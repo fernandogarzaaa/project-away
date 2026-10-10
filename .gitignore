@@ -27,3 +27,5 @@ squashfs-root/
 .env
 *.local.yaml
 .testteeth-reports/
+packaging/linux/appimagetool-*.AppImage
+packaging/linux/runtime-*

@@ -24,6 +24,12 @@ if [ ! -x "$TOOL" ]; then
   curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
   chmod +x "$TOOL"
 fi
+# fetch the runtime with curl ourselves (appimagetool's built-in download ignores some proxy setups)
+RUNTIME="${APPIMAGE_RUNTIME:-$ROOT/packaging/linux/runtime-$ARCH}"
+if [ ! -s "$RUNTIME" ]; then
+  curl -fsSL -o "$RUNTIME" "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$ARCH"
+fi
 # --appimage-extract-and-run: works without FUSE (CI containers)
-ARCH="$ARCH" "$TOOL" --appimage-extract-and-run "$APPDIR" "$ROOT/dist/ProjectAway-${VERSION}-linux-${ARCH}.AppImage"
+ARCH="$ARCH" "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" \
+  "$ROOT/dist/ProjectAway-${VERSION}-linux-${ARCH}.AppImage"
 echo "built dist/ProjectAway-${VERSION}-linux-${ARCH}.AppImage"

@@ -40,8 +40,13 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
 }
 
 
+# boundary/default tests written after the first mutation pass apply to every group
+SHARED_TESTS = ["tests/test_spec_edges.py", "tests/test_spec_edges2.py"]
+
+
 def run(group: str, workers: int = 2) -> None:
-    paths, tests = GROUPS[group]
+    paths, own = GROUPS[group]
+    tests = own + SHARED_TESTS
     OUT.mkdir(exist_ok=True)
     cmd = [
         "testteeth", "run", *paths,
