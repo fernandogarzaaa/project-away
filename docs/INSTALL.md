@@ -116,6 +116,43 @@ No display (SSH, containers)? `away settings` prints these commands instead of o
 Shell-command actions are disabled until you set `bindings.allow_shell: true` yourself.
 See the README's *Customizing controls* section for every trigger, action and setting.
 
+## Optional: a second camera (multi-camera fusion)
+
+A laptop webcam plus an external USB camera, ideally 30–60 cm apart and both pointed at where your
+hand moves, track more reliably than one camera. Calibrating them also gives depth, which enables
+the push-to-click gesture and a 3D pinch that stops false clicks when one camera sees the hand edge-on.
+
+```bash
+away cameras list                 # find the device index or name
+away cameras add 2                # your current camera becomes the primary (cursor reference)
+away calibrate-cameras            # move an OPEN hand slowly around both views for ~20 s
+away run
+```
+
+- The primary camera should face you from the screen. Push is detected as the hand getting closer
+  to it.
+- **Accurate calibration:** `away calibrate-cameras --print-board board.png --checkerboard 9x6`, print
+  the board flat, measure one square, then run
+  `away calibrate-cameras --method checkerboard --checkerboard 9x6 --square-mm 25` and tilt the board
+  in front of both cameras.
+- Re-run calibration after you move either camera. Calibration data is stored in the data folder below
+  as `camera_extrinsics.json`.
+- **Settings → Cameras** does the same with pickers, a calibrate button and live per-camera confidence.
+- **Windows:** some webcams can be opened by only one app at a time. Close Zoom or Teams first.
+- **Linux:** each USB camera exposes extra `/dev/video*` metadata nodes. `away cameras list` hides them.
+- Remove the second camera with `away cameras remove 2`. With one camera left, Away returns to
+  single-camera mode.
+
+## Other new options worth knowing
+
+- **F9** toggles gesture control on and off from anywhere (`app.toggle_hotkey`).
+- Touching the real mouse or keyboard pauses gestures for 1.5 s (`app.auto_pause`).
+- `away run --cursor-overlay` shows a ring at the pointer that fills as your pinch closes.
+- Dwell click (`hands.dwell.enabled`) and wink clicks (`face.wink_trigger`) are off by default. Turn
+  them on in **Settings → Voice & input**.
+- **Ctrl+Alt+E** edits the selected text by voice (`voice.edit_hotkey`). Clipboard access needs the
+  `control` extra (pyperclip; on Linux also `xclip` or `xsel`).
+
 ## Where things are stored
 
 | | Windows | macOS | Linux |
