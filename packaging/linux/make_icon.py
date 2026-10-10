@@ -10,4 +10,5 @@ except Exception:  # Pillow missing: write a 1x1 PNG so packaging still succeeds
     import base64
 
     png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-    open(sys.argv[1], "wb").write(base64.b64decode(png))
+    with open(sys.argv[1], "wb") as fh:
+        fh.write(base64.b64decode(png))
