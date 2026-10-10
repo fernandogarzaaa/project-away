@@ -44,3 +44,22 @@ class SpeechGate:
         if others > hits:
             return False
         return hits / len(window) >= self.min_fraction
+
+    def allow_ambient(self, t0: float, t1: float) -> bool:
+        """Stricter gate for always-on listening: a face must be at the screen *and* be the one talking.
+
+        Unlike :meth:`allow`, no visible face means "not the user" (background talk, TV).
+        """
+        window = [(a, n) for t, a, n in self._log if t0 <= t <= t1]
+        if not window or all(n == 0 for _, n in window):
+            return False
+        if self.primary is not None and self.identity is not None and not self.identity.is_user(self.primary):
+            return False
+        if self.primary is None:
+            speaking = sum(1 for a, _ in window if a is not None)
+            return speaking / len(window) >= self.min_fraction
+        hits = sum(1 for a, _ in window if a == self.primary)
+        others = sum(1 for a, _ in window if a is not None and a != self.primary)
+        if others > hits:
+            return False
+        return hits / len(window) >= self.min_fraction

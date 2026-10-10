@@ -31,7 +31,7 @@ class Trimmer(Protocol):
 
 @dataclass
 class DictationResult:
-    status: str  # ok | silence | gated | empty | disabled
+    status: str  # ok | silence | gated | empty | disabled | command
     raw: str = ""
     text: str = ""
     seconds: float = 0.0
@@ -51,6 +51,7 @@ class DictationSession:
         context: Callable[[], str | None] | None = None,
         vocabulary: list[str] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        command_handler: Callable[[str], bool] | None = None,
     ) -> None:
         self.asr, self.cleaner, self.sink, self.vad = asr, cleaner, sink, vad
         self.bus = bus
@@ -59,6 +60,8 @@ class DictationSession:
         self.context = context
         self.vocabulary = vocabulary or []
         self.clock = clock
+        # called with the raw transcript; returning True means it was a voice command (nothing is typed)
+        self.command_handler = command_handler
         self.enabled = True
         self.recording = False
         self._chunks: list[NDArray[np.float32]] = []
@@ -104,6 +107,12 @@ class DictationSession:
         self._publish("dictation.result", {"status": result.status, "text": result.text})
         return result
 
+    def cancel(self) -> None:
+        """Stop recording and drop the audio without transcribing it (mute)."""
+        with self._lock:
+            self.recording = False
+            self._chunks = []
+
     def toggle(self) -> DictationResult | None:
         if self.recording:
             return self.stop()
@@ -119,6 +128,8 @@ class DictationSession:
             return DictationResult("gated", seconds=seconds, meta={"reason": "speaker is not the enrolled user"})
         app = self.context() if self.context else None
         raw = self.asr.transcribe(np.asarray(speech, dtype=np.float32), whisper_prompt(app, self.vocabulary))
+        if self.command_handler is not None and raw.strip() and self.command_handler(raw):
+            return DictationResult("command", raw=raw, seconds=seconds, meta={"app": app})
         text = self.cleaner.clean(raw, app)
         if not text:
             return DictationResult("empty", raw=raw, seconds=seconds)
