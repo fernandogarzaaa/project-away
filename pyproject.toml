@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-away"
+version = "0.1.0"
+description = "Hands-free PC control: camera hand gestures, push-to-talk dictation, active-speaker gating and experimental Wi-Fi CSI sensing. Local-first."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Fernando Garza", email = "fernandogarzaaa@gmail.com" }]
+keywords = ["gesture", "hand-tracking", "mediapipe", "dictation", "whisper", "accessibility", "wifi-csi"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Desktop Environment",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Core stays lean: pure numpy/scipy logic + YAML config. Everything that needs
+# a camera, a mic, a GPU or a desktop session is an extra.
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+hands = ["mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17"]
+face = ["mediapipe>=0.10.14", "opencv-python>=4.8"]
+voice = ["faster-whisper>=1.0", "sounddevice>=0.4.6", "silero-vad>=5.1"]
+control = ["pynput>=1.7.6", "pyperclip>=1.8"]
+tray = ["pystray>=0.19", "Pillow>=10"]
+train = ["torch>=2.1", "onnx>=1.15", "onnxruntime>=1.17"]
+parakeet = ["nemo_toolkit[asr]>=2.0"]
+all = [
+  "mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17",
+  "faster-whisper>=1.0", "sounddevice>=0.4.6", "silero-vad>=5.1",
+  "pynput>=1.7.6", "pyperclip>=1.8",
+  "pystray>=0.19", "Pillow>=10",
+]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML"]
+
+[project.scripts]
+away = "away.cli:main"
+
+[project.gui-scripts]
+away-tray = "away.app.tray:main"
+
+[project.urls]
+Homepage = "https://github.com/fernandogarzaaa/project-away"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+away = ["py.typed", "data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "slow: slower tests (training loops, ONNX export)",
+  "torch: needs the [train] extra",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059", "RUF005", "B017", "E501", "SIM115"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/away"]
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["away.app.autostart"]
+warn_unused_ignores = false
+disable_error_code = ["attr-defined"]
+
+[tool.testteeth]
+paths = [
+  "src/away/hands/filters.py",
+  "src/away/hands/landmarks.py",
+  "src/away/hands/gestures.py",
+  "src/away/hands/cursor.py",
+  "src/away/voice/cleanup.py",
+  "src/away/voice/vad.py",
+  "src/away/wifi/features.py",
+  "src/away/wifi/classifier.py",
+  "src/away/face/speaking.py",
+  "src/away/face/speaker.py",
+  "src/away/face/commands.py",
+  "src/away/fusion.py",
+  "src/away/events.py",
+]
+test_args = ["tests", "-m", "not slow and not torch", "-x", "-q", "-p", "no:cacheprovider"]

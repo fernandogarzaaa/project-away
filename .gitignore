@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+mutation*.json
+.testteeth*/
+# models are downloaded by `away setup`, never committed (except the tiny bundled static_pose.npz)
+*.task
+*.onnx
+*.pt
+!src/away/data/*.onnx
+# packaging outputs
+*.AppImage
+*.deb
+*.dmg
+*.exe
+packaging/linux/AppDir/
+squashfs-root/
+# secrets / local config
+.env
+*.local.yaml
