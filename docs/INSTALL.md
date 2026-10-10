@@ -88,9 +88,33 @@ Linux notes:
 - Mouse/keyboard control uses X11. On **Wayland** most compositors block synthetic input and global hotkeys:
   choose an *Xorg/X11 session* at the login screen.
 - Your user needs camera access (`groups` should list `video`) and a PipeWire/PulseAudio microphone.
-- `xdotool` (optional) lets dictation know which window is focused.
+- `xdotool` (optional) lets dictation know which window is focused and lets per-app control profiles switch.
+- The Settings window uses tkinter. With pipx on a distro Python install it first:
+  `sudo apt install python3-tk` (Fedora: `sudo dnf install python3-tkinter`). The AppImage/.deb bundle it.
 
 ---
+
+## After installing: choose how it listens and remap controls
+
+The installed app starts **active and listening** (`app.always_on: true`, `voice.mode: always_on`). To change that:
+
+- Tray icon → **Settings...** (or `away settings`): bindings table with dropdowns and key capture, sliders,
+  profiles, voice mode, wake word, sensitivity, and a camera *Test gesture* tab. Press **Save**; a running app
+  reloads within a second.
+- Tray icon → **Mic on** toggles the microphone; **Pause** stops gestures. The default mute hotkey is Ctrl+Alt+M.
+- Terminal equivalents:
+
+```bash
+away voice mode push_to_talk     # or toggle / always_on
+away voice wake-word away        # only act on "away, ..."; `off` to disable
+away bindings set gesture:swipe_left key:alt+left
+away profile new chrome --apps chrome chrome.exe
+away bindings export controls.yaml   # back up / share; `away bindings import controls.yaml`
+```
+
+No display (SSH, containers)? `away settings` prints these commands instead of opening a window.
+Shell-command actions are disabled until you set `bindings.allow_shell: true` yourself.
+See the README's *Customizing controls* section for every trigger, action and setting.
 
 ## Where things are stored
 
@@ -101,7 +125,8 @@ Linux notes:
 
 Override with `AWAY_CONFIG_DIR` / `AWAY_DATA_DIR`. Nothing leaves your machine unless you turn on the optional
 LLM cleanup (`voice.llm_cleanup: true` + `AWAY_LLM_BASE_URL`), which sends the dictated text to the endpoint you
-configure (a local Ollama/LM Studio server keeps it on-device).
+configure (a local Ollama/LM Studio server keeps it on-device). Always-on listening keeps audio in memory only;
+no recordings are saved unless you run `away record` (hand landmarks, not audio).
 
 ## Uninstalling
 
