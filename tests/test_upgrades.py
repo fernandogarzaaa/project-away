@@ -243,3 +243,58 @@ def test_new_hotkeys_validate():
     assert cfg.app.toggle_hotkey == "ctrl+alt+g" and cfg.voice.edit_hotkey == ""
     with pytest.raises(ValueError, match="toggle_hotkey"):
         C.from_dict({"app": {"toggle_hotkey": "ctrl+notakey"}})
+
+
+# --------------------------------------------------------------------------- B5 alternate clicks
+def test_wink_trigger():
+    from away.face.commands import WinkTrigger
+
+    w = WinkTrigger(threshold=0.5, open_max=0.3, hold=0.2, cooldown=0.5)
+    assert w.update(0.0, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.9}) is None  # blink: both closed
+    assert w.update(0.3, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.9}) is None
+    assert w.update(0.4, {"eyeBlinkLeft": 0.8, "eyeBlinkRight": 0.1}) is None  # hold starts
+    assert w.update(0.65, {"eyeBlinkLeft": 0.8, "eyeBlinkRight": 0.1}) == "wink_left"
+    assert w.update(0.9, {"eyeBlinkLeft": 0.8, "eyeBlinkRight": 0.1}) is None  # still closed: fires once
+    assert w.update(1.3, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0}) is None
+    assert w.update(1.4, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.9}) is None
+    assert w.update(1.7, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.9}) == "wink_right"
+
+
+def test_pipeline_face_clicks_are_bindable():
+    cfg = AppConfig()
+    cfg.face.wink_trigger = True
+    cfg.face.mouth_open_trigger = True
+    cfg.bindings.set("face:mouth_open", "mouse:click")
+    cfg.bindings.set("face:wink_right", "key:esc")
+    b = RecordingBackend()
+    p = Pipeline(cfg, b)
+    box = [(0.5, 0.5, 0.3)]
+    p.on_faces(0.0, box, [{}])
+    for i in range(1, 12):
+        p.on_faces(i * 0.05, box, [{"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.0}])
+    assert ("click", (1,)) in b.calls and p.bus.history("face.wink_left")
+    for i in range(12, 30):
+        p.on_faces(i * 0.05, box, [{"eyeBlinkRight": 0.9}])
+    assert ("key", ("esc",)) in b.calls
+    n = b.calls.count(("click", (1,)))
+    for i in range(30, 60):
+        p.on_faces(i * 0.05, box, [{"jawOpen": 0.9}])
+    assert b.calls.count(("click", (1,))) == n + 1 and p.bus.history("face.mouth_open")
+    new = AppConfig()
+    new.face.wink_hold = 1.0
+    p.apply_config(new)
+    assert p.wink.hold == 1.0
+
+
+def test_settings_model_new_switches(tmp_path):
+    from away.app.settings_gui import SettingsModel
+
+    m = SettingsModel(AppConfig(), tmp_path / "c.yaml")
+    assert m.set_voice("face.wink_trigger", True) is None and m.cfg.face.wink_trigger
+    assert m.set_voice("hands.dwell.enabled", 1) is None and m.cfg.hands.dwell.enabled is True
+    assert m.set_voice("hands.cursor.curve", "power") is None and m.cfg.hands.cursor.curve == "power"
+    assert m.set_voice("hands.cursor.curve", "cubic") is not None
+    assert m.set_voice("app.toggle_hotkey", "ctrl+notakey") is not None and m.cfg.app.toggle_hotkey == "f9"
+    assert m.set_voice("cursor_overlay", True) is None and m.cfg.cursor_overlay
+    assert m.set_tunable("hands.dwell.radius_px", 50) is None and m.cfg.hands.dwell.radius_px == 50
+    assert m.set_tunable("hands.cursor.click_rewind_ms", 120.4) is None and m.cfg.hands.cursor.click_rewind_ms == 120

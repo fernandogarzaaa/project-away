@@ -157,6 +157,10 @@ class Pipeline:
         self.mouse.mapper.filter = OneEuro2D(c.min_cutoff, c.beta, c.d_cutoff)
         self.mouse.stabilizer = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
         self.dwell = DwellDetector(self.cfg.hands.dwell.radius_px, self.cfg.hands.dwell.time_s)
+        f = self.cfg.face  # per-user face-click thresholds
+        self.brow = BrowRaiseToggle(f.brow_threshold, f.brow_hold)
+        self.mouth = MouthOpenTrigger(f.mouth_threshold, f.mouth_hold)
+        self.wink = WinkTrigger(f.wink_threshold, f.wink_open_max, f.wink_hold)
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)

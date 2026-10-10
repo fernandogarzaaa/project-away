@@ -84,6 +84,8 @@ INT_TUNABLES = {
     "voice.numbers_min_value",
 }
 VOICE_FIELDS = {
+    "hands.cursor.curve": ("sigmoid", "power"),
+    "hands.multicam.fusion": ("weighted", "best_view"),
     "voice.mode": VOICE_MODES,
     "voice.intent": ("dictation", "command"),
     "voice.ambient_fallback": ("commands_only", "type"),
@@ -299,6 +301,16 @@ class SettingsModel:
             "app.start_minimized",
             "face.brow_raise_toggle",
             "face.mouth_open_trigger",
+            "face.wink_trigger",
+            "hands.dwell.enabled",
+            "hands.cursor.click_freeze",
+            "app.auto_pause",
+            "app.toggle_hotkey",
+            "voice.edit_hotkey",
+            "voice.numbers_as_digits",
+            "cursor_overlay",
+            "hands.cursor.curve",
+            "hands.multicam.fusion",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -565,10 +577,11 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _build_voice(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(nb, padding=8)
-        nb.add(f, text="Voice")
+        nb.add(f, text="Voice & input")
         self.vvars: dict[str, Any] = {}
         r = 0
         for path, label in (
+            ("hands.cursor.curve", "Cursor acceleration curve"),
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
             ("voice.ambient_fallback", "No wake word + no camera"),
@@ -587,6 +600,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("app.start_minimized", "Start minimized to tray"),
             ("face.brow_raise_toggle", "Brow-raise trigger"),
             ("face.mouth_open_trigger", "Mouth-open trigger"),
+            ("face.wink_trigger", "Wink triggers (left / right)"),
+            ("hands.dwell.enabled", "Dwell click (rest the cursor)"),
+            ("hands.cursor.click_freeze", "Steady click (freeze while pinching)"),
+            ("app.auto_pause", "Pause while I use the mouse / keyboard"),
+            ("voice.numbers_as_digits", "Spoken numbers as digits"),
+            ("cursor_overlay", "Ring at the cursor (next start)"),
         ):
             var = tk.BooleanVar()
             ttk.Checkbutton(
@@ -599,6 +618,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("voice.hotkey", "Push-to-talk / toggle hotkey", True),
             ("voice.mute_hotkey", "Mute hotkey", True),
             ("voice.hold_key", "Hold-to-talk key", True),
+            ("app.toggle_hotkey", "Gestures on/off hotkey", True),
+            ("voice.edit_hotkey", "Edit selected text hotkey", True),
         ):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=3)
             var = tk.StringVar()
