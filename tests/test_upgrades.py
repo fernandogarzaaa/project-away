@@ -173,3 +173,73 @@ def test_cursor_overlay_ring_spec():
     assert ring_spec({"state": "hand_lost"})["width"] == 1
     assert status_text(Event("app.auto_paused", {"paused": True}, 0.0)).startswith("PAUSED")
     assert status_text(Event("gesture.push", {}, 0.0)) == "push"
+
+
+# --------------------------------------------------------------------------- B4 auto-pause + toggle hotkey
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_manual_input_guard_ignores_own_events():
+    from away.app.autopause import GuardedBackend, ManualInputGuard
+
+    clk = Clock()
+    g = ManualInputGuard(idle_ms=1000, clock=clk)
+    b = RecordingBackend()
+    gb = GuardedBackend(b, g)
+    gb.move(100, 100)
+    assert not g.on_mouse_move(100, 100)  # the listener seeing our own move
+    clk.t = 0.5
+    assert not g.on_mouse_move(101, 101)  # within tolerance of our last synthetic position
+    assert not g.active
+    assert g.on_mouse_move(300, 300) and g.active  # the user moved the real mouse
+    clk.t = 1.4
+    assert g.active
+    clk.t = 1.6
+    assert not g.active
+    gb.key("enter")
+    assert not g.on_key()  # our own key press
+    gb.click(1)
+    assert not g.on_click()
+    clk.t = 3.0
+    assert g.on_key() and g.active
+    gb.type_text("hi")
+    assert b.calls[-1] == ("type_text", ("hi",)) and b.calls[0] == ("move", (100, 100))
+    g.enabled = False
+    clk.t = 10.0
+    assert not g.on_click() and not g.active
+
+
+def test_pipeline_auto_pause_blocks_output_then_resumes_without_jump():
+    from away.app.autopause import ManualInputGuard
+
+    clk = Clock()
+    g = ManualInputGuard(idle_ms=500, clock=clk)
+    b = RecordingBackend()
+    p = Pipeline(AppConfig(), b, guard=g)
+    point = make_hand({"middle": 1, "ring": 1, "pinky": 1}, scale=0.2)
+    p.on_hand(0.0, point)
+    clk.t = 0.1
+    g.on_mouse_move(5, 5)
+    n = len(b.calls)
+    for i in range(5):
+        p.on_hand(
+            0.1 + i * 0.03, make_hand({"middle": 1, "ring": 1, "pinky": 1}, center=(0.5 + 0.02 * i, 0.5), scale=0.2)
+        )
+    assert len(b.calls) == n and p.output_paused() and p.cursor_state()["state"] == "paused"
+    assert p.bus.history("app.auto_paused")[-1].data == {"paused": True}
+    clk.t = 1.0
+    p.on_hand(1.0, make_hand({"middle": 1, "ring": 1, "pinky": 1}, center=(0.7, 0.5), scale=0.2))
+    assert not p.output_paused() and p.bus.history("app.auto_paused")[-1].data == {"paused": False}
+    assert p.mouse.mapper._prev is not None  # re-anchored on the first frame after resuming
+
+
+def test_new_hotkeys_validate():
+    cfg, _ = C.from_dict({"app": {"toggle_hotkey": "ctrl+alt+g"}, "voice": {"edit_hotkey": ""}})
+    assert cfg.app.toggle_hotkey == "ctrl+alt+g" and cfg.voice.edit_hotkey == ""
+    with pytest.raises(ValueError, match="toggle_hotkey"):
+        C.from_dict({"app": {"toggle_hotkey": "ctrl+notakey"}})
