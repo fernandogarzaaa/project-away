@@ -9,6 +9,7 @@ The primary camera sets the pace; when it drops out, the freshest live camera do
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import re
@@ -62,10 +63,14 @@ def _node_num(path: str) -> int:
 
 
 def _probe(c: CameraDevice) -> CameraDevice:  # pragma: no cover - opens a device
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")  # missing indices are expected while probing
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "0")
     try:
         import cv2
     except ImportError:
         return c
+    with contextlib.suppress(Exception):
+        cv2.setLogLevel(0)
     cap = cv2.VideoCapture(c.index if c.index is not None else c.path)
     try:
         ok = bool(cap.isOpened() and cap.read()[0])
