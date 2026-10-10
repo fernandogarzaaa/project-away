@@ -20,6 +20,11 @@ STATUS_TOPICS = {
     "voice.state": lambda d: f"voice: {d.get('state', '')}" + (" (commands)" if d.get("intent") == "command" else ""),
     "action.fired": lambda d: f"{d.get('trigger', '')} -> {d.get('action', '')}",
     "app.paused": lambda d: "PAUSED" if d.get("paused") else "ACTIVE",
+    "app.auto_paused": lambda d: "PAUSED (mouse/keyboard in use)" if d.get("paused") else "ACTIVE",
+    "gesture.push": lambda d: "push",
+    "gesture.dwell": lambda d: "dwell click",
+    "cameras.dropped": lambda d: f"camera {d.get('camera')} dropped",
+    "cameras.recovered": lambda d: f"camera {d.get('camera')} back",
 }
 
 

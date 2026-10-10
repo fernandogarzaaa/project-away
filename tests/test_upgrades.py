@@ -1,5 +1,7 @@
 """Research-driven upgrades: steady click, sigmoid curve, overlay state, auto-pause, dwell/face clicks, dictation."""
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -67,7 +69,9 @@ def test_pipeline_steady_click_lands_before_the_pinch():
     # pinch closes; the synthetic thumb pulls the index tip down-left while closing
     for k, pinch in enumerate((0.5, 0.8, 1.0, 1.0, 0.0)):
         t += 0.033
-        lm = make_hand({"middle": 1, "ring": 1, "pinky": 1}, pinch=pinch, center=(0.445 - 0.01 * k, 0.5 + 0.01 * k), scale=0.2)
+        lm = make_hand(
+            {"middle": 1, "ring": 1, "pinky": 1}, pinch=pinch, center=(0.445 - 0.01 * k, 0.5 + 0.01 * k), scale=0.2
+        )
         p.on_hand(t, lm)
     clicks = [i for i, c in enumerate(b.calls) if c[0] == "click"]
     assert clicks, b.calls[-6:]
@@ -87,7 +91,7 @@ def test_sigmoid_gain_shape():
     assert lo == pytest.approx(0.6, abs=0.06) and hi == pytest.approx(3.0) and mid == pytest.approx(1.8)
     xs = np.linspace(0, 0.05, 50)
     gains = [sigmoid_gain(x, 0.6, 3.0, 1.5, 2.5) for x in xs]
-    assert all(b >= a for a, b in zip(gains, gains[1:]))  # monotonic
+    assert all(b >= a for a, b in itertools.pairwise(gains))  # monotonic
     assert sigmoid_gain(1e9, 0.6, 3.0, 1.5, 2.5) == pytest.approx(3.0)  # no overflow
     assert accelerate(0.04, 3.0) == pytest.approx(0.04 * 16)  # the old curve is still there
 
@@ -152,3 +156,20 @@ def test_pipeline_dwell_click_and_cursor_state():
     p.on_hand(t + 0.05, make_hand({"middle": 1, "ring": 1, "pinky": 1}, pinch=1.0, scale=0.2))
     s = p.cursor_state()
     assert s["state"] in ("pinch", "drag") and s["pinch"] > 0.9 and set(s) >= {"x", "y", "dwell", "frozen"}
+
+
+# --------------------------------------------------------------------------- B3 cursor overlay
+def test_cursor_overlay_ring_spec():
+    from away.app.cursor_overlay import COLORS, ring_spec
+    from away.app.overlay import status_text
+    from away.events import Event
+
+    assert ring_spec({"state": "idle", "pinch": 0.0})["visible"] is False
+    half = ring_spec({"state": "idle", "pinch": 0.5})
+    assert half["visible"] and half["extent"] == pytest.approx(180.0) and not half["filled"]
+    assert ring_spec({"state": "pinch"})["filled"] and ring_spec({"state": "drag"})["color"] == COLORS["drag"]
+    assert ring_spec({"state": "dwell", "dwell": 0.25})["extent"] == pytest.approx(90.0)
+    assert ring_spec({"state": "paused"})["color"] == COLORS["paused"]
+    assert ring_spec({"state": "hand_lost"})["width"] == 1
+    assert status_text(Event("app.auto_paused", {"paused": True}, 0.0)).startswith("PAUSED")
+    assert status_text(Event("gesture.push", {}, 0.0)) == "push"

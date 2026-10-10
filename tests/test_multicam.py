@@ -115,7 +115,7 @@ def test_cameras_config_parse_and_validate(tmp_path):
     ):
         with pytest.raises(ValueError):
             C.from_dict({"hands": {"cameras": bad}})
-    with pytest.raises(ValueError, match="multicam.fusion"):
+    with pytest.raises(ValueError, match=r"multicam\.fusion"):
         C.from_dict({"hands": {"multicam": {"fusion": "magic"}}})
 
 

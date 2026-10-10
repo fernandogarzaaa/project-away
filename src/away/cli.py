@@ -76,6 +76,16 @@ def cmd_run(args: argparse.Namespace) -> int:  # pragma: no cover - needs device
     if args.wifi:
         cfg.wifi.enabled = True
     app = AwayApp(cfg, dry_run=args.dry_run)
+    if args.cursor_overlay or cfg.cursor_overlay:
+        import threading
+
+        from away.app.cursor_overlay import run_cursor_overlay
+
+        app.start()
+        threading.Thread(target=lambda: app.stop_event.wait(), daemon=True).start()
+        run_cursor_overlay(app.pipeline.cursor_state, app.bus if (args.overlay or cfg.overlay) else None)
+        app.stop()
+        return 0
     if args.overlay or cfg.overlay:
         import threading
 
@@ -614,6 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-face", action="store_true")
     r.add_argument("--wifi", action="store_true", help="enable Wi-Fi sensing (see docs/wifi-setup.md)")
     r.add_argument("--overlay", action="store_true", help="show the on-screen status overlay")
+    r.add_argument("--cursor-overlay", action="store_true", help="ring at the cursor: pinch progress, drag, dwell")
     r.set_defaults(fn=cmd_run)
 
     sub.add_parser("tray", help="run in the system tray").set_defaults(fn=cmd_tray)
