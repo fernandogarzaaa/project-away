@@ -70,7 +70,7 @@ def _probe(c: CameraDevice) -> CameraDevice:  # pragma: no cover - opens a devic
     except ImportError:
         return c
     with contextlib.suppress(Exception):
-        cv2.setLogLevel(0)
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
     cap = cv2.VideoCapture(c.index if c.index is not None else c.path)
     try:
         ok = bool(cap.isOpened() and cap.read()[0])
