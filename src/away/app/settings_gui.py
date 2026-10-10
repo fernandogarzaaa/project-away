@@ -366,6 +366,94 @@ class SettingsModel:
             self.profile = "default"
         return None
 
+    # -------------------------------------------------------------- cameras
+    def camera_rows(self) -> list[dict[str, Any]]:
+        """Configured cameras for the Cameras tab (empty list = single-camera mode)."""
+        return [dict(vars(c)) for c in self.cfg.hands.cameras]
+
+    def camera_mode(self) -> str:
+        n = len(self.cfg.hands.cameras)
+        return f"{n} cameras (fusion: {self.cfg.hands.multicam.fusion})" if n >= 2 else "single camera"
+
+    def device_choices(self, devices: list[Any] | None = None) -> list[str]:
+        """``"0: Integrated Webcam"`` entries for the device pickers."""
+        if devices is None:
+            from away.multicam.capture import list_cameras
+
+            try:
+                devices = list_cameras()
+            except Exception:
+                devices = []
+        return [f"{d.index if d.index is not None else d.path}: {d.name}" for d in devices]
+
+    @staticmethod
+    def parse_device(choice: str) -> int | str:
+        head = str(choice).split(":", 1)[0].strip()
+        return int(head) if head.isdigit() else head
+
+    def _cams_try(self, new: list[Any]) -> str | None:
+        from away.config import validate_cameras
+
+        try:
+            validate_cameras(new)
+        except ValueError as exc:
+            return str(exc)
+        self.cfg.hands.cameras = new
+        return None
+
+    def add_camera(self, device: int | str, role: str = "secondary") -> str | None:
+        from away.config import CameraSpec
+
+        new = [copy.copy(c) for c in self.cfg.hands.cameras]
+        if not new:  # leaving single-camera mode: the current camera becomes the primary
+            new.append(CameraSpec(self.cfg.hands.camera_index, "primary", mirror=self.cfg.hands.mirror))
+        new.append(CameraSpec(device, role, mirror=self.cfg.hands.mirror))
+        return self._cams_try(new)
+
+    def remove_camera(self, i: int) -> str | None:
+        new = [copy.copy(c) for j, c in enumerate(self.cfg.hands.cameras) if j != i]
+        if len(new) == 1:  # back to single-camera mode
+            if isinstance(new[0].device, int):
+                self.cfg.hands.camera_index = new[0].device
+            new = []
+        return self._cams_try(new)
+
+    def set_camera(self, i: int, field: str, value: Any) -> str | None:
+        if field not in ("device", "role", "width", "height", "fps", "hfov_deg", "mirror"):
+            return f"unknown camera setting {field!r}"
+        new = [copy.copy(c) for c in self.cfg.hands.cameras]
+        if not 0 <= i < len(new):
+            return "no such camera"
+        if field in ("width", "height", "fps"):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                return f"{field} must be a whole number"
+        elif field == "hfov_deg":
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return "field of view must be a number"
+        elif field == "device":
+            value = self.parse_device(value)
+        if field == "role" and value == "primary":  # promoting one demotes the old primary
+            for c in new:
+                c.role = "secondary"
+        setattr(new[i], field, value)
+        return self._cams_try(new)
+
+    @staticmethod
+    def calibration_status() -> str:
+        import time as _time
+
+        from away.multicam.geometry import load_extrinsics
+
+        ex = load_extrinsics()
+        if ex is None:
+            return "not calibrated (fusion works; depth/push/3D pinch need calibration)"
+        when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ex.created))
+        return f"calibrated {when} by {ex.method}, reprojection error {ex.reprojection_error_px:.2f} px"
+
     # -------------------------------------------------------- gesture test
     def describe_event(self, ev: GestureEvent) -> str | None:
         """Text for the live 'test gesture' indicator: ``pinch -> mouse:click``."""
@@ -424,6 +512,50 @@ def gesture_test_worker(model: SettingsModel, out: queue.Queue[str], stop: threa
         tracker.close()
 
 
+def camera_confidence_worker(
+    model: SettingsModel, out: queue.Queue[Any], stop: threading.Event
+) -> None:  # pragma: no cover
+    """Live per-camera hand confidence for the Cameras tab (no actions are executed)."""
+    from away import paths
+    from away.hands.tracker import HandTracker
+    from away.multicam.capture import CameraThread, FramePairer
+    from away.multicam.fusion import ViewObs, view_confidence
+
+    cams = model.cfg.hands.cameras
+    mdir = Path(model.cfg.models_dir) if model.cfg.models_dir else paths.models_dir()
+    primary = next((i for i, c in enumerate(cams) if c.role == "primary"), 0)
+    pairer = FramePairer(len(cams), primary, model.cfg.hands.multicam.pair_tolerance_ms / 1000.0, 0.5)
+    threads = [CameraThread(i, c, pairer, stop) for i, c in enumerate(cams)]
+    try:
+        trackers = [HandTracker(mdir / "hand_landmarker.task", 1) for _ in cams]
+        for th in threads:
+            th.start()
+        import time as _time
+
+        while not stop.is_set():
+            st = pairer.pop_set()
+            if st is None:
+                _time.sleep(0.005)
+                continue
+            confs: list[float | None] = []
+            for i, item in enumerate(st[1]):
+                if item is None:
+                    confs.append(None)
+                    continue
+                fr = trackers[i].process(item[1], item[0])
+                h, w = item[1].shape[:2]
+                confs.append(
+                    0.0
+                    if fr.landmarks is None
+                    else view_confidence(ViewObs(i, item[0], fr.landmarks, fr.handedness, fr.score, (w, h)))
+                )
+            out.put(confs)
+    except Exception as exc:
+        out.put(f"camera error: {exc}")
+    finally:
+        stop.set()
+
+
 class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb only
     def __init__(self, root: Any, model: SettingsModel) -> None:
         import tkinter as tk
@@ -468,6 +600,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_bindings(nb)
         self._build_tuning(nb)
         self._build_voice(nb)
+        self._build_cameras(nb)
         self._build_test(nb)
 
         bottom = ttk.Frame(root, padding=6)
@@ -652,6 +785,168 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             row=r, column=0, columnspan=3, sticky="w", pady=6
         )
 
+    def _build_cameras(self, nb: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(nb, padding=8)
+        nb.add(f, text="Cameras")
+        self.cam_mode = tk.StringVar()
+        ttk.Label(f, textvariable=self.cam_mode, font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, columnspan=6, sticky="w"
+        )
+        cols = ("role", "device", "resolution", "fps", "fov", "confidence")
+        self.cam_tree = ttk.Treeview(f, columns=cols, show="headings", height=5)
+        for c, w in zip(cols, (90, 220, 110, 50, 60, 140)):
+            self.cam_tree.heading(c, text=c.title())
+            self.cam_tree.column(c, width=w, anchor="w")
+        self.cam_tree.grid(row=1, column=0, columnspan=6, sticky="nsew", pady=4)
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text="Device:").grid(row=2, column=0, sticky="w")
+        self.cam_dev = tk.StringVar()
+        self.cam_dev_cb = ttk.Combobox(f, textvariable=self.cam_dev, width=34)
+        self.cam_dev_cb.grid(row=2, column=1, sticky="we", padx=4)
+        ttk.Button(f, text="Refresh list", command=self._cam_refresh_devices).grid(row=2, column=2)
+        ttk.Label(f, text="Role:").grid(row=3, column=0, sticky="w")
+        self.cam_role = tk.StringVar(value="secondary")
+        ttk.Combobox(f, textvariable=self.cam_role, values=["primary", "secondary"], state="readonly", width=12).grid(
+            row=3, column=1, sticky="w", padx=4
+        )
+        ttk.Label(f, text="Resolution / fps:").grid(row=4, column=0, sticky="w")
+        self.cam_res = tk.StringVar(value="640x480")
+        self.cam_fps = tk.StringVar(value="30")
+        ttk.Entry(f, textvariable=self.cam_res, width=12).grid(row=4, column=1, sticky="w", padx=4)
+        ttk.Entry(f, textvariable=self.cam_fps, width=6).grid(row=4, column=2, sticky="w")
+        btns = ttk.Frame(f)
+        btns.grid(row=5, column=0, columnspan=6, sticky="w", pady=6)
+        ttk.Button(btns, text="Add camera", command=self._cam_add).pack(side="left", padx=2)
+        ttk.Button(btns, text="Apply to selected", command=self._cam_apply).pack(side="left", padx=2)
+        ttk.Button(btns, text="Remove selected", command=self._cam_remove).pack(side="left", padx=2)
+        ttk.Button(btns, text="Calibrate (wave hand ~20 s)", command=self._cam_calibrate).pack(side="left", padx=8)
+        self.cam_live_btn = ttk.Button(btns, text="Live confidence", command=self._cam_live)
+        self.cam_live_btn.pack(side="left", padx=2)
+        ttk.Label(f, text="Fusion:").grid(row=6, column=0, sticky="w")
+        self.cam_fusion = tk.StringVar(value=self.m.cfg.hands.multicam.fusion)
+        cb = ttk.Combobox(f, textvariable=self.cam_fusion, values=["weighted", "best_view"], state="readonly", width=12)
+        cb.grid(row=6, column=1, sticky="w", padx=4)
+        cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._report(self.m.set_voice("hands.multicam.fusion", self.cam_fusion.get())),
+        )
+        self.cam_calib = tk.StringVar()
+        ttk.Label(f, textvariable=self.cam_calib, foreground="#555").grid(
+            row=7, column=0, columnspan=6, sticky="w", pady=4
+        )
+        ttk.Label(
+            f,
+            text="Save first; calibration and live confidence use the saved config. "
+            "The primary camera is the cursor's frame of reference.",
+            foreground="#555",
+        ).grid(row=8, column=0, columnspan=6, sticky="w")
+        self._cam_q: queue.Queue[Any] = queue.Queue()
+        self._cam_stop = threading.Event()
+        self._cam_thread: threading.Thread | None = None
+        self._cam_confs: list[Any] = []
+        self._cam_refresh_devices()
+
+    def _cam_refresh_devices(self) -> None:
+        self.cam_dev_cb["values"] = self.m.device_choices()
+
+    def _cam_selected(self) -> int | None:
+        sel = self.cam_tree.selection()
+        return self.cam_tree.index(sel[0]) if sel else None
+
+    def _cam_refresh(self) -> None:
+        self.cam_mode.set(self.m.camera_mode())
+        self.cam_tree.delete(*self.cam_tree.get_children())
+        for i, r in enumerate(self.m.camera_rows()):
+            conf = self._cam_confs[i] if i < len(self._cam_confs) else None
+            bar = "-" if conf is None else ("#" * round(conf * 10)).ljust(10, ".") + f" {conf:.2f}"
+            self.cam_tree.insert(
+                "", "end", values=(r["role"], r["device"], f"{r['width']}x{r['height']}", r["fps"], r["hfov_deg"], bar)
+            )
+        self.cam_calib.set(self.m.calibration_status())
+
+    def _cam_add(self) -> None:
+        if not self.cam_dev.get():
+            self._report("pick a device first")
+            return
+        self._report(self.m.add_camera(self.m.parse_device(self.cam_dev.get()), self.cam_role.get()))
+        self._cam_refresh()
+
+    def _cam_apply(self) -> None:
+        i = self._cam_selected()
+        if i is None:
+            self._report("select a camera row first")
+            return
+        w, _, h = self.cam_res.get().lower().partition("x")
+        for field, val in (("width", w), ("height", h), ("fps", self.cam_fps.get()), ("role", self.cam_role.get())):
+            err = self.m.set_camera(i, field, val)
+            if err:
+                self._report(err)
+                break
+        if self.cam_dev.get():
+            self._report(self.m.set_camera(i, "device", self.cam_dev.get()))
+        self._cam_refresh()
+
+    def _cam_remove(self) -> None:
+        i = self._cam_selected()
+        if i is not None:
+            self._report(self.m.remove_camera(i))
+            self._cam_refresh()
+
+    def _cam_calibrate(self) -> None:
+        import subprocess
+
+        if len(self.m.cfg.hands.cameras) < 2:
+            self._report("add a second camera first")
+            return
+        if self.m.dirty:
+            self._on_save()
+        self._report(None, "calibrating: move your open hand through both cameras' view for ~20 s...")
+
+        def run() -> None:
+            r = subprocess.run(
+                [sys.executable, "-m", "away", "calibrate-cameras", "--config", str(self.m.path)],
+                capture_output=True,
+                text=True,
+            )
+            msg = (r.stdout.strip().splitlines() or [""])[-1] if r.returncode == 0 else r.stderr.strip()[-200:]
+
+            def done() -> None:
+                self._report(None, msg)
+                self._cam_refresh()
+
+            self.root.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _cam_live(self) -> None:
+        if self._cam_thread is not None and self._cam_thread.is_alive():
+            self._cam_stop.set()
+            self.cam_live_btn.configure(text="Live confidence")
+            return
+        if len(self.m.cfg.hands.cameras) < 2:
+            self._report("add a second camera first")
+            return
+        self._cam_stop.clear()
+        self._cam_thread = threading.Thread(
+            target=camera_confidence_worker, args=(self.m, self._cam_q, self._cam_stop), daemon=True
+        )
+        self._cam_thread.start()
+        self.cam_live_btn.configure(text="Stop live view")
+        self.root.after(150, self._cam_poll)
+
+    def _cam_poll(self) -> None:
+        latest = None
+        while not self._cam_q.empty():
+            latest = self._cam_q.get_nowait()
+        if isinstance(latest, str):
+            self._report(latest)
+        elif latest is not None:
+            self._cam_confs = latest
+            self._cam_refresh()
+        if self._cam_thread is not None and self._cam_thread.is_alive():
+            self.root.after(150, self._cam_poll)
+
     def _build_test(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(nb, padding=8)
@@ -701,6 +996,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         for path, var in self.vvars.items():
             var.set(m.voice_value(path))
         self.shell_var.set(m.bindings.allow_shell)
+        self._cam_refresh()
         self._report(None)
 
     def _selected_trigger(self) -> str | None:
@@ -869,6 +1165,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from tkinter import messagebox
 
         self._test_stop.set()
+        self._cam_stop.set()
         if self.m.dirty and messagebox.askyesno("Unsaved changes", "Save changes before closing?"):
             self._on_save()
         self.root.destroy()

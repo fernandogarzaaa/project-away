@@ -224,3 +224,32 @@ def test_tray_icon_colours():
 
     for state, colour in STATE_COLORS.items():
         assert make_icon_image(state=state).getpixel((32, 6)) == colour
+
+
+def test_cameras_tab_model(tmp_path):
+    from away.app.settings_gui import SettingsModel
+    from away.config import AppConfig
+    from away.multicam.capture import CameraDevice
+
+    m = SettingsModel(AppConfig(), tmp_path / "c.yaml")
+    assert m.camera_rows() == [] and m.camera_mode() == "single camera"
+    devs = [CameraDevice(0, "/dev/video0", "Integrated Webcam"), CameraDevice(2, "/dev/video2", "Logitech BRIO")]
+    choices = m.device_choices(devs)
+    assert choices == ["0: Integrated Webcam", "2: Logitech BRIO"]
+    assert m.parse_device(choices[1]) == 2 and m.parse_device("/dev/video4: x") == "/dev/video4"
+    assert m.add_camera(m.parse_device(choices[1])) is None
+    assert [(r["device"], r["role"]) for r in m.camera_rows()] == [(0, "primary"), (2, "secondary")]
+    assert m.camera_mode().startswith("2 cameras")
+    assert m.add_camera(2) is not None  # same device twice
+    assert m.set_camera(1, "width", "1280") is None and m.cfg.hands.cameras[1].width == 1280
+    assert m.set_camera(1, "fps", "abc") is not None
+    assert m.set_camera(1, "fps", 1) is not None and m.cfg.hands.cameras[1].fps == 30  # rejected, unchanged
+    assert m.set_camera(1, "role", "primary") is None
+    assert [c.role for c in m.cfg.hands.cameras] == ["secondary", "primary"]  # promotion demotes the old one
+    assert m.set_camera(5, "fps", 30) == "no such camera" and m.set_camera(0, "bogus", 1) is not None
+    assert m.set_camera(0, "device", "4: Other") is None and m.cfg.hands.cameras[0].device == 4
+    assert m.set_camera(0, "hfov_deg", "85") is None and m.cfg.hands.cameras[0].hfov_deg == 85.0
+    m.save()
+    assert C.load(tmp_path / "c.yaml")[0].hands.cameras == m.cfg.hands.cameras
+    assert m.remove_camera(1) is None and m.cfg.hands.cameras == [] and m.cfg.hands.camera_index == 4
+    assert "not calibrated" in m.calibration_status()
