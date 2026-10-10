@@ -175,7 +175,7 @@ def test_settings_command_without_tkinter(cfgfile, capsys, monkeypatch):
 
 
 def test_settings_command_headless(cfgfile, capsys, monkeypatch):
-    tkinter = pytest.importorskip("tkinter")
+    tkinter = pytest.importorskip("tkinter", exc_type=ImportError)  # libtk may be missing
 
     def no_display():
         raise tkinter.TclError("no display name and no $DISPLAY environment variable")
