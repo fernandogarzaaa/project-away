@@ -135,9 +135,30 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_record(args: argparse.Namespace) -> int:  # pragma: no cover - needs a camera
-    from away.hands.recorder import record
+def register_custom_gesture(label: str, cfg_path: Path | None = None) -> bool:
+    """Add ``label`` to bindings.custom_gestures (unbound until you bind it). Returns True if it was added."""
+    from away.hands.recorder import check_label
+    from away.hands.synthetic import GESTURES
 
+    check_label(label, allow_custom=True)
+    if label in GESTURES:
+        return False
+    cfg, _ = cfgmod.load(cfg_path)
+    if label in cfg.bindings.custom_gestures:
+        return False
+    cfg.bindings.custom_gestures.append(label)
+    cfgmod.save(cfg, cfg_path)
+    return True
+
+
+def cmd_record(args: argparse.Namespace) -> int:  # pragma: no cover - needs a camera
+    from away.hands.recorder import check_label, record
+
+    try:
+        check_label(args.label, args.custom)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     cfg, _ = cfgmod.load()
     out = Path(args.out) if args.out else paths.recordings_dir()
     record(
@@ -148,7 +169,13 @@ def cmd_record(args: argparse.Namespace) -> int:  # pragma: no cover - needs a c
         _models_dir(cfg) / "hand_landmarker.task",
         cfg.hands.camera_index,
         cfg.hands.mirror,
+        allow_custom=args.custom,
     )
+    if args.custom and register_custom_gesture(args.label):
+        print(
+            f"registered custom gesture {args.label!r}. Next: `away calibrate`, then "
+            f"`away bindings set gesture:{args.label} key:ctrl+t` (or use `away settings`)."
+        )
     return 0
 
 
@@ -190,7 +217,7 @@ def cmd_train(args: argparse.Namespace) -> int:  # pragma: no cover - needs torc
 
 def cmd_config(args: argparse.Namespace) -> int:
     if args.action == "path":
-        print(paths.config_file())
+        print(cfgmod.config_path())
     elif args.action == "init":
         p = cfgmod.save(cfgmod.AppConfig())
         print(f"wrote defaults to {p}")
@@ -202,6 +229,200 @@ def cmd_config(args: argparse.Namespace) -> int:
         for k in unknown:
             print(f"# unknown key ignored: {k}")
     return 0
+
+
+# --------------------------------------------------------------------------- controls
+def _cfg_path(args: argparse.Namespace) -> Path:
+    return Path(args.config) if getattr(args, "config", None) else cfgmod.config_path()
+
+
+def _load_for_edit(args: argparse.Namespace) -> cfgmod.AppConfig:
+    cfg, unknown = cfgmod.load(_cfg_path(args))
+    for k in unknown:
+        print(f"warning: unknown config key {k}", file=sys.stderr)
+    return cfg
+
+
+def _fail(msg: object) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    return 2
+
+
+def cmd_bindings(args: argparse.Namespace) -> int:
+    import yaml
+
+    from away.bindings import BindingsError, list_rows, load_bindings_file, merge_bindings
+
+    path = _cfg_path(args)
+    try:
+        cfg = _load_for_edit(args)
+    except ValueError as exc:
+        return _fail(exc)
+    b = cfg.bindings
+    prof = getattr(args, "profile", None) or "default"
+    if prof not in b.profiles:
+        return _fail(f"no profile named {prof!r} (have: {', '.join(b.profiles)})")
+    if args.action == "list":
+        rows = list_rows(b, prof)
+        if args.json:
+            print(json.dumps([{"trigger": t, "action": a, "from": src} for t, a, src in rows], indent=2))
+        else:
+            w = max(len(t) for t, _a, _s in rows)
+            print(f"# profile: {prof}   (active_profile: {b.active_profile}; allow_shell: {b.allow_shell})")
+            for t, a, src in rows:
+                mark = "" if src == prof else "   (from default)"
+                print(f"{t:<{w}}  ->  {a}{mark}")
+        return 0
+    if args.action == "set":
+        if not args.trigger or args.value is None:
+            return _fail(
+                "usage: away bindings set TRIGGER ACTION [--profile NAME], e.g. gesture:swipe_left key:alt+left"
+            )
+        try:
+            act = b.set(args.trigger, args.value, prof)
+        except ValueError as exc:
+            return _fail(exc)
+        cfgmod.save(cfg, path)
+        print(f"[{prof}] {args.trigger} -> {act}")
+        return 0
+    if args.action == "reset":
+        try:
+            if args.trigger:
+                b.unset(args.trigger, prof)
+                msg = f"[{prof}] {args.trigger} reset"
+            else:
+                b.reset(None if args.all else prof)
+                msg = "all bindings reset to defaults" if args.all else f"profile {prof!r} reset"
+        except ValueError as exc:
+            return _fail(exc)
+        cfgmod.save(cfg, path)
+        print(msg)
+        return 0
+    if args.action == "export":
+        text = yaml.safe_dump({"bindings": b.to_dict()}, sort_keys=False, allow_unicode=True)
+        if not args.trigger or args.trigger == "-":
+            print(text, end="")
+        else:
+            Path(args.trigger).write_text(text, encoding="utf-8")
+            print(f"exported bindings to {args.trigger}")
+        return 0
+    # import
+    if not args.trigger:
+        return _fail("usage: away bindings import FILE [--replace]")
+    try:
+        incoming, raw = load_bindings_file(args.trigger)
+        cfg.bindings = incoming if args.replace else merge_bindings(b, incoming, raw)
+    except BindingsError as exc:
+        return _fail(exc)
+    except (OSError, yaml.YAMLError) as exc:
+        return _fail(f"cannot read {args.trigger}: {exc}")
+    cfgmod.save(cfg, path)
+    print(f"imported bindings from {args.trigger} ({'replaced' if args.replace else 'merged'})")
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    path = _cfg_path(args)
+    try:
+        cfg = _load_for_edit(args)
+    except ValueError as exc:
+        return _fail(exc)
+    b = cfg.bindings
+    if args.action == "list":
+        for name, p in b.profiles.items():
+            active = " *" if b.active_profile == name else ""
+            apps = (
+                "all apps" if name == "default" else (", ".join(p.apps) or "(no apps; select with `away profile use`)")
+            )
+            print(f"{name}{active}: {apps}")
+        print(f"active_profile: {b.active_profile}")
+        return 0
+    if not args.name:
+        return _fail(f"usage: away profile {args.action} NAME")
+    try:
+        if args.action == "use":
+            if args.name != "auto" and args.name not in b.profiles:
+                raise ValueError(f"no profile named {args.name!r} (have: {', '.join(b.profiles)}, or 'auto')")
+            b.active_profile = args.name
+            msg = f"active profile: {args.name}"
+        elif args.action == "new":
+            b.new_profile(args.name, args.apps or [], args.copy_from)
+            msg = f"created profile {args.name!r} for {', '.join(args.apps) if args.apps else 'no apps yet'}"
+        else:  # remove
+            if args.name == "default" or args.name not in b.profiles:
+                raise ValueError(f"cannot remove {args.name!r}")
+            del b.profiles[args.name]
+            if b.active_profile == args.name:
+                b.active_profile = "auto"
+            msg = f"removed profile {args.name!r}"
+        cfgmod.save(cfg, path)
+    except ValueError as exc:
+        return _fail(exc)
+    print(msg)
+    return 0
+
+
+VOICE_SHOW_KEYS = (
+    "enabled",
+    "mode",
+    "hotkey",
+    "hold_key",
+    "mute_hotkey",
+    "wake_word_enabled",
+    "wake_word",
+    "wake_window",
+    "intent",
+    "ambient_fallback",
+    "vad_sensitivity",
+    "end_silence_ms",
+    "commands_enabled",
+)
+
+
+def cmd_voice(args: argparse.Namespace) -> int:
+    path = _cfg_path(args)
+    try:
+        cfg = _load_for_edit(args)
+    except ValueError as exc:
+        return _fail(exc)
+    v = cfg.voice
+    if args.action == "show":
+        for k in VOICE_SHOW_KEYS:
+            print(f"voice.{k}: {getattr(v, k)}")
+        print(f"app.always_on: {cfg.app.always_on}")
+        return 0
+    val = args.value
+    attr = {"mode": "mode", "intent": "intent", "sensitivity": "vad_sensitivity"}.get(args.action)
+    if val is None:
+        if attr:
+            print(getattr(v, attr))
+        else:
+            print(v.wake_word if v.wake_word_enabled else "off")
+        return 0
+    try:
+        if args.action == "wake-word":
+            if val.lower() in ("off", "none", "false"):
+                v.wake_word_enabled = False
+            else:
+                v.wake_word_enabled = True
+                if val.lower() not in ("on", "true"):
+                    v.wake_word = val
+        elif attr == "vad_sensitivity":
+            v.vad_sensitivity = float(val)
+        elif attr:
+            setattr(v, attr, val)
+        cfgmod.save(cfg, path)  # validates
+    except ValueError as exc:
+        return _fail(exc)
+    shown = "off" if args.action == "wake-word" and not v.wake_word_enabled else val
+    print(f"voice {args.action}: {shown}")
+    return 0
+
+
+def cmd_settings(args: argparse.Namespace) -> int:
+    from away.app import settings_gui
+
+    return settings_gui.main(config_path=Path(args.config) if args.config else None)
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
@@ -255,6 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--count", type=int, default=10)
     rc.add_argument("--seconds", type=float, default=1.2)
     rc.add_argument("--out")
+    rc.add_argument("--custom", action="store_true", help="record a new custom gesture and register it for bindings")
     rc.set_defaults(fn=cmd_record)
 
     c = sub.add_parser("calibrate", help="fine-tune the temporal model on your recordings")
@@ -276,6 +498,35 @@ def build_parser() -> argparse.ArgumentParser:
     cf = sub.add_parser("config", help="show | path | init")
     cf.add_argument("action", choices=["show", "path", "init"], nargs="?", default="show")
     cf.set_defaults(fn=cmd_config)
+
+    bd = sub.add_parser("bindings", help="list | set | reset | export | import trigger -> action bindings")
+    bd.add_argument("action", choices=["list", "set", "reset", "export", "import"])
+    bd.add_argument("trigger", nargs="?", help="trigger (gesture:pinch, 'voice:scroll down', ...) or FILE")
+    bd.add_argument("value", nargs="?", help="action for `set` (key:ctrl+tab, mouse:right_click, none, ...)")
+    bd.add_argument("--profile", help="profile to show/edit (default: default)")
+    bd.add_argument("--json", action="store_true", help="list as JSON")
+    bd.add_argument("--all", action="store_true", help="reset: every profile")
+    bd.add_argument("--replace", action="store_true", help="import: replace instead of merging")
+    bd.add_argument("--config", help="config file (default: per-OS path or $AWAY_CONFIG)")
+    bd.set_defaults(fn=cmd_bindings)
+
+    pf = sub.add_parser("profile", help="list | use NAME|auto | new NAME --apps ... | remove NAME")
+    pf.add_argument("action", choices=["list", "use", "new", "remove"])
+    pf.add_argument("name", nargs="?")
+    pf.add_argument("--apps", nargs="*", help="process names this profile applies to (chrome firefox.exe Code)")
+    pf.add_argument("--copy-from", help="start from a copy of this profile")
+    pf.add_argument("--config")
+    pf.set_defaults(fn=cmd_profile)
+
+    vc = sub.add_parser("voice", help="show | mode [always_on|push_to_talk|toggle] | wake-word [WORD|off] | ...")
+    vc.add_argument("action", choices=["show", "mode", "wake-word", "intent", "sensitivity"])
+    vc.add_argument("value", nargs="?")
+    vc.add_argument("--config")
+    vc.set_defaults(fn=cmd_voice)
+
+    st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
+    st.add_argument("--config")
+    st.set_defaults(fn=cmd_settings)
 
     a = sub.add_parser("autostart", help="start the tray app at login")
     a.add_argument("state", choices=["on", "off"])
