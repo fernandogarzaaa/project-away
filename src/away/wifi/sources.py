@@ -55,7 +55,8 @@ class PicoScenesSource:  # pragma: no cover - needs the PicoScenes toolbox + a c
 def picoscenes_frame(raw: dict[str, Any]) -> CSIFrame:
     """Convert one PicoScenes toolbox frame dict to a :class:`CSIFrame` (defensive key access)."""
     basic = raw.get("RxSBasic") or {}
-    t = float(basic.get("systemns", basic.get("timestamp", 0.0))) / 1e9
+    # systemns is 0 in some captures (e.g. the toolbox's USRP sample); fall back to the device timestamp
+    t = float(basic.get("systemns") or basic.get("timestamp") or 0.0) / 1e9
     rssi = basic.get("rssi")
     csi_block = raw.get("CSI") or {}
     csi = csi_block.get("CSI")
@@ -221,6 +222,21 @@ def synthetic_csi(
         slope = rng.normal(0, 0.05, n)
         H *= np.exp(1j * (common[:, None, None] + slope[:, None, None] * k[None, None, :]))
     return t, H
+
+
+def stack_csi(csis: list[NDArray[np.complex128]]) -> NDArray[np.complex128] | None:
+    """Stack per-packet CSI into (T, n_rx, n_sub), keeping only the most common shape.
+
+    Real captures mix packet formats (e.g. 20 MHz HT and non-HT frames have
+    different tone counts), which cannot be stacked together.
+    """
+    if not csis:
+        return None
+    shapes: dict[tuple[int, ...], int] = {}
+    for c in csis:
+        shapes[c.shape] = shapes.get(c.shape, 0) + 1
+    best = max(shapes, key=lambda k: shapes[k])
+    return np.stack([c for c in csis if c.shape == best])
 
 
 def frames_from_array(t: NDArray[np.float64], H: NDArray[np.complex128]) -> list[CSIFrame]:

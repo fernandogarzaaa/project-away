@@ -14,6 +14,7 @@ from away.wifi.sources import (
     parse_proc_net_wireless,
     parse_wdutil,
     picoscenes_frame,
+    stack_csi,
     synthetic_csi,
 )
 
@@ -75,6 +76,8 @@ def test_picoscenes_frame_conversion():
     fr = picoscenes_frame(raw)
     assert fr.t == 2.0 and fr.rssi == -42.0
     assert fr.csi.shape == (2, 4)
+    zero_sys = picoscenes_frame({"RxSBasic": {"systemns": 0, "timestamp": 3_500_000_000}})
+    assert zero_sys.t == 3.5
     empty = picoscenes_frame({})
     assert empty.csi is None and empty.rssi is None and empty.t == 0.0
     odd = picoscenes_frame({"CSI": {"CSI": np.ones(5), "numTones": 4}})
@@ -256,3 +259,11 @@ def test_calibration_ignores_inconsistent_groups():
     th2 = c.calibrate([({"energy": 0.0}, "empty"), ({"energy": 0.04}, "presence")])
     assert th2.presence == pytest.approx(0.02)
     assert c.calibrate([]).presence == pytest.approx(0.02)
+
+
+def test_stack_csi_keeps_majority_shape():
+    a, b = np.ones((1, 56), complex), np.ones((1, 52), complex)
+    out = stack_csi([a, b, a * 2, a * 3])
+    assert out.shape == (3, 1, 56)
+    assert np.allclose(out[:, 0, 0], [1, 2, 3])
+    assert stack_csi([]) is None

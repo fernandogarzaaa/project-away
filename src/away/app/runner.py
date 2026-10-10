@@ -209,7 +209,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.threads.append(threading.Thread(target=mic_loop, daemon=True, name="mic"))
 
     def _wifi_loop(self) -> None:
-        from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource
+        from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource, stack_csi
 
         w = self.cfg.wifi
         src: Any
@@ -231,7 +231,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 buf_rssi.append(fr.rssi)
             n = len(buf_csi) if buf_csi else len(buf_rssi)
             if n >= (win if buf_csi else 10):
-                csi = np.stack(buf_csi) if buf_csi else None
+                csi = stack_csi(buf_csi)
                 self.pipeline.on_csi_window(
                     time.monotonic(), csi, np.array(buf_rssi) if buf_rssi else None, w.sample_rate if buf_csi else 10.0
                 )
