@@ -26,3 +26,4 @@ squashfs-root/
 # secrets / local config
 .env
 *.local.yaml
+.testteeth-reports/

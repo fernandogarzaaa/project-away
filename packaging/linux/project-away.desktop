@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Project Away
+GenericName=Hands-free control
+Comment=Control your PC with hand gestures and push-to-talk dictation (local-first)
+Exec=ProjectAway tray
+Icon=project-away
+Terminal=false
+Categories=Utility;Accessibility;
