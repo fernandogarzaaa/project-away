@@ -73,10 +73,14 @@ def test_energy_vad_min_rms_floor():
     assert vad.segments(utterance()) == []  # 0.3 amplitude tone stays under the absolute floor
 
 
-def test_make_vad_fallback():
+def test_make_vad_fallback(monkeypatch):
+    import sys
+
     assert isinstance(make_vad("energy"), EnergyVAD)
-    v = make_vad("silero")  # falls back when silero isn't installed
-    assert hasattr(v, "trim")
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.setitem(sys.modules, "faster_whisper.vad", None)
+    monkeypatch.setitem(sys.modules, "silero_vad", None)
+    assert isinstance(make_vad("silero"), EnergyVAD)  # falls back when no Silero backend is installed
 
 
 def test_whisper_prompt():
@@ -92,9 +96,17 @@ def test_fake_asr():
     assert a.calls == [(5, "p"), (3, None)]
 
 
-def test_make_asr_unknown_backends_are_lazy():
-    with pytest.raises(Exception):  # faster-whisper not installed in core test env
+def test_make_asr_imports_backend_lazily(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.setitem(sys.modules, "nemo", None)
+    monkeypatch.setitem(sys.modules, "nemo.collections", None)
+    monkeypatch.setitem(sys.modules, "nemo.collections.asr", None)
+    with pytest.raises(ImportError):
         make_asr("faster-whisper", "tiny")
+    with pytest.raises(ImportError):
+        make_asr("parakeet", "large-v3-turbo")
 
 
 class Clock:

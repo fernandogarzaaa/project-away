@@ -93,25 +93,32 @@ class EnergyVAD:
         return bool(self.segments(audio))
 
 
-class SileroVAD:  # pragma: no cover - needs the silero-vad package
-    def __init__(self, sample_rate: int = 16000, threshold: float = 0.5) -> None:
-        from silero_vad import get_speech_timestamps, load_silero_vad
+class SileroVAD:  # pragma: no cover - needs faster-whisper (bundled Silero ONNX) or silero-vad
+    """Silero VAD. Prefers the ONNX copy bundled with faster-whisper (no torch needed),
+    falls back to the ``silero-vad`` package (needs torch)."""
 
-        self.model = load_silero_vad(onnx=True)
-        self._ts = get_speech_timestamps
+    def __init__(self, sample_rate: int = 16000, threshold: float = 0.5) -> None:
         self.sr = sample_rate
         self.threshold = threshold
+        try:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+            opts = VadOptions(threshold=threshold, min_silence_duration_ms=300, speech_pad_ms=0)
+            self._fn = lambda a: get_speech_timestamps(np.asarray(a, dtype=np.float32), opts, sampling_rate=self.sr)
+            self.backend = "faster-whisper-onnx"
+        except ImportError:
+            import torch
+            from silero_vad import get_speech_timestamps as gst
+            from silero_vad import load_silero_vad
+
+            model = load_silero_vad(onnx=True)
+            self._fn = lambda a: gst(
+                torch.from_numpy(np.asarray(a, dtype=np.float32)), model, sampling_rate=self.sr, threshold=threshold
+            )
+            self.backend = "silero-vad"
 
     def segments(self, audio: FloatArray) -> list[Segment]:
-        import torch
-
-        ts = self._ts(
-            torch.from_numpy(np.asarray(audio, dtype=np.float32)),
-            self.model,
-            sampling_rate=self.sr,
-            threshold=self.threshold,
-        )
-        return [Segment(int(t["start"]), int(t["end"])) for t in ts]
+        return [Segment(int(t["start"]), int(t["end"])) for t in self._fn(audio)]
 
     def trim(self, audio: FloatArray, pad_ms: int = 150) -> FloatArray:
         segs = self.segments(audio)

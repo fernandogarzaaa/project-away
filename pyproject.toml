@@ -33,14 +33,15 @@ dependencies = [
 [project.optional-dependencies]
 hands = ["mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17"]
 face = ["mediapipe>=0.10.14", "opencv-python>=4.8"]
-voice = ["faster-whisper>=1.0", "sounddevice>=0.4.6", "silero-vad>=5.1"]
+# Silero VAD comes from the ONNX model bundled in faster-whisper (no torch needed)
+voice = ["faster-whisper>=1.1", "sounddevice>=0.4.6"]
 control = ["pynput>=1.7.6", "pyperclip>=1.8"]
 tray = ["pystray>=0.19", "Pillow>=10"]
 train = ["torch>=2.1", "onnx>=1.15", "onnxruntime>=1.17"]
 parakeet = ["nemo_toolkit[asr]>=2.0"]
 all = [
   "mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17",
-  "faster-whisper>=1.0", "sounddevice>=0.4.6", "silero-vad>=5.1",
+  "faster-whisper>=1.1", "sounddevice>=0.4.6",
   "pynput>=1.7.6", "pyperclip>=1.8",
   "pystray>=0.19", "Pillow>=10",
 ]

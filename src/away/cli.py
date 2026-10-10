@@ -14,7 +14,7 @@ from away import config as cfgmod
 EXTRAS = {
     "hands/face": ["mediapipe", "cv2"],
     "runtime models": ["onnxruntime"],
-    "voice": ["faster_whisper", "sounddevice", "silero_vad"],
+    "voice": ["faster_whisper", "sounddevice"],
     "control": ["pynput", "pyperclip"],
     "tray": ["pystray", "PIL"],
     "train": ["torch", "onnx"],
