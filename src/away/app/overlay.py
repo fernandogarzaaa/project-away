@@ -17,6 +17,9 @@ STATUS_TOPICS = {
     "gesture.drag_start": lambda d: "drag",
     "gesture.swipe_left": lambda d: "swipe left",
     "gesture.swipe_right": lambda d: "swipe right",
+    "voice.state": lambda d: f"voice: {d.get('state', '')}" + (" (commands)" if d.get("intent") == "command" else ""),
+    "action.fired": lambda d: f"{d.get('trigger', '')} -> {d.get('action', '')}",
+    "app.paused": lambda d: "PAUSED" if d.get("paused") else "ACTIVE",
 }
 
 

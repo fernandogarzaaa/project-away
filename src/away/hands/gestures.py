@@ -49,6 +49,9 @@ SCROLL_MIN_DELTA = 0.002
 class GestureStateMachine:
     def __init__(self, cfg: GestureConfig | None = None) -> None:
         self.cfg = cfg or GestureConfig()
+        # Detection vs mapping: the clutch pose is always *detected*; whether it pauses the machine is decided by
+        # the bindings (open_palm -> pause:toggle sets this True; any other binding sets it False).
+        self.clutch_pauses = True
         self.reset()
 
     # ------------------------------------------------------------------ state
@@ -119,7 +122,8 @@ class GestureStateMachine:
             if drift > CLUTCH_MAX_DRIFT:
                 self._palm_t0, self._palm_pos = t, (wx, wy)
             elif not self._clutch_latched and t - self._palm_t0 >= self.cfg.clutch_hold:
-                self.paused = not self.paused
+                if self.clutch_pauses:
+                    self.paused = not self.paused
                 self._clutch_latched = True
                 events.append(GestureEvent("clutch", t, {"paused": self.paused}))
         else:

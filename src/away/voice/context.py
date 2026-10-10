@@ -41,6 +41,44 @@ def active_app(platform: str | None = None) -> str | None:  # pragma: no cover -
     return None
 
 
+def active_process(platform: str | None = None) -> str | None:  # pragma: no cover - OS specific
+    """Process name of the focused window (``chrome.exe``, ``Code``, ``firefox``), for per-app profiles."""
+    plat = platform or sys.platform
+    try:
+        if plat.startswith("win"):
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+            h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return buf.value.replace("\\", "/").rsplit("/", 1)[-1] or None
+            finally:
+                kernel32.CloseHandle(h)
+            return None
+        if plat == "darwin":
+            return active_app(plat)  # System Events already returns the process name
+        if shutil.which("xdotool"):
+            out = subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowpid"], capture_output=True, text=True, timeout=1.0
+            )
+            xpid = out.stdout.strip()
+            if xpid.isdigit():
+                with open(f"/proc/{xpid}/comm", encoding="utf-8") as fh:
+                    return fh.read().strip() or None
+    except Exception:
+        return None
+    return None
+
+
 def whisper_prompt(app: str | None, vocabulary: list[str]) -> str | None:
     """A short initial prompt nudging Whisper toward your terms and the app's register."""
     parts = []

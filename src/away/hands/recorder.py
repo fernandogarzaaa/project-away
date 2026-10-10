@@ -11,9 +11,28 @@ from numpy.typing import NDArray
 from away.hands.synthetic import GESTURES
 
 
-def save_clip(folder: Path, label: str, frames: list[NDArray[np.float64]], handedness: str, fps: float) -> Path:
-    if label not in GESTURES:
-        raise ValueError(f"label must be one of {GESTURES}")
+def check_label(label: str, allow_custom: bool = False) -> str:
+    """Built-in gesture labels always pass; custom ones (lower_snake_case) only with ``allow_custom``."""
+    from away.bindings import LABEL_RE
+
+    if label in GESTURES:
+        return label
+    if allow_custom:
+        if not LABEL_RE.match(label):
+            raise ValueError(f"custom gesture name {label!r} must be lower_snake_case (a-z, 0-9, _), max 32 chars")
+        return label
+    raise ValueError(f"label must be one of {GESTURES} (or pass --custom to record a new gesture)")
+
+
+def save_clip(
+    folder: Path,
+    label: str,
+    frames: list[NDArray[np.float64]],
+    handedness: str,
+    fps: float,
+    allow_custom: bool = False,
+) -> Path:
+    check_label(label, allow_custom)
     if not frames:
         raise ValueError("no hand frames captured")
     folder = Path(folder) / label
@@ -24,10 +43,18 @@ def save_clip(folder: Path, label: str, frames: list[NDArray[np.float64]], hande
 
 
 def record(  # pragma: no cover - needs a camera
-    label: str, count: int, seconds: float, out: Path, model_path: Path, camera: int = 0, mirror: bool = True
+    label: str,
+    count: int,
+    seconds: float,
+    out: Path,
+    model_path: Path,
+    camera: int = 0,
+    mirror: bool = True,
+    allow_custom: bool = False,
 ) -> list[Path]:
     from away.hands.tracker import HandTracker, camera_frames
 
+    check_label(label, allow_custom)
     tracker = HandTracker(model_path)
     saved: list[Path] = []
     frames_iter = camera_frames(camera, mirror)
@@ -52,7 +79,7 @@ def record(  # pragma: no cover - needs a camera
             if len(clip) < 5:
                 print("  no hand seen, skipping", flush=True)
                 continue
-            saved.append(save_clip(out, label, clip, hand, len(clip) / seconds))
+            saved.append(save_clip(out, label, clip, hand, len(clip) / seconds, allow_custom))
             print(f"  saved {saved[-1].name} ({len(clip)} frames)", flush=True)
     finally:
         tracker.close()

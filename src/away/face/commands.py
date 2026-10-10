@@ -37,3 +37,20 @@ class BrowRaiseToggle:
             self._last_fire = t
             return True
         return False
+
+
+def mouth_open(blendshapes: dict[str, float]) -> float:
+    return float(blendshapes.get("jawOpen", 0.0))
+
+
+class MouthOpenTrigger(BrowRaiseToggle):
+    """Same hold/re-arm/cooldown logic as the brow raise, on the ``jawOpen`` blendshape.
+
+    Use a long ``hold`` (default 0.8 s) so talking does not fire it.
+    """
+
+    def __init__(self, threshold: float = 0.5, hold: float = 0.8, cooldown: float = 1.0) -> None:
+        super().__init__(threshold, hold, cooldown)
+
+    def update(self, t: float, blendshapes: dict[str, float]) -> bool:
+        return super().update(t, {"browInnerUp": mouth_open(blendshapes)})

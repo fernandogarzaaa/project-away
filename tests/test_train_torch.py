@@ -77,3 +77,22 @@ def test_train_temporal_and_runtime(tmp_path):
 def test_train_temporal_needs_data(tmp_path):
     with pytest.raises(ValueError):
         T.train_temporal(tmp_path, n_synthetic=0, epochs=1)
+
+
+def test_calibrate_adds_custom_gesture_class(tmp_path):
+    """A custom `away record --custom wave` clip grows the output layer; the shipped weights still load."""
+    from away.hands.recorder import save_clip
+
+    rng = np.random.default_rng(1)
+    out = tmp_path / "out"
+    T.train_temporal(out, n_synthetic=6, epochs=1)  # base model, built-in classes only
+    rec = tmp_path / "rec"
+    for _ in range(4):
+        save_clip(rec, "wave", list(gesture_sequence("swipe_right", 20, rng)), "Right", 30, allow_custom=True)
+    m = T.calibrate(out, rec, epochs=1)
+    assert m["classes"] == [*GESTURES, "wave"]
+    clf = TemporalGestureClassifier(out / "gesture_tcn.onnx")
+    probs = None
+    for f in gesture_sequence("swipe_right", 30, rng):
+        probs = clf.push(f)
+    assert probs is not None and "wave" in probs

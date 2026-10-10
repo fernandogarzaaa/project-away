@@ -154,9 +154,14 @@ def train_temporal(
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     _, GestureTCN = build_torch_models()
-    model = GestureTCN(SEQ_FEATURES, len(GESTURES))
+    rec_data = load_recordings(Path(recordings)) if recordings is not None and Path(recordings).exists() else None
+    classes = temporal_classes(rec_data[1] if rec_data else [])
+    model = GestureTCN(SEQ_FEATURES, len(classes))
     if init_from is not None and init_from.exists():
-        model.load_state_dict(torch.load(init_from, map_location="cpu"))
+        state = torch.load(init_from, map_location="cpu")
+        own = model.state_dict()
+        # a new custom gesture changes the output layer: keep every weight whose shape still matches
+        model.load_state_dict({k: v for k, v in state.items() if k in own and own[k].shape == v.shape}, strict=False)
     Xs: list[NDArray[np.float64]] = []
     ys: list[int] = []
     src: list[str] = []
@@ -165,12 +170,12 @@ def train_temporal(
         Xs.extend(seqs_to_features(list(S), Sh))
         ys.extend(int(v) for v in Sy)
         src.extend(["synthetic"] * len(Sy))
-    if recordings is not None and Path(recordings).exists():
-        R, Rl, Rh = load_recordings(Path(recordings))
-        keep = [i for i, lab in enumerate(Rl) if lab in GESTURES]
+    if rec_data is not None:
+        R, Rl, Rh = rec_data
+        keep = [i for i, lab in enumerate(Rl) if lab in classes]
         if keep:
             Xs.extend(seqs_to_features([R[i] for i in keep], [Rh[i] for i in keep]))
-            ys.extend(GESTURES.index(Rl[i]) for i in keep)
+            ys.extend(classes.index(Rl[i]) for i in keep)
             src.extend(["recorded"] * len(keep))
     if not Xs:
         raise ValueError("no training data")
@@ -182,7 +187,7 @@ def train_temporal(
     model = _fit(model, t(X[~test]), t(y[~test], torch.long), t(X[test]), t(y[test], torch.long), epochs, lr, bs=64)
     with torch.no_grad():
         pred = model(t(X[test])).argmax(1).numpy() if test.any() else np.array([], dtype=np.int64)
-    metrics: dict[str, Any] = {"model": "gesture_tcn", "classes": list(GESTURES), "frames": SEQ_FRAMES}
+    metrics: dict[str, Any] = {"model": "gesture_tcn", "classes": list(classes), "frames": SEQ_FRAMES}
     for name in ("synthetic", "recorded"):
         m = test & (source == name)
         if m.any():
@@ -195,10 +200,18 @@ def train_temporal(
         model,
         torch.zeros(1, SEQ_FRAMES, SEQ_FEATURES),
         out_dir / "gesture_tcn.onnx",
-        {"classes": list(GESTURES), "frames": SEQ_FRAMES, "input": "sequence_features (T, 44)"},
+        {"classes": list(classes), "frames": SEQ_FRAMES, "input": "sequence_features (T, 44)"},
     )
     (out_dir / "gesture_tcn.metrics.json").write_text(json.dumps(metrics, indent=2))
     return metrics
+
+
+def temporal_classes(recorded_labels: list[str]) -> list[str]:
+    """Built-in gesture classes followed by any custom gestures found in your recordings (sorted)."""
+    from away.bindings import LABEL_RE
+
+    custom = sorted({lab for lab in recorded_labels if lab not in GESTURES and LABEL_RE.match(lab)})
+    return [*GESTURES, *custom]
 
 
 def calibrate(models_dir: Path, recordings: Path, epochs: int = 15) -> dict[str, Any]:

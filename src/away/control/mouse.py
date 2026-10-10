@@ -41,6 +41,15 @@ class RecordingBackend:
     def key(self, name: str) -> None:
         self.calls.append(("key", (name,)))
 
+    def click_button(self, button: str, count: int = 1) -> None:
+        self.calls.append(("click_button", (button, count)))
+
+    def hotkey(self, keys: list[str]) -> None:
+        self.calls.append(("hotkey", tuple(keys)))
+
+    def type_text(self, text: str) -> None:
+        self.calls.append(("type_text", (text,)))
+
 
 class PynputBackend:  # pragma: no cover - needs a desktop session
     def __init__(self) -> None:
@@ -75,6 +84,21 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
         k = getattr(self._keys, name, name)
         self._k.press(k)
         self._k.release(k)
+
+    def click_button(self, button: str, count: int = 1) -> None:
+        from pynput import mouse
+
+        self._m.click(getattr(mouse.Button, button, mouse.Button.left), count)
+
+    def hotkey(self, keys: list[str]) -> None:
+        objs = [getattr(self._keys, k, k) for k in keys]
+        for k in objs:
+            self._k.press(k)
+        for k in reversed(objs):
+            self._k.release(k)
+
+    def type_text(self, text: str) -> None:
+        self._k.type(text)
 
 
 # swipe -> key binding (browser/back-forward style by default)
