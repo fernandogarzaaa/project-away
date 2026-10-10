@@ -3,8 +3,10 @@
 * ``absolute``: an "active region" box of the camera image maps linearly onto
   the screen (clamped). Simple, but arm fatigue is real.
 * ``relative``: trackpad-style. Hand deltas move the cursor, with a dead zone
-  that eats tremor and a power-law acceleration so slow moves are precise and
-  fast moves cross the screen. Changing anchor (pointing -> pinch) or losing
+  that eats tremor and an acceleration curve so slow moves are precise and
+  fast moves cross the screen. Two curves: ``power`` (|d|^k, the original) and
+  ``sigmoid`` (a logistic gain between a low and a high plateau), plus optional
+  per-direction speed multipliers. Changing anchor (pointing -> pinch) or losing
   the hand re-anchors without a jump, like lifting a finger off a trackpad.
 """
 
@@ -25,6 +27,31 @@ def accelerate(delta: float, exponent: float, ref: float = ACCEL_REF) -> float:
         return 0.0
     factor = max(1.0, (mag / ref) ** (exponent - 1.0))
     return delta * factor
+
+
+def sigmoid_gain(mag: float, low: float, high: float, mid: float, slope: float, ref: float = ACCEL_REF) -> float:
+    """Gain multiplier for a per-frame delta of size ``mag``: ``low`` for tiny moves, ``high`` for fast ones.
+
+    Clean-room implementation of the idea behind Project Gameface's sigmoid acceleration
+    (https://github.com/google/project-gameface, Apache-2.0): a logistic curve centred at ``mid`` (in units
+    of ``ref``) with steepness ``slope``. No code was copied.
+    """
+    x = mag / ref
+    z = max(-60.0, min(60.0, -slope * (x - mid)))
+    return low + (high - low) / (1.0 + math.exp(z))
+
+
+def accelerate_sigmoid(
+    delta: float, low: float, high: float, mid: float, slope: float, ref: float = ACCEL_REF
+) -> float:
+    if delta == 0.0:
+        return 0.0
+    return delta * sigmoid_gain(abs(delta), low, high, mid, slope, ref)
+
+
+def direction_scale(dx: float, dy: float, up: float, down: float, left: float, right: float) -> tuple[float, float]:
+    """Per-direction speed (screen y grows downwards): ``up`` scales negative dy, ``right`` positive dx..."""
+    return dx * (right if dx > 0 else left), dy * (down if dy > 0 else up)
 
 
 def apply_dead_zone(dx: float, dy: float, dead_zone: float) -> tuple[float, float]:
@@ -87,7 +114,15 @@ class CursorMapper:
         if dx == 0.0 and dy == 0.0:
             return round(self.pos[0]), round(self.pos[1])
         self._prev = (fx, fy)
-        sx = accelerate(dx, self.cfg.acceleration) * self.cfg.gain * self.w
-        sy = accelerate(dy, self.cfg.acceleration) * self.cfg.gain * self.w  # same scale both axes
+        c = self.cfg
+        if c.curve == "sigmoid":
+            # one gain from the 2D speed so diagonal moves keep their direction
+            k = sigmoid_gain(math.hypot(dx, dy), c.sigmoid_low, c.sigmoid_high, c.sigmoid_mid, c.sigmoid_slope)
+            ax, ay = dx * k, dy * k
+        else:
+            ax, ay = accelerate(dx, c.acceleration), accelerate(dy, c.acceleration)
+        ax, ay = direction_scale(ax, ay, c.speed_up, c.speed_down, c.speed_left, c.speed_right)
+        sx = ax * c.gain * self.w
+        sy = ay * c.gain * self.w  # same scale both axes
         self.set_position(self.pos[0] + sx, self.pos[1] + sy)
         return round(self.pos[0]), round(self.pos[1])

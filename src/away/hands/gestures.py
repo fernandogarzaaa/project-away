@@ -93,8 +93,11 @@ class GestureStateMachine:
         return None
 
     # ------------------------------------------------------------------- step
-    def update(self, t: float, landmarks: object | None) -> list[GestureEvent]:
-        """Feed one frame (``None`` = no hand). Returns the events it produced."""
+    def update(self, t: float, landmarks: object | None, pinch: float | None = None) -> list[GestureEvent]:
+        """Feed one frame (``None`` = no hand). Returns the events it produced.
+
+        ``pinch`` overrides the 2D thumb-index ratio (multi-camera fusion passes a 3D one).
+        """
         events: list[GestureEvent] = []
         if landmarks is None:
             if self.dragging:
@@ -112,7 +115,7 @@ class GestureStateMachine:
         self.hand_present = True
         wx, wy = float(lm[WRIST, 0]), float(lm[WRIST, 1])
         pose = classify_pose(lm)
-        ratio = pinch_ratio(lm)
+        ratio = pinch_ratio(lm) if pinch is None else float(pinch)
 
         # --- clutch (open palm held still) works even while paused
         if pose == "palm" and not self.pinched:

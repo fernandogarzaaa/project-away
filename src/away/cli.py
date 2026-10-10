@@ -419,6 +419,158 @@ def cmd_voice(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cameras(args: argparse.Namespace) -> int:
+    from away.multicam.capture import list_cameras
+
+    devs = list_cameras(probe=args.probe)
+    cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
+    if args.json:
+        print(json.dumps([d.__dict__ for d in devs], indent=2))
+        return 0
+    if not devs:
+        print("no cameras found (none connected, or no permission to /dev/video*)")
+    for d in devs:
+        state = "" if d.ok is None else ("  ok" if d.ok else "  (could not open)")
+        print(f"{d.index if d.index is not None else '-':>3}  {d.path:<14} {d.name}{state}")
+    if cfg.hands.cameras:
+        print("\nconfigured (hands.cameras):")
+        for c in cfg.hands.cameras:
+            print(f"  {c.role:<9} device={c.device!r} {c.width}x{c.height}@{c.fps} hfov={c.hfov_deg}")
+    else:
+        print(f"\nsingle-camera mode: hands.camera_index = {cfg.hands.camera_index}")
+        print("add a second camera with `away cameras add DEVICE` (or the Cameras tab in `away settings`)")
+    return 0
+
+
+def cmd_cameras_edit(args: argparse.Namespace) -> int:
+    from away.config import CameraSpec
+
+    path = _cfg_path(args)
+    try:
+        cfg = _load_for_edit(args)
+    except ValueError as exc:
+        return _fail(exc)
+    cams = cfg.hands.cameras
+    if args.action == "add":
+        if args.device is None:
+            return _fail("usage: away cameras add DEVICE [--role secondary]")
+        dev: int | str = int(args.device) if str(args.device).isdigit() else str(args.device)
+        if not cams:  # going multi-camera: the current single camera becomes the primary
+            cams.append(CameraSpec(cfg.hands.camera_index, "primary", mirror=cfg.hands.mirror))
+        cams.append(CameraSpec(dev, args.role or "secondary", mirror=cfg.hands.mirror))
+    elif args.action == "remove":
+        keep = [c for c in cams if str(c.device) != str(args.device)]
+        if len(keep) == len(cams):
+            return _fail(f"no configured camera {args.device!r}")
+        cfg.hands.cameras = keep if len(keep) > 1 else []  # one camera left: back to single-camera mode
+        if len(keep) == 1 and isinstance(keep[0].device, int):
+            cfg.hands.camera_index = keep[0].device
+    try:
+        cfgmod.save(cfg, path)
+    except ValueError as exc:
+        return _fail(exc)
+    n = len(cfg.hands.cameras)
+    print(f"{n} cameras configured" if n else "single-camera mode")
+    return 0
+
+
+def cmd_calibrate_cameras(args: argparse.Namespace) -> int:
+    from away.multicam import geometry as G
+
+    if args.print_board:
+        import cv2
+
+        cols, rows = (int(v) for v in args.checkerboard.lower().split("x"))
+        cv2.imwrite(args.print_board, G.make_checkerboard_image(cols, rows))
+        print(
+            f"wrote a {cols}x{rows} inner-corner checkerboard to {args.print_board}; print it flat, measure one square"
+        )
+        return 0
+    cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
+    if len(cfg.hands.cameras) < 2:
+        return _fail("calibration needs two cameras in hands.cameras (see `away cameras list` / `away cameras add`)")
+    return _run_camera_calibration(cfg, args)  # pragma: no cover - needs cameras
+
+
+def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> int:  # pragma: no cover - cameras
+    import threading
+    import time
+
+    import numpy as np
+
+    from away.hands.tracker import HandTracker
+    from away.multicam import geometry as G
+    from away.multicam.calibration import CheckerboardCalibrator, HandMotionCalibrator
+    from away.multicam.capture import CameraThread, FramePairer
+    from away.multicam.fusion import ViewObs
+
+    cams = cfg.hands.cameras
+    primary = next(i for i, c in enumerate(cams) if c.role == "primary")
+    pairer = FramePairer(len(cams), primary, cfg.hands.multicam.pair_tolerance_ms / 1000, 0.5)
+    stop = threading.Event()
+    threads = [CameraThread(i, c, pairer, stop) for i, c in enumerate(cams)]
+    for th in threads:
+        th.start()
+    board = args.checkerboard if args.method == "checkerboard" else None
+    try:
+        if board:
+            cols, rows = (int(v) for v in board.lower().split("x"))
+            cal_b = CheckerboardCalibrator(cams, cols, rows, args.square_mm / 1000.0)
+            print(f"show the {cols}x{rows} board to both cameras, tilting it; collecting {args.views} views...")
+            last = 0.0
+            deadline = time.monotonic() + max(args.seconds, 60)
+            while time.monotonic() < deadline and min(len(v) for v in cal_b.views.values()) < args.views:
+                s = pairer.pop_set()
+                if s is None or s[0] - last < 0.7:
+                    time.sleep(0.01)
+                    continue
+                if cal_b.add([None if f is None else f[1] for f in s[1]]):
+                    last = s[0]
+                    print(f"  views: {min(len(v) for v in cal_b.views.values())}/{args.views}", flush=True)
+            ex, rep = cal_b.solve(min_views=min(args.views, 8))
+        else:
+            model = _models_dir(cfg) / "hand_landmarker.task"
+            trackers = [HandTracker(model, 1) for _ in cams]
+            cal_h = HandMotionCalibrator(cams)
+            print(f"move your OPEN hand slowly around the space both cameras see, for {args.seconds:.0f} s...")
+            end = time.monotonic() + args.seconds
+            shown = -1
+            while time.monotonic() < end:
+                s = pairer.pop_set()
+                if s is None:
+                    time.sleep(0.003)
+                    continue
+                views: list[ViewObs | None] = []
+                for i, item in enumerate(s[1]):
+                    if item is None:
+                        views.append(None)
+                        continue
+                    fr = trackers[i].process(item[1], item[0])
+                    h, w = np.asarray(item[1]).shape[:2]
+                    views.append(
+                        None
+                        if fr.landmarks is None
+                        else ViewObs(i, item[0], fr.landmarks, fr.handedness, fr.score, (w, h))
+                    )
+                cal_h.add(views)
+                pct = int(cal_h.progress() * 100)
+                if pct // 10 != shown:
+                    shown = pct // 10
+                    print(f"  {pct}% ({int(end - time.monotonic())} s left)", flush=True)
+            ex, rep = cal_h.solve(cfg.hands.multicam.palm_length_m)
+    finally:
+        stop.set()
+    for th in threads:
+        if th.error:
+            print(f"camera {th.spec.device!r}: {th.error}", file=sys.stderr)
+    print(json.dumps(rep.per_camera, indent=2))
+    if ex is None:
+        return _fail(rep.message)
+    p = G.save_extrinsics(ex)
+    print(f"{rep.message}\nsaved extrinsics to {p}")
+    return 0
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
@@ -523,6 +675,25 @@ def build_parser() -> argparse.ArgumentParser:
     vc.add_argument("value", nargs="?")
     vc.add_argument("--config")
     vc.set_defaults(fn=cmd_voice)
+
+    cm = sub.add_parser("cameras", help="list | add DEVICE | remove DEVICE: cameras for multi-camera fusion")
+    cm.add_argument("action", choices=["list", "add", "remove"], nargs="?", default="list")
+    cm.add_argument("device", nargs="?", help="index (1), path (/dev/video2) or part of the camera name")
+    cm.add_argument("--role", choices=["primary", "secondary"])
+    cm.add_argument("--probe", action="store_true", help="open each camera to check it delivers frames")
+    cm.add_argument("--json", action="store_true")
+    cm.add_argument("--config")
+    cm.set_defaults(fn=lambda a: cmd_cameras(a) if a.action == "list" else cmd_cameras_edit(a))
+
+    cc = sub.add_parser("calibrate-cameras", help="calibrate two cameras (hand motion ~20 s, or a checkerboard)")
+    cc.add_argument("--method", choices=["hand", "checkerboard"], default="hand")
+    cc.add_argument("--seconds", type=float, default=20.0)
+    cc.add_argument("--checkerboard", default="9x6", help="inner corners COLSxROWS (default 9x6)")
+    cc.add_argument("--square-mm", type=float, default=25.0, help="checkerboard square size in mm")
+    cc.add_argument("--views", type=int, default=15, help="checkerboard views to collect")
+    cc.add_argument("--print-board", metavar="PNG", help="write a printable checkerboard image and exit")
+    cc.add_argument("--config")
+    cc.set_defaults(fn=cmd_calibrate_cameras)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")

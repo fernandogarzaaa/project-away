@@ -28,6 +28,20 @@ class CursorConfig:
     beta: float = 0.02
     d_cutoff: float = 1.0
     active_region: tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)  # absolute-mode box
+    # transfer function: "power" (|d|^acceleration, the original curve) or "sigmoid" (precise low-speed plateau,
+    # capped high-speed plateau; idea from Google Project Gameface, Apache-2.0, re-implemented)
+    curve: str = "power"
+    sigmoid_low: float = 0.6  # gain multiplier for very slow moves
+    sigmoid_high: float = 3.0  # gain multiplier for very fast moves
+    sigmoid_mid: float = 1.5  # speed (in units of the neutral per-frame delta) where the curve is halfway
+    sigmoid_slope: float = 2.5
+    speed_up: float = 1.0  # per-direction multipliers (asymmetry for limited reach / camera angle)
+    speed_down: float = 1.0
+    speed_left: float = 1.0
+    speed_right: float = 1.0
+    click_freeze: bool = True  # hold the cursor still while a pinch is closing
+    click_rewind_ms: int = 100  # click where the cursor was this long before the pinch started closing
+    freeze_margin: float = 0.35  # start freezing when pinch ratio < pinch_on * (1 + margin)
 
 
 @dataclass
@@ -46,13 +60,52 @@ class GestureConfig:
 
 
 @dataclass
+class DwellConfig:
+    enabled: bool = False  # gesture:dwell fires when the cursor rests inside radius_px for time_s
+    radius_px: float = 30.0
+    time_s: float = 0.8
+
+
+CAMERA_ROLES = ("primary", "secondary")
+
+
+@dataclass
+class CameraSpec:
+    device: int | str = 0  # OpenCV index, or a device path / name (/dev/video2, "Logitech BRIO")
+    role: str = "primary"  # primary (cursor frame of reference) | secondary
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+    hfov_deg: float = 70.0  # horizontal field of view, used to approximate intrinsics before calibration
+    mirror: bool = True
+
+
+@dataclass
+class MultiCamConfig:
+    fusion: str = "weighted"  # weighted (confidence-weighted average) | best_view
+    pair_tolerance_ms: float = 40.0  # frames further apart than this are not fused
+    dropout_ms: float = 300.0  # a camera silent for longer is treated as dropped
+    handover_decay_s: float = 1.0  # how fast the offset that hides a view switch fades out
+    min_confidence: float = 0.2  # views below this are ignored
+    use_3d_pinch: bool = True  # pinch distance from triangulated 3D points when calibrated
+    push_distance_m: float = 0.06  # push gesture: hand moves this much toward the screen...
+    push_time_s: float = 0.35  # ...within this time
+    push_cooldown_s: float = 0.6
+    push_monocular: bool = False  # also detect push from hand-size growth with one camera (rougher)
+    palm_length_m: float = 0.09  # wrist -> middle MCP, used to give hand-motion calibration a metric scale
+
+
+@dataclass
 class HandsConfig:
     enabled: bool = True
-    camera_index: int = 0
+    camera_index: int = 0  # single-camera mode (used when `cameras` is empty)
     max_hands: int = 1
     mirror: bool = True
-    cursor: CursorConfig = field(default_factory=CursorConfig)
+    cursor: CursorConfig = field(default_factory=lambda: CursorConfig(curve="sigmoid"))
     gestures: GestureConfig = field(default_factory=GestureConfig)
+    dwell: DwellConfig = field(default_factory=DwellConfig)
+    cameras: list[CameraSpec] = field(default_factory=list)  # 2+ entries turn on multi-camera fusion
+    multicam: MultiCamConfig = field(default_factory=MultiCamConfig)
 
 
 VOICE_MODES = ("always_on", "push_to_talk", "toggle")
@@ -88,6 +141,10 @@ class VoiceConfig:
     vocabulary_file: str | None = None
     llm_cleanup: bool = False  # needs AWAY_LLM_BASE_URL (+ AWAY_LLM_API_KEY, AWAY_LLM_MODEL)
     sample_rate: int = 16000
+    hotwords: bool = True  # also pass the vocabulary to faster-whisper `hotwords` (in addition to initial_prompt)
+    numbers_as_digits: bool = True  # "twenty five" -> 25
+    numbers_min_value: int = 10  # smaller numbers stay words ("one of them")
+    edit_hotkey: str = "<ctrl>+<alt>+e"  # speak an instruction that edits the selected text ("" = off)
 
 
 @dataclass
@@ -103,6 +160,10 @@ class FaceConfig:
     mouth_open_trigger: bool = False  # face:mouth_open trigger (bind it under bindings ... face)
     mouth_threshold: float = 0.5
     mouth_hold: float = 0.8
+    wink_trigger: bool = False  # face:wink_left / face:wink_right triggers
+    wink_threshold: float = 0.5  # eyeBlink score of the closed eye
+    wink_open_max: float = 0.3  # the other eye must stay below this (a blink closes both)
+    wink_hold: float = 0.25
 
 
 @dataclass
@@ -119,6 +180,9 @@ class WifiConfig:
 class AppSection:
     always_on: bool = True  # gestures + voice active as soon as the app launches (False = start paused, mic muted)
     start_minimized: bool = True  # tray only at launch; False also opens the settings window
+    auto_pause: bool = True  # physical mouse/keyboard use pauses gesture control...
+    auto_pause_idle_ms: int = 1500  # ...until it has been idle this long
+    toggle_hotkey: str = "f9"  # global on/off for gesture control ("" = off)
 
 
 @dataclass
@@ -129,6 +193,7 @@ class AppConfig:
     face: FaceConfig = field(default_factory=FaceConfig)
     wifi: WifiConfig = field(default_factory=WifiConfig)
     overlay: bool = False
+    cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
     models_dir: str | None = None
     bindings: BindingsConfig = field(default_factory=BindingsConfig)
@@ -144,6 +209,9 @@ def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> A
         if isinstance(current, BindingsConfig):
             setattr(obj, key, parse_bindings(value, prefix + key))
             continue
+        if key == "cameras" and isinstance(obj, HandsConfig):
+            setattr(obj, key, _parse_cameras(value, prefix + key, unknown))
+            continue
         if is_dataclass(current) and isinstance(value, dict):
             _merge(current, value, prefix + key + ".", unknown)
         elif isinstance(current, tuple) and isinstance(value, list):
@@ -151,6 +219,21 @@ def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> A
         else:
             setattr(obj, key, value)
     return obj
+
+
+def _parse_cameras(value: Any, path: str, unknown: list[str]) -> list[CameraSpec]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list of cameras")
+    out = []
+    for i, item in enumerate(value):
+        if isinstance(item, (int, str)):
+            item = {"device": item, "role": "primary" if i == 0 else "secondary"}
+        if not isinstance(item, dict):
+            raise ValueError(f"{path}[{i}] must be a mapping (device, role, width, height, fps)")
+        out.append(_merge(CameraSpec(role="primary" if i == 0 else "secondary"), item, f"{path}[{i}].", unknown))
+    return out
 
 
 def from_dict(data: dict[str, Any] | None) -> tuple[AppConfig, list[str]]:
@@ -176,6 +259,20 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError(f"voice.asr_backend must be faster-whisper|parakeet, got {cfg.voice.asr_backend!r}")
     if cfg.wifi.source not in ("rssi", "picoscenes", "iax", "synthetic"):
         raise ValueError(f"wifi.source invalid: {cfg.wifi.source!r}")
+    c = cfg.hands.cursor
+    if c.curve not in ("power", "sigmoid"):
+        raise ValueError(f"hands.cursor.curve must be power|sigmoid, got {c.curve!r}")
+    if not c.sigmoid_low <= c.sigmoid_high:
+        raise ValueError("hands.cursor.sigmoid_low must be <= sigmoid_high")
+    validate_cameras(cfg.hands.cameras)
+    if cfg.hands.multicam.fusion not in ("weighted", "best_view"):
+        raise ValueError(f"hands.multicam.fusion must be weighted|best_view, got {cfg.hands.multicam.fusion!r}")
+    for name, combo in (("app.toggle_hotkey", cfg.app.toggle_hotkey), ("voice.edit_hotkey", cfg.voice.edit_hotkey)):
+        if combo:
+            try:
+                canonical(str(combo))
+            except KeyComboError as exc:
+                raise ValueError(f"{name}: {exc}") from None
     g = cfg.hands.gestures
     if not g.pinch_on < g.pinch_off:
         raise ValueError("hands.gestures.pinch_on must be < pinch_off (hysteresis)")
@@ -200,6 +297,26 @@ def validate(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be a number in [{lo}, {hi}], got {value!r}")
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
+
+
+def validate_cameras(cams: list[CameraSpec]) -> None:
+    for i, cam in enumerate(cams):
+        p = f"hands.cameras[{i}]"
+        if cam.role not in CAMERA_ROLES:
+            raise ValueError(f"{p}.role must be primary|secondary, got {cam.role!r}")
+        if isinstance(cam.device, bool) or not isinstance(cam.device, (int, str)) or cam.device == "":
+            raise ValueError(f"{p}.device must be an index (0, 1, ...) or a device path/name")
+        for k, lo, hi in (("width", 160, 7680), ("height", 120, 4320), ("fps", 5, 240), ("hfov_deg", 20.0, 170.0)):
+            v = getattr(cam, k)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+                raise ValueError(f"{p}.{k} must be in [{lo}, {hi}], got {v!r}")
+    if cams:
+        prim = [c for c in cams if c.role == "primary"]
+        if len(prim) != 1:
+            raise ValueError(f"hands.cameras needs exactly one primary camera, got {len(prim)}")
+        devs = [str(c.device) for c in cams]
+        if len(set(devs)) != len(devs):
+            raise ValueError("hands.cameras lists the same device twice")
 
 
 def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
@@ -227,6 +344,26 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("voice.wake_window", v.wake_window, 0.0, 30.0),
         ("face.mouth_threshold", cfg.face.mouth_threshold, 0.05, 1.0),
         ("face.mouth_hold", cfg.face.mouth_hold, 0.1, 5.0),
+        ("hands.cursor.sigmoid_low", c.sigmoid_low, 0.05, 5.0),
+        ("hands.cursor.sigmoid_high", c.sigmoid_high, 0.1, 10.0),
+        ("hands.cursor.sigmoid_mid", c.sigmoid_mid, 0.1, 10.0),
+        ("hands.cursor.sigmoid_slope", c.sigmoid_slope, 0.1, 20.0),
+        ("hands.cursor.speed_up", c.speed_up, 0.1, 5.0),
+        ("hands.cursor.speed_down", c.speed_down, 0.1, 5.0),
+        ("hands.cursor.speed_left", c.speed_left, 0.1, 5.0),
+        ("hands.cursor.speed_right", c.speed_right, 0.1, 5.0),
+        ("hands.cursor.click_rewind_ms", c.click_rewind_ms, 0, 500),
+        ("hands.cursor.freeze_margin", c.freeze_margin, 0.0, 1.0),
+        ("hands.dwell.radius_px", cfg.hands.dwell.radius_px, 2.0, 200.0),
+        ("hands.dwell.time_s", cfg.hands.dwell.time_s, 0.2, 5.0),
+        ("hands.multicam.pair_tolerance_ms", cfg.hands.multicam.pair_tolerance_ms, 1.0, 500.0),
+        ("hands.multicam.push_distance_m", cfg.hands.multicam.push_distance_m, 0.01, 0.5),
+        ("face.brow_threshold", cfg.face.brow_threshold, 0.05, 1.0),
+        ("face.wink_threshold", cfg.face.wink_threshold, 0.05, 1.0),
+        ("face.wink_open_max", cfg.face.wink_open_max, 0.0, 1.0),
+        ("face.wink_hold", cfg.face.wink_hold, 0.05, 3.0),
+        ("app.auto_pause_idle_ms", cfg.app.auto_pause_idle_ms, 100, 10000),
+        ("voice.numbers_min_value", cfg.voice.numbers_min_value, 0, 1000000),
     ]
 
 

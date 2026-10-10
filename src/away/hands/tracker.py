@@ -22,6 +22,7 @@ class HandFrame:
     landmarks: NDArray[np.float64] | None  # (21, 3) image coords of the first hand
     handedness: str
     image: Any = None
+    score: float = 1.0  # MediaPipe handedness confidence (used by multi-camera fusion)
 
 
 class HandTracker:
@@ -52,7 +53,8 @@ class HandTracker:
             return HandFrame(t, None, "Right")
         lm = np.array([[p.x, p.y, p.z] for p in res.hand_landmarks[0]], dtype=np.float64)
         hand = res.handedness[0][0].category_name if res.handedness else "Right"
-        return HandFrame(t, lm, hand)
+        score = float(res.handedness[0][0].score) if res.handedness else 1.0
+        return HandFrame(t, lm, hand, score=score)
 
     def close(self) -> None:
         self.landmarker.close()

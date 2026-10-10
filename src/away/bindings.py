@@ -5,7 +5,7 @@ Triggers (what the user does) are grouped by source:
 * ``gestures``: built-in hand gestures (:data:`GESTURE_TRIGGERS`) plus any
   custom gesture listed in ``custom_gestures`` (record it with ``away record``).
 * ``voice``: spoken phrases, matched case- and punctuation-insensitively.
-* ``face``: ``brow_raise``, ``mouth_open``.
+* ``face``: ``brow_raise``, ``mouth_open``, ``wink_left``, ``wink_right``.
 * ``hotkeys``: key combos (``ctrl+alt+k``) plus the named slots ``ptt``
   (= ``voice.hotkey``) and ``mute`` (= ``voice.mute_hotkey``).
 
@@ -51,8 +51,10 @@ GESTURE_TRIGGERS = (
     "open_palm",
     "swipe_left",
     "swipe_right",
+    "push",
+    "dwell",
 )
-FACE_TRIGGERS = ("brow_raise", "mouth_open")
+FACE_TRIGGERS = ("brow_raise", "mouth_open", "wink_left", "wink_right")
 HOTKEY_SLOTS = ("ptt", "mute")
 CATEGORIES = ("gestures", "voice", "face", "hotkeys")
 CATEGORY_PREFIX = {"gestures": "gesture", "voice": "voice", "face": "face", "hotkeys": "hotkey"}
@@ -188,6 +190,8 @@ def default_profile() -> Profile:
             "open_palm": a("pause:toggle"),
             "swipe_left": a("key:left"),
             "swipe_right": a("key:right"),
+            "push": a("mouse:click"),  # only detected with depth (multi-camera, or hands.multicam.push_monocular)
+            "dwell": a("mouse:click"),  # only detected when hands.dwell.enabled
         },
         voice={
             "click": a("mouse:click"),
@@ -205,7 +209,12 @@ def default_profile() -> Profile:
             "pause gestures": a("pause:on"),
             "resume gestures": a("pause:off"),
         },
-        face={"brow_raise": a("dictation:toggle"), "mouth_open": NONE},
+        face={
+            "brow_raise": a("dictation:toggle"),
+            "mouth_open": NONE,
+            "wink_left": a("mouse:click"),  # only detected when face.wink_trigger
+            "wink_right": a("mouse:right_click"),
+        },
         hotkeys={"ptt": a("dictation:toggle"), "mute": a("mic:toggle")},
     )
 

@@ -34,7 +34,10 @@ EVENT_TRIGGER = {
     "clutch": "open_palm",
     "swipe_left": "swipe_left",
     "swipe_right": "swipe_right",
+    "push": "push",  # multi-camera depth: hand pushed toward the screen
+    "dwell": "dwell",  # cursor rested in place (hands.dwell)
 }
+PINCH_CLICK_EVENTS = ("click", "double_click", "drag_start")
 SCROLL_STEP = 3.0  # wheel notches for mouse:scroll_up / scroll_down
 URL_PREFIXES = ("http://", "https://", "mailto:", "file://", "ftp://")
 HOOK_KINDS = ("dictation", "mic", "voice", "pause")
@@ -229,6 +232,8 @@ class Dispatcher:
             return act
         if self.paused() and act.kind != "pause":
             return NONE
+        if ev.kind in PINCH_CLICK_EVENTS and act.kind == "mouse":
+            mouse.steady(ev.t)  # steady click: land where the cursor was before the pinch began
         cont = {"point": "move", "pinch_hold": "drag", "two_finger_scroll": "scroll"}.get(trig)
         if cont is not None and act == Action("mouse", cont):
             if ev.kind in ("move", "drag_start", "scroll"):

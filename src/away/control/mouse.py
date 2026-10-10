@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from away.hands.cursor import CursorMapper
 from away.hands.gestures import GestureEvent
+from away.hands.stabilize import ClickStabilizer
 
 
 class MouseBackend(Protocol):
@@ -106,12 +107,42 @@ DEFAULT_SWIPE_KEYS = {"swipe_left": "left", "swipe_right": "right"}
 
 
 class MouseController:
-    def __init__(self, backend: MouseBackend, mapper: CursorMapper, swipe_keys: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        backend: MouseBackend,
+        mapper: CursorMapper,
+        swipe_keys: dict[str, str] | None = None,
+        stabilizer: ClickStabilizer | None = None,
+    ) -> None:
         self.backend = backend
         self.mapper = mapper
         self.swipe_keys = DEFAULT_SWIPE_KEYS if swipe_keys is None else swipe_keys
         self.enabled = True
         self.button_down = False
+        self.stabilizer = stabilizer
+
+    # ------------------------------------------------------------ steady click
+    def observe_pinch(self, t: float, ratio: float, pinch_on: float, pinched: bool, dragging: bool) -> None:
+        st = self.stabilizer
+        if st is None:
+            return
+        st.observe(t, ratio, pinch_on, pinched, dragging)
+        if st.just_released:
+            st.just_released = False
+            self.mapper.reset()  # re-anchor: the next move continues from here, no jump
+
+    def steady(self, t: float) -> None:
+        """Before a pinch click/press: put the cursor back where it was just before the pinch began."""
+        st = self.stabilizer
+        if st is None or not self.enabled:
+            return
+        pos = st.click_position()
+        if pos is None:
+            return
+        x, y = round(pos[0]), round(pos[1])
+        if (x, y) != (round(self.mapper.pos[0]), round(self.mapper.pos[1])):
+            self.mapper.set_position(pos[0], pos[1])
+            self.backend.move(x, y)
 
     def handle(self, ev: GestureEvent) -> None:
         if ev.kind == "clutch":
@@ -121,15 +152,21 @@ class MouseController:
             return
         if ev.kind == "hand_lost":
             self.mapper.reset()
+            if self.stabilizer is not None:
+                self.stabilizer.reset()
             self._release_if_down()
             return
         if not self.enabled:
             return
         if ev.kind == "move":
+            if self.stabilizer is not None and self.stabilizer.frozen:
+                return  # pinch closing: hold still
             x, y = self.mapper.update(
                 ev.t, float(ev.data["x"]), float(ev.data["y"]), str(ev.data.get("anchor", "index"))
             )
             self.backend.move(x, y)
+            if self.stabilizer is not None:
+                self.stabilizer.record(ev.t, self.mapper.pos)
         elif ev.kind in ("click", "double_click"):
             # double_click is the *second* tap: one more click makes the OS see a double click
             self.backend.click(1)

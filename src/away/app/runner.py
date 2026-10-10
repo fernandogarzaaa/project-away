@@ -21,7 +21,7 @@ from away.bindings import Action
 from away.config import AppConfig
 from away.control.mouse import MouseBackend, MouseController, RecordingBackend
 from away.events import EventBus
-from away.face.commands import BrowRaiseToggle, MouthOpenTrigger
+from away.face.commands import BrowRaiseToggle, MouthOpenTrigger, WinkTrigger
 from away.face.gate import SpeechGate
 from away.face.speaker import ActiveSpeakerDetector
 from away.face.speaking import SpeakingScorer
@@ -30,6 +30,9 @@ from away.fusion import GestureFusion
 from away.hands.cursor import CursorMapper
 from away.hands.filters import OneEuro2D
 from away.hands.gestures import GestureEvent, GestureStateMachine
+from away.hands.landmarks import as_array, pinch_ratio
+from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
+from away.multicam.fusion import FusedHand, PushDetector
 from away.wifi.classifier import CoarseCSIClassifier
 from away.wifi.features import window_features
 
@@ -43,11 +46,22 @@ class Pipeline:
         bus: EventBus | None = None,
         temporal: Any = None,
         active_app: Any = None,
+        guard: Any = None,
     ) -> None:
         self.cfg = cfg
         self.bus = bus or EventBus()
         self.gestures = GestureStateMachine(cfg.hands.gestures)
-        self.mouse = MouseController(backend or RecordingBackend(), CursorMapper(screen, cfg.hands.cursor))
+        c = cfg.hands.cursor
+        stab = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
+        self.mouse = MouseController(backend or RecordingBackend(), CursorMapper(screen, c), stabilizer=stab)
+        self.guard = guard  # ManualInputGuard: physical mouse/keyboard use pauses gesture output
+        self._auto_paused = False
+        self.dwell = DwellDetector(cfg.hands.dwell.radius_px, cfg.hands.dwell.time_s)
+        mc = cfg.hands.multicam
+        self.push = PushDetector(mc.push_distance_m, mc.push_time_s, mc.push_cooldown_s)
+        self.wink = WinkTrigger(cfg.face.wink_threshold, cfg.face.wink_open_max, cfg.face.wink_hold)
+        self.last_ratio: float | None = None
+        self.last_fused: FusedHand | None = None
         self.fusion = GestureFusion(
             cfg.wifi.fusion_weight if cfg.wifi.enabled else 0.0,
             threshold=cfg.hands.gestures.model_min_conf if temporal else 0.5,
@@ -68,7 +82,7 @@ class Pipeline:
         # detection (state machine) -> mapping (bindings) -> execution (backend / hooks)
         self.executor = ActionExecutor(self.mouse, cfg.bindings.allow_shell, hooks={"pause": self._pause_hook})
         self.dispatcher = Dispatcher(
-            cfg.bindings, self.executor, self.gestures, active_app=active_app, paused=lambda: self.paused
+            cfg.bindings, self.executor, self.gestures, active_app=active_app, paused=self.output_paused
         )
         self.dispatcher.on_fire = self._on_fire
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
@@ -77,6 +91,46 @@ class Pipeline:
         self.bus.publish("action.fired", {"trigger": trig, "action": str(act)})
 
     # pause -------------------------------------------------------------------
+    def output_paused(self) -> bool:
+        """Paused by the user, or auto-paused because the physical mouse/keyboard is in use."""
+        return self.paused or self._auto_paused
+
+    def _check_auto_pause(self, t: float) -> None:
+        auto = bool(self.guard is not None and self.guard.active)
+        if auto == self._auto_paused:
+            return
+        self._auto_paused = auto
+        if auto:
+            self.mouse._release_if_down()
+        else:
+            self.mouse.mapper.reset()  # resume from wherever the real mouse left the cursor, no jump
+        self.bus.publish("app.auto_paused", {"paused": auto}, t)
+
+    def cursor_state(self) -> dict[str, Any]:
+        """Snapshot for the at-cursor overlay (polled; nothing is published per frame)."""
+        g = self.cfg.hands.gestures
+        if self.output_paused():
+            state = "paused"
+        elif not self.gestures.hand_present:
+            state = "hand_lost"
+        elif self.gestures.dragging:
+            state = "drag"
+        elif self.gestures.pinched:
+            state = "pinch"
+        elif self.cfg.hands.dwell.enabled and self.dwell.progress > 0:
+            state = "dwell"
+        else:
+            state = "idle"
+        x, y = self.mouse.mapper.pos
+        return {
+            "x": round(x),
+            "y": round(y),
+            "state": state,
+            "pinch": pinch_progress(self.last_ratio, g.pinch_on, g.pinch_off) if self.gestures.hand_present else 0.0,
+            "dwell": self.dwell.progress if self.cfg.hands.dwell.enabled else 0.0,
+            "frozen": bool(self.mouse.stabilizer is not None and self.mouse.stabilizer.frozen),
+        }
+
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
         self.gestures.paused = paused
@@ -96,8 +150,13 @@ class Pipeline:
         for src, dst in ((cfg.hands.gestures, self.cfg.hands.gestures), (cfg.hands.cursor, self.cfg.hands.cursor)):
             for k, v in vars(src).items():
                 setattr(dst, k, v)
+        for src, dst in ((cfg.hands.dwell, self.cfg.hands.dwell), (cfg.face, self.cfg.face)):  # type: ignore[assignment]
+            for k, v in vars(src).items():
+                setattr(dst, k, v)
         c = self.cfg.hands.cursor
         self.mouse.mapper.filter = OneEuro2D(c.min_cutoff, c.beta, c.d_cutoff)
+        self.mouse.stabilizer = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
+        self.dwell = DwellDetector(self.cfg.hands.dwell.radius_px, self.cfg.hands.dwell.time_s)
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
@@ -110,8 +169,30 @@ class Pipeline:
         return self.dispatcher.trigger(category, name, data)
 
     # hands -------------------------------------------------------------------
-    def on_hand(self, t: float, landmarks: Any, handedness: str = "Right") -> list[str]:
+    def on_fused(self, fused: FusedHand | None, t: float | None = None) -> list[str]:
+        """Feed a multi-camera fused hand (``None`` = no camera sees a hand)."""
+        self.last_fused = fused
+        if fused is None:
+            return self.on_hand(t if t is not None else 0.0, None)
+        return self.on_hand(fused.t, fused.landmarks, fused.handedness, pinch=fused.pinch, depth=fused.depth)
+
+    def on_hand(
+        self,
+        t: float,
+        landmarks: Any,
+        handedness: str = "Right",
+        *,
+        pinch: float | None = None,
+        depth: float | None = None,
+    ) -> list[str]:
         accepted = []
+        self._check_auto_pause(t)
+        ratio = None
+        if landmarks is not None:
+            ratio = pinch if pinch is not None else pinch_ratio(as_array(landmarks))
+            g = self.gestures
+            self.mouse.observe_pinch(t, ratio, self.cfg.hands.gestures.pinch_on, g.pinched, g.dragging)
+        self.last_ratio = ratio
         if self.temporal is not None and landmarks is not None:
             probs = self.temporal.push(landmarks, handedness)
             self.fusion.update_model(probs)
@@ -119,15 +200,34 @@ class Pipeline:
                 self.bus.publish("gesture.custom", {"name": name}, t)
                 self.dispatcher.on_gesture(GestureEvent("custom", t, {"name": name}))
                 accepted.append(f"custom:{name}")
-        for ev in self.gestures.update(t, landmarks):
+        pointed = False
+        for ev in self.gestures.update(t, landmarks, pinch=pinch):
             if not self.fusion.accept(ev):
                 self.bus.publish("gesture.rejected", {"kind": ev.kind}, t)
                 continue
             self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), t)
             if not self.paused or ev.kind in ("clutch", "hand_lost", "drag_end"):
                 self.dispatcher.on_gesture(ev)
+            if ev.kind == "move" and ev.data.get("anchor") != "pinch":
+                pointed = True
             accepted.append(ev.kind)
+        active = not self.output_paused()
+        if self.cfg.hands.dwell.enabled:
+            pos = self.mouse.mapper.pos if pointed and active and not self.gestures.pinched else None
+            if self.dwell.update(t, pos):
+                accepted += self._synthetic_gesture(GestureEvent("dwell", t, {"x": pos[0], "y": pos[1]} if pos else {}))
+        if landmarks is not None and depth is not None and active and not self.gestures.pinched:
+            if self.push.update(t, depth):
+                accepted += self._synthetic_gesture(GestureEvent("push", t, {"depth": depth}))
+        elif landmarks is None or depth is None:
+            self.push.reset()
         return accepted
+
+    def _synthetic_gesture(self, ev: GestureEvent) -> list[str]:
+        """Gestures detected outside the state machine (dwell, push) go through the same bindings."""
+        self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), ev.t)
+        self.dispatcher.on_gesture(ev)
+        return [ev.kind]
 
     # face --------------------------------------------------------------------
     def on_faces(
@@ -151,6 +251,12 @@ class Pipeline:
             if self.mouth.update(t, bs):
                 self.bus.publish("face.mouth_open", {}, t)
                 self.fire("face", "mouth_open")
+        if self.cfg.face.wink_trigger and self.gate.primary in ids:
+            bs = blendshapes[ids.index(self.gate.primary)]  # type: ignore[arg-type]
+            side = self.wink.update(t, bs)
+            if side:
+                self.bus.publish(f"face.{side}", {}, t)
+                self.fire("face", side)
         return active
 
     def re_enroll(self) -> None:
@@ -189,8 +295,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             temporal = TemporalGestureClassifier(p) if p else None
         from away.voice.context import active_process
 
-        self.pipeline = Pipeline(cfg, backend, screen, self.bus, temporal, active_app=active_process)
+        self.guard: Any = None
+        if cfg.app.auto_pause and not dry_run:
+            from away.app.autopause import GuardedBackend, ManualInputGuard
+
+            self.guard = ManualInputGuard(cfg.app.auto_pause_idle_ms)
+            backend = GuardedBackend(backend, self.guard)  # type: ignore[assignment]
+        self.pipeline = Pipeline(cfg, backend, screen, self.bus, temporal, active_app=active_process, guard=self.guard)
+        self.camera_confidences: dict[int, float] = {}  # multi-camera: latest per-view confidence
         self.voice: Any = None  # VoiceController
+        self.editor: Any = None  # SelectionEditor (voice.edit_hotkey)
         self.threads: list[threading.Thread] = []
         self._listeners: list[Any] = []
         self.bus.subscribe("*", self._log)
@@ -202,7 +316,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         return self.voice.dictation if self.voice is not None else None
 
     def _log(self, ev: Any) -> None:
-        if ev.topic not in ("gesture.move", "gesture.scroll", "wifi.state"):
+        if ev.topic not in ("gesture.move", "gesture.scroll", "wifi.state", "app.auto_paused"):
             print(f"[{ev.topic}] {ev.data}", flush=True)
 
     # public controls used by the tray --------------------------------------
@@ -390,7 +504,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 return
             threading.Thread(target=self.pipeline.fire, args=("hotkeys", name), daemon=True).start()
 
-        combos = {combo: (lambda n=name: fire(n)) for combo, name in self.pipeline.hotkeys().items()}
+        combos: dict[str, Any] = {
+            combo: functools.partial(fire, name) for combo, name in self.pipeline.hotkeys().items()
+        }
+        from away.control.keys import canonical, to_pynput_hotkey
+
+        if self.cfg.app.toggle_hotkey:  # global on/off for gesture control
+            combos[to_pynput_hotkey(canonical(self.cfg.app.toggle_hotkey))] = lambda: self.set_paused(
+                not self.pipeline.paused
+            )
+        if self.cfg.voice.edit_hotkey and self.editor is not None:
+            ed = self.editor
+            combos[to_pynput_hotkey(canonical(self.cfg.voice.edit_hotkey))] = lambda: threading.Thread(
+                target=ed.toggle, daemon=True
+            ).start()
         if combos:
             gh = keyboard.GlobalHotKeys(combos)
             gh.start()
@@ -423,6 +550,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             from away.face.landmarker import FaceLandmarker
 
             faces = FaceLandmarker(face_model)
+        if len(self.cfg.hands.cameras) >= 2 and hands is not None:
+            self._multicam_loop(hands, faces)
+            return
         for t, rgb in camera_frames(self.cfg.hands.camera_index, self.cfg.hands.mirror):
             if self.stop_event.is_set():
                 break
@@ -432,6 +562,62 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             if faces is not None:
                 obs = faces.process(rgb, t)
                 self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
+
+    def _multicam_loop(self, first_tracker: Any, faces: Any) -> None:
+        """Two or more cameras: threaded capture -> timestamp pairing -> per-view hands -> fusion -> pipeline."""
+        from away.hands.tracker import HandTracker
+        from away.multicam.capture import CameraThread, FramePairer
+        from away.multicam.fusion import MultiViewFuser, ViewObs, hand_crop, sharpness_score
+        from away.multicam.geometry import load_extrinsics
+
+        cams, mc = self.cfg.hands.cameras, self.cfg.hands.multicam
+        primary = next(i for i, c in enumerate(cams) if c.role == "primary")
+        pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
+        threads = [CameraThread(i, c, pairer, self.stop_event) for i, c in enumerate(cams)]
+        for th in threads:
+            th.start()
+        model = self.models_dir / "hand_landmarker.task"
+        trackers = [first_tracker] + [HandTracker(model, 1) for _ in cams[1:]]
+        ex = load_extrinsics()
+        fuser = MultiViewFuser(cams, mc, ex)
+        self.bus.publish("cameras.started", {"cameras": len(cams), "calibrated": fuser.calibrated})
+        dropped: set[int] = set()
+        while not self.stop_event.is_set():
+            s = pairer.pop_set()
+            if s is None:
+                time.sleep(0.002)
+                continue
+            t_ref, frames = s
+            alive = pairer.alive()
+            for i, ok in enumerate(alive):
+                if not ok and i not in dropped:
+                    dropped.add(i)
+                    self.bus.publish("cameras.dropped", {"camera": i, "error": threads[i].error})
+                elif ok and i in dropped:
+                    dropped.discard(i)
+                    self.bus.publish("cameras.recovered", {"camera": i})
+            views: list[Any] = []
+            for i, item in enumerate(frames):
+                if item is None:
+                    views.append(None)
+                    continue
+                t_i, rgb = item
+                fr = trackers[i].process(rgb, t_i)
+                if fr.landmarks is None:
+                    views.append(None)
+                    continue
+                h, w = rgb.shape[:2]
+                crop = hand_crop(rgb, fr.landmarks)
+                sharp = sharpness_score(crop.mean(axis=2)) if crop.size else None
+                views.append(ViewObs(i, t_i, fr.landmarks, fr.handedness, fr.score, (w, h), sharp))
+            fused = fuser.update(t_ref, views)
+            self.camera_confidences = dict(fuser.last_confidences)
+            self.pipeline.on_fused(fused, t_ref)
+            prim_frame = frames[primary]
+            if faces is not None and prim_frame is not None:
+                t_p, rgb_p = prim_frame
+                obs = faces.process(rgb_p, t_p)
+                self.pipeline.on_faces(t_p, [o.box for o in obs], [o.blendshapes for o in obs])
 
     def _wifi_loop(self) -> None:
         from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource, stack_csi
@@ -473,11 +659,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.threads.append(threading.Thread(target=self._watch_config, daemon=True, name="config-watch"))
         for th in self.threads:
             th.start()
+        if self.guard is not None:
+            try:
+                from away.app.autopause import start_listeners
+
+                self._input_listeners = start_listeners(self.guard)
+            except Exception as exc:
+                self.bus.publish("autopause.unavailable", {"error": str(exc)})
         self._restart_hotkeys()
 
     def stop(self) -> None:
         self.stop_event.set()
-        for lst in self._listeners:
+        for lst in [*self._listeners, *getattr(self, "_input_listeners", [])]:
             lst.stop()
 
     def run_forever(self) -> None:
