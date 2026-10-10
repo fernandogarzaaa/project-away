@@ -40,6 +40,7 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
         compute_type: str = "auto",
         language: str | None = None,
         download_root: str | None = None,
+        hotwords: str | None = None,
     ) -> None:
         from faster_whisper import WhisperModel
 
@@ -47,17 +48,38 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
             compute_type = "default"
         self.model = WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root)
         self.language = language
+        self.hotwords = hotwords
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
-        segments, _info = self.model.transcribe(
-            np.asarray(audio, dtype=np.float32),
-            language=self.language,
-            initial_prompt=prompt,
-            vad_filter=False,
-            beam_size=5,
-            condition_on_previous_text=False,
-        )
-        return " ".join(s.text.strip() for s in segments).strip()
+        return whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords)
+
+
+def supports_kwarg(fn: object, name: str) -> bool:
+    import inspect
+
+    try:
+        return name in inspect.signature(fn).parameters  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
+def whisper_transcribe(
+    model: object, audio: NDArray[np.float32], language: str | None, prompt: str | None, hotwords: str | None
+) -> str:
+    """Call ``WhisperModel.transcribe`` with the vocabulary as ``initial_prompt`` and, when the installed
+    faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``."""
+    fn = model.transcribe  # type: ignore[attr-defined]
+    kw: dict[str, object] = {
+        "language": language,
+        "initial_prompt": prompt,
+        "vad_filter": False,
+        "beam_size": 5,
+        "condition_on_previous_text": False,
+    }
+    if hotwords and supports_kwarg(fn, "hotwords"):
+        kw["hotwords"] = hotwords
+    segments, _info = fn(np.asarray(audio, dtype=np.float32), **kw)
+    return " ".join(s.text.strip() for s in segments).strip()
 
 
 class ParakeetASR:  # pragma: no cover - optional NVIDIA NeMo backend
@@ -83,7 +105,8 @@ def make_asr(
     compute_type: str = "auto",
     language: str | None = None,
     download_root: str | None = None,
+    hotwords: str | None = None,
 ) -> ASRBackend:
     if backend == "parakeet":
         return ParakeetASR() if model in WHISPER_MODELS else ParakeetASR(model)
-    return FasterWhisperASR(model, device, compute_type, language, download_root)
+    return FasterWhisperASR(model, device, compute_type, language, download_root, hotwords)

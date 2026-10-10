@@ -8,6 +8,7 @@ hotkeys and Wi-Fi threads around it.
 from __future__ import annotations
 
 import functools
+import sys
 import threading
 import time
 from pathlib import Path
@@ -400,7 +401,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         v = self.cfg.voice
         vocab = Vocabulary.load(v.vocabulary_file)
-        rules = RuleCleaner(vocab)
+        rules = RuleCleaner(vocab, numbers_as_digits=v.numbers_as_digits, numbers_min_value=v.numbers_min_value)
         cleaner = LLMCleaner(rules) if v.llm_cleanup else rules
         asr = make_asr(
             v.asr_backend,
@@ -409,6 +410,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             v.compute_type,
             v.language,
             str(self.models_dir / f"whisper-{v.asr_model}"),
+            vocab.hotwords() if v.hotwords else None,
         )
         face_gate = self.cfg.face.enabled and self.cfg.face.gate_dictation
         gate = self.pipeline.gate.allow if face_gate else None
@@ -475,8 +477,31 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         for kind in ("dictation", "mic", "voice"):
             self.pipeline.executor.hooks[kind] = functools.partial(self._voice_hook, kind)
 
+        if v.edit_hotkey and not self.dry_run:
+            try:
+                from away.control.keys import parse_combo
+                from away.voice.edit import LLMEditor, SelectionEditor, SystemClipboard
+
+                mod = "cmd" if sys.platform == "darwin" else "ctrl"
+                b = self.pipeline.executor.backend
+                ed_llm = LLMEditor()
+                self.editor = SelectionEditor(
+                    asr,
+                    SystemClipboard(),
+                    lambda: b.hotkey(parse_combo(f"{mod}+c")),
+                    lambda: b.hotkey(parse_combo(f"{mod}+v")),
+                    ed_llm if ed_llm.configured else None,
+                    self.bus,
+                    v.sample_rate,
+                )  # while it records, on_chunk routes the mic to the editor instead of ambient listening
+            except Exception as exc:
+                self.bus.publish("edit.unavailable", {"error": str(exc)})
+
         def on_chunk(chunk: np.ndarray) -> None:
             self.pipeline.mic_energy = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+            if self.editor is not None and self.editor.recording:
+                self.editor.feed(chunk)
+                return
             self.voice.feed(chunk)
 
         def mic_loop() -> None:

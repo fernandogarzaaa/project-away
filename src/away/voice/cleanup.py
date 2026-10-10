@@ -135,6 +135,11 @@ class Vocabulary:
     def terms(self) -> list[str]:
         return [rep for _, rep in self.replacements]
 
+    def hotwords(self, limit: int = 60) -> str | None:
+        """Distinct target terms as one space-separated string for faster-whisper ``hotwords``."""
+        seen = list(dict.fromkeys(t for t in self.terms() if t))
+        return " ".join(seen[:limit]) or None
+
 
 def tidy(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
@@ -158,9 +163,17 @@ def ensure_terminal(text: str, min_words: int = 3) -> str:
 
 
 class RuleCleaner:
-    def __init__(self, vocabulary: Vocabulary | None = None, terminal_period: bool = True) -> None:
+    def __init__(
+        self,
+        vocabulary: Vocabulary | None = None,
+        terminal_period: bool = True,
+        numbers_as_digits: bool = False,
+        numbers_min_value: int = 10,
+    ) -> None:
         self.vocab = vocabulary or Vocabulary()
         self.terminal_period = terminal_period
+        self.numbers_as_digits = numbers_as_digits
+        self.numbers_min_value = numbers_min_value
 
     def clean(self, text: str, context: str | None = None) -> str:
         t = " ".join(text.split())
@@ -168,6 +181,10 @@ class RuleCleaner:
         t = apply_spoken_punctuation(t)
         t = apply_scratch_that(t)
         t = apply_corrections(t)
+        if self.numbers_as_digits:
+            from away.voice.numbers import words_to_digits
+
+            t = words_to_digits(t, self.numbers_min_value)
         t = self.vocab.apply(t)
         t = tidy(t)
         if _is_code_context(context):  # shells: no sentence casing, no trailing period

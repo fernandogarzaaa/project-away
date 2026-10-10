@@ -298,3 +298,140 @@ def test_settings_model_new_switches(tmp_path):
     assert m.set_voice("cursor_overlay", True) is None and m.cfg.cursor_overlay
     assert m.set_tunable("hands.dwell.radius_px", 50) is None and m.cfg.hands.dwell.radius_px == 50
     assert m.set_tunable("hands.cursor.click_rewind_ms", 120.4) is None and m.cfg.hands.cursor.click_rewind_ms == 120
+
+
+# --------------------------------------------------------------------------- B6 dictation polish
+@pytest.mark.parametrize(
+    ("spoken", "digits"),
+    [
+        ("I have twenty five apples", "I have 25 apples"),
+        ("one of them", "one of them"),
+        ("one hundred and three people", "103 people"),
+        ("in two thousand twenty six", "in 2026"),
+        ("it costs three point five dollars", "it costs 3.5 dollars"),
+        ("five six seven", "five six seven"),
+        ("twenty-one pilots", "21 pilots"),
+        ("nine, ten or eleven", "nine, 10 or 11"),
+        ("forty two, forty three", "42, 43"),
+        ("one million two hundred thousand", "1200000"),
+        ("Twelve Monkeys", "12 Monkeys"),
+    ],
+)
+def test_words_to_digits(spoken, digits):
+    from away.voice.numbers import words_to_digits
+
+    assert words_to_digits(spoken, 10) == digits
+
+
+def test_rule_cleaner_numbers_option_and_hotwords():
+    from away.voice.cleanup import RuleCleaner, Vocabulary
+
+    assert RuleCleaner().clean("we need twenty five chairs") == "We need twenty five chairs."  # off by default
+    rc = RuleCleaner(numbers_as_digits=True, numbers_min_value=10)
+    assert rc.clean("we need twenty five chairs and one table") == "We need 25 chairs and one table."
+    v = Vocabulary.parse("cooper netties -> Kubernetes\nPyTorch\nkube -> Kubernetes\n")
+    assert v.hotwords() == "Kubernetes PyTorch"
+    assert Vocabulary().hotwords() is None
+    assert AppConfig().voice.numbers_as_digits and AppConfig().voice.hotwords
+
+
+def test_whisper_transcribe_passes_hotwords_only_when_supported():
+    from away.voice.asr import supports_kwarg, whisper_transcribe
+
+    class Seg:
+        text = " hi "
+
+    class New:
+        def transcribe(self, audio, language=None, initial_prompt=None, vad_filter=True, beam_size=5,
+                       condition_on_previous_text=True, hotwords=None):  # fmt: skip
+            self.kw = {"initial_prompt": initial_prompt, "hotwords": hotwords}
+            return [Seg()], None
+
+    class Old:
+        def transcribe(self, audio, language=None, initial_prompt=None, vad_filter=True, beam_size=5,
+                       condition_on_previous_text=True):  # fmt: skip
+            self.kw = {"initial_prompt": initial_prompt}
+            return [Seg()], None
+
+    new, old = New(), Old()
+    audio = np.zeros(10, np.float32)
+    assert whisper_transcribe(new, audio, None, "Kubernetes", "Kubernetes PyTorch") == "hi"
+    assert new.kw == {"initial_prompt": "Kubernetes", "hotwords": "Kubernetes PyTorch"}
+    assert whisper_transcribe(old, audio, None, "Kubernetes", "Kubernetes PyTorch") == "hi"
+    assert old.kw == {"initial_prompt": "Kubernetes"}
+    assert not supports_kwarg(42, "x")
+
+
+def test_installed_faster_whisper_has_hotwords():
+    fw = pytest.importorskip("faster_whisper")
+    from away.voice.asr import supports_kwarg
+
+    assert supports_kwarg(fw.WhisperModel.transcribe, "hotwords")
+    assert supports_kwarg(fw.WhisperModel.transcribe, "initial_prompt")
+
+
+def test_apply_edit_rules_and_llm_fallback():
+    from away.voice.edit import apply_edit
+
+    assert apply_edit("Make it uppercase.", "hello") == ("HELLO", "rule")
+    assert apply_edit("please lowercase", "HeLLo") == ("hello", "rule")
+    assert apply_edit("title case", "the old man") == ("The Old Man", "rule")
+    assert apply_edit("replace cat with dog", "the Cat sat") == ("the dog sat", "rule")
+    assert apply_edit("clean it up", "um so i think the the plan works") == ("So I think the plan works.", "rule")
+    assert apply_edit("make it a bullet list", "eggs; milk; bread") == ("- eggs\n- milk\n- bread", "rule")
+    assert apply_edit("numbers as digits", "three apples") == ("3 apples", "rule")
+    assert apply_edit("delete this", "secret") == ("", "rule")
+    assert apply_edit("wrap it in quotes", "hi") == ('"hi"', "rule")
+    assert apply_edit("", "x") == ("x", "unchanged")
+    assert apply_edit("make it sound friendlier", "Send it.") == ("Send it.", "unchanged")
+
+    class FakeLLM:
+        configured = True
+
+        def edit(self, instruction, text):
+            return f"[{instruction}] {text}"
+
+    class BrokenLLM:
+        def edit(self, instruction, text):
+            raise OSError("down")
+
+    assert apply_edit("make it sound friendlier", "Send it.", FakeLLM()) == (
+        "[make it sound friendlier] Send it.",
+        "llm",
+    )
+    assert apply_edit("make it formal", "yo", BrokenLLM()) == ("yo", "unchanged")
+
+
+def test_selection_editor_flow():
+    from away.voice.asr import FakeASR
+    from away.voice.edit import SelectionEditor
+
+    class Clip:
+        def __init__(self):
+            self.value = "old clipboard"
+            self.selection = "make me loud"
+
+        def get(self):
+            return self.value
+
+        def set(self, text):
+            self.value = text
+
+    clip = Clip()
+    pasted = []
+    asr = FakeASR(["Uppercase.", ""])
+    ed = SelectionEditor(
+        asr,
+        clip,
+        copy_keys=lambda: clip.set(clip.selection),
+        paste_keys=lambda: pasted.append(clip.value),
+        sleep=lambda s: None,
+    )
+    assert ed.toggle() is None and ed.recording
+    ed.feed(np.ones(1600, np.float32))
+    assert ed.toggle() == ("MAKE ME LOUD", "rule")
+    assert pasted == ["MAKE ME LOUD"] and clip.value == "old clipboard" and not ed.recording
+    assert ed.stop() == ("", "idle")
+    clip.selection = ""  # nothing selected: copy leaves the marker in place
+    ed2 = SelectionEditor(asr, clip, copy_keys=lambda: None, paste_keys=lambda: None, sleep=lambda s: None)
+    assert ed2.start() is False and clip.value == "old clipboard"
