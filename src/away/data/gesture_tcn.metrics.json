@@ -1,0 +1,18 @@
+{
+  "model": "gesture_tcn",
+  "classes": [
+    "idle",
+    "move",
+    "pinch_click",
+    "double_pinch",
+    "pinch_drag",
+    "scroll",
+    "palm_clutch",
+    "swipe_left",
+    "swipe_right"
+  ],
+  "frames": 24,
+  "synthetic_holdout_accuracy": 0.8661087866108786,
+  "synthetic_holdout_n": 478,
+  "note": "synthetic_* numbers measure fit to procedural data only, not real-world accuracy"
+}

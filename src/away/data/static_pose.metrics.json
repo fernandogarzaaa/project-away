@@ -1,0 +1,77 @@
+{
+  "model": "static_pose_mlp",
+  "data": "HaGRID v2 annotations_with_landmarks (test split JSONs), subject-disjoint split by user_id",
+  "classes": [
+    "point",
+    "palm",
+    "fist",
+    "two",
+    "ok",
+    "none"
+  ],
+  "classes_present": [
+    "point",
+    "palm",
+    "fist",
+    "two",
+    "ok",
+    "none"
+  ],
+  "n_train": 12385,
+  "n_val": 2128,
+  "n_test": 4094,
+  "n_test_subjects": 520,
+  "test_accuracy": 0.9926722032242306,
+  "test_macro_f1": 0.9817493645559017,
+  "confusion": [
+    [
+      618,
+      0,
+      3,
+      0,
+      0,
+      8
+    ],
+    [
+      0,
+      652,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      682,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      2,
+      1346,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0,
+      646,
+      0
+    ],
+    [
+      10,
+      3,
+      0,
+      0,
+      0,
+      120
+    ]
+  ],
+  "trained_at": "2026-10-10T16:56:36"
+}

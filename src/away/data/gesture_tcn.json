@@ -1,0 +1,15 @@
+{
+  "classes": [
+    "idle",
+    "move",
+    "pinch_click",
+    "double_pinch",
+    "pinch_drag",
+    "scroll",
+    "palm_clutch",
+    "swipe_left",
+    "swipe_right"
+  ],
+  "frames": 24,
+  "input": "sequence_features (T, 44)"
+}
