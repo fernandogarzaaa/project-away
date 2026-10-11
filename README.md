@@ -52,9 +52,17 @@ away demo                    # synthetic end-to-end check
 away run                     # or: away tray ; away autostart on
 ```
 
-- **Windows:** run the `.exe` installer from Releases. It's unsigned, so choose *More info → Run anyway*.
-- **macOS:** open the `.dmg`, drag to Applications, then right-click → Open. Allow Camera, Microphone, and Accessibility.
-- **Linux:** use the AppImage or `.deb`. Mouse and keyboard control needs X11; Wayland is untested.
+**One-click installers** (Releases page) bundle every feature: tracking, dictation, tray, settings
+window and on-device training (CPU PyTorch). Parakeet/NeMo is the one exception (multi-GB,
+NVIDIA-oriented; use `pipx install "project-away[all,parakeet]"`). Installers are ~0.4–0.8 GB; the models
+(~1.6 GB, or ~0.5 GB with Whisper `small`) download during install on Windows and on first launch elsewhere.
+
+- **Windows:** run the `setup.exe`. It's unsigned, so choose *More info → Run anyway*, then **Install**. Models,
+  start-at-sign-in, a desktop shortcut and launching the tray app are all on by default.
+- **macOS:** open the `.dmg`, drag to Applications, then right-click → Open. The first launch downloads the
+  models with a notification. Allow Camera, Microphone, Accessibility and Input Monitoring.
+- **Linux:** run the AppImage or install the `.deb`; the first launch downloads the models. Mouse and keyboard
+  control needs X11; Wayland is untested.
 
 ## Customizing controls
 
@@ -305,12 +313,14 @@ Each view runs its own MediaPipe instance in sequence, so two cameras cost about
 | MediaPipe hands/face on real photos | Verified |
 | faster-whisper + Silero VAD on synthetic speech | Verified |
 | PicoScenes `.csi` parsing on sample file | Verified |
-| Linux bundle, AppImage (aarch64), `.deb` | Built and launched in sandbox |
+| Linux bundle, AppImage (aarch64), `.deb` | Earlier lean bundle (without torch) built and launched in the sandbox; the full bundle is CI-verified on tag only |
 | Settings window (tkinter) | Model logic unit-tested; window smoke-tested under Xvfb (Linux) only |
 | Always-on voice | End-pointing, wake word and face-gate policy tested with synthetic audio; **untested with a real mic/ASR** |
 | Per-app profile detection (active window process) | **Untested** on real desktops (Windows API / osascript / xdotool) |
 | Real webcam, mic, mouse/keyboard, global hotkeys, tray, overlay | **Untested** |
-| Windows `.exe`, macOS `.dmg` | **Built by CI, untested** |
+| Installer one-click flow (non-interactive `setup --yes` with no stdin, windowed-exe streams, first-launch download, Inno options) | Logic unit-tested (`tests/test_installer.py`) |
+| Frozen bundle with every feature (`away selftest`: torch, onnx, onnxruntime, MediaPipe, OpenCV, faster-whisper + Silero VAD, PortAudio, tkinter, pynput, pystray) | All 13 checks pass in the dev venv (Linux aarch64). The frozen build with the new bundle was **not completed in the sandbox** (too slow on its filesystem). Windows/macOS/Linux x86_64: **CI-verified on tag only** (the release workflow fails if any check fails) |
+| Windows `.exe` installer, macOS `.dmg` | **CI-built and smoke-tested on tag only; untested on real hardware** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

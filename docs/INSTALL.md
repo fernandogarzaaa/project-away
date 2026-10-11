@@ -4,16 +4,60 @@ Project Away is free and local-first. Pick **one** of the install methods below.
 
 | Method | Best for | Status |
 |---|---|---|
-| `pipx install "project-away[all]"` | anyone with Python 3.10–3.12 | wheel install verified in a clean venv (Linux) |
-| Windows installer (`ProjectAway-x.y.z-windows-x64-setup.exe`) | Windows 10/11 | **built by CI, untested on real hardware** |
-| macOS disk image (`ProjectAway-x.y.z-macos-arm64.dmg`) | Apple Silicon Macs | **built by CI, untested on real hardware** |
-| Linux AppImage / `.deb` | Ubuntu/Debian/Fedora… | built and launched (`--version`, `demo`) in the sandbox on aarch64; x86_64 built by CI |
+| **Windows installer** (`ProjectAway-x.y.z-windows-x64-setup.exe`) | Windows 10/11 | one click; **CI-verified on tag only, untested on real hardware** |
+| **macOS disk image** (`ProjectAway-x.y.z-macos-arm64.dmg`) | Apple Silicon Macs | one drag; **CI-verified on tag only, untested on real hardware** |
+| **Linux AppImage / `.deb`** | Ubuntu/Debian/Fedora… | one file; **CI-verified on tag only** (an earlier lean aarch64 build was launched in the sandbox) |
+| `pipx install "project-away[all,train]"` | anyone with Python 3.10–3.12, Intel Macs, Parakeet users | wheel install verified in a clean venv (Linux) |
 
 The native installers appear on the GitHub **Releases** page after a version tag is pushed
 (`git tag v0.1.0 && git push origin v0.1.0`); the release is created as a **draft** so you can check it first.
 
+## One click: what you get
+
+Every native installer contains **every feature**. Nothing else needs to be installed:
+
+| Feature | Bundled |
+|---|---|
+| Hand + face tracking | MediaPipe (with its data files), OpenCV, ONNX Runtime, the bundled gesture models |
+| Dictation | faster-whisper + CTranslate2, the Silero VAD model, PortAudio (microphone) |
+| Mouse/keyboard control, paste | pynput, pyperclip |
+| Tray icon, Settings window | pystray + Pillow, tkinter (Tcl/Tk) |
+| `away calibrate`, custom gestures, `away train` | PyTorch (**CPU build**), onnx |
+| Parakeet (NVIDIA NeMo) speech recognition | **Not bundled** (see below) |
+
+The models are downloaded **during installation** (Windows) or **on first launch** (macOS, Linux), not
+by a separate step:
+
+| Download | Size | When |
+|---|---|---|
+| MediaPipe hand + face models | ~12 MB | always |
+| Whisper `large-v3-turbo` (default speech model) | ~1.6 GB | default |
+| Whisper `small` (for slower PCs) | ~0.5 GB | Windows: tick *Use the smaller speech model*; elsewhere `setup --yes --asr-model small` |
+
+Approximate installer sizes (CPU PyTorch is most of it; GitHub allows 2 GB per file and the release
+workflow fails above 1.9 GB):
+
+| Installer | Download | Installed |
+|---|---|---|
+| Windows `setup.exe` | ~0.4–0.6 GB | ~1.3–1.6 GB |
+| macOS `.dmg` | ~0.4–0.6 GB | ~1.0–1.4 GB |
+| Linux AppImage | ~0.5–0.8 GB | runs from the file |
+| Linux `.deb` | ~0.4–0.7 GB | ~1.3–1.6 GB |
+
+Sizes are estimates from the package sizes; the release workflow prints the real sizes of each build.
+Add the model download on top.
+
 Nothing is code-signed (signing certificates cost money). That means one extra click the first time
 on Windows and macOS — see below.
+
+### Why Parakeet is not in the installers
+
+NVIDIA NeMo (needed for `voice.asr_backend: parakeet`) pulls in several GB of dependencies, is aimed at
+Linux with NVIDIA GPUs, and cannot be added to a frozen app after installation (there is no Python
+interpreter to `pip install` into). An installer-time download is therefore not feasible. Whisper
+`large-v3-turbo` is the default and is bundled. To use Parakeet, install from Python:
+`pipx install "project-away[all,parakeet]"`. If the installed app's config selects Parakeet, it stops with
+a message that says exactly this.
 
 ---
 
@@ -23,10 +67,11 @@ on Windows and macOS — see below.
 # 1. Python 3.10, 3.11 or 3.12 and pipx
 python -m pip install --user pipx && python -m pipx ensurepath   # then open a new terminal
 
-# 2. Install (the [all] extra = camera, face, voice, mouse/keyboard control, tray)
-pipx install "project-away[all]"          # from PyPI, once it is published
+# 2. Install (the [all] extra = camera, face, voice, mouse/keyboard control, tray; [train] = PyTorch for
+#    calibrate / custom gestures). CPU-only PyTorch is much smaller than the default CUDA build on Linux:
+pipx install "project-away[all,train]" --pip-args="--extra-index-url https://download.pytorch.org/whl/cpu"
 # or, from a clone of the repo:
-pipx install ".[all]"
+pipx install ".[all,train]"
 
 # 3. First-run wizard: downloads models, checks camera + mic, writes config
 away setup                                 # ~1.6 GB Whisper large-v3-turbo; use --asr-model small on slower PCs
@@ -42,46 +87,64 @@ Extras if you want less: `[hands]`, `[face]`, `[voice]`, `[control]`, `[tray]`, 
 
 `away doctor` prints which extras, models and folders it can see.
 
-## Option B — Windows installer
+## Option B — Windows installer (one click)
 
-1. Download `ProjectAway-<version>-windows-x64-setup.exe` from Releases.
+1. Download `ProjectAway-<version>-windows-x64-setup.exe` from Releases and run it.
 2. Windows SmartScreen will say *"Windows protected your PC"* because the installer is unsigned:
-   click **More info → Run anyway**.
-3. The installer is per-user (no admin). Options: **Start when I sign in**, **Desktop shortcut**.
-4. Start Menu → **Project Away**. On first launch it downloads the MediaPipe models (~12 MB) and sits in the tray.
-   Start Menu → **Project Away setup (download models)** runs the full wizard (speech model, camera/mic check).
+   click **More info → Run anyway**. (Your browser may also warn about an uncommon download: choose **Keep**.)
+3. Click **Next / Install**. The installer is per-user (no admin rights). These are ticked by default:
+   - **Download hand-tracking and speech models now** (~1.6 GB). A console window shows the download progress.
+     Tick **Use the smaller speech model** too on slower PCs (~0.5 GB).
+   - **Start Project Away when I sign in**
+   - **Create a desktop shortcut**
+4. On the last page **Launch Project Away now** is ticked: the app starts in the tray (notification area).
 5. Privacy: *Settings → Privacy & security → Camera* and *Microphone* → allow **desktop apps**.
 6. Typing into apps running as Administrator only works if Project Away also runs as Administrator (Windows UIPI rule).
+
+If a download failed (offline, proxy), the app retries it the next time it starts. Start Menu →
+**Project Away: re-download models** runs it again by hand. `ProjectAway.exe doctor`, `setup`, `demo`
+and the other `away` commands work from a terminal and open their own console window.
 
 ## Option C — macOS disk image (Apple Silicon)
 
 1. Download `ProjectAway-<version>-macos-arm64.dmg`, open it, drag **Project Away** to **Applications**.
 2. Gatekeeper blocks unsigned apps on first open. **Right-click (or Control-click) the app → Open → Open.**
    On macOS 15+, if there is no Open button: *System Settings → Privacy & Security* → scroll down →
-   **Open Anyway** next to "Project Away was blocked".
-3. Grant permissions when prompted, or later in *System Settings → Privacy & Security*:
+   **Open Anyway** next to "Project Away was blocked". If macOS says the app "is damaged", the download was
+   quarantined: run `xattr -dr com.apple.quarantine "/Applications/Project Away.app"` once.
+3. **First launch** downloads the models automatically (~1.6 GB). A notification says when it starts
+   and when it is done; the menu-bar icon appears afterwards. The log is in
+   `~/Library/Application Support/ProjectAway/logs/away.log`.
+4. Grant permissions when prompted, or later in *System Settings → Privacy & Security*:
    - **Camera** — hand and face tracking
    - **Microphone** — dictation
    - **Accessibility** — moving the pointer, clicking, pasting text
    - **Input Monitoring** — the push-to-talk hotkey
    Without Accessibility/Input Monitoring macOS silently ignores synthetic input; quit and reopen the app after
    granting them.
-4. It runs as a menu-bar app (no Dock icon). Intel Macs: use Option A (pipx).
+5. It runs as a menu-bar app (no Dock icon). Start at login: `"/Applications/Project Away.app/Contents/MacOS/ProjectAway" autostart on`.
+   Intel Macs: use Option A (pipx).
 
 ## Option D — Linux AppImage or .deb
 
 ```bash
-# AppImage (any distro)
+# AppImage (any distro): everything is inside the file, including PortAudio and Tk
 chmod +x ProjectAway-<version>-linux-x86_64.AppImage
-./ProjectAway-<version>-linux-x86_64.AppImage            # tray app
-./ProjectAway-<version>-linux-x86_64.AppImage setup      # wizard
+./ProjectAway-<version>-linux-x86_64.AppImage            # first launch downloads the models, then the tray app
 ./ProjectAway-<version>-linux-x86_64.AppImage run        # foreground
+./ProjectAway-<version>-linux-x86_64.AppImage autostart on
 # no FUSE (containers, some minimal distros)? add --appimage-extract-and-run
 
 # .deb (Ubuntu/Debian)
 sudo apt install ./project-away_<version>_amd64.deb      # installs /opt/project-away + `away` command
-away setup
+away tray                                                # or the "Project Away" menu entry
 ```
+
+**First launch** (tray, menu entry or `away tray`) downloads the models (~1.6 GB) with a desktop notification
+(`notify-send`) and progress in the terminal, then starts the tray app. The `.deb` deliberately does **not**
+download in its install script: models are per-user (`~/.local/share/project-away`), and a root-run
+package script cannot safely write into a user's home or know which user will run the app.
+To pick the smaller speech model instead: `away setup --yes --asr-model small` before the first launch.
 
 Linux notes:
 
@@ -91,6 +154,7 @@ Linux notes:
 - `xdotool` (optional) lets dictation know which window is focused and lets per-app control profiles switch.
 - The Settings window uses tkinter. With pipx on a distro Python install it first:
   `sudo apt install python3-tk` (Fedora: `sudo dnf install python3-tkinter`). The AppImage/.deb bundle it.
+- The AppImage uses the system PortAudio when present and its own copy otherwise.
 
 ---
 
