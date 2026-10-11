@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import sys
 from typing import Any, Protocol
 
 from away.hands.cursor import CursorMapper
@@ -82,9 +84,9 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
             self._scroll_acc -= steps
 
     def key(self, name: str) -> None:
-        k = getattr(self._keys, name, name)
-        self._k.press(k)
-        self._k.release(k)
+        # Use the same guaranteed cleanup path as multi-key chords. A failure in
+        # press() must not leave a modifier or ordinary key logically held down.
+        self.hotkey([name])
 
     def click_button(self, button: str, count: int = 1) -> None:
         from pynput import mouse
@@ -92,11 +94,33 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
         self._m.click(getattr(mouse.Button, button, mouse.Button.left), count)
 
     def hotkey(self, keys: list[str]) -> None:
+        """Press a chord and always attempt to release every key touched.
+
+        OS input APIs can fail partway through a chord (for example, when a
+        desktop session loses access). Without cleanup, modifier keys can stay
+        logically held and affect subsequent user input.
+        """
         objs = [getattr(self._keys, k, k) for k in keys]
-        for k in objs:
-            self._k.press(k)
-        for k in reversed(objs):
-            self._k.release(k)
+        attempted: list[Any] = []
+        try:
+            for key in objs:
+                # Register before calling press(): the backend may raise after
+                # the OS accepted the key-down event.
+                attempted.append(key)
+                self._k.press(key)
+        finally:
+            # Keep cleaning up after an individual release failure. Preserve an
+            # original press error instead of replacing it with a cleanup error.
+            active_error = sys.exc_info()[0] is not None
+            release_error: BaseException | None = None
+            for key in reversed(attempted):
+                try:
+                    self._k.release(key)
+                except BaseException as exc:
+                    if release_error is None:
+                        release_error = exc
+            if release_error is not None and not active_error:
+                raise release_error
 
     def type_text(self, text: str) -> None:
         self._k.type(text)
@@ -171,8 +195,17 @@ class MouseController:
             # double_click is the *second* tap: one more click makes the OS see a double click
             self.backend.click(1)
         elif ev.kind == "drag_start":
-            self.backend.press()
+            # A backend call may raise after the OS accepted the button-down
+            # event. Mark it as potentially held before pressing, then make a
+            # best-effort release without masking the original failure.
             self.button_down = True
+            try:
+                self.backend.press()
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    self.backend.release()
+                self.button_down = False
+                raise
         elif ev.kind == "drag_end":
             self._release_if_down()
         elif ev.kind == "scroll":
