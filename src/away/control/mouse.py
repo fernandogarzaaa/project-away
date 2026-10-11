@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import sys
 from typing import Any, Protocol
 
@@ -202,9 +201,15 @@ class MouseController:
             try:
                 self.backend.press()
             except BaseException:
-                with contextlib.suppress(BaseException):
+                # The press may have reached the OS before raising. Keep the
+                # state marked as potentially down if cleanup also fails, so a
+                # later hand-loss, pause, or shutdown can retry the release.
+                try:
                     self.backend.release()
-                self.button_down = False
+                except BaseException:
+                    self.button_down = True
+                else:
+                    self.button_down = False
                 raise
         elif ev.kind == "drag_end":
             self._release_if_down()
