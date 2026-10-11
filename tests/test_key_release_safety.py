@@ -2,7 +2,9 @@
 
 import pytest
 
-from away.control.mouse import PynputBackend
+from away.control.mouse import MouseController, PynputBackend
+from away.hands.cursor import CursorMapper
+from away.hands.gestures import GestureEvent
 
 
 class _KeyNamespace:
@@ -82,3 +84,42 @@ def test_single_key_uses_the_same_cleanup_path() -> None:
         backend.key("enter")
 
     assert keyboard.calls == [("press", "enter"), ("release", "enter")]
+
+
+class _FlakyMouse:
+    def __init__(self, *, fail_press: bool = False, fail_release: bool = False) -> None:
+        self.fail_press = fail_press
+        self.fail_release = fail_release
+        self.calls: list[str] = []
+
+    def press(self) -> None:
+        self.calls.append("press")
+        if self.fail_press:
+            raise RuntimeError("mouse press failed")
+
+    def release(self) -> None:
+        self.calls.append("release")
+        if self.fail_release:
+            raise RuntimeError("mouse release failed")
+
+
+def test_drag_start_attempts_release_when_mouse_press_fails() -> None:
+    backend = _FlakyMouse(fail_press=True)
+    mouse = MouseController(backend, CursorMapper((100, 100)))
+
+    with pytest.raises(RuntimeError, match="mouse press failed"):
+        mouse.handle(GestureEvent("drag_start", 0.0, {}))
+
+    assert backend.calls == ["press", "release"]
+    assert mouse.button_down is False
+
+
+def test_drag_start_preserves_press_error_if_cleanup_also_fails() -> None:
+    backend = _FlakyMouse(fail_press=True, fail_release=True)
+    mouse = MouseController(backend, CursorMapper((100, 100)))
+
+    with pytest.raises(RuntimeError, match="mouse press failed"):
+        mouse.handle(GestureEvent("drag_start", 0.0, {}))
+
+    assert backend.calls == ["press", "release"]
+    assert mouse.button_down is False
