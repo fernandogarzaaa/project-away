@@ -275,7 +275,9 @@ def test_release_workflow_smoke_and_strict():
     assert yml.count("selftest --json") + yml.count('"selftest", "--json"') + yml.count("'selftest','--json'") >= 5
     assert 'AWAY_SPEC_STRICT: "1"' in yml and yml.count("scripts/check_selftest.py") >= 8
     assert "download.pytorch.org/whl/cpu" in yml and ".[all,train]" in yml
-    assert "draft: true" in yml and "PYPI_API_TOKEN != ''" in yml
+    assert "draft: true" in yml
+    # PyPI via trusted publishing: OIDC only, in its own job so it can't block the installers
+    assert "pypa/gh-action-pypi-publish" in yml and "id-token: write" in yml and "PYPI_API_TOKEN" not in yml
 
 
 def test_spec_bundles_everything_but_nemo():

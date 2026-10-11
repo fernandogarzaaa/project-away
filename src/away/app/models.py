@@ -74,11 +74,93 @@ def download(
     return dest
 
 
+def dir_bytes(path: Path) -> int:
+    """Bytes under ``path``, counting partial (``.incomplete``) download files too."""
+    total = 0
+    if path.exists():
+        for f in path.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def progress_bar(done: int, total: int, width: int = 30) -> str:
+    """``[#####.....]  41%  664/1620 MB`` (clamped; ``total`` <= 0 shows MB only)."""
+    mb = done / 1_000_000
+    if total <= 0:
+        return f"  {mb:,.0f} MB"
+    frac = min(max(done / total, 0.0), 1.0)
+    filled = round(frac * width)
+    return f"  [{'#' * filled}{'.' * (width - filled)}] {frac * 100:3.0f}%  {mb:,.0f}/{total / 1_000_000:,.0f} MB"
+
+
+class _DirProgress:
+    """Background thread that redraws one progress line while a folder fills up."""
+
+    def __init__(self, path: Path, total_bytes: int, write: Callable[[str], object], interval: float = 0.5) -> None:
+        import threading
+
+        self.path, self.total, self.write, self.interval = path, total_bytes, write, interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="away-download-progress", daemon=True)
+
+    def _draw(self) -> None:
+        self.write("\r" + progress_bar(dir_bytes(self.path), self.total))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._draw()
+
+    def __enter__(self) -> _DirProgress:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        if exc[0] is None:
+            self.write("\r" + progress_bar(self.total, self.total))
+        self.write("\n")
+
+
+def quiet_hf_hub() -> None:
+    """Hide huggingface_hub's harmless warnings (no HF_TOKEN, hf_xet missing, deprecated args)."""
+    import logging
+    import os
+    import warnings
+
+    os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+    warnings.filterwarnings("ignore", module=r"huggingface_hub(\..*)?")
+    for name in ("huggingface_hub", "huggingface_hub.file_download", "huggingface_hub.utils._http"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
 def download_asr(model: str, dest_dir: Path, progress: Callable[[str], None] = print) -> Path:  # pragma: no cover
+    import sys
+
+    quiet_hf_hub()
     from faster_whisper import download_model
 
-    progress(f"  ASR '{model}': downloading ~{ASR_SIZES_MB.get(model, 0)} MB from Hugging Face ...")
-    path = download_model(model, output_dir=str(dest_dir / f"whisper-{model}"))
+    out = dest_dir / f"whisper-{model}"
+    size_mb = ASR_SIZES_MB.get(model, 0)
+    progress(f"  ASR '{model}': downloading ~{size_mb} MB from Hugging Face ...")
+    stream = sys.stdout
+
+    def write(text: str) -> None:
+        if stream is None:
+            return
+        try:
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    with _DirProgress(out, size_mb * 1_000_000, write):
+        path = download_model(model, output_dir=str(out))
     return Path(path)
 
 
