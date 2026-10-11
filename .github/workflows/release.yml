@@ -1,8 +1,13 @@
 name: Release
 
-# Builds native installers when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0).
+# Builds the one-click native installers when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0).
 # Everything here is free: GitHub-hosted runners, PyInstaller, Inno Setup, appimagetool, hdiutil.
 # Nothing is code-signed (no paid certificates): see docs/INSTALL.md for the one-time OS prompts.
+#
+# Every installer bundles every runtime feature: [all] + [train] (CPU-only torch, onnx), tkinter,
+# PortAudio, MediaPipe/Whisper/Silero assets. AWAY_SPEC_STRICT=1 fails the PyInstaller build if a
+# package is missing, and `selftest` (a hidden command) fails the job if a feature does not load
+# inside the frozen app. Parakeet/NeMo is intentionally not bundled (docs/INSTALL.md).
 
 on:
   push:
@@ -11,6 +16,11 @@ on:
 
 permissions:
   contents: write
+
+env:
+  TORCH_CPU_INDEX: https://download.pytorch.org/whl/cpu
+  AWAY_SPEC_STRICT: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
   python-dist:
@@ -27,26 +37,54 @@ jobs:
         with:
           name: python-dist
           path: dist/*
-      - name: Publish to PyPI (only if a PYPI_API_TOKEN secret exists)
+      - name: Publish to PyPI (skipped unless a PYPI_API_TOKEN secret exists)
         if: ${{ env.PYPI_API_TOKEN != '' }}
         run: pip install twine && twine upload -u __token__ -p "$PYPI_API_TOKEN" dist/*
 
   linux:
     runs-on: ubuntu-22.04  # older glibc => the bundle runs on more distros
+    env:
+      AWAY_DATA_DIR: ${{ github.workspace }}/smoke/data
+      AWAY_CONFIG_DIR: ${{ github.workspace }}/smoke/config
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y libportaudio2 libegl1 libgl1 libxtst6
-      - run: pip install ".[all]" pyinstaller
-      - run: pyinstaller packaging/pyinstaller/away.spec --noconfirm
+      - name: System libraries (PortAudio and Tk are bundled into the app; xvfb for GUI smoke tests)
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libtk8.6 libegl1 libgl1 libxtst6 xvfb binutils
+      - name: Install every feature (CPU-only torch)
+        run: |
+          pip install torch --index-url "$TORCH_CPU_INDEX"
+          pip install ".[all,train]" pyinstaller
+          python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: PyInstaller (strict; under Xvfb so pynput/pystray can be analysed)
+        run: AWAY_VERSION="${GITHUB_REF_NAME#v}" xvfb-run -a pyinstaller packaging/pyinstaller/away.spec --noconfirm
       - name: Smoke-test the frozen app
         run: |
-          dist/ProjectAway/ProjectAway --version
-          dist/ProjectAway/ProjectAway demo
+          set -e
+          APP=dist/ProjectAway/ProjectAway
+          xvfb-run -a $APP --version
+          xvfb-run -a $APP doctor
+          xvfb-run -a $APP demo
+          xvfb-run -a $APP selftest --json selftest.json
+          python scripts/check_selftest.py selftest.json
+          # non-interactive model download inside the frozen app (tiny Whisper keeps CI fast)
+          $APP setup --yes --skip-probe --asr-model tiny < /dev/null
+          python scripts/check_selftest.py --models "$AWAY_DATA_DIR/models" --asr tiny
       - run: bash packaging/linux/build_appimage.sh "${GITHUB_REF_NAME#v}"
       - run: bash packaging/linux/build_deb.sh "${GITHUB_REF_NAME#v}"
+      - name: Smoke-test the AppImage and the .deb
+        run: |
+          set -e
+          chmod +x dist/*.AppImage
+          xvfb-run -a dist/*.AppImage --appimage-extract-and-run selftest --json appimage.json
+          python scripts/check_selftest.py appimage.json
+          sudo apt-get install -y ./dist/*.deb
+          xvfb-run -a away selftest --json deb.json
+          python scripts/check_selftest.py deb.json
+      - name: Release asset size limit (GitHub allows 2 GB per file)
+        run: python scripts/check_selftest.py --max-size-mb 1900 dist/*.AppImage dist/*.deb
       - uses: actions/upload-artifact@v4
         with:
           name: linux-installers
@@ -56,41 +94,105 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    env:
+      AWAY_DATA_DIR: ${{ github.workspace }}\smoke\data
+      AWAY_CONFIG_DIR: ${{ github.workspace }}\smoke\config
+      AWAY_LOG_FILE: ${{ github.workspace }}\smoke\away.log
+      AWAY_NO_CONSOLE: "1"  # windowed exe: write output to AWAY_LOG_FILE instead of opening a console
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ".[all]" pyinstaller
-      - run: pyinstaller packaging/pyinstaller/away.spec --noconfirm
-      - name: Smoke-test the frozen app
+      - name: Install every feature (CPU-only torch)
+        run: |
+          pip install torch --index-url $env:TORCH_CPU_INDEX
+          pip install ".[all,train]" pyinstaller
+          python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: PyInstaller (strict)
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\ProjectAway\ProjectAway.exe -ArgumentList "demo" -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          $env:AWAY_VERSION = "${{ github.ref_name }}".TrimStart("v")
+          pyinstaller packaging/pyinstaller/away.spec --noconfirm
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test the frozen app (windowed exe, no stdin)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          function Run-Away([string[]]$a) {
+            $p = Start-Process -FilePath dist\ProjectAway\ProjectAway.exe -ArgumentList $a -Wait -PassThru -NoNewWindow
+            if (Test-Path $env:AWAY_LOG_FILE) { Get-Content $env:AWAY_LOG_FILE; Remove-Item $env:AWAY_LOG_FILE }
+            if ($p.ExitCode -ne 0) { throw "ProjectAway.exe $a exited $($p.ExitCode)" }
+          }
+          Run-Away @("--version")
+          Run-Away @("doctor")
+          Run-Away @("demo")
+          Run-Away @("selftest", "--json", "selftest.json")
+          python scripts/check_selftest.py selftest.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Run-Away @("setup", "--yes", "--skip-probe", "--asr-model", "tiny")
+          python scripts/check_selftest.py --models "$env:AWAY_DATA_DIR\models" --asr tiny
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Build installer with Inno Setup (preinstalled on windows-latest)
         shell: pwsh
         run: |
           $v = "${{ github.ref_name }}".TrimStart("v")
           if (-not $v -or $v -eq "${{ github.ref_name }}") { $v = "0.0.0-dev" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\windows\away.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test the installer (silent, models unticked to keep CI fast)
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist\*-setup.exe)[0].FullName
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
+          $exe = "$env:LOCALAPPDATA\Programs\ProjectAway\ProjectAway.exe"
+          if (-not (Test-Path $exe)) { throw "not installed: $exe" }
+          $p = Start-Process -FilePath $exe -ArgumentList 'selftest','--json','installed.json' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "installed selftest exited $($p.ExitCode)" }
+          python scripts/check_selftest.py installed.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python scripts/check_selftest.py --max-size-mb 1900 $setup
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: dist/*-setup.exe
 
   macos:
-    runs-on: macos-14  # Apple Silicon; Intel Macs: use `pipx install "project-away[all]"`
+    runs-on: macos-14  # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`
+    env:
+      AWAY_DATA_DIR: ${{ github.workspace }}/smoke/data
+      AWAY_CONFIG_DIR: ${{ github.workspace }}/smoke/config
+      AWAY_LOG_FILE: ${{ github.workspace }}/smoke/away.log
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ".[all]" pyinstaller
-      - run: pyinstaller packaging/pyinstaller/away.spec --noconfirm
+      - name: Install every feature (CPU-only torch)
+        run: |
+          pip install torch --index-url "$TORCH_CPU_INDEX"
+          pip install ".[all,train]" pyinstaller
+          python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: PyInstaller (strict)
+        run: AWAY_VERSION="${GITHUB_REF_NAME#v}" pyinstaller packaging/pyinstaller/away.spec --noconfirm
       - name: Smoke-test the frozen app
-        run: dist/ProjectAway.app/Contents/MacOS/ProjectAway demo
+        run: |
+          set -e
+          mkdir -p smoke
+          APP=dist/ProjectAway.app/Contents/MacOS/ProjectAway
+          show() { [ -f "$AWAY_LOG_FILE" ] && cat "$AWAY_LOG_FILE" && rm -f "$AWAY_LOG_FILE" || true; }
+          $APP --version; show
+          $APP doctor; show
+          $APP demo; show
+          $APP selftest --json selftest.json; show
+          python scripts/check_selftest.py selftest.json
+          $APP setup --yes --skip-probe --asr-model tiny < /dev/null; show
+          python scripts/check_selftest.py --models "$AWAY_DATA_DIR/models" --asr tiny
       - run: bash packaging/macos/build_dmg.sh "${GITHUB_REF_NAME#v}"
+      - name: Release asset size limit (GitHub allows 2 GB per file)
+        run: python scripts/check_selftest.py --max-size-mb 1900 dist/*.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
