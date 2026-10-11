@@ -18,6 +18,8 @@ EXTRAS = {
     "control": ["pynput", "pyperclip"],
     "tray": ["pystray", "PIL"],
     "train": ["torch", "onnx"],
+    "settings window": ["tkinter"],
+    "parakeet (optional, not in installers)": ["nemo"],
 }
 
 
@@ -52,6 +54,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     info["bundled_models"] = {n: bundled_model(n) is not None for n in ("static_pose.npz", "gesture_tcn.onnx")}
     print(json.dumps(info, indent=2, default=str))
     return 0
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    from away.app import selftest
+
+    return selftest.main(args.json)
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -721,6 +729,12 @@ def build_parser() -> argparse.ArgumentParser:
     u.set_defaults(fn=cmd_uninstall)
 
     sub.add_parser("doctor", help="show installed extras, models and paths").set_defaults(fn=cmd_doctor)
+
+    # hidden: used by the release workflow to verify the frozen installer build
+    stt = sub.add_parser("selftest")  # no help= => not listed in --help
+    stt.add_argument("--json", help="also write the report to this file")
+    stt.set_defaults(fn=cmd_selftest)
+    sub.metavar = "{" + ",".join(c for c in sub.choices if c != "selftest") + "}"
     return p
 
 
