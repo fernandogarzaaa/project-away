@@ -238,11 +238,14 @@ def test_cameras_tab_model(tmp_path):
     devs = [CameraDevice(0, "/dev/video0", "Integrated Webcam"), CameraDevice(2, "/dev/video2", "Logitech BRIO")]
     choices = m.device_choices(devs)
     assert choices == ["0: Integrated Webcam", "2: Logitech BRIO"]
-    assert m.parse_device(choices[1]) == 2 and m.parse_device("/dev/video4: x") == "/dev/video4"
+    # v0.1.11: a listed camera is saved by name (stable across hot-plug), with its index as a hint
+    assert m.parse_device(choices[1]) == "Logitech BRIO" and m.parse_device("/dev/video4: x") == "/dev/video4"
     assert m.add_camera(m.parse_device(choices[1])) is None
-    assert [(r["device"], r["role"]) for r in m.camera_rows()] == [(0, "primary"), (2, "secondary")]
+    assert [(r["device"], r["role"]) for r in m.camera_rows()] == [(0, "primary"), ("Logitech BRIO", "secondary")]
+    assert m.cfg.hands.cameras[1].index_hint == 2
+    assert [r["label"] for r in m.camera_rows()] == ["0: Integrated Webcam", "2: Logitech BRIO"]
     assert m.camera_mode().startswith("2 cameras")
-    assert m.add_camera(2) is not None  # same device twice
+    assert m.add_camera("Logitech BRIO") is not None  # same device twice
     assert m.set_camera(1, "width", "1280") is None and m.cfg.hands.cameras[1].width == 1280
     assert m.set_camera(1, "fps", "abc") is not None
     assert m.set_camera(1, "fps", 1) is not None and m.cfg.hands.cameras[1].fps == 30  # rejected, unchanged

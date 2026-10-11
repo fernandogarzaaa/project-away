@@ -193,6 +193,16 @@ def describe_failures(devices: Sequence[Any], failed: Mapping[int, str] | set[in
     return ", ".join(parts)
 
 
+def retry_labels(specs: Sequence[Any], bad: Mapping[int, str]) -> dict[str, str]:
+    """``{device: reason}`` for a background retry: ``bad`` is keyed by position in the retried subset
+    (``specs``), so key 0 is the first *retried* camera, not camera 0 of the whole set."""
+    out: dict[str, str] = {}
+    for k, why in bad.items():
+        dev = getattr(specs[k], "device", specs[k]) if 0 <= k < len(specs) else k
+        out[str(dev)] = why
+    return out
+
+
 def degrade_plan(
     devices: Sequence[Any],
     primary: int,
@@ -208,7 +218,8 @@ def degrade_plan(
       never stops hand tracking; the full set is retried in the background);
     * ``("none", primary, why)`` when no camera works at all (nothing is tracked; everything is retried).
 
-    The message names only the cameras that failed, with their real error.
+    The message names only the cameras that failed, with their real error. (Virtual cameras are kept out
+    before this: :func:`away.multicam.capture.pin_camera_set` never puts a legacy index on one.)
     """
     working = [i for i in range(len(devices)) if i not in failed]
     if len(working) >= 2:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import logging
 import sys
 import threading
 import time
@@ -883,13 +884,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
 
         def run_single(idx: Any, until: Any = None) -> None:
-            """Track on one camera (retried while it will not open) until ``until()`` or stop."""
+            """Track on one camera (retried while it will not open) until ``until()`` or stop. ``idx`` is a camera
+            name or index; it is resolved to the camera's current DirectShow index at every (re)open."""
+            hint = self._hint_for(idx)
 
             def open_frames() -> Any:
-                from away.multicam.capture import resolve_device
-
-                dev: Any = resolve_device(idx) if isinstance(idx, str) else idx
-                return camera_frames(dev, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps)
+                return camera_frames(
+                    idx, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps, hint=hint
+                )
 
             CameraLoop(
                 open_frames,
@@ -902,6 +904,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 until=until,
             ).run()
 
+        self._camera_list(log=True)  # the enumerated cameras (source, index, name, virtual) -> away.log
         try:
             if len(self.cfg.hands.cameras) >= 2 and hands is not None:
                 self._multicam_loop(hands, faces, run_single)
@@ -914,6 +917,24 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 if close is not None:
                     with contextlib.suppress(Exception):
                         close()
+
+    def _hint_for(self, device: Any) -> int | None:
+        """The index saved alongside a camera name (used only when no camera list is available)."""
+        h = self.cfg.hands
+        if not h.cameras and device == h.camera_index:
+            return h.camera_hint
+        return next((c.index_hint for c in h.cameras if c.device == device), None)
+
+    def _camera_list(self, log: bool = False) -> list[Any] | None:
+        """The cameras the OS lists now (Windows: DirectShow order), logged when it changed (or ``log``);
+        None when listing fails. Overridden in tests."""
+        try:
+            from away.multicam.capture import list_cameras
+
+            return list_cameras(log_list=True if log else None)
+        except Exception as exc:
+            logging.getLogger("away.cameras").warning("camera listing failed: %s", exc)
+            return None
 
     # ------------------------------------------------------------------------------ multi-camera
     def _start_cameras(self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any) -> list[Any]:
@@ -960,6 +981,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """Track on ``device`` alone; every ``every_s`` probe the failed cameras in the background and return
         (to retry the full multi-camera set) once they all deliver frames. Tracking is never interrupted by a
         probe that still fails."""
+        from away.app.camera_loop import retry_labels
+
         ready = threading.Event()
         done = threading.Event()
 
@@ -973,7 +996,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     bad = self._probe_specs(failed_specs, probe_s)
                 except Exception as exc:
                     bad = {0: f"probe error: {exc}"}
-                self.bus.publish("cameras.retry", {"ok": not bad, "failed": {str(k): v for k, v in bad.items()}})
+                self.bus.publish("cameras.retry", {"ok": not bad, "failed": retry_labels(failed_specs, bad)})
                 if not bad and not done.is_set():
                     ready.set()
                     return
@@ -1006,7 +1029,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         * The captures restart after a hand-over to Settings (camera_share) without restarting the app.
         """
         from away.app.camera_loop import degrade_plan, is_shutdown_error, probe_cameras
-        from away.multicam.capture import FramePairer
+        from away.multicam.capture import FramePairer, pin_camera_set
         from away.multicam.fusion import MultiViewFuser, ViewObs, hand_crop, sharpness_score
         from away.multicam.geometry import load_extrinsics
 
@@ -1027,17 +1050,21 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         ex = load_extrinsics()
         fuser = MultiViewFuser(cams, mc, ex)
         share = self.camera_share
-        devices = [c.device for c in cams]
         timeout = self._probe_timeout(len(cams), probe_s)
         degraded = False
         backoff = retry_s
         after_retry = False
         try:
             while not self.stop_event.is_set():
+                # every attempt: bare indices from older versions are pinned to camera names (a virtual camera at
+                # that index is swapped for a real one: the auto-skip), so each open resolves by name (hot-plug safe)
+                listed = self._camera_list()
+                run_cams = pin_camera_set(cams, listed) if listed else list(cams)
+                devices = [c.device for c in run_cams]
                 session = threading.Event()
                 pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
                 lock = threading.Lock() if self._serial_open() else None
-                threads = self._start_cameras(list(cams), pairer, session, lock)
+                threads = self._start_cameras(run_cams, pairer, session, lock)
                 failed = probe_cameras(threads, pairer.seen, timeout, self.stop_event)
                 if self.stop_event.is_set():
                     self._end_cameras(session, threads)
@@ -1058,7 +1085,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     if mode == "none" or run_single is None:
                         self.stop_event.wait(none_retry_s)
                         continue
-                    self._single_until_retry(run_single, device, [cams[i] for i in sorted(failed)], backoff, probe_s)
+                    self._single_until_retry(
+                        run_single, device, [run_cams[i] for i in sorted(failed)], backoff, probe_s
+                    )
                     after_retry = True
                     continue
                 backoff = retry_s

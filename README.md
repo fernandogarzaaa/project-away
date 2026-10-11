@@ -408,8 +408,9 @@ A laptop webcam and an external camera can work together. A hand that one camera
 that is occluded, is usually clear in the other.
 
 ```bash
-away cameras list                 # device names (V4L2 / Windows PnP / macOS) without opening them
-away cameras add 2                # index, /dev/video2, or part of the name ("brio")
+away cameras list                 # device names (V4L2 / Windows DirectShow / macOS) without opening them
+away cameras use "HD User Facing" # single-camera mode: pick the camera by name
+away cameras add 2                # index, /dev/video2, or part of the name ("brio"); saved by name
 away calibrate-cameras            # wave an open hand through both views for ~20 s
 away calibrate-cameras --method checkerboard --checkerboard 9x6 --square-mm 25   # accurate option
 away calibrate-cameras --print-board board.png --checkerboard 9x6                # printable board
@@ -435,6 +436,18 @@ hands:
     push_distance_m: 0.06
     push_time_s: 0.35
 ```
+
+**Cameras are chosen by name (v0.1.11).** Settings and `away cameras use/add` save the camera's name
+(`hands.camera_index: "HD User Facing"`, or `device:` in `hands.cameras`) plus its current index as a hint
+(`camera_hint` / `index_hint`). The name is resolved to the camera's current index at every open, including
+retries, so a hot-plugged camera can never take its place; two cameras with the same name are told apart by
+their Windows DevicePath or `NAME #2`. Plain integer indices still work. On Windows the list is DirectShow's
+own (`ICreateDevEnum`, the order `cv2.CAP_DSHOW` uses; WMI/PnP only as a logged fallback) and every camera,
+single or multi, is opened with DirectShow (Media Foundation only as a logged fallback). **Virtual cameras**
+(NVIDIA Broadcast, OBS Virtual Camera, Iriun, DroidCam, Camo, Snap Camera, ManyCam, XSplit...) are marked
+`(virtual)` and never picked automatically: an old integer index that now lands on one (NVIDIA Broadcast is
+often DirectShow camera 0) is moved to the first real camera, with a line in `away.log`. Choose one by name
+to use it anyway. The camera list (source, index, name, virtual) is logged at start-up and when it changes.
 
 How it works:
 
@@ -547,11 +560,14 @@ installer on some Windows 11 PCs. If the tray update to v0.1.10 does not take, d
 `ProjectAway-0.1.10-windows-x64-setup.exe` from the releases page and run it once by hand (quit Project
 Away first). Updates after that use the new helper.
 
+The v0.1.10 → v0.1.11 update is the first one installed by the batch helper on a real PC. If it does not
+take, use **Run update installer** in the tray, or run `ProjectAway-0.1.11-windows-x64-setup.exe` by hand.
+
 ## Verified vs untested
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1021 tests (the Settings-window test runs under Xvfb and is skipped without a display); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1055 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow COM test runs only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -563,6 +579,7 @@ Away first). Updates after that use the new helper.
 | Multi-camera fusion | Synthetic: best-view and weighted selection, timestamp pairing and dropout, occlusion handover with no jump, push gesture, 3D pinch rejecting an edge-on false pinch, Cameras-tab model |
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
+| Windows camera enumeration and naming (v0.1.11) | DirectShow list parsing/order, virtual-camera flags, name/DevicePath/`#k` resolution across hot-plug, legacy-index remap (NVIDIA Broadcast at 0, built-in at 1, USB at 2), DirectShow-first opening with logged MSMF fallback, Settings role/gating and retry labels unit-tested with a fake enumerator and fake OpenCV; the ctypes COM enumeration runs on the Windows CI runner against the DirectShow filter category (no camera there); **untested on a real PC with cameras (the reported Acer Predator with NVIDIA Broadcast)** |
 | Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |
 | Steady click, sigmoid curve, dwell, wink, auto-pause guard, cursor ring states, numbers to digits, edit-selection rules | Logic unit-tested with synthetic input |
 | Settings window layout (v0.1.10) | DPI awareness before Tk, `tk scaling` from the real DPI, 10 pt fonts, button padding, scrollable tabs with a pinned bottom bar and a separate wrapped status row; size/scale/wheel/status helpers unit-tested, window rendered and wheel-scrolled under Xvfb at 96 and 144 dpi on a 1366x768 screen; **untested on a real Windows desktop at 125 %/150 % and across mixed-DPI monitors** (Tk 8.6 does not rescale when the window moves to a monitor with a different DPI) |

@@ -536,32 +536,55 @@ def cmd_voice(args: argparse.Namespace) -> int:
 
 
 def cmd_cameras(args: argparse.Namespace) -> int:
-    from away.multicam.capture import list_cameras
+    from away.multicam import capture
 
-    devs = list_cameras(probe=args.probe)
+    devs = capture.list_cameras(probe=args.probe, log_list=True)
     cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
     if args.json:
         print(json.dumps([d.__dict__ for d in devs], indent=2))
         return 0
     if not devs:
         print("no cameras found (none connected, or no permission to /dev/video*)")
+    elif capture.last_source:
+        print(
+            f"source: {capture.last_source}"
+            + ("  (index = DirectShow index)" if capture.last_source == "dshow" else "")
+        )
     for d in devs:
         state = "" if d.ok is None else ("  ok" if d.ok else "  (could not open)")
         if d.in_use:
             state = "  (in use by Project Away)"
-        print(f"{d.index if d.index is not None else '-':>3}  {d.path:<14} {d.name}{state}")
+        virt = " (virtual)" if d.virtual else ""
+        print(f"{d.index if d.index is not None else '-':>3}  {d.path:<14} {d.name}{virt}{state}")
     if cfg.hands.cameras:
         print("\nconfigured (hands.cameras):")
         for c in cfg.hands.cameras:
             print(f"  {c.role:<9} device={c.device!r} {c.width}x{c.height}@{c.fps} hfov={c.hfov_deg}")
     else:
-        print(f"\nsingle-camera mode: hands.camera_index = {cfg.hands.camera_index}")
-        print("add a second camera with `away cameras add DEVICE` (or the Cameras tab in `away settings`)")
+        print(f"\nsingle-camera mode: hands.camera_index = {cfg.hands.camera_index!r}")
+        print("pick it by name with `away cameras use NAME`; add a second one with `away cameras add NAME`")
     return 0
+
+
+def pick_camera(arg: str, devs: list[Any]) -> tuple[int | str, int | None]:
+    """``away cameras add/use`` argument -> ``(what to save, index hint)``: a listed camera is saved by name
+    (``"HD User Facing"``; the DevicePath or ``name #2`` when two share a name), with its index as a hint.
+    A path, or anything not in the list, is saved as given."""
+    from away.multicam.capture import config_device, find_device
+
+    raw: int | str = int(arg) if str(arg).strip().isdigit() else str(arg)
+    if isinstance(raw, str) and raw.startswith(("/dev/", "http://", "https://", "rtsp://")):
+        return raw, None
+    c = find_device(raw, devs) if devs else None
+    if c is None:
+        return raw, None
+    value = config_device(c, devs)
+    return value, (c.index if isinstance(value, str) else None)
 
 
 def cmd_cameras_edit(args: argparse.Namespace) -> int:
     from away.config import CameraSpec
+    from away.multicam.capture import list_cameras
 
     path = _cfg_path(args)
     try:
@@ -569,20 +592,38 @@ def cmd_cameras_edit(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _fail(exc)
     cams = cfg.hands.cameras
-    if args.action == "add":
+    h = cfg.hands
+    if args.action in ("add", "use"):
         if args.device is None:
-            return _fail("usage: away cameras add DEVICE [--role secondary]")
-        dev: int | str = int(args.device) if str(args.device).isdigit() else str(args.device)
-        if not cams:  # going multi-camera: the current single camera becomes the primary
-            cams.append(CameraSpec(cfg.hands.camera_index, "primary", mirror=cfg.hands.mirror))
-        cams.append(CameraSpec(dev, args.role or "secondary", mirror=cfg.hands.mirror))
+            return _fail(
+                f"usage: away cameras {args.action} DEVICE" + (" [--role secondary]" if args.action == "add" else "")
+            )
+        try:
+            devs = list_cameras()
+        except Exception:
+            devs = []
+        dev, hint = pick_camera(args.device, devs)
+        if args.action == "use":
+            if cams:
+                return _fail(
+                    "several cameras are configured; use `away cameras remove` / `add` (or Settings > Cameras)"
+                )
+            h.camera_index, h.camera_hint = dev, hint
+        else:
+            if not cams:  # going multi-camera: the current single camera becomes the primary
+                cams.append(CameraSpec(h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror))
+            cams.append(CameraSpec(dev, args.role or "secondary", index_hint=hint, mirror=h.mirror))
+            if args.role == "primary":
+                for c in cams[:-1]:
+                    c.role = "secondary"
+        print(f"camera: {dev!r}")
     elif args.action == "remove":
         keep = [c for c in cams if str(c.device) != str(args.device)]
         if len(keep) == len(cams):
             return _fail(f"no configured camera {args.device!r}")
         cfg.hands.cameras = keep if len(keep) > 1 else []  # one camera left: back to single-camera mode
-        if len(keep) == 1 and isinstance(keep[0].device, int):
-            cfg.hands.camera_index = keep[0].device
+        if len(keep) == 1:
+            h.camera_index, h.camera_hint = keep[0].device, keep[0].index_hint
     try:
         cfgmod.save(cfg, path)
     except ValueError as exc:
@@ -922,9 +963,11 @@ def build_parser() -> argparse.ArgumentParser:
     vc.add_argument("--config")
     vc.set_defaults(fn=cmd_voice)
 
-    cm = sub.add_parser("cameras", help="list | add DEVICE | remove DEVICE: cameras for multi-camera fusion")
-    cm.add_argument("action", choices=["list", "add", "remove"], nargs="?", default="list")
-    cm.add_argument("device", nargs="?", help="index (1), path (/dev/video2) or part of the camera name")
+    cm = sub.add_parser(
+        "cameras", help="list | use NAME (single camera) | add NAME | remove DEVICE: choose cameras by name"
+    )
+    cm.add_argument("action", choices=["list", "use", "add", "remove"], nargs="?", default="list")
+    cm.add_argument("device", nargs="?", help="camera name (or part of it), index from `away cameras list`, or path")
     cm.add_argument("--role", choices=["primary", "secondary"])
     cm.add_argument("--probe", action="store_true", help="open each camera to check it delivers frames")
     cm.add_argument("--json", action="store_true")

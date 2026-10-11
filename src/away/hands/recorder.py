@@ -48,7 +48,7 @@ def record(  # pragma: no cover - needs a camera
     seconds: float,
     out: Path,
     model_path: Path,
-    camera: int = 0,
+    camera: int | str = 0,
     mirror: bool = True,
     allow_custom: bool = False,
 ) -> list[Path]:

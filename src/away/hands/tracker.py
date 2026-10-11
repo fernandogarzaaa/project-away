@@ -157,12 +157,25 @@ class HandTracker:
 
 
 def camera_frames(
-    index: int = 0, mirror: bool = True, width: int = 640, height: int = 480, fps: int = 0
+    index: int | str = 0,
+    mirror: bool = True,
+    width: int = 640,
+    height: int = 480,
+    fps: int = 0,
+    hint: int | None = None,
+    cv2: Any = None,
 ) -> Iterator[tuple[float, Any]]:
-    """Yield (monotonic time, RGB frame). Mirrored by default so motion matches the screen."""
-    import cv2
+    """Yield (monotonic time, RGB frame). Mirrored by default so motion matches the screen.
 
-    cap = cv2.VideoCapture(index)
+    ``index`` is a camera name or an index, resolved to the camera's current index when the generator starts
+    (so every retry re-resolves it and a hot-plugged camera cannot redirect it). On Windows the camera is
+    opened with DirectShow, the numbering ``away cameras list`` shows (see :func:`open_video`)."""
+    if cv2 is None:  # pragma: no cover - real OpenCV
+        import cv2
+    from away.multicam.capture import open_video, resolve_device
+
+    src = resolve_device(index, hint=hint)
+    cap = open_video(src, cv2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     if fps > 0:
@@ -182,12 +195,19 @@ def camera_frames(
         cap.release()
 
 
-def probe_camera(index: int = 0) -> tuple[bool, str]:
+def probe_camera(index: int | str = 0, hint: int | None = None, cv2: Any = None) -> tuple[bool, str]:
+    if cv2 is None:  # pragma: no cover - real OpenCV
+        try:
+            import cv2
+        except ImportError:
+            return False, "opencv not installed (pip install 'project-away[hands]')"
+    from away.multicam.capture import open_video, resolve_device
+
     try:
-        import cv2
-    except ImportError:
-        return False, "opencv not installed (pip install 'project-away[hands]')"
-    cap = cv2.VideoCapture(index)
+        src = resolve_device(index, hint=hint)
+    except ValueError as exc:
+        return False, str(exc)
+    cap = open_video(src, cv2)
     try:
         if not cap.isOpened():
             return False, f"camera {index} could not be opened (no device or permission denied)"

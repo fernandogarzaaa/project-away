@@ -89,13 +89,14 @@ CAMERA_ROLES = ("primary", "secondary")
 
 @dataclass
 class CameraSpec:
-    device: int | str = 0  # OpenCV index, or a device path / name (/dev/video2, "Logitech BRIO")
+    device: int | str = 0  # camera name ("HD User Facing"), OpenCV index, or device path (/dev/video2)
     role: str = "primary"  # primary (cursor frame of reference) | secondary
     width: int = 640
     height: int = 480
     fps: int = 30
     hfov_deg: float = 70.0  # horizontal field of view, used to approximate intrinsics before calibration
     mirror: bool = True
+    index_hint: int | None = None  # index the named camera had when it was chosen (used only with no camera list)
 
 
 @dataclass
@@ -116,7 +117,9 @@ class MultiCamConfig:
 @dataclass
 class HandsConfig:
     enabled: bool = True
-    camera_index: int = 0  # single-camera mode (used when `cameras` is empty)
+    # single-camera mode (used when `cameras` is empty): a camera name (stable; what Settings saves) or an index
+    camera_index: int | str = 0
+    camera_hint: int | None = None  # index the named camera had when it was chosen (used only with no camera list)
     max_hands: int = 2  # hands MediaPipe looks for; 2 lets `prefer` ignore the other hand (1 = lighter on CPU)
     prefer: str = "any"  # which hand drives the cursor: right | left | any (any = keep the hand being tracked)
     mirror: bool = True
@@ -403,6 +406,8 @@ def validate(cfg: AppConfig) -> None:
     bc = c.big_cursor_size
     if isinstance(bc, bool) or not isinstance(bc, int) or not 0 <= bc <= 5:
         raise ValueError(f"hands.cursor.big_cursor_size must be an integer in [0, 5] (0 = off), got {bc!r}")
+    validate_camera_device("hands.camera_index", cfg.hands.camera_index)
+    validate_hint("hands.camera_hint", cfg.hands.camera_hint)
     validate_cameras(cfg.hands.cameras)
     if cfg.hands.multicam.fusion not in ("weighted", "best_view"):
         raise ValueError(f"hands.multicam.fusion must be weighted|best_view, got {cfg.hands.multicam.fusion!r}")
@@ -438,13 +443,26 @@ def validate(cfg: AppConfig) -> None:
         raise BindingsError(["bindings: invalid"])
 
 
+def validate_camera_device(path: str, device: Any) -> None:
+    """A camera is a name (``"HD User Facing"``), an index (0, 1, ...) or a device path."""
+    if isinstance(device, bool) or not isinstance(device, (int, str)) or str(device).strip() == "":
+        raise ValueError(f"{path} must be a camera name, an index (0, 1, ...) or a device path, got {device!r}")
+    if isinstance(device, int) and device < 0:
+        raise ValueError(f"{path} must not be negative, got {device!r}")
+
+
+def validate_hint(path: str, hint: Any) -> None:
+    if hint is not None and (isinstance(hint, bool) or not isinstance(hint, int) or hint < 0):
+        raise ValueError(f"{path} must be a camera index (0, 1, ...) or empty, got {hint!r}")
+
+
 def validate_cameras(cams: list[CameraSpec]) -> None:
     for i, cam in enumerate(cams):
         p = f"hands.cameras[{i}]"
         if cam.role not in CAMERA_ROLES:
             raise ValueError(f"{p}.role must be primary|secondary, got {cam.role!r}")
-        if isinstance(cam.device, bool) or not isinstance(cam.device, (int, str)) or cam.device == "":
-            raise ValueError(f"{p}.device must be an index (0, 1, ...) or a device path/name")
+        validate_camera_device(f"{p}.device", cam.device)
+        validate_hint(f"{p}.index_hint", cam.index_hint)
         for k, lo, hi in (("width", 160, 7680), ("height", 120, 4320), ("fps", 5, 240), ("hfov_deg", 20.0, 170.0)):
             v = getattr(cam, k)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:

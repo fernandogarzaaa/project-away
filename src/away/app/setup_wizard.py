@@ -122,7 +122,7 @@ def run(
         from away.hands.tracker import probe_camera
         from away.voice.dictation import probe_microphone
 
-        ok, msg = probe_camera(cfg.hands.camera_index)
+        ok, msg = probe_camera(cfg.hands.camera_index, hint=cfg.hands.camera_hint)
         rep.probes["camera"] = msg
         out(f"  {msg}")
         ok2, msg2 = probe_microphone()

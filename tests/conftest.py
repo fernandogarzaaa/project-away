@@ -35,3 +35,16 @@ def fixed_hardware(monkeypatch):
     monkeypatch.setattr(hardware, "cached", lambda: hw)
     monkeypatch.setattr(gpupack, "cublas_available", lambda platform=None: False)
     yield hw
+
+
+@pytest.fixture(autouse=True)
+def no_real_camera_listing(monkeypatch):
+    """Hermetic cameras: no DirectShow COM enumeration (Windows CI) and no camera listing from the app runner,
+    unless a test injects its own enumerator / list."""
+    from away.app.runner import AwayApp
+    from away.multicam import capture
+
+    monkeypatch.setattr(capture, "windows_dshow_cameras", lambda category=capture.CLSID_VideoInputDeviceCategory: [])
+    monkeypatch.setattr(AwayApp, "_camera_list", lambda self, log=False: None)
+    capture._last_logged = None
+    yield

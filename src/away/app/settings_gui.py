@@ -396,6 +396,8 @@ class SettingsModel:
         return None
 
     # -------------------------------------------------------------- cameras
+    MULTI_ONLY_HINT = "Calibrate and Live confidence need two cameras: add a second camera first."
+
     def app_cameras(self) -> set[str]:
         """Devices the running Project Away app holds right now (from its camera-owner heartbeat)."""
         share = getattr(self, "camera_share", None)
@@ -407,6 +409,24 @@ class SettingsModel:
             return set(share.owned_devices())
         except Exception:
             return set()
+
+    def _listed(self) -> list[Any]:
+        """The cameras the last 'Refresh list' found (empty before the first one, or when listing failed)."""
+        return list(getattr(self, "listed", []) or [])
+
+    def device_display(self, device: Any) -> str:
+        """The true name of a configured camera for the Device column: ``1: HD User Facing``,
+        ``0: Camera (NVIDIA Broadcast) (virtual)``, or ``Logitech BRIO (not connected)``."""
+        from away.multicam.capture import find_device
+
+        devs = self._listed()
+        c = find_device(device, devs) if devs and not isinstance(device, bool) else None
+        if c is None:
+            if devs and isinstance(device, str) and not device.strip().isdigit():
+                return f"{device} (not connected)"
+            return str(device)
+        idx = c.index if c.index is not None else c.path
+        return f"{idx}: {c.name}" + (" (virtual)" if c.virtual else "")
 
     def camera_rows(self) -> list[dict[str, Any]]:
         """Cameras for the Cameras tab. Single-camera mode shows the implicit camera
@@ -430,28 +450,59 @@ class SettingsModel:
             rows = [{**vars(c), "implicit": False} for c in h.cameras]
         for r in rows:
             r["in_use"] = str(r["device"]) in busy
+            r["label"] = self.device_display(r["device"])
         return rows
 
     def camera_mode(self) -> str:
         n = len(self.cfg.hands.cameras)
         return f"{n} cameras (fusion: {self.cfg.hands.multicam.fusion})" if n >= 2 else "single camera"
 
+    def role_default(self, selected: int | None = None) -> str:
+        """What the Role picker shows: primary in single-camera mode (the only camera is the primary, so Apply on
+        it just works), the selected camera's own role, or secondary for a camera about to be added."""
+        cams = self.cfg.hands.cameras
+        if not cams:
+            return "primary"
+        if selected is not None and 0 <= selected < len(cams):
+            return cams[selected].role
+        return "secondary"
+
+    def multi_tools(self) -> tuple[bool, str]:
+        """Are Calibrate / Live confidence usable? ``(enabled, hint)``: they need two configured cameras."""
+        if len(self.cfg.hands.cameras) >= 2:
+            return True, ""
+        return False, self.MULTI_ONLY_HINT
+
     def device_choices(self, devices: list[Any] | None = None) -> list[str]:
-        """``"0: Integrated Webcam"`` entries for the device pickers.
+        """``"1: HD User Facing"`` entries for the device pickers (``(virtual)`` marks NVIDIA Broadcast & co).
 
         Never empty while a camera is configured: devices the running app holds and the configured ones are
         always listed, even when the OS listing fails or misses them (Windows cameras are exclusive, so a
         held camera cannot be probed)."""
+        from away.multicam.capture import config_device, device_label, find_device, list_cameras
+
         busy = self.app_cameras()
         if devices is None:
-            from away.multicam.capture import list_cameras
-
             try:
-                devices = list_cameras(in_use=busy)
+                devices = list_cameras(in_use=busy, log_list=True)  # 'Refresh list' -> away.log
             except Exception:
                 devices = []
         devices = list(devices)
+        self.listed = devices
+        values: dict[str, Any] = {}
         have = {str(d.index if d.index is not None else d.path) for d in devices} | {str(d.path) for d in devices}
+        have |= {d.name for d in devices} | {device_label(d, devices) for d in devices}
+        have |= {d.device_path for d in devices if d.device_path}
+        out: list[str] = []
+        for d in devices:
+            held = getattr(d, "in_use", False) or str(d.index) in busy or device_label(d, devices) in busy
+            label = (
+                f"{d.index if d.index is not None else d.path}: {d.name}"
+                + (" (virtual)" if d.virtual else "")
+                + (" (in use by Project Away)" if held else "")
+            )
+            values[label] = config_device(d, devices) if d.index is not None else d.path
+            out.append(label)
         h = self.cfg.hands
         configured = [c.device for c in h.cameras] if h.cameras else [h.camera_index]
         extra: list[tuple[str, str]] = []
@@ -459,19 +510,35 @@ class SettingsModel:
             key = str(dev)
             if key in have or key in (k for k, _ in extra):
                 continue
-            label = "in use by Project Away" if key in busy else "configured"
-            extra.append((key, f"{key}: camera {key} ({label})" if key.isdigit() else f"{key}: {key} ({label})"))
+            if devices and find_device(dev, devices) is not None:
+                continue
+            state = "in use by Project Away" if key in busy else "configured"
+            label = f"{key}: camera {key} ({state})" if key.isdigit() else f"{key} ({state})"
+            values[label] = int(key) if key.isdigit() else dev
+            extra.append((key, label))
         self.known_devices = have | {k for k, _ in extra}
-        return [
-            f"{d.index if d.index is not None else d.path}: {d.name}"
-            + (" (in use by Project Away)" if getattr(d, "in_use", False) or str(d.index) in busy else "")
-            for d in devices
-        ] + [label for _, label in extra]
+        self.choice_values = values
+        return out + [label for _, label in extra]
 
-    @staticmethod
-    def parse_device(choice: str) -> int | str:
+    def parse_device(self, choice: Any) -> int | str:
+        """A picker entry -> what is saved: the camera's name (stable when cameras are plugged in or reordered),
+        or its index when the OS gave no name."""
+        if isinstance(choice, int) and not isinstance(choice, bool):
+            return choice
+        values = getattr(self, "choice_values", {}) or {}
+        if choice in values:
+            return values[choice]  # type: ignore[no-any-return]
         head = str(choice).split(":", 1)[0].strip()
         return int(head) if head.isdigit() else head
+
+    def _hint(self, device: Any) -> int | None:
+        """The current index of a camera saved by name (kept as a hint for when no list is available)."""
+        from away.multicam.capture import find_device
+
+        if isinstance(device, int) or not self._listed():
+            return None
+        c = find_device(device, self._listed())
+        return c.index if c is not None else None
 
     def _cams_try(self, new: list[Any]) -> str | None:
         from away.config import validate_cameras
@@ -488,28 +555,32 @@ class SettingsModel:
         the multi-camera setup start with a dead view)."""
         known = getattr(self, "known_devices", None)
         if known and str(device) not in known:
-            return f"camera {device} was not found; pick a device from the list (press Refresh list)"
+            return f"camera {device} not found; pick one from the list (Refresh list)"
         return None
 
     def add_camera(self, device: int | str, role: str = "secondary") -> str | None:
         from away.config import CameraSpec
 
+        device = self.parse_device(device)
         err = self._unknown_device(device)
         if err:
             return err
-        new = [copy.copy(c) for c in self.cfg.hands.cameras]
+        h = self.cfg.hands
+        new = [copy.copy(c) for c in h.cameras]
         if not new:  # leaving single-camera mode: the current camera becomes the primary
-            new.append(CameraSpec(self.cfg.hands.camera_index, "primary", mirror=self.cfg.hands.mirror))
-        new.append(CameraSpec(device, role, mirror=self.cfg.hands.mirror))
+            new.append(CameraSpec(h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror))
+            if role == "primary":
+                new[0].role = "secondary"
+        new.append(CameraSpec(device, role, index_hint=self._hint(device), mirror=h.mirror))
         return self._cams_try(new)
 
     def remove_camera(self, i: int) -> str | None:
         if not self.cfg.hands.cameras:
-            return "this is the only camera (single-camera mode); pick another device for it instead"
+            return "it is the only camera; pick another device for it instead"
         new = [copy.copy(c) for j, c in enumerate(self.cfg.hands.cameras) if j != i]
         if len(new) == 1:  # back to single-camera mode
-            if isinstance(new[0].device, int):
-                self.cfg.hands.camera_index = new[0].device
+            self.cfg.hands.camera_index = new[0].device
+            self.cfg.hands.camera_hint = new[0].index_hint
             new = []
         return self._cams_try(new)
 
@@ -533,6 +604,7 @@ class SettingsModel:
                 return "field of view must be a number"
         elif field == "device":
             value = self.parse_device(value)
+            new[i].index_hint = self._hint(value)
         if field == "role" and value == "primary":  # promoting one demotes the old primary
             for c in new:
                 c.role = "secondary"
@@ -544,9 +616,12 @@ class SettingsModel:
         h, perf = self.cfg.hands, self.cfg.performance
         if field == "device":
             dev = self.parse_device(value)
-            if not isinstance(dev, int):
-                return "single-camera mode takes a numbered device (0, 1, ...); add a second camera to use a path"
+            try:
+                cfgmod.validate_camera_device("hands.camera_index", dev)
+            except ValueError as exc:
+                return str(exc)
             h.camera_index = dev
+            h.camera_hint = self._hint(dev)
             return None
         if field == "role":
             return None if value == "primary" else "the only camera is always the primary"
@@ -1313,7 +1388,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_dev_cb.grid(row=2, column=1, sticky="we", padx=4)
         ttk.Button(f, text="Refresh list", command=self._cam_refresh_devices).grid(row=2, column=2)
         ttk.Label(f, text="Role:").grid(row=3, column=0, sticky="w")
-        self.cam_role = tk.StringVar(value="secondary")
+        self.cam_role = tk.StringVar(value=self.m.role_default())
         ttk.Combobox(f, textvariable=self.cam_role, values=["primary", "secondary"], state="readonly", width=12).grid(
             row=3, column=1, sticky="w", padx=4
         )
@@ -1327,9 +1402,17 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ttk.Button(btns, text="Add camera", command=self._cam_add).pack(side="left", padx=2)
         ttk.Button(btns, text="Apply to selected", command=self._cam_apply).pack(side="left", padx=2)
         ttk.Button(btns, text="Remove selected", command=self._cam_remove).pack(side="left", padx=2)
-        ttk.Button(btns, text="Calibrate (wave hand ~20 s)", command=self._cam_calibrate).pack(side="left", padx=8)
+        self.cam_calib_btn = ttk.Button(btns, text="Calibrate (wave hand ~20 s)", command=self._cam_calibrate)
+        self.cam_calib_btn.pack(side="left", padx=8)
         self.cam_live_btn = ttk.Button(btns, text="Live confidence", command=self._cam_live)
         self.cam_live_btn.pack(side="left", padx=2)
+        self.cam_multi_hint = tk.StringVar()
+        ttk.Label(f, textvariable=self.cam_multi_hint, foreground="#555").grid(
+            row=9, column=0, columnspan=6, sticky="w", pady=(2, 0)
+        )
+        self.cam_tree.bind(
+            "<<TreeviewSelect>>", lambda _e: self.cam_role.set(self.m.role_default(self._cam_selected()))
+        )
         ttk.Label(f, text="Fusion:").grid(row=6, column=0, sticky="w")
         self.cam_fusion = tk.StringVar(value=self.m.cfg.hands.multicam.fusion)
         cb = ttk.Combobox(f, textvariable=self.cam_fusion, values=["weighted", "best_view"], state="readonly", width=12)
@@ -1356,6 +1439,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _cam_refresh_devices(self) -> None:
         self.cam_dev_cb["values"] = self.m.device_choices()
+        self._cam_refresh()  # the Device column shows the names from the fresh list
 
     def _cam_selected(self) -> int | None:
         sel = self.cam_tree.selection()
@@ -1367,12 +1451,19 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         for i, r in enumerate(self.m.camera_rows()):
             conf = self._cam_confs[i] if i < len(self._cam_confs) else None
             bar = "-" if conf is None else ("#" * round(conf * 10)).ljust(10, ".") + f" {conf:.2f}"
-            dev = str(r["device"]) + (" (in use by Project Away)" if r.get("in_use") else "")
+            dev = str(r.get("label") or r["device"]) + (" (in use by Project Away)" if r.get("in_use") else "")
             role = r["role"] + (" (default)" if r.get("implicit") else "")
             self.cam_tree.insert(
                 "", "end", values=(role, dev, f"{r['width']}x{r['height']}", r["fps"], r["hfov_deg"], bar)
             )
         self.cam_calib.set(self.m.calibration_status())
+        ok, hint = self.m.multi_tools()
+        live = self._cam_thread is not None and self._cam_thread.is_alive()
+        self.cam_calib_btn.configure(state="normal" if ok else "disabled")
+        self.cam_live_btn.configure(state="normal" if ok or live else "disabled")
+        self.cam_multi_hint.set(hint)
+        if self._cam_selected() is None:
+            self.cam_role.set(self.m.role_default())
 
     def _cam_add(self) -> None:
         if not self.cam_dev.get():
@@ -1405,8 +1496,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _cam_calibrate(self) -> None:
         import subprocess
 
-        if len(self.m.cfg.hands.cameras) < 2:
-            self._report("add a second camera first")
+        ok, hint = self.m.multi_tools()
+        if not ok:
+            self._report(hint)
             return
         if self.m.dirty:
             self._on_save()
@@ -1456,8 +1548,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self._cam_stop.set()
             self.cam_live_btn.configure(text="Live confidence")
             return
-        if len(self.m.cfg.hands.cameras) < 2:
-            self._report("add a second camera first")
+        ok, hint = self.m.multi_tools()
+        if not ok:
+            self._report(hint)
             return
         self._cam_stop.clear()
         self._cam_thread = threading.Thread(
@@ -1776,6 +1869,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
 
 def main(config_path: Path | None = None, argv: list[str] | None = None) -> int:
+    if getattr(sys, "frozen", False):  # pragma: no cover - installed app
+        from away.app.frozen import setup_logging
+
+        setup_logging()  # away.* INFO (the camera list on 'Refresh list'...) -> away.log
     try:
         model = SettingsModel(path=config_path)
     except ValueError as exc:

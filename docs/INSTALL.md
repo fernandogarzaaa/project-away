@@ -259,6 +259,29 @@ away run
   over to Settings automatically; close Zoom or Teams first. A secondary camera that cannot be opened is
   skipped (one notification) and tracking continues on the other.
 - **Linux:** each USB camera exposes extra `/dev/video*` metadata nodes. `away cameras list` hides them.
+
+### Choosing a camera by name, and virtual cameras (NVIDIA Broadcast, OBS...)
+
+Project Away saves the camera you pick by its **name** (for example `HD User Facing`), so plugging in
+another webcam or reordering USB ports can never switch it to a different camera. On Windows the list
+comes from DirectShow, the same list OpenCV opens, so the number shown next to a name is the number that
+really opens it.
+
+```bash
+away cameras list                 # index, name, and "(virtual)" for software cameras
+away cameras use "HD User Facing" # single camera: pick it by name (part of the name works too)
+away cameras add "USB2.0"         # add a second camera by name
+```
+
+- **Virtual cameras** such as *Camera (NVIDIA Broadcast)*, *OBS Virtual Camera*, Iriun, DroidCam, Camo,
+  Snap Camera, ManyCam or XSplit appear in the list marked **(virtual)**. They usually take index 0, ahead
+  of the real webcam, and Windows' own device list does not show them. Project Away never picks one on
+  its own; choose it by name if you really want its (processed) picture.
+- Settings written by v0.1.10 or older store a number. If that number now points at a virtual camera,
+  the first real camera is used instead (the log says so). Pick your camera once in **Settings → Cameras**
+  (or `away cameras use NAME`) to store it by name.
+- Two identical webcams share a name; they are told apart by their Windows device path (or `NAME #2`).
+- The camera list (source, index, name, virtual) is written to `away.log` at start-up and whenever it changes.
 - Remove the second camera with `away cameras remove 2`. With one camera left, Away returns to
   single-camera mode.
 
