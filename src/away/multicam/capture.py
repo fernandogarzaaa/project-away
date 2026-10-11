@@ -51,7 +51,7 @@ def list_cameras(
             continue
         name_file = Path(node) / "name"
         name = name_file.read_text().strip() if name_file.exists() else base
-        out.append(CameraDevice(_node_num(node), os.path.join(dev, base), name))
+        out.append(CameraDevice(_node_num(node), dev.rstrip("/") + "/" + base, name))  # V4L paths are POSIX
     if probe:  # pragma: no cover - opens devices
         out = [_probe(c) for c in out]
     return out
