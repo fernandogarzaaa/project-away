@@ -170,9 +170,10 @@ def camera_frames(
     ``index`` is a camera name or an index, resolved to the camera's current index when the generator starts
     (so every retry re-resolves it and a hot-plugged camera cannot redirect it). On Windows the camera is
     opened with DirectShow, the numbering ``away cameras list`` shows (see :func:`open_video`)."""
+    from away.multicam.capture import load_cv2, open_video, resolve_device
+
     if cv2 is None:  # pragma: no cover - real OpenCV
-        import cv2
-    from away.multicam.capture import open_video, resolve_device
+        cv2 = load_cv2()
 
     src = resolve_device(index, hint=hint)
     cap = open_video(src, cv2)
@@ -196,12 +197,13 @@ def camera_frames(
 
 
 def probe_camera(index: int | str = 0, hint: int | None = None, cv2: Any = None) -> tuple[bool, str]:
+    from away.multicam.capture import load_cv2, open_video, resolve_device
+
     if cv2 is None:  # pragma: no cover - real OpenCV
         try:
-            import cv2
+            cv2 = load_cv2()
         except ImportError:
             return False, "opencv not installed (pip install 'project-away[hands]')"
-    from away.multicam.capture import open_video, resolve_device
 
     try:
         src = resolve_device(index, hint=hint)

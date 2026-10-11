@@ -448,13 +448,19 @@ def _windows() -> bool:
     return sys.platform.startswith("win")
 
 
+def load_cv2() -> Any:  # pragma: no cover - real OpenCV
+    import cv2
+
+    return cv2
+
+
 def open_video(src: int | str, cv2: Any = None) -> Any:
     """``cv2.VideoCapture`` for ``src``. On Windows an integer index is opened with DirectShow, the backend whose
     numbering :func:`list_cameras` reports (and that lists virtual cameras); Media Foundation is tried only when
     DirectShow cannot open it, and that is logged (MSMF numbers cameras its own way). Everything else uses
     OpenCV's default backend."""
     if cv2 is None:  # pragma: no cover - real OpenCV
-        import cv2
+        cv2 = load_cv2()
     if not (_windows() and isinstance(src, int)):
         return cv2.VideoCapture(src)
     cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
