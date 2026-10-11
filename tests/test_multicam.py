@@ -2,7 +2,6 @@
 
 import math
 
-import cv2
 import numpy as np
 import pytest
 
@@ -24,6 +23,8 @@ from away.multicam.fusion import (
     view_confidence,
     visibility,
 )
+
+cv2 = pytest.importorskip("cv2")
 
 W1, H1, W2, H2 = 640, 480, 1280, 720
 

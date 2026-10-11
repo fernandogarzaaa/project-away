@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e ".[dev]" Pillow
+      - run: pip install -e ".[dev]" Pillow opencv-python-headless
       - name: Core tests (torch tests self-skip without the [train] extra)
         run: pytest -p no:warnings --cov=away --cov-report=term-missing:skip-covered
 
