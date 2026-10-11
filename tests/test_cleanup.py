@@ -69,6 +69,10 @@ def test_scratch_that_after_correction_marker():
     assert C.apply_scratch_that("Deploy tonight no wait scratch that deploy tomorrow") == "deploy tomorrow"
     assert C.apply_scratch_that("Keep this. Drop this actually no scratch that. And this.") == "Keep this. And this."
     assert C.apply_scratch_that("no wait scratch that hi") == "hi"
+    # correction markers ending in ! or ? are still commands, not sentence text
+    assert C.apply_scratch_that("Deploy tonight. no wait! scratch that deploy tomorrow.") == "deploy tomorrow."
+    assert C.apply_scratch_that("Deploy tonight. no wait? scratch that deploy tomorrow.") == "deploy tomorrow."
+    assert C.apply_scratch_that("Keep this. Drop this actually no! scratch that. And this.") == "Keep this. And this."
     # plain scratch-that behaviour is unchanged
     assert C.apply_scratch_that("Deploy tonight scratch that deploy tomorrow.") == "deploy tomorrow."
 

@@ -43,7 +43,7 @@ SCRATCH_RE = re.compile(r"\bscratch that\b[,.!?]?", re.IGNORECASE)
 CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.]?\s*", re.IGNORECASE)
 # a correction marker at the very end of the text before "scratch that" is a
 # command, not part of the sentence being scratched
-_TRAILING_CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.]?\s*$", re.IGNORECASE)
+_TRAILING_CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.!?]?\s*$", re.IGNORECASE)
 _SENT_END = re.compile(r"[.!?\n]")
 _NUM = re.compile(r"^\d+(?:[.:]\d+)?$")
 
