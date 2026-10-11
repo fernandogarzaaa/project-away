@@ -194,8 +194,19 @@ class MouseController:
             # double_click is the *second* tap: one more click makes the OS see a double click
             self.backend.click(1)
         elif ev.kind == "drag_start":
-            self.backend.press()
+            # A backend call may raise after the OS accepted the button-down
+            # event. Mark it as potentially held before pressing, then make a
+            # best-effort release without masking the original failure.
             self.button_down = True
+            try:
+                self.backend.press()
+            except BaseException:
+                try:
+                    self.backend.release()
+                except BaseException:
+                    pass
+                self.button_down = False
+                raise
         elif ev.kind == "drag_end":
             self._release_if_down()
         elif ev.kind == "scroll":
