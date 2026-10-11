@@ -251,7 +251,13 @@ away run
 - Re-run calibration after you move either camera. Calibration data is stored in the data folder below
   as `camera_extrinsics.json`.
 - **Settings → Cameras** does the same with pickers, a calibrate button and live per-camera confidence.
-- **Windows:** some webcams can be opened by only one app at a time. Close Zoom or Teams first.
+  While Project Away is running, *Test gesture*, *Live confidence* and *Calibrate* ask it to hand the
+  cameras over and take them back afterwards. Calibration progress and the result ("calibrated,
+  reprojection error X px") appear in the status line; the full output is in `calibration.log` in the
+  data folder.
+- **Windows:** some webcams can be opened by only one app at a time. Project Away hands its own cameras
+  over to Settings automatically; close Zoom or Teams first. A secondary camera that cannot be opened is
+  skipped (one notification) and tracking continues on the other.
 - **Linux:** each USB camera exposes extra `/dev/video*` metadata nodes. `away cameras list` hides them.
 - Remove the second camera with `away cameras remove 2`. With one camera left, Away returns to
   single-camera mode.

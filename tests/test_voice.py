@@ -85,7 +85,9 @@ def test_make_vad_fallback(monkeypatch):
 
 def test_whisper_prompt():
     assert whisper_prompt(None, []) is None
-    assert whisper_prompt("Slack", ["Inan", "GitHub"]) == "Vocabulary: Inan, GitHub. Dictating into Slack."
+    # the focused app is never in the prompt: Whisper echoed "Dictating into Slack." into Slack (v0.1.6 fix)
+    assert whisper_prompt("Slack", ["Inan", "GitHub"]) == "Vocabulary: Inan, GitHub."
+    assert whisper_prompt("Slack", []) is None
     assert whisper_prompt(None, ["x"] * 50).count("x") == 40
 
 
@@ -156,7 +158,7 @@ def test_dictation_happy_path():
     assert r.seconds == pytest.approx(len(utterance()) / SR)
     n_samples, prompt = asr.calls[0]
     assert n_samples < len(utterance())  # VAD trimmed the silence
-    assert prompt == "Vocabulary: Inan. Dictating into Notes."
+    assert prompt == "Vocabulary: Inan."
     topics = [e.topic for e in bus.history()]
     assert topics == ["dictation.start", "dictation.result"]
     assert bus.history("dictation.result")[0].data == {"status": "ok", "text": "Hello there friend."}

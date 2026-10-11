@@ -535,3 +535,26 @@ def test_calibrate_cli_writes_status_on_error(tmp_path):
     assert cli.main(["calibrate-cameras", "--config", str(cfgp), "--status-file", str(st)]) != 0
     data = json.loads(Path(st).read_text())
     assert data["state"] == "failed" and "two cameras" in data["message"]
+
+
+def test_no_subprocess_hardcodes_python_dash_m_away():
+    """``sys.executable -m away`` is wrong in the frozen build (sys.executable is ProjectAway.exe): every
+    child-process argv goes through ``away.app.frozen.away_command``."""
+    src = Path(__file__).resolve().parents[1] / "src" / "away"
+    offenders = [
+        str(p.relative_to(src))
+        for p in src.rglob("*.py")
+        if p.name != "frozen.py" and '"-m", "away"' in p.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_tray_settings_command_frozen(monkeypatch):
+    import sys
+
+    from away.app.tray import TrayController
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert TrayController.settings_command() == [sys.executable, "settings"]
+    monkeypatch.delattr(sys, "frozen")
+    assert TrayController.settings_command()[1:] == ["-m", "away", "settings"]

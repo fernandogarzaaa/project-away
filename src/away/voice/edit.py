@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from away.voice.cleanup import RuleCleaner, tidy
+from away.voice.hallucination import clean_transcript
 from away.voice.numbers import words_to_digits
 
 EDIT_SYSTEM_PROMPT = (
@@ -201,6 +202,8 @@ class SelectionEditor:
         audio = np.concatenate(self._chunks) if self._chunks else np.zeros(0, np.float32)
         self._chunks = []
         instruction = self.asr.transcribe(audio, None) if len(audio) else ""
+        # "Thank you." on a silent recording must not become an edit instruction
+        instruction = clean_transcript(instruction, None, (), len(audio) / self.sample_rate)[0]
         new, method = apply_edit(instruction, self._selection, self.llm)
         if method != "unchanged":
             self.clip.set(new)

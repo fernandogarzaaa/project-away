@@ -31,6 +31,7 @@ from away.events import EventBus
 from away.voice.asr import ASRBackend
 from away.voice.context import whisper_prompt
 from away.voice.dictation import Cleaner, DictationSession
+from away.voice.hallucination import clean_transcript
 from away.voice.output import TextSink
 
 WAKE_LEADS = ("hey", "ok", "okay", "hi")
@@ -336,13 +337,20 @@ class AmbientSession:
     def process(self, u: Utterance) -> AmbientResult:
         seconds = len(u.audio) / self.ep.sr
         app = self.context() if self.context else None
-        raw = self.asr.transcribe(u.audio, whisper_prompt(app, self.vocabulary))
+        prompt = whisper_prompt(app, self.vocabulary)
+        heard = self.asr.transcribe(u.audio, prompt)
         u.audio = np.zeros(0, dtype=np.float32)  # privacy: the audio is gone once transcribed
+        commands = self.commands()
+        if normalize_phrase(heard) in commands:  # a bound phrase is never a hallucination ("thank you")
+            raw, dropped = heard, ""
+        else:
+            raw, why = clean_transcript(heard, prompt, self.vocabulary, seconds)
+            dropped = why if not raw and heard.strip() else ""
         gate = self.gate(u.t0, u.t1) if (self.gate is not None and not self.wake_word) else None
         now = self.clock()
         d = decide(
             raw,
-            commands=self.commands(),
+            commands=commands,
             wake_word=self.wake_word,
             in_wake_window=now <= self._wake_until,
             gate=gate,
@@ -351,7 +359,9 @@ class AmbientSession:
             fallback=self.fallback,
             commands_enabled=self.commands_enabled,
         )
-        res = AmbientResult(d, raw=raw, seconds=seconds, meta={"app": app, "gate": gate})
+        if dropped:
+            d = Decision("ignore", f"dropped: {dropped}")
+        res = AmbientResult(d, raw=raw or heard, seconds=seconds, meta={"app": app, "gate": gate})
         if d.kind == "wake":
             self._wake_until = now + self.wake_window
         elif d.kind == "command" and d.action is not None:

@@ -115,9 +115,9 @@ class TrayController:
     @staticmethod
     def settings_command() -> list[str]:
         """argv that opens the settings window in its own process (Tk and pystray each want the main thread)."""
-        if getattr(sys, "frozen", False):  # PyInstaller build: the app exe is the `away` CLI
-            return [sys.executable, "settings"]
-        return [sys.executable, "-m", "away", "settings"]
+        from away.app.frozen import away_command  # frozen: the app exe is the `away` CLI (no `-m away`)
+
+        return away_command(["settings"])
 
     def is_idle(self, idle_s: float = 600.0, now: float | None = None) -> bool:
         """Safe moment for a silent auto-update: gestures paused, or no action fired for ``idle_s``."""

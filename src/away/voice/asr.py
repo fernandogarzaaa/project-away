@@ -9,6 +9,8 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from away.voice.hallucination import join_segments
+
 WHISPER_MODELS = ("large-v3-turbo", "large-v3", "medium", "small", "base", "tiny", "distil-large-v3")
 
 
@@ -94,7 +96,8 @@ def whisper_transcribe(
     beam_size: int = 5,
 ) -> str:
     """Call ``WhisperModel.transcribe`` with the vocabulary as ``initial_prompt`` and, when the installed
-    faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``."""
+    faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``. Silent-segment hallucinations are
+    removed (:func:`away.voice.hallucination.segment_ok`)."""
     fn = model.transcribe  # type: ignore[attr-defined]
     kw: dict[str, object] = {
         "language": language,
@@ -106,7 +109,8 @@ def whisper_transcribe(
     if hotwords and supports_kwarg(fn, "hotwords"):
         kw["hotwords"] = hotwords
     segments, _info = fn(np.asarray(audio, dtype=np.float32), **kw)
-    return " ".join(s.text.strip() for s in segments).strip()
+    # segments Whisper produced over silence (high no_speech_prob AND low avg_logprob) are dropped
+    return join_segments(segments)
 
 
 class ParakeetASR:  # pragma: no cover - optional NVIDIA NeMo backend

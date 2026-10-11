@@ -80,10 +80,12 @@ def active_process(platform: str | None = None) -> str | None:  # pragma: no cov
 
 
 def whisper_prompt(app: str | None, vocabulary: list[str]) -> str | None:
-    """A short initial prompt nudging Whisper toward your terms and the app's register."""
-    parts = []
-    if vocabulary:
-        parts.append("Vocabulary: " + ", ".join(vocabulary[:40]) + ".")
-    if app:
-        parts.append(f"Dictating into {app}.")
-    return " ".join(parts) or None
+    """A short initial prompt nudging Whisper toward your terms.
+
+    ``app`` is accepted for callers that pass it but is deliberately *not* put in the prompt: Whisper
+    repeats its prompt on short or noisy audio, and before v0.1.6 that typed "Dictating into <app>." into
+    the app. The focused app is used only by the text cleanup (see :mod:`away.voice.cleanup`)."""
+    del app
+    if not vocabulary:
+        return None
+    return "Vocabulary: " + ", ".join(vocabulary[:40]) + "."

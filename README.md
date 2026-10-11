@@ -199,7 +199,15 @@ Pointer accuracy:
   until it has been idle for `app.auto_pause_idle_ms`. Away's own synthetic input is ignored.
 
 Dictation extras: the vocabulary file is passed to faster-whisper as `initial_prompt` and as
-`hotwords` (when the installed version supports it; 1.2.1 does). `voice.numbers_as_digits` turns
+`hotwords` (when the installed version supports it; 1.2.1 does). The prompt holds only the vocabulary
+(`Vocabulary: a, b, c.`), never the focused app: Whisper repeats its prompt on short or noisy audio, and
+up to v0.1.5 that typed "Dictating into <app>." into the app. Since v0.1.6 every transcript (push-to-talk,
+always-on and the edit hotkey) is filtered before it is typed: prompt echoes ("Vocabulary: ...",
+"Dictating into ...") and bare lists of vocabulary terms are dropped or stripped, segments with a high
+`no_speech_prob` *and* a low `avg_logprob` are discarded, and stock silence phrases ("Thank you.",
+"Thanks for watching!", "Please subscribe") are dropped when the utterance is under 2 s. A phrase you bound
+as a voice command is never filtered. Dropped transcripts show in the log as `dropped: <reason>`.
+`voice.numbers_as_digits` turns
 "twenty five" into 25 from `numbers_min_value` (10) up. `voice.edit_hotkey` works like this:
 select text, press the hotkey, say an instruction ("uppercase", "replace cat with dog", "clean it up",
 "make it a bullet list", or anything else when an LLM endpoint is configured), then press it again.
@@ -291,7 +299,10 @@ away calibrate-cameras --print-board board.png --checkerboard 9x6               
 ```
 
 The same is available in **Settings → Cameras** (device pickers, roles, calibrate button, live
-per-camera confidence). In YAML:
+per-camera confidence). *Calibrate* runs `calibrate-cameras` as a separate process (in the installed
+Windows app that is `ProjectAway.exe calibrate-cameras`, not `python -m away`), borrows the cameras from
+the running app, shows progress in the status line and ends with "calibrated, reprojection error X px" or
+the error. Its full output is saved as `calibration.log` next to `calibration-status.json` in the data folder. In YAML:
 
 ```yaml
 hands:
@@ -394,13 +405,14 @@ Same options under **Settings → Voice & input**; from a terminal: `away update
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 850 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 896 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
 | GPU pack | Real `nvidia-cublas-cu12` 12.8.4.1 wheels downloaded, SHA-256 verified and extracted (Windows: 568 MB download, 788 MB kept; Linux x86-64: 594 / 868 MB); the DLLs import only each other + KERNEL32 |
 | Whisper on an NVIDIA GPU (CUDA) | **Untested** (no GPU in the build sandbox); CPU fallback path unit-tested |
 | Download link expiry (HTTP 403 after ~1 h) | Re-resolve + mid-chunk resume tested against a local fake Hub; interrupt + resume of `large-v3-turbo` verified against the real Hub |
+| Whisper hallucination filter (prompt echo, silent segments, stock phrases) | Unit-tested with fake segments and fake ASR through push-to-talk, always-on and edit; **not yet measured on real noisy recordings** |
 | Multi-camera geometry | Synthetic: two virtual cameras with known extrinsics. Pose from noisy (0.5 px) hand landmarks within 1.5°, palm-scaled baseline within 10%, exact noise-free triangulation, checkerboard stereo calibration under 0.5 px |
 | Multi-camera fusion | Synthetic: best-view and weighted selection, timestamp pairing and dropout, occlusion handover with no jump, push gesture, 3D pinch rejecting an edge-on false pinch, Cameras-tab model |
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |

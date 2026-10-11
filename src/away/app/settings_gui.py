@@ -1133,6 +1133,13 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 result["rc"], result["err"] = r.returncode, (r.stderr or "")
+                # keep the full output next to the status file for troubleshooting (GUI exe: no console)
+                with contextlib.suppress(OSError):
+                    status_file.with_name("calibration.log").write_text(
+                        f"$ {' '.join(self.m.calibration_command(status_file))}\nexit {r.returncode}\n"
+                        f"--- stdout ---\n{r.stdout or ''}\n--- stderr ---\n{r.stderr or ''}",
+                        encoding="utf-8",
+                    )
             except Exception as exc:
                 result["rc"], result["err"] = -1, str(exc)
 

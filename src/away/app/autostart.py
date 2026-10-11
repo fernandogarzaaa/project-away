@@ -14,7 +14,9 @@ def launch_command() -> list[str]:
     if getattr(sys, "frozen", False):  # PyInstaller bundle
         # inside an AppImage sys.executable is a temporary mount; $APPIMAGE is the file the user keeps
         return [os.environ.get("APPIMAGE") or sys.executable, "tray"]
-    return [sys.executable, "-m", "away", "tray"]
+    from away.app.frozen import away_command
+
+    return away_command(["tray"], frozen=False)
 
 
 def linux_desktop_file(home: Path) -> Path:

@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from away.events import EventBus
 from away.voice.asr import ASRBackend
 from away.voice.context import whisper_prompt
+from away.voice.hallucination import clean_transcript
 from away.voice.output import TextSink
 
 
@@ -127,7 +128,12 @@ class DictationSession:
         if self.gate is not None and not self.gate(t0, t1):
             return DictationResult("gated", seconds=seconds, meta={"reason": "speaker is not the enrolled user"})
         app = self.context() if self.context else None
-        raw = self.asr.transcribe(np.asarray(speech, dtype=np.float32), whisper_prompt(app, self.vocabulary))
+        prompt = whisper_prompt(app, self.vocabulary)
+        heard = self.asr.transcribe(np.asarray(speech, dtype=np.float32), prompt)
+        raw, why = clean_transcript(heard, prompt, self.vocabulary, len(speech) / self.sr)
+        if not raw:
+            reason = why or "empty transcript"
+            return DictationResult("empty", raw=heard, seconds=seconds, meta={"app": app, "reason": reason})
         if self.command_handler is not None and raw.strip() and self.command_handler(raw):
             return DictationResult("command", raw=raw, seconds=seconds, meta={"app": app})
         text = self.cleaner.clean(raw, app)
