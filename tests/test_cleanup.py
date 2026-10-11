@@ -26,6 +26,10 @@ def test_fillers_and_stutter():
         ("meet at the cafe no, wait at the library tomorrow", "Meet at the library tomorrow."),
         ("hello there period this is wrong scratch that this is right", "Hello there. This is right."),
         ("first one. second one scratch that", "First one."),
+        (
+            "deploy the release tonight period no wait scratch that deploy the release tomorrow morning period",
+            "Deploy the release tomorrow morning.",
+        ),
         ("scratch that hi", "Hi"),
         ("is it ready question mark new line yes it is", "Is it ready?\nYes it is."),
         ("the the meeting is at at noon", "The meeting is at noon."),
@@ -56,6 +60,17 @@ def test_number_correction():
 def test_scratch_that_multiple_sentences():
     assert C.apply_scratch_that("Keep this. Drop this scratch that. And this.") == "Keep this. And this."
     assert C.apply_scratch_that("a! b scratch that c") == "a! c"
+
+
+def test_scratch_that_after_correction_marker():
+    # "no wait" / "actually no" are correction commands, not sentence text:
+    # the sentence before the marker is what the user wants gone
+    assert C.apply_scratch_that("Deploy tonight. no wait scratch that deploy tomorrow.") == "deploy tomorrow."
+    assert C.apply_scratch_that("Deploy tonight no wait scratch that deploy tomorrow") == "deploy tomorrow"
+    assert C.apply_scratch_that("Keep this. Drop this actually no scratch that. And this.") == "Keep this. And this."
+    assert C.apply_scratch_that("no wait scratch that hi") == "hi"
+    # plain scratch-that behaviour is unchanged
+    assert C.apply_scratch_that("Deploy tonight scratch that deploy tomorrow.") == "deploy tomorrow."
 
 
 def test_vocabulary(tmp_path):

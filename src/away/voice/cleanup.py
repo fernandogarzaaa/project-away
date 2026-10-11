@@ -41,6 +41,9 @@ SPOKEN_PUNCT = [
 
 SCRATCH_RE = re.compile(r"\bscratch that\b[,.!?]?", re.IGNORECASE)
 CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.]?\s*", re.IGNORECASE)
+# a correction marker at the very end of the text before "scratch that" is a
+# command, not part of the sentence being scratched
+_TRAILING_CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.]?\s*$", re.IGNORECASE)
 _SENT_END = re.compile(r"[.!?\n]")
 _NUM = re.compile(r"^\d+(?:[.:]\d+)?$")
 
@@ -57,6 +60,14 @@ def apply_scratch_that(text: str) -> str:
         if not m:
             return text
         before = text[: m.start()].rstrip()
+        # "no wait" / "actually no" are correction commands, not sentence text:
+        # strip a trailing one so "X. no wait scratch that Y" deletes X (the
+        # sentence the user wants gone), not just the marker
+        while True:
+            stripped = _TRAILING_CORRECTION_RE.sub("", before).rstrip()
+            if stripped == before:
+                break
+            before = stripped
         # strip a trailing terminator that belongs to the scratched clause
         core = before.rstrip(" ,")
         ends = [e.end() for e in _SENT_END.finditer(core[:-1] if core.endswith((".", "!", "?")) else core)]
