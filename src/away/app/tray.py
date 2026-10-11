@@ -177,6 +177,7 @@ def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
     import contextlib
+    import logging
     import threading
 
     from away.control.monitors import enable_dpi_awareness
@@ -184,9 +185,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     enable_dpi_awareness()  # before pystray/pynput/tkinter (Windows; no-op elsewhere)
     import pystray
 
+    from away.app.frozen import setup_logging
     from away.app.runner import AwayApp
-    from away.app.updater import UpdateManager
+    from away.app.updater import UpdateManager, exit_after_update
 
+    setup_logging()  # away.* INFO -> away.log (windowed app) or the terminal
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
     ctl = TrayController(app)
@@ -236,7 +239,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             ic.update_menu()
 
     def quit_for_update() -> None:
-        on_quit(icon, None)
+        # Runs on the update worker thread. pystray's icon.stop() only posts a message to the tray loop, but
+        # the app shutdown (camera/voice threads) can hang; the installer waits for this process to be gone,
+        # so after a short grace the process exits no matter what.
+        exit_after_update(lambda: on_quit(icon, None))
 
     updates = UpdateManager(
         cfg.updates,
@@ -248,6 +254,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
 
     def on_update(_icon: Any, _item: Any) -> None:
         threading.Thread(target=updates.install_now, name="away-update-install", daemon=True).start()
+
+    def on_check_updates(_icon: Any, _item: Any) -> None:
+        threading.Thread(target=updates.check_now, name="away-update-check", daemon=True).start()
 
     gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
     gate_hint = {"shown": False}
@@ -306,6 +315,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             visible=lambda _i: updates.menu_label() is not None,
             enabled=lambda _i: not updates.installing,
         ),
+        pystray.MenuItem(
+            "Check for updates", on_check_updates, enabled=lambda _i: not (updates.installing or updates.checking)
+        ),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
@@ -333,8 +345,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         refresh(ic)
         ic.update_menu()
 
-    updates.start()  # no-op when updates.check is false; first check right away, then every 24 h
+    updates.start()  # reports the last install; first check right away, then every 24 h (unless updates.check: false)
     icon.run()
+    if updates.exiting:  # quitting for an update: do not wait on any leftover thread at interpreter exit
+        logging.getLogger("away.updater").info("update: tray closed, exiting for the installer")
+        logging.shutdown()
+        os._exit(0)
     return 0
 
 

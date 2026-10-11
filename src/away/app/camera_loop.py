@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 from away.app.camera_share import CameraShare
@@ -44,6 +44,7 @@ class CameraLoop:
         check_s: float = 0.5,
         owner_s: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
+        until: Callable[[], bool] | None = None,
     ) -> None:
         self.open_frames = open_frames
         self.process = process
@@ -56,6 +57,7 @@ class CameraLoop:
         self.check_s = check_s
         self.owner_s = owner_s
         self.clock = clock
+        self.until = until  # optional: end the loop (camera closed) once this returns True
         self.handovers = 0
         self.open_failures = 0
         self._last_error: str | None = None
@@ -63,9 +65,19 @@ class CameraLoop:
     def _requested(self) -> bool:
         return self.share is not None and self.share.requested()
 
+    def _done(self) -> bool:
+        if self.stop.is_set():
+            return True
+        if self.until is None:
+            return False
+        try:
+            return bool(self.until())
+        except Exception:
+            return False
+
     def run(self) -> None:
         try:
-            while not self.stop.is_set():
+            while not self._done():
                 if self._requested():
                     self._hand_over()
                     continue
@@ -106,7 +118,7 @@ class CameraLoop:
                     next_owner = now + self.owner_s
                 if now >= next_check:
                     next_check = now + self.check_s
-                    if self._requested():
+                    if self._requested() or self._done():
                         break
                 t, frame = item
                 try:
@@ -140,21 +152,78 @@ class CameraLoop:
         self.publish("camera.handover", {"released": False, "cameras": self.cameras})
 
 
-def degrade_plan(devices: list[Any], primary: int, failed: set[int]) -> tuple[str, Any, str]:
+def probe_cameras(
+    threads: Sequence[Any],
+    seen: Callable[[int], bool],
+    timeout_s: float,
+    stop: threading.Event,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+    step: float = 0.05,
+) -> dict[int, str]:
+    """Wait until every camera thread has delivered a frame or died, or ``timeout_s`` passed.
+
+    Returns ``{camera: reason}`` for the cameras that failed. A camera fails only when its thread died
+    with an error (``open error: ...``) or ended/stayed silent without a frame by the deadline
+    (``no frames within N s``). A slow camera that is still opening is waited for until the deadline.
+    """
+    deadline = clock() + timeout_s
+    while clock() < deadline and not stop.is_set():
+        if all(seen(i) or not th.is_alive() for i, th in enumerate(threads)):
+            break
+        sleep(step)
+    failed: dict[int, str] = {}
+    for i, th in enumerate(threads):
+        err = getattr(th, "error", None)
+        alive = th.is_alive()
+        if not alive and err:
+            failed[i] = f"open error: {err}" if not seen(i) else f"error: {err}"
+        elif not seen(i):
+            failed[i] = "closed before sending a frame" if not alive else f"no frames within {timeout_s:g} s"
+    return failed
+
+
+def describe_failures(devices: Sequence[Any], failed: Mapping[int, str] | set[int]) -> str:
+    """``camera 1 (no frames within 12 s)``, ``camera 0 (open error: ...), camera 1 (...)``."""
+    reasons = failed if isinstance(failed, Mapping) else dict.fromkeys(failed, "")
+    parts = []
+    for i in sorted(reasons):
+        why = reasons[i]
+        parts.append(f"camera {devices[i]}" + (f" ({why})" if why else ""))
+    return ", ".join(parts)
+
+
+def degrade_plan(
+    devices: Sequence[Any],
+    primary: int,
+    failed: Mapping[int, str] | set[int],
+    retry_s: float | None = None,
+) -> tuple[str, Any, str]:
     """What to do when some configured cameras could not be opened (or sent no frame).
 
-    Returns ``(mode, device, message)``: ``("multi", None, "")`` when two or more cameras work (a dead
-    extra camera is simply left out of the fusion), else ``("single", device, why)`` with the camera to
-    track on alone: the primary when it works, otherwise the first working one (or the primary again,
-    which the single-camera loop keeps retrying). A missing secondary camera never stops hand tracking.
+    Returns ``(mode, device, message)``:
+
+    * ``("multi", None, "")`` when two or more cameras work (a dead extra camera is left out of the fusion);
+    * ``("single", device, why)`` with the one working camera to track on (a missing secondary camera
+      never stops hand tracking; the full set is retried in the background);
+    * ``("none", primary, why)`` when no camera works at all (nothing is tracked; everything is retried).
+
+    The message names only the cameras that failed, with their real error.
     """
     working = [i for i in range(len(devices)) if i not in failed]
     if len(working) >= 2:
         return "multi", None, ""
-    pick = primary if primary in working else (working[0] if working else primary)
-    bad = ", ".join(str(devices[i]) for i in sorted(failed)) or "-"
+    bad = describe_failures(devices, failed) or "-"
+    every = f" every {retry_s:g} s" if retry_s else ""
+    if not working:
+        msg = (
+            f"no camera is working: {bad}. Hand tracking is off; retrying{every}. Close other apps that use "
+            "the cameras, or check Settings > Cameras."
+        )
+        return "none", devices[primary], msg
+    pick = working[0]
     msg = (
-        f"camera {bad} could not be opened (missing or in use); tracking with camera {devices[pick]} only. "
+        f"{bad} failed; tracking with camera {devices[pick]} only and retrying the full set{every}. "
         "Fix or remove it in Settings > Cameras."
     )
     return "single", devices[pick], msg

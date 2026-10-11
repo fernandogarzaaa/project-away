@@ -229,7 +229,8 @@ def test_cameras_tab_shows_default_camera_and_in_use(tmp_path):
     assert m.set_camera(0, "role", "secondary") is not None
     assert m.remove_camera(0) is not None  # the only camera
     choices = m.device_choices([CameraDevice(0, "camera 0", "Integrated Webcam", in_use=True)])
-    assert choices == ["0: Integrated Webcam (in use by Project Away)"]
+    # the configured camera (index 1, set above) is listed even though the OS listing did not find it
+    assert choices == ["0: Integrated Webcam (in use by Project Away)", "1: camera 1 (configured)"]
     assert m.add_camera(2) is not None and "not found" in str(m.add_camera(2))  # only real devices
     assert m.cfg.hands.cameras == []
 
@@ -238,7 +239,7 @@ def test_windows_camera_list_does_not_open_devices():
     from away.multicam import capture
 
     def run(argv, **kw):
-        assert argv[0] == "powershell" and kw["timeout"] <= 10
+        assert argv[0] == "powershell" and kw["timeout"] <= 15 and kw["stdin"] is not None
         return types.SimpleNamespace(returncode=0, stdout="Integrated Webcam\r\nLogitech BRIO\r\n\r\n")
 
     devs = capture.list_cameras(sysfs="/nonexistent", platform="win32", run=run, in_use={"0"})
@@ -254,10 +255,10 @@ def test_windows_camera_list_does_not_open_devices():
 def test_dead_secondary_camera_never_stops_tracking():
     assert degrade_plan([0, 2], 0, set()) == ("multi", None, "")
     mode, dev, msg = degrade_plan([0, 2], 0, {1})
-    assert (mode, dev) == ("single", 0) and "camera 2 could not be opened" in msg and "camera 0 only" in msg
+    assert (mode, dev) == ("single", 0) and "camera 2 failed" in msg and "camera 0 only" in msg
     assert degrade_plan([0, 2], 0, {0})[:2] == ("single", 2)  # primary dead: track on the one that works
     assert degrade_plan([0, 2, 4], 0, {2})[0] == "multi"
-    assert degrade_plan([0, 2], 0, {0, 1})[:2] == ("single", 0)  # nothing works: keep retrying the primary
+    assert degrade_plan([0, 2], 0, {0, 1})[:2] == ("none", 0)  # nothing works: no tracking claimed (v0.1.8)
 
 
 # ----------------------------------------------------------------------------- speech: CPU fallback

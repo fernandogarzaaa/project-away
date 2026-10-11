@@ -47,18 +47,19 @@ def list_cameras(
     in_use: set[str] | None = None,
     platform: str | None = None,
     run: Callable[..., Any] | None = None,
+    probe_fn: Callable[[CameraDevice], CameraDevice] | None = None,
 ) -> list[CameraDevice]:
     """Enumerate cameras without opening them where the OS allows it.
 
     * Linux: V4L2 capture nodes with their names (``probe`` also opens each one).
-    * Windows: camera/image-class PnP devices by name (PowerShell CIM query, 8 s timeout), numbered in
+    * Windows: camera/image-class PnP devices by name (PowerShell CIM query, 15 s timeout), numbered in
       that order as OpenCV indices (best effort; DirectShow usually enumerates in the same order).
     * macOS: ``system_profiler SPCameraDataType``.
     * Otherwise (or when the query finds nothing): OpenCV indices ``0..max_index-1`` are opened.
 
     ``in_use``: device keys (``"0"``, ``"/dev/video0"``) the running app holds (camera_share owner file);
     they are listed and marked instead of probed, since an exclusive camera would fail to open and vanish
-    from the list. ``None`` reads the owner file.
+    from the list (and are added even when the OS query missed them). ``None`` reads the owner file.
     """
     plat = platform or sys.platform
     if in_use is None:
@@ -88,12 +89,37 @@ def list_cameras(
         devs = [CameraDevice(i, f"camera {i}", n, in_use=str(i) in in_use) for i, n in enumerate(names)]
         if probe:  # pragma: no cover - opens devices
             devs = [c if c.in_use else _probe(c) for c in devs]
-        return devs
-    found = []  # pragma: no cover - no name query worked: open each index
+        return with_in_use(devs, in_use)
+    # no name query worked: open each free index (the ones the app holds are listed, not opened)
+    prober = probe_fn or _probe
+    found: list[CameraDevice] = []
+    misses = 0
     for i in range(max_index):
         c = CameraDevice(i, f"camera {i}", f"camera {i}", in_use=str(i) in in_use)
-        found.append(c if c.in_use else _probe(c))
-    return [c for c in found if c.ok or c.in_use]
+        if c.in_use:
+            found.append(c)
+            misses = 0
+            continue
+        r = prober(c)
+        if r.ok:
+            found.append(r)
+            misses = 0
+        else:
+            misses += 1
+            if misses >= 2 and i >= 2:  # indices are dense: two misses in a row means no more cameras
+                break
+    return with_in_use(found, in_use)
+
+
+def with_in_use(devs: list[CameraDevice], in_use: set[str]) -> list[CameraDevice]:
+    """``devs`` plus a row for every numeric device the running app holds that the query missed (a camera
+    held exclusively can drop out of an OS listing or fail a probe, and must never vanish from the list)."""
+    have = {d.key for d in devs} | {d.path for d in devs}
+    extra = [
+        CameraDevice(int(k), f"camera {k}", f"camera {k}", in_use=True)
+        for k in sorted((k for k in in_use if k.isdigit() and k not in have), key=int)
+    ]
+    return sorted([*devs, *extra], key=lambda d: (d.index is None, d.index if d.index is not None else 0, d.path))
 
 
 def _app_cameras() -> set[str]:
@@ -105,10 +131,14 @@ def _app_cameras() -> set[str]:
         return set()
 
 
+# Filtered by WMI itself (listing every PnP entity and filtering in PowerShell can take longer than the
+# timeout on a busy PC). USB webcams are class Camera (Windows 10+) or Image (older drivers); ``usbvideo``
+# catches UVC cameras some drivers file under another class.
 WINDOWS_CAMERA_QUERY = (
-    "Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in @('Camera','Image') -and "
-    "$_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"
+    "Get-CimInstance -ClassName Win32_PnPEntity -Filter \"PNPClass='Camera' OR PNPClass='Image' OR "
+    "Service='usbvideo'\" | Where-Object { $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"
 )
+WINDOWS_QUERY_TIMEOUT_S = 15
 
 
 def parse_name_lines(text: str) -> list[str]:
@@ -128,9 +158,11 @@ def windows_camera_names(run: Callable[..., Any] | None = None) -> list[str]:
     try:
         r = runner(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_CAMERA_QUERY],
+            stdin=subprocess.DEVNULL,  # a windowed exe has no usable stdin handle to inherit
             capture_output=True,
             text=True,
-            timeout=8,
+            errors="replace",
+            timeout=WINDOWS_QUERY_TIMEOUT_S,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -177,12 +209,15 @@ def _probe(c: CameraDevice) -> CameraDevice:  # pragma: no cover - opens a devic
         return c
     with contextlib.suppress(Exception):
         cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
-    cap = cv2.VideoCapture(c.index if c.index is not None else c.path)
+    src: Any = c.index if c.index is not None else c.path
+    cap = cv2.VideoCapture(src, cv2.CAP_DSHOW) if sys.platform.startswith("win") and isinstance(src, int) else None
+    if cap is None or not cap.isOpened():
+        cap = cv2.VideoCapture(src)
     try:
         ok = bool(cap.isOpened() and cap.read()[0])
     finally:
         cap.release()
-    return CameraDevice(c.index, c.path, c.name, ok)
+    return CameraDevice(c.index, c.path, c.name, ok, c.in_use)
 
 
 def resolve_device(device: int | str, devices: list[CameraDevice] | None = None) -> int | str:
@@ -303,39 +338,91 @@ def open_capture(spec: CameraSpec) -> Any:  # pragma: no cover - opens a device
     return cap
 
 
-class CameraThread(threading.Thread):  # pragma: no cover - device thread
-    """Reads one camera as fast as it delivers, stamping each frame with ``time.monotonic()`` on arrival."""
+class CameraThread(threading.Thread):
+    """Reads one camera as fast as it delivers, stamping each frame with ``time.monotonic()`` on arrival.
 
-    def __init__(self, cam: int, spec: CameraSpec, pairer: FramePairer, stop: threading.Event) -> None:
+    * ``open_lock``: when given, the device is opened while holding it, so several cameras open one after
+      another instead of all at once (Windows MSMF/DirectShow is slow and flaky opening two USB webcams
+      at the same moment). Reading still runs in parallel once a camera is open.
+    * A freshly opened camera may return empty reads for a while before its first frame (Windows webcams
+      can take seconds); that is tolerated for ``first_frame_s``. After the first frame, 30 failed reads
+      in a row mean the camera is gone.
+    * ``error`` is set when the thread ends because of a problem; ``opened`` once the device opened.
+    """
+
+    def __init__(
+        self,
+        cam: int,
+        spec: CameraSpec,
+        pairer: FramePairer,
+        stop: threading.Event,
+        open_lock: threading.Lock | None = None,
+        first_frame_s: float = 10.0,
+        opener: Callable[[CameraSpec], Any] | None = None,
+        convert: Callable[[Any, bool], Any] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         super().__init__(daemon=True, name=f"camera-{cam}")
         self.cam, self.spec, self.pairer, self.stop = cam, spec, pairer, stop
+        self.open_lock = open_lock
+        self.first_frame_s = first_frame_s
+        self.opener = opener or open_capture
+        self.convert = convert or _bgr_to_rgb
+        self.clock = clock
         self.error: str | None = None
+        self.opened = threading.Event()
+        self.frames = 0
         self.size: tuple[int, int] = (spec.width, spec.height)
 
-    def run(self) -> None:
-        import cv2
-
+    def _open(self) -> Any:
+        if self.open_lock is None:
+            return self.opener(self.spec)
+        while not self.open_lock.acquire(timeout=0.1):
+            if self.stop.is_set():
+                return None
         try:
-            cap = open_capture(self.spec)
+            return None if self.stop.is_set() else self.opener(self.spec)
+        finally:
+            self.open_lock.release()
+
+    def run(self) -> None:
+        try:
+            cap = self._open()
         except Exception as exc:
-            self.error = str(exc)
+            self.error = f"cannot open camera {self.spec.device!r}: {exc}" if "camera" not in str(exc) else str(exc)
             return
+        if cap is None:  # stopped while waiting for its turn to open
+            return
+        self.opened.set()
         try:
             failures = 0
+            started = self.clock()
             while not self.stop.is_set():
                 ok, frame = cap.read()
-                t = time.monotonic()
-                if not ok:
+                t = self.clock()
+                if not ok or frame is None:
                     failures += 1
-                    if failures > 30:  # unplugged: stop; the pairer marks this camera dropped
+                    if self.frames == 0:
+                        if t - started > self.first_frame_s:
+                            self.error = f"camera opened but sent no frame within {self.first_frame_s:g} s"
+                            return
+                    elif failures > 30:  # unplugged: stop; the pairer marks this camera dropped
                         self.error = "camera stopped delivering frames"
                         return
                     time.sleep(0.02)
                     continue
                 failures = 0
-                if self.spec.mirror:
-                    frame = cv2.flip(frame, 1)
+                self.frames += 1
                 self.size = (frame.shape[1], frame.shape[0])
-                self.pairer.push(self.cam, t, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                self.pairer.push(self.cam, t, self.convert(frame, self.spec.mirror))
         finally:
-            cap.release()
+            with contextlib.suppress(Exception):
+                cap.release()
+
+
+def _bgr_to_rgb(frame: Any, mirror: bool) -> Any:  # pragma: no cover - needs OpenCV
+    import cv2
+
+    if mirror:
+        frame = cv2.flip(frame, 1)
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

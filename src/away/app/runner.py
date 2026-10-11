@@ -39,6 +39,13 @@ from away.voice.always_on import GateHint
 from away.wifi.classifier import CoarseCSIClassifier
 from away.wifi.features import window_features
 
+# Multi-camera start-up. Windows MSMF/DirectShow can take several seconds to open a USB webcam (more when
+# two open at once), so a camera only counts as failed when it errors or sends nothing for MULTICAM_PROBE_S.
+MULTICAM_PROBE_S = 12.0
+MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones this often
+MULTICAM_RETRY_MAX_S = 600.0  # back-off ceiling when the full set keeps failing right after a good probe
+MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
+
 
 def effective_ambient_fallback(cfg: AppConfig) -> str:
     """Always-on without a wake word: ``type`` when the user turned the face gate off (that must still type;
@@ -357,7 +364,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.gate_hint = GateHint(5)
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
+        self._camera_episode = 0  # bumps when the cameras recover, so a new failure is notified again
         self.bus.subscribe("cameras.degraded", self._on_cameras_degraded)
+        self.bus.subscribe("cameras.restored", self._on_cameras_restored)
         self._save_migrations()
         self.bus.publish(
             "monitors.detected", {"layout": self.monitor_layout.summary(), "note": self.monitor_layout.note}
@@ -383,8 +392,22 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def _on_cameras_degraded(self, ev: Any) -> None:
         msg = str(ev.data.get("message") or "a camera could not be opened and was skipped")
+        mode = str(ev.data.get("mode") or "single")
+        failed = ",".join(sorted(str(k) for k in (ev.data.get("failed") or {})))
         print(f"warning: {msg}", flush=True)
-        self.notice("Project Away: camera skipped", msg, key="cameras-degraded")
+        title = "Project Away: no camera" if mode == "none" else "Project Away: camera skipped"
+        # once per problem: a retry that fails the same way stays quiet until the cameras come back
+        self.notice(title, msg, key=f"cameras-degraded:{self._camera_episode}:{mode}:{failed}")
+        self._camera_degraded_shown = True
+
+    def _on_cameras_restored(self, ev: Any) -> None:
+        msg = str(ev.data.get("message") or "all cameras are working again")
+        print(f"info: {msg}", flush=True)
+        if not getattr(self, "_camera_degraded_shown", False):
+            return  # nothing was reported broken: nothing to announce
+        self._camera_degraded_shown = False
+        self.notice("Project Away: cameras back", msg, key=f"cameras-restored:{self._camera_episode}")
+        self._camera_episode += 1
 
     def _on_utterance(self, ev: Any) -> None:
         if self.gate_hint.observe(ev.data):
@@ -740,28 +763,24 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             from away.face.landmarker import FaceLandmarker
 
             faces = FaceLandmarker(face_model)
-        try:
-            idx: Any = self.cfg.hands.camera_index
-            if len(self.cfg.hands.cameras) >= 2 and hands is not None:
-                fallback = self._multicam_loop(hands, faces)
-                if fallback is None:
-                    return
-                idx = fallback  # a camera failed: keep tracking on the one that works
-            prof = self.profile
+        prof = self.profile
+
+        def process(n: int, t: float, rgb: Any) -> None:
+            if hands is not None and n % max(1, prof.hands_every) == 0:
+                fr = hands.process(rgb, t)
+                self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
+            if faces is not None and n % max(1, prof.face_every) == 0:
+                obs = faces.process(rgb, t)
+                self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
+
+        def run_single(idx: Any, until: Any = None) -> None:
+            """Track on one camera (retried while it will not open) until ``until()`` or stop."""
 
             def open_frames() -> Any:
                 from away.multicam.capture import resolve_device
 
                 dev: Any = resolve_device(idx) if isinstance(idx, str) else idx
                 return camera_frames(dev, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps)
-
-            def process(n: int, t: float, rgb: Any) -> None:
-                if hands is not None and n % max(1, prof.hands_every) == 0:
-                    fr = hands.process(rgb, t)
-                    self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
-                if faces is not None and n % max(1, prof.face_every) == 0:
-                    obs = faces.process(rgb, t)
-                    self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
 
             CameraLoop(
                 open_frames,
@@ -771,7 +790,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 share=self.camera_share,
                 publish=self._publish_quiet,
                 on_release=self._release_hand,
+                until=until,
             ).run()
+
+        try:
+            if len(self.cfg.hands.cameras) >= 2 and hands is not None:
+                self._multicam_loop(hands, faces, run_single)
+                return
+            run_single(self.cfg.hands.camera_index)
         finally:
             # close the landmarkers only after this thread stopped calling them (shutdown race)
             for tr in (hands, faces):
@@ -780,49 +806,157 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     with contextlib.suppress(Exception):
                         close()
 
-    def _multicam_loop(self, first_tracker: Any, faces: Any, probe_s: float = 3.0) -> Any:
+    # ------------------------------------------------------------------------------ multi-camera
+    def _start_cameras(self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any) -> list[Any]:
+        """Start one capture thread per camera (overridden in tests with simulated cameras)."""
+        from away.multicam.capture import CameraThread
+
+        threads = [CameraThread(i, c, pairer, session, open_lock=open_lock) for i, c in enumerate(specs)]
+        for th in threads:
+            th.start()
+        return threads
+
+    @staticmethod
+    def _end_cameras(session: threading.Event, threads: list[Any]) -> None:
+        session.set()
+        for th in threads:
+            th.join(timeout=2.0)
+
+    @staticmethod
+    def _serial_open() -> bool:
+        """Open cameras one after another (Windows: two webcams opening at once is slow and flaky)."""
+        return sys.platform.startswith("win")
+
+    def _probe_timeout(self, n: int, probe_s: float) -> float:
+        # opening one after another: give every extra camera half a probe more
+        return probe_s + (probe_s / 2.0) * (n - 1) if self._serial_open() else probe_s
+
+    def _probe_specs(self, specs: list[Any], probe_s: float) -> dict[int, str]:
+        """Open ``specs`` briefly (while the working camera keeps tracking): ``{}`` when all send frames."""
+        from away.app.camera_loop import probe_cameras
+        from away.multicam.capture import FramePairer
+
+        session = threading.Event()
+        pairer = FramePairer(len(specs), 0, 1.0, 1.0)
+        lock = threading.Lock() if self._serial_open() else None
+        threads = self._start_cameras(list(specs), pairer, session, lock)
+        try:
+            return probe_cameras(threads, pairer.seen, self._probe_timeout(len(specs), probe_s), self.stop_event)
+        finally:
+            self._end_cameras(session, threads)
+
+    def _single_until_retry(
+        self, run_single: Any, device: Any, failed_specs: list[Any], every_s: float, probe_s: float
+    ) -> None:
+        """Track on ``device`` alone; every ``every_s`` probe the failed cameras in the background and return
+        (to retry the full multi-camera set) once they all deliver frames. Tracking is never interrupted by a
+        probe that still fails."""
+        ready = threading.Event()
+        done = threading.Event()
+
+        def prober() -> None:
+            while not done.wait(every_s):
+                if self.stop_event.is_set():
+                    return
+                if self.camera_share.requested():  # Settings is using the cameras: do not grab them
+                    continue
+                try:
+                    bad = self._probe_specs(failed_specs, probe_s)
+                except Exception as exc:
+                    bad = {0: f"probe error: {exc}"}
+                self.bus.publish("cameras.retry", {"ok": not bad, "failed": {str(k): v for k, v in bad.items()}})
+                if not bad and not done.is_set():
+                    ready.set()
+                    return
+
+        th = threading.Thread(target=prober, name="camera-retry", daemon=True)
+        th.start()
+        try:
+            run_single(device, ready.is_set)
+        finally:
+            done.set()
+
+    def _multicam_loop(
+        self,
+        first_tracker: Any,
+        faces: Any,
+        run_single: Any = None,
+        probe_s: float = MULTICAM_PROBE_S,
+        retry_s: float = MULTICAM_RETRY_S,
+        none_retry_s: float = MULTICAM_NONE_RETRY_S,
+        trackers: list[Any] | None = None,
+    ) -> None:
         """Two or more cameras: threaded capture -> timestamp pairing -> per-view hands -> fusion -> pipeline.
 
-        The captures restart after a hand-over to Settings (camera_share) without restarting the app.
-        Returns None when it stopped normally, or the device to track on alone when cameras failed to open
-        (a missing or busy secondary camera must never stop hand tracking)."""
-        from away.app.camera_loop import degrade_plan, is_shutdown_error
-        from away.hands.tracker import HandTracker
-        from away.multicam.capture import CameraThread, FramePairer
+        * Start-up probe: a camera fails only when its thread dies with an error, or it sends no frame within
+          ``probe_s`` (Windows webcams are slow to open; on Windows they open one after another).
+        * One camera left: track on it alone (``run_single``) and re-probe the failed cameras every
+          ``retry_s`` without touching the working one; when they deliver again, go back to fusion (backing off
+          up to MULTICAM_RETRY_MAX_S if the set keeps failing right after a good probe).
+        * No camera works: nothing is claimed; the whole set is retried every ``none_retry_s``.
+        * The captures restart after a hand-over to Settings (camera_share) without restarting the app.
+        """
+        from away.app.camera_loop import degrade_plan, is_shutdown_error, probe_cameras
+        from away.multicam.capture import FramePairer
         from away.multicam.fusion import MultiViewFuser, ViewObs, hand_crop, sharpness_score
         from away.multicam.geometry import load_extrinsics
 
         cams, mc = self.cfg.hands.cameras, self.cfg.hands.multicam
         primary = next(i for i, c in enumerate(cams) if c.role == "primary")
-        model = self.models_dir / "hand_landmarker.task"
-        trackers = [first_tracker] + [HandTracker(model, 1) for _ in cams[1:]]
+        own_trackers = trackers is None
+        if trackers is None:
+            from away.hands.tracker import HandTracker
+
+            model = self.models_dir / "hand_landmarker.task"
+            trackers = [first_tracker] + [HandTracker(model, 1) for _ in cams[1:]]
         ex = load_extrinsics()
         fuser = MultiViewFuser(cams, mc, ex)
         share = self.camera_share
         devices = [c.device for c in cams]
+        timeout = self._probe_timeout(len(cams), probe_s)
+        degraded = False
+        backoff = retry_s
+        after_retry = False
         try:
             while not self.stop_event.is_set():
                 session = threading.Event()
                 pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
-                threads = [CameraThread(i, c, pairer, session) for i, c in enumerate(cams)]
-                for th in threads:
-                    th.start()
-                deadline = time.monotonic() + probe_s  # which cameras actually deliver frames?
-                while time.monotonic() < deadline and not self.stop_event.is_set():
-                    if all(pairer.seen(i) or not th.is_alive() for i, th in enumerate(threads)):
-                        break
-                    time.sleep(0.05)
-                failed = {i for i, th in enumerate(threads) if not pairer.seen(i)}
-                mode, device, why = degrade_plan(devices, primary, failed)
+                lock = threading.Lock() if self._serial_open() else None
+                threads = self._start_cameras(list(cams), pairer, session, lock)
+                failed = probe_cameras(threads, pairer.seen, timeout, self.stop_event)
+                if self.stop_event.is_set():
+                    self._end_cameras(session, threads)
+                    break
+                working = len(cams) - len(failed)
+                if working < 2 and after_retry:  # the set failed again right after a good probe: back off
+                    backoff = min(backoff * 2.0, MULTICAM_RETRY_MAX_S)
+                after_retry = False
+                retry_every = none_retry_s if working == 0 else (backoff if working == 1 else None)
+                mode, device, why = degrade_plan(devices, primary, failed, retry_every)
                 if failed:
-                    errs = {str(devices[i]): threads[i].error or "no frames" for i in sorted(failed)}
-                    self.bus.publish("cameras.degraded", {"failed": errs, "message": why or "", "mode": mode})
-                if mode == "single" and not self.stop_event.is_set():
-                    session.set()
-                    for th in threads:
-                        th.join(timeout=2.0)
+                    errs = {str(devices[i]): failed[i] for i in sorted(failed)}
+                    self.bus.publish("cameras.degraded", {"failed": errs, "message": why, "mode": mode})
+                if mode != "multi":
+                    self._end_cameras(session, threads)
                     share.clear_owner()
-                    return device
+                    degraded = True
+                    if mode == "none" or run_single is None:
+                        self.stop_event.wait(none_retry_s)
+                        continue
+                    self._single_until_retry(run_single, device, [cams[i] for i in sorted(failed)], backoff, probe_s)
+                    after_retry = True
+                    continue
+                backoff = retry_s
+                if degraded:
+                    degraded = False
+                    self.bus.publish(
+                        "cameras.restored",
+                        {
+                            "cameras": devices,
+                            "message": f"cameras {', '.join(str(d) for d in devices)} are working again; "
+                            "multi-camera tracking is back on.",
+                        },
+                    )
                 self.bus.publish("cameras.started", {"cameras": len(cams), "calibrated": fuser.calibrated})
                 dropped: set[int] = set()
                 next_check = 0.0
@@ -878,9 +1012,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                 return
                             raise
                 finally:
-                    session.set()
-                    for th in threads:
-                        th.join(timeout=2.0)
+                    self._end_cameras(session, threads)
                 if handover:
                     self.pipeline.on_fused(None, time.monotonic())
                     share.clear_owner()
@@ -892,10 +1024,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     self.bus.publish("camera.handover", {"released": False, "cameras": devices})
         finally:
             share.clear_owner()
-            for tr in trackers[1:]:
-                with contextlib.suppress(Exception):
-                    tr.close()
-        return None
+            if own_trackers:
+                for tr in trackers[1:]:
+                    with contextlib.suppress(Exception):
+                        tr.close()
 
     def _wifi_loop(self) -> None:
         from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource, stack_csi

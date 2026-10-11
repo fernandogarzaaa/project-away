@@ -81,6 +81,23 @@ def log_file(env: Mapping[str, str] | None = None) -> Path:
     return paths.data_dir() / "logs" / "away.log"
 
 
+def setup_logging(stream: Any = None, level: int | None = None) -> Any:
+    """INFO logging for the ``away.*`` loggers (updater steps, monitors...) to ``stream`` (default stderr,
+    which the windowed app has already pointed at away.log). Idempotent; other libraries stay at WARNING."""
+    import logging
+
+    lg = logging.getLogger("away")
+    lg.setLevel(logging.INFO if level is None else level)
+    for h in lg.handlers:
+        if getattr(h, "_away_handler", False):
+            return h
+    h = logging.StreamHandler(stream if stream is not None else sys.stderr)
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    h._away_handler = True  # type: ignore[attr-defined]
+    lg.addHandler(h)
+    return h
+
+
 def wants_console(argv: Sequence[str]) -> bool:
     return bool(argv) and (argv[0] in CONSOLE_COMMANDS or argv[0] in ("--version", "-h", "--help"))
 

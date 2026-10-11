@@ -6,13 +6,16 @@
 ; then downloads the MediaPipe + Whisper models in a visible console window, enables start-at-sign-in
 ; and a desktop shortcut (both pre-ticked), and launches the tray app.
 ;
-; Auto-update (away/app/updater.py) runs this installer silently:
+; Auto-update (away/app/updater.py) runs this installer silently, from a detached helper that first waits
+; for every ProjectAway.exe of this install to exit (so no file is locked):
 ;   ProjectAway-X.Y.Z-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS
-;       /NORESTARTAPPLICATIONS /AUTOUPDATE=1
-; /AUTOUPDATE=1 relaunches the tray app when the install finishes. A silent install skips the model
+;       /NORESTARTAPPLICATIONS /AUTOUPDATE=1 /DIR="<install folder>" /LOG="<data dir>\logs\update-install.log"
+; CloseApplications=force: if a copy is somehow still running, Setup closes it instead of stopping at
+; "Preparing to install" (which /SUPPRESSMSGBOXES would answer with abort). /AUTOUPDATE=1 relaunches the
+; tray app when the install finishes. A silent install skips the model
 ; download when the models are already on disk (an upgrade keeps them); missing ones download on first launch.
 #ifndef AppVersion
-  #define AppVersion "0.1.7"
+  #define AppVersion "0.1.8"
 #endif
 
 [Setup]
@@ -30,6 +33,10 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=Project Away
 ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=force
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
+RestartApplications=no
+SetupLogging=yes
 
 [Tasks]
 Name: "models"; Description: "Download hand-tracking and speech models now (recommended, ~1.6 GB)"; GroupDescription: "Models:"

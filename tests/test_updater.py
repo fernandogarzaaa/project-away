@@ -452,8 +452,11 @@ def test_windows_install_launches_detached_installer(tmp_path: Path) -> None:
     assert out.exit_app is True
     assert len(launch.calls) == 1 and run.calls == []
     cmd, kw = launch.calls[0]
-    assert cmd == U.windows_command(setup)
-    assert kw["creationflags"] == 0x00000008 | 0x00000200 and "start_new_session" not in kw
+    # v0.1.8: a detached PowerShell helper waits for this process to exit, then runs the installer
+    assert cmd[0] == "powershell.exe" and cmd[-2] == "-EncodedCommand"
+    script = U.base64.b64decode(cmd[-1]).decode("utf-16-le")
+    assert "Wait-Process -Id 42" in script and str(setup) in script and "/AUTOUPDATE=1" in script
+    assert kw["creationflags"] == 0x00000008 | 0x00000200 | 0x01000000 and "start_new_session" not in kw
     assert kw["stdin"] is U.subprocess.DEVNULL
 
 

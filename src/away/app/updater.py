@@ -17,8 +17,11 @@ Flow::
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import platform as _platform
 import re
@@ -33,10 +36,12 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any
 
 from away import __version__
+
+log = logging.getLogger("away.updater")
 
 REPO = "fernandogarzaaa/project-away"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -45,12 +50,20 @@ RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 SUMS_ASSET = "SHA256SUMS.txt"
 CHANNELS = ("stable", "beta")  # beta also considers GitHub pre-releases
 CHECK_INTERVAL_S = 24 * 3600
+ERROR_RETRY_S = 30 * 60  # a failed check (offline at sign-in, rate limit) is retried after 30 min, not 24 h
+EXIT_GRACE_S = 8.0  # after launching the installer: force the process to exit if a clean quit hangs
+STATE_FILE = "update-state.json"  # written before installing; the next launch reports the outcome
+EXIT_CODE_FILE = "update-exit-code.txt"  # the Windows helper writes the installer's exit code here
+INSTALL_LOG = "update-install.log"  # Inno Setup /LOG (in <data dir>/logs)
+HELPER_LOG = "update-helper.log"  # the Windows wait-then-install helper's own log
 TIMEOUT_S = 10.0
 PIP_HINT = "pipx upgrade project-away   (or: pip install -U project-away)"
 
 # Inno Setup silent install. /AUTOUPDATE=1 makes away.iss relaunch the tray app and skip the model
 # download when the models are already there; /NORESTARTAPPLICATIONS avoids a second launch by the
-# Restart Manager (the [Run] entry does the relaunch).
+# Restart Manager (the [Run] entry does the relaunch). The updater adds /DIR= (the running install's
+# folder) and /LOG= (<data dir>/logs/update-install.log). The installer is started by a small detached
+# PowerShell helper only after this process has exited, so no file of the running app is locked.
 WINDOWS_SILENT_ARGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS")
 
 Fetch = Callable[[str, float], bytes]
@@ -235,6 +248,8 @@ def detect_install(
     if not is_frozen:
         return InstallTarget("pip", None, arch)
     if plat.startswith("win"):
+        # the Inno install folder ({localappdata}\Programs\ProjectAway) holds ProjectAway.exe + unins000.exe;
+        # a portable copy is updated in place the same way (/DIR= its folder)
         return InstallTarget("windows", exe, arch)
     if plat == "darwin":
         bundle = next((p for p in (exe, *exe.parents) if p.suffix == ".app"), None)
@@ -461,11 +476,91 @@ class InstallOutcome:
     message: str
 
 
-def windows_command(installer: Path, relaunch: bool = True) -> list[str]:
+def windows_command(
+    installer: Path, relaunch: bool = True, install_dir: PurePath | None = None, log_path: PurePath | None = None
+) -> list[str]:
     cmd = [str(installer), *WINDOWS_SILENT_ARGS]
     if relaunch:
         cmd.append("/AUTOUPDATE=1")
+    if install_dir is not None:
+        cmd.append(f"/DIR={install_dir}")
+    if log_path is not None:
+        cmd.append(f"/LOG={log_path}")
     return cmd
+
+
+def win_arg(arg: str) -> str:
+    """One Inno Setup argument for a command line: ``/DIR=C:\a b`` -> ``/DIR="C:\a b"``."""
+    if not any(c in arg for c in ' \t"'):
+        return arg
+    if arg.startswith("/") and "=" in arg:
+        k, v = arg.split("=", 1)
+        return f'{k}="{v}"'
+    return f'"{arg}"'
+
+
+def _ps_str(text: str) -> str:
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def windows_helper_script(
+    pid: int, argv: Sequence[str], app_exe: Path | None, exit_file: Path, helper_log: Path, wait_s: int = 60
+) -> str:
+    """PowerShell: wait for this app (and any other copy of ProjectAway.exe from the install folder, e.g. the
+    Settings window) to exit, stop leftovers after ``wait_s``, then run the installer, wait for it and write
+    its exit code to ``exit_file`` so the next launch can report the result."""
+    installer, args = str(argv[0]), " ".join(win_arg(str(a)) for a in argv[1:])
+    exe = _ps_str(str(app_exe) if app_exe else "")
+    name = _ps_str(PureWindowsPath(str(app_exe)).stem if app_exe else "ProjectAway")
+    return "\n".join(
+        [
+            "$ErrorActionPreference = 'SilentlyContinue'",
+            f"$log = {_ps_str(str(helper_log))}",
+            "function Log($m) { Add-Content -Path $log -Value ((Get-Date -Format s) + ' ' + $m) }",
+            f"Log 'update helper: waiting for Project Away (pid {pid}) to exit'",
+            f"Wait-Process -Id {pid} -Timeout {wait_s}",
+            f"$exe = {exe}",
+            f"$deadline = (Get-Date).AddSeconds({max(5, wait_s // 2)})",
+            "do {",
+            f"  $left = @(Get-Process -Name {name} | Where-Object {{ $exe -eq '' -or $_.Path -eq $exe }})",
+            "  if ($left.Count -eq 0) { break }",
+            "  Start-Sleep -Milliseconds 500",
+            "} while ((Get-Date) -lt $deadline)",
+            "if ($left.Count -gt 0) { Log ('stopping ' + $left.Count + ' Project Away process(es) still running');"
+            " $left | Stop-Process -Force; Start-Sleep -Seconds 1 }",
+            f"Log ('starting installer: ' + {_ps_str(installer)} + ' ' + {_ps_str(args)})",
+            f"$p = Start-Process -FilePath {_ps_str(installer)} -ArgumentList {_ps_str(args)} -PassThru",
+            "if ($p) {",
+            "  $h = $p.Handle",  # cache the handle, or ExitCode is empty after WaitForExit
+            "  $p.WaitForExit()",
+            "  Log ('installer exit code ' + $p.ExitCode)",
+            f"  Set-Content -Path {_ps_str(str(exit_file))} -Value $p.ExitCode",
+            "} else {",
+            "  Log ('could not start the installer: ' + $Error[0])",
+            f"  Set-Content -Path {_ps_str(str(exit_file))} -Value 'launch-failed'",
+            "}",
+        ]
+    )
+
+
+def windows_helper_command(script: str) -> list[str]:
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")  # no quoting pitfalls
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-EncodedCommand",
+        encoded,
+    ]
+
+
+def windows_start_command(argv: Sequence[str]) -> str:
+    """Last-resort launch (no PowerShell): ``cmd /c start "" "setup.exe" /VERYSILENT ...``."""
+    return 'cmd.exe /c start "" ' + " ".join(win_arg(str(a)) for a in argv)
 
 
 def deb_command(deb: Path) -> list[str]:
@@ -533,7 +628,12 @@ def replace_appimage(new_file: Path, target: Path) -> Path:
     return target
 
 
-def _detached_kwargs(platform: str) -> dict[str, Any]:
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000  # survive the app's exit even if it runs inside a kill-on-close job
+
+
+def _detached_kwargs(platform: str, breakaway: bool = False) -> dict[str, Any]:
     kw: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
@@ -541,10 +641,52 @@ def _detached_kwargs(platform: str) -> dict[str, Any]:
         "close_fds": True,
     }
     if platform.startswith("win"):
-        kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        kw["creationflags"] = (
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | (CREATE_BREAKAWAY_FROM_JOB if breakaway else 0)
+        )
     else:
         kw["start_new_session"] = True
     return kw
+
+
+def launch_windows_installer(
+    installer: Path,
+    target: InstallTarget,
+    pid: int,
+    relaunch: bool,
+    launcher: Callable[..., Any],
+    data_dir: Path,
+    platform: str = "win32",
+) -> str:
+    """Start the detached helper that installs once this process is gone. Returns how it was started.
+
+    Tries, in order: PowerShell helper with CREATE_BREAKAWAY_FROM_JOB, the helper without it (a job that
+    forbids breakaway rejects the flag), then ``cmd /c start`` of the installer itself."""
+    logs = data_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    install_dir = PureWindowsPath(str(target.path)).parent if target.path is not None else None
+    argv = windows_command(installer, relaunch, install_dir, logs / INSTALL_LOG)
+    exit_file = data_dir / EXIT_CODE_FILE
+    exit_file.unlink(missing_ok=True)
+    script = windows_helper_script(pid, argv, target.path, exit_file, logs / HELPER_LOG)
+    helper = windows_helper_command(script)
+    attempts: list[tuple[str, Any, dict[str, Any]]] = [
+        ("powershell helper (breakaway)", helper, _detached_kwargs(platform, breakaway=True)),
+        ("powershell helper", helper, _detached_kwargs(platform)),
+        ("cmd start (breakaway)", windows_start_command(argv), _detached_kwargs(platform, breakaway=True)),
+        ("cmd start", windows_start_command(argv), _detached_kwargs(platform)),
+    ]
+    errors = []
+    for how, cmd, kw in attempts:
+        try:
+            launcher(cmd, **kw)
+        except OSError as exc:
+            log.warning("update: could not start the installer via %s: %s", how, exc)
+            errors.append(f"{how}: {exc}")
+            continue
+        log.info("update: installer scheduled via %s: %s", how, " ".join(argv))
+        return how
+    raise UpdateError("could not start the installer (" + "; ".join(errors) + f"); run {installer} yourself")
 
 
 def install(
@@ -556,6 +698,7 @@ def install(
     runner: Callable[..., Any] = subprocess.run,
     platform: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
+    data_dir: Path | None = None,
 ) -> InstallOutcome:
     """Install the verified file for ``target``. Raises UpdateError for anything it cannot do."""
     plat = platform or sys.platform
@@ -566,8 +709,8 @@ def install(
     if kind not in INSTALLABLE:
         raise UpdateError(f"this copy cannot update itself; download the new version from {RELEASES_PAGE}")
     if kind == "windows":
-        launcher(windows_command(path, relaunch), **_detached_kwargs(plat))
-        return InstallOutcome(True, "Installing the update; Project Away restarts when it is done.")
+        launch_windows_installer(Path(path), target, pid, relaunch, launcher, data_dir or _data_dir(), plat)
+        return InstallOutcome(True, "Installing the update; Project Away closes now and restarts when it is done.")
     if kind == "macos":
         dest = macos_destination(target)
         if not os.access(dest.parent, os.W_OK):
@@ -598,11 +741,97 @@ def install(
     return InstallOutcome(False, "Updated; restart Project Away to use the new version.")
 
 
+def _data_dir() -> Path:
+    from away import paths
+
+    return paths.data_dir()
+
+
+# ------------------------------------------------------------------------------------ install state
+INNO_EXIT_CODES = {
+    "1": "the installer failed to start",
+    "2": "the installer was cancelled",
+    "3": "the installer hit a fatal error while preparing",
+    "4": "the installer hit a fatal error while installing",
+    "5": "the installer was stopped at 'Preparing to install' (the app could not be closed)",
+    "6": "the installer was killed",
+    "7": "the installer could not proceed (files in use?)",
+    "8": "Windows needs a restart to finish the update",
+    "launch-failed": "the installer could not be started",
+}
+
+
+def write_state(data_dir: Path, current: str, latest: str, asset: str, installer: Path | None = None) -> Path:
+    """Record an install that is about to happen, for :func:`previous_outcome` on the next launch."""
+    path = Path(data_dir) / STATE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"from": current, "to": latest, "asset": asset, "installer": str(installer or ""), "t": time.time()}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def previous_outcome(data_dir: Path, current: str = __version__, clear: bool = True) -> tuple[bool, str, str] | None:
+    """``(ok, version, message)`` for the install recorded by :func:`write_state`, or None when there is none.
+
+    ``ok`` is True when this copy now runs the version that was being installed (or newer). The state is
+    removed (``clear``) so the outcome is reported once."""
+    path = Path(data_dir) / STATE_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    finally:
+        if clear:
+            path.unlink(missing_ok=True)
+    if not isinstance(data, dict) or not data.get("to"):
+        return None
+    to = str(data["to"])
+    exit_file = Path(data_dir) / EXIT_CODE_FILE
+    code = ""
+    with contextlib.suppress(OSError):
+        code = exit_file.read_text(encoding="utf-8", errors="replace").strip().lstrip("\ufeff")
+    if clear:
+        exit_file.unlink(missing_ok=True)
+    pv, pc = parse_version(to), parse_version(current)
+    if pv is not None and pc is not None and pc >= pv:
+        return True, to, f"Project Away was updated to v{current}."
+    why = INNO_EXIT_CODES.get(code, f"the installer exited with code {code}" if code else "the installer did not run")
+    logs = Path(data_dir) / "logs"
+    msg = f"The update to v{to} did not install (still v{current}): {why}. Details: {logs / INSTALL_LOG}"
+    return False, to, msg
+
+
+def exit_after_update(
+    shutdown: Callable[[], object],
+    grace_s: float = EXIT_GRACE_S,
+    exit_fn: Callable[[int], object] = os._exit,
+    timer: Callable[..., Any] = threading.Timer,
+) -> None:
+    """Quit so the installer can replace the files: a clean ``shutdown()``, and ``exit_fn(0)`` after ``grace_s``
+    no matter what (a hung camera/voice thread or tray loop must never keep the old files locked)."""
+
+    def force() -> None:
+        log.info("update: forcing exit so the installer can run")
+        with contextlib.suppress(Exception):
+            logging.shutdown()
+        exit_fn(0)
+
+    t = timer(grace_s, force)
+    t.daemon = True
+    t.start()
+    try:
+        shutdown()
+    except Exception as exc:
+        log.warning("update: clean shutdown failed (%s); the forced exit follows", exc)
+
+
 # -------------------------------------------------------------------------------------- tray manager
 class UpdateManager:
     """Background checks for the tray app: on start, then every 24 h; notify or install when idle.
 
-    ``tick(now)`` holds all the decisions so it can be tested without threads or network.
+    ``tick(now)`` holds all the decisions so it can be tested without threads or network. Every step is
+    logged (logger ``away.updater``, INFO; the tray app writes it to away.log) and every failure is shown
+    as a notification.
     """
 
     def __init__(
@@ -615,21 +844,34 @@ class UpdateManager:
         checker: Callable[[], CheckResult] | None = None,
         installer: Callable[[CheckResult], InstallOutcome] | None = None,
         interval_s: float = CHECK_INTERVAL_S,
+        error_retry_s: float = ERROR_RETRY_S,
+        data_dir: Path | None = None,
+        current: str = __version__,
     ) -> None:
         self.cfg = updates_cfg
         self.notify, self.on_change, self.quit_app, self.is_idle = notify, on_change, quit_app, is_idle
         self.checker = checker or (lambda: check(channel=str(getattr(updates_cfg, "channel", "stable"))))
         self.installer = installer or self._download_and_install
         self.interval_s = interval_s
+        self.error_retry_s = error_retry_s
+        self._data_dir = data_dir
+        self.current = current
         self.result: CheckResult | None = None
         self.last_check: float | None = None
+        self.last_check_failed = False
         self.notified: str | None = None
         self.installing = False
+        self.checking = False
+        self.exiting = False  # set once the installer was launched and the app is quitting for it
         self.failed_version: str | None = None  # an automatic install that failed is not retried
         self.last_error: str | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir if self._data_dir is not None else _data_dir()
 
     # -------------------------------------------------------------- state for the menu
     @property
@@ -646,14 +888,32 @@ class UpdateManager:
         return f"Update to v{r.latest}"
 
     # -------------------------------------------------------------- decisions
+    def _run_check(self) -> CheckResult:
+        log.info("update: checking GitHub releases (current v%s)", self.current)
+        fresh = self.checker()
+        self.last_check_failed = fresh.error is not None
+        if fresh.error is None or self.available is None:  # a failed re-check keeps a known update
+            self.result = fresh
+        if fresh.error:
+            log.info("update: check failed: %s", fresh.error)
+        else:
+            asset = fresh.asset.name if fresh.asset else None
+            log.info(
+                "update: latest v%s, update available: %s, install kind: %s, asset: %s",
+                fresh.latest,
+                fresh.update_available,
+                fresh.target.kind,
+                asset,
+            )
+        return fresh
+
     def tick(self, now: float) -> None:
         if not getattr(self.cfg, "check", True):
             return
-        if self.last_check is None or now - self.last_check >= self.interval_s:
+        wait = self.error_retry_s if self.last_check_failed else self.interval_s
+        if self.last_check is None or now - self.last_check >= wait:
             self.last_check = now
-            fresh = self.checker()
-            if fresh.error is None or self.available is None:  # a failed re-check keeps a known update
-                self.result = fresh
+            fresh = self._run_check()
             if fresh.error is None and fresh.update_available and self.notified != fresh.latest:
                 self.notified = fresh.latest
                 if fresh.target.kind == "pip":
@@ -671,51 +931,143 @@ class UpdateManager:
             and self.failed_version != r.latest
             and self.is_idle()
         ):
+            log.info("update: idle, installing v%s automatically", r.latest)
             self.install_now()
+
+    def check_now(self) -> CheckResult | None:
+        """Tray "Check for updates": check right away and always say what was found. Never raises."""
+        with self._lock:
+            if self.checking or self.installing:
+                return None
+            self.checking = True
+        try:
+            fresh = self._run_check()
+            self.last_check = time.monotonic()
+            if fresh.error:
+                self.notify("Project Away update check failed", fresh.error)
+            elif fresh.update_available:
+                self.notified = fresh.latest
+                if fresh.target.kind == "pip":
+                    self.notify("Project Away update", f"v{fresh.latest} is available. Run: {PIP_HINT}")
+                elif fresh.asset is None:
+                    self.notify("Project Away update", fresh.summary())
+                else:
+                    self.notify("Project Away update", f"v{fresh.latest} is available. Use the tray menu to update.")
+            else:
+                self.notify("Project Away update", fresh.summary())
+            return fresh
+        except Exception as exc:  # pragma: no cover - checker never raises; defensive
+            log.exception("update: check crashed")
+            self.notify("Project Away update check failed", str(exc))
+            return None
+        finally:
+            self.checking = False
+            self.on_change()
+
+    def report_previous(self) -> tuple[bool, str, str] | None:
+        """On start: tell the user how the last install went (from the state file it left)."""
+        try:
+            out = previous_outcome(self.data_dir, self.current)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("update: could not read the previous install state: %s", exc)
+            return None
+        if out is None:
+            return None
+        ok, version, msg = out
+        log.info("update: previous install of v%s %s: %s", version, "succeeded" if ok else "FAILED", msg)
+        if ok:
+            self.notify("Project Away updated", msg)
+        else:
+            self.failed_version = version  # do not auto-install the same version in a loop
+            self.last_error = msg
+            self.notify("Project Away update failed", msg)
+        return out
 
     def install_now(self) -> InstallOutcome | None:
         """Download, verify and install the available update (tray menu click). Never raises."""
         r = self.available
         with self._lock:
-            if r is None or self.installing:
+            if r is None or self.installing or self.exiting:
                 return None
             self.installing = True
         self.on_change()
+        log.info("update: install of v%s requested (install kind: %s)", r.latest, r.target.kind)
         try:
             if r.target.kind == "pip" or r.asset is None:
+                log.info("update: nothing to install here: %s", r.summary())
                 self.notify("Project Away update", r.summary())
                 return None
             outcome = self.installer(r)
         except Exception as exc:  # UpdateError, or anything unexpected: never take the tray down
             self.last_error = str(exc) if isinstance(exc, UpdateError) else f"update failed: {exc}"
             self.failed_version = r.latest
+            log.error("update: install of v%s failed: %s", r.latest, self.last_error)
             self.notify("Project Away update failed", self.last_error)
             return None
         finally:
             self.installing = False
             self.on_change()
+        log.info("update: %s", outcome.message)
         self.notify("Project Away update", outcome.message)
         if outcome.exit_app:
-            self.quit_app()
+            self.exiting = True
+            log.info("update: quitting so the installer can replace the files")
+            try:
+                self.quit_app()
+            except Exception as exc:
+                log.error("update: quitting failed: %s", exc)
+                self.notify("Project Away update", f"Quit Project Away to finish the update ({exc}).")
         return outcome
 
-    def _download_and_install(self, r: CheckResult) -> InstallOutcome:  # pragma: no cover - network + OS
+    def _download_and_install(self, r: CheckResult) -> InstallOutcome:
         assert r.asset is not None
-        path = download(r.asset)
-        verify_download(path, r.asset, r.release, allow_unverified=bool(getattr(self.cfg, "allow_unverified", False)))
-        return install(path, r.target)
+        dl_dir = self.data_dir / "updates"
+        if dl_dir.exists():  # old installers from earlier attempts
+            for old in dl_dir.iterdir():
+                if old.is_file() and old.name != r.asset.name:
+                    with contextlib.suppress(OSError):
+                        old.unlink()
+        log.info("update: downloading %s (%d bytes) to %s", r.asset.name, r.asset.size, dl_dir)
+        path = download(r.asset, dl_dir)
+        log.info("update: downloaded %s", path)
+        source = verify_download(
+            path, r.asset, r.release, allow_unverified=bool(getattr(self.cfg, "allow_unverified", False))
+        )
+        log.info("update: SHA-256 verified (source: %s)", source)
+        write_state(self.data_dir, self.current, str(r.latest), r.asset.name, path)
+        try:
+            outcome = install(path, r.target, data_dir=self.data_dir)
+        except Exception:
+            (self.data_dir / STATE_FILE).unlink(missing_ok=True)
+            raise
+        log.info("update: installer launched for v%s", r.latest)
+        return outcome
 
     # -------------------------------------------------------------- thread
-    def start(self, poll_s: float = 60.0) -> None:
-        if not getattr(self.cfg, "check", True) or self._thread is not None:
+    def start(self, poll_s: float = 60.0, report_delay_s: float = 3.0) -> None:
+        """Background thread: report the last install (after ``report_delay_s``, once the tray icon is up),
+        then check right away and every ``interval_s``."""
+        if self._thread is not None:
+            return
+        if not getattr(self.cfg, "check", True):
+            log.info("update: automatic checks are off (updates.check: false)")
+
+            def report_only() -> None:
+                if not self._stop.wait(report_delay_s):
+                    self.report_previous()
+
+            threading.Thread(target=report_only, name="away-update-report", daemon=True).start()
             return
 
         def loop() -> None:
+            if not self._stop.wait(report_delay_s):
+                self.report_previous()
             while not self._stop.is_set():
                 try:
                     self.tick(time.monotonic())
                 except Exception as exc:  # pragma: no cover - defensive
                     self.last_error = str(exc)
+                    log.exception("update: background check crashed")
                 self._stop.wait(poll_s)
 
         self._thread = threading.Thread(target=loop, name="away-updater", daemon=True)

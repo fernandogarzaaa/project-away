@@ -421,22 +421,36 @@ class SettingsModel:
         return f"{n} cameras (fusion: {self.cfg.hands.multicam.fusion})" if n >= 2 else "single camera"
 
     def device_choices(self, devices: list[Any] | None = None) -> list[str]:
-        """``"0: Integrated Webcam"`` entries for the device pickers."""
+        """``"0: Integrated Webcam"`` entries for the device pickers.
+
+        Never empty while a camera is configured: devices the running app holds and the configured ones are
+        always listed, even when the OS listing fails or misses them (Windows cameras are exclusive, so a
+        held camera cannot be probed)."""
+        busy = self.app_cameras()
         if devices is None:
             from away.multicam.capture import list_cameras
 
             try:
-                devices = list_cameras(in_use=self.app_cameras())
+                devices = list_cameras(in_use=busy)
             except Exception:
                 devices = []
-        self.known_devices = {str(d.index if d.index is not None else d.path) for d in devices} | {
-            str(d.path) for d in devices
-        }
+        devices = list(devices)
+        have = {str(d.index if d.index is not None else d.path) for d in devices} | {str(d.path) for d in devices}
+        h = self.cfg.hands
+        configured = [c.device for c in h.cameras] if h.cameras else [h.camera_index]
+        extra: list[tuple[str, str]] = []
+        for dev in [*sorted(busy), *configured]:
+            key = str(dev)
+            if key in have or key in (k for k, _ in extra):
+                continue
+            label = "in use by Project Away" if key in busy else "configured"
+            extra.append((key, f"{key}: camera {key} ({label})" if key.isdigit() else f"{key}: {key} ({label})"))
+        self.known_devices = have | {k for k, _ in extra}
         return [
             f"{d.index if d.index is not None else d.path}: {d.name}"
-            + (" (in use by Project Away)" if getattr(d, "in_use", False) else "")
+            + (" (in use by Project Away)" if getattr(d, "in_use", False) or str(d.index) in busy else "")
             for d in devices
-        ]
+        ] + [label for _, label in extra]
 
     @staticmethod
     def parse_device(choice: str) -> int | str:
