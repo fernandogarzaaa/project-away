@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -46,12 +47,26 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
 
         if compute_type == "auto":
             compute_type = "default"
-        self.model = WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root)
+        self.model = WhisperModel(
+            resolve_whisper_model(model, download_root),
+            device=device,
+            compute_type=compute_type,
+            download_root=download_root,
+        )
         self.language = language
         self.hotwords = hotwords
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
         return whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords)
+
+
+def resolve_whisper_model(model: str, download_root: str | None) -> str:
+    """``away setup`` downloads the model flat into ``download_root`` (``model.bin`` + tokenizer). Load that
+    directory directly; passing the size name with ``download_root`` would make faster-whisper fetch a second
+    copy into a Hugging Face cache layout on first dictation."""
+    if download_root and (Path(download_root) / "model.bin").exists():
+        return str(download_root)
+    return model
 
 
 def supports_kwarg(fn: object, name: str) -> bool:
@@ -98,6 +113,13 @@ class ParakeetASR:  # pragma: no cover - optional NVIDIA NeMo backend
         return str(getattr(first, "text", first)).strip()
 
 
+PARAKEET_MISSING = (
+    "voice.asr_backend 'parakeet' needs NVIDIA NeMo, which the one-click installers do not bundle "
+    "(multi-GB, Linux/NVIDIA-oriented). Install from Python instead: "
+    "pipx install 'project-away[all,parakeet]', or set voice.asr_backend: faster-whisper."
+)
+
+
 def make_asr(
     backend: str,
     model: str,
@@ -108,5 +130,9 @@ def make_asr(
     hotwords: str | None = None,
 ) -> ASRBackend:
     if backend == "parakeet":
+        try:
+            import nemo.collections.asr  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(PARAKEET_MISSING) from exc
         return ParakeetASR() if model in WHISPER_MODELS else ParakeetASR(model)
     return FasterWhisperASR(model, device, compute_type, language, download_root, hotwords)
