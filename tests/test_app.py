@@ -389,7 +389,14 @@ def test_cli_setup(monkeypatch):
 
     monkeypatch.setattr(setup_wizard, "run", fake_run)
     assert main(["setup", "-y", "--skip-asr", "--skip-probe", "--asr-model", "small"]) == 0
-    assert seen == {"yes": True, "asr_model": "small", "skip_asr": True, "skip_probe": True, "connections": 8}
+    assert seen == {
+        "yes": True,
+        "asr_model": "small",
+        "skip_asr": True,
+        "skip_probe": True,
+        "connections": 8,
+        "gpu": None,
+    }
     monkeypatch.setattr(setup_wizard, "run", lambda **kw: setup_wizard.SetupReport(models={"a": "failed: x"}))
     assert main(["setup", "-y"]) == 1
 
@@ -397,4 +404,4 @@ def test_cli_setup(monkeypatch):
 def test_cli_version(capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
-    assert "project-away 0.1.4" in capsys.readouterr().out
+    assert "project-away 0.1.5" in capsys.readouterr().out

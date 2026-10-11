@@ -31,10 +31,56 @@ by a separate step:
 | Download | Size | When |
 |---|---|---|
 | MediaPipe hand + face models | ~12 MB | always |
-| Whisper `large-v3-turbo` (default speech model) | ~1.6 GB | default |
-| Whisper `small` (for slower PCs) | ~0.5 GB | Windows: tick *Use the smaller speech model*; elsewhere `setup --yes --asr-model small` |
+| Whisper model picked for your hardware (`away hardware` shows which and why) | ~0.08–1.6 GB | default |
+| Whisper `small` (for slower PCs or connections) | ~0.5 GB | Windows: tick *Use the smaller speech model*; elsewhere `setup --yes --asr-model small` |
+| NVIDIA GPU pack (cuBLAS 12, only with a usable NVIDIA GPU) | ~570 MB download, ~790 MB on disk | offered by setup; or `away gpu install` |
 
-The Whisper download uses 8 parallel connections, verifies each file's checksum, and resumes where it stopped if interrupted (run `setup` again); tune with `setup --connections N` (1 = single stream).
+The Whisper download uses 8 parallel connections, verifies each file's checksum, and resumes where it stopped if interrupted (run `setup` again, even after an older version was interrupted); tune with `setup --connections N` (1 = single stream). Hugging Face's download links expire after an hour; the downloader fetches a fresh link and carries on instead of starting over. On a very slow connection (under 0.5 MB/s) it prints the estimated time and suggests `--asr-model small`.
+
+### Hardware auto-tuning and the NVIDIA GPU
+
+On first run Project Away detects your CPU cores, RAM, free disk and GPU and picks the speech model, CPU or
+GPU, precision, threads, beam size, camera resolution/frame rate and how often face tracking runs. Run
+`away hardware` (or open *Settings > Performance*) to see what it found and why.
+
+| Machine | Speech recognition |
+|---|---|
+| NVIDIA GPU with >= 4 GB VRAM (e.g. RTX 2060 6 GB) + GPU pack | `large-v3-turbo` on CUDA, float16 (int8 on Pascal cards), beam 5 |
+| NVIDIA GPU with 2–3 GB (e.g. GTX 1050 2 GB) + GPU pack | `small` on CUDA, int8 |
+| No usable GPU, 12+ cores and 16 GB | `large-v3-turbo` on the CPU, int8 |
+| No usable GPU, 4+ cores and 8 GB | `small` on the CPU, int8 |
+| Smaller PCs | `base` / `tiny` on the CPU, int8; lighter camera settings |
+| Mac (Apple Silicon or Intel) | CPU, int8 (CTranslate2 has no Metal backend) |
+
+**GPU (Windows / Linux, NVIDIA):** the installers stay small and do not include CUDA. When setup finds an
+NVIDIA GPU it offers the **GPU pack**: a one-time download of NVIDIA's official `nvidia-cublas-cu12` 12.8
+wheel from PyPI (checksum-verified), from which only the two cuBLAS libraries are kept, in your data folder.
+That is all Whisper's engine (CTranslate2 4.8) needs; cuDNN is not required. You need an NVIDIA driver that
+supports CUDA 12 (Windows 527.41+, Linux 525.60.13+); with an older driver it stays on the CPU and says why.
+
+```bash
+away gpu install      # download the GPU pack (installed app); resumes if interrupted
+away gpu status       # what is installed and whether cuBLAS loads
+away gpu remove
+```
+
+From pip/pipx, install the library into the same environment instead:
+`pip install nvidia-cublas-cu12==12.8.4.1` (Project Away finds it automatically, no `LD_LIBRARY_PATH`).
+
+Choose explicitly in `config.yaml` (or *Settings > Performance*); explicit settings always win:
+
+```yaml
+performance:
+  mode: auto        # auto | cpu | gpu
+  cpu_threads: 0    # 0 = auto; also beam_size, camera_width/height/fps, hands_every, face_every
+voice:
+  asr_model: auto   # or large-v3-turbo, small, base, tiny
+  device: auto      # auto | cuda | cpu
+  compute_type: auto
+```
+
+If the GPU fails to start at runtime (missing library, driver, out of memory), dictation falls back to
+the CPU automatically and shows a notification with the reason.
 
 Approximate installer sizes (CPU PyTorch is most of it; GitHub allows 2 GB per file and the release
 workflow fails above 1.9 GB):
@@ -76,7 +122,8 @@ pipx install "project-away[all,train]" --pip-args="--extra-index-url https://dow
 pipx install ".[all,train]"
 
 # 3. First-run wizard: downloads models, checks camera + mic, writes config
-away setup                                 # ~1.6 GB Whisper large-v3-turbo; use --asr-model small on slower PCs
+away setup                                 # picks the Whisper model for your hardware; --asr-model small on slow PCs/links
+away hardware                              # what was detected and the settings picked from it
 
 # 4. Run
 away run          # foreground, Ctrl+C to quit

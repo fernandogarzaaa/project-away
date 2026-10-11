@@ -59,7 +59,8 @@ def test_setup_without_yes_and_without_stdin_uses_defaults(monkeypatch):
     got = []
     monkeypatch.setattr(models, "download_asr", lambda m, d, out, **k: got.append(m))
     rep = setup_wizard.run(skip_probe=True, out=lambda s: None, downloader=_fake_dl)
-    assert rep.models["asr"] == "ok" and got == [C.AppConfig().voice.asr_model]
+    assert rep.models["asr"] == "ok" and got == ["small"]  # the auto pick for the test machine (8 cores, 16 GB)
+    assert C.load()[0].voice.asr_model == "auto"  # an automatic pick is not frozen into the config
 
 
 def test_uninstall_without_stdin_does_not_delete(monkeypatch):
@@ -132,7 +133,8 @@ def test_missing_models_and_first_launch(monkeypatch):
     cfg = C.AppConfig()
     mdir = paths.models_dir()
     missing = frozen.missing_models(cfg, mdir)
-    assert "hand_landmarker.task" in missing and f"whisper-{cfg.voice.asr_model}" in missing
+    assert cfg.voice.asr_model == "auto"
+    assert "hand_landmarker.task" in missing and "whisper-small" in missing  # auto -> small on the test machine
     assert frozen.needs_setup(cfg)
 
     calls, notes = [], []
@@ -141,7 +143,7 @@ def test_missing_models_and_first_launch(monkeypatch):
         calls.append(argv)
         for mf in models.MEDIAPIPE_MODELS:
             _fake_dl(mf, mdir, None)
-        w = mdir / f"whisper-{cfg.voice.asr_model}"
+        w = mdir / "whisper-small"
         w.mkdir(parents=True, exist_ok=True)
         (w / "model.bin").write_bytes(b"x")
         C.save(cfg)
@@ -149,7 +151,7 @@ def test_missing_models_and_first_launch(monkeypatch):
 
     rc = frozen.first_launch(fake_cli, cfg, notifier=lambda t, m: notes.append(m))
     assert rc == 0
-    assert calls == [["setup", "--yes", "--skip-probe", "--asr-model", cfg.voice.asr_model]]
+    assert calls == [["setup", "--yes", "--skip-probe"]]  # auto: setup picks the model from the hardware
     assert "GB" in notes[0] and notes[-1] == "Models ready."
     assert frozen.missing_models(cfg, mdir) == [] and not frozen.needs_setup(cfg)
     # second launch: nothing to do

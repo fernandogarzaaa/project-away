@@ -74,27 +74,57 @@ def download(
     return dest
 
 
+# fastdl's own temporary files: a preallocated (sparse) full-size ``.part`` and its JSON sidecar. Counting
+# them made the fallback bar jump to 100% at once (v0.1.4) while huggingface_hub restarted from zero.
+FASTDL_TEMP_SUFFIXES = (".part", ".part.json", ".part.json.tmp")
+
+
+def is_fastdl_temp(path: Path) -> bool:
+    return path.name.endswith(FASTDL_TEMP_SUFFIXES)
+
+
 def dir_bytes(path: Path) -> int:
-    """Bytes under ``path``, counting partial (``.incomplete``) download files too."""
+    """Bytes really downloaded under ``path``: finished files plus huggingface_hub's ``.incomplete`` files,
+    but not fastdl's preallocated ``.part`` files (their size is the final size, not progress)."""
     total = 0
     if path.exists():
         for f in path.rglob("*"):
             try:
-                if f.is_file():
+                if f.is_file() and not is_fastdl_temp(f):
                     total += f.stat().st_size
             except OSError:
                 continue
     return total
 
 
-def progress_bar(done: int, total: int, width: int = 30) -> str:
-    """``[#####.....]  41%  664/1620 MB`` (clamped; ``total`` <= 0 shows MB only)."""
-    mb = done / 1_000_000
+def progress_bar(done: int, total: int, width: int = 30, final: bool = True) -> str:
+    """``[#####.....]  41%  664/1620 MB`` (clamped to ``total``; ``total`` <= 0 shows MB only).
+
+    ``final=False`` (still running) never shows more than 99%: the expected size is an estimate."""
     if total <= 0:
-        return f"  {mb:,.0f} MB"
-    frac = min(max(done / total, 0.0), 1.0)
+        return f"  {max(done, 0) / 1_000_000:,.0f} MB"
+    done = min(max(done, 0), total)
+    frac = done / total
+    if not final:
+        frac = min(frac, 0.99)
     filled = round(frac * width)
-    return f"  [{'#' * filled}{'.' * (width - filled)}] {frac * 100:3.0f}%  {mb:,.0f}/{total / 1_000_000:,.0f} MB"
+    pct = frac * 100
+    shown = f"{pct:3.0f}" if final or pct < 99 else " 99"
+    return f"  [{'#' * filled}{'.' * (width - filled)}] {shown}%  {done / 1_000_000:,.0f}/{total / 1_000_000:,.0f} MB"
+
+
+def cleanup_fastdl_temp(path: Path) -> int:
+    """Delete fastdl ``.part`` leftovers once a model is complete (they can be 1.6 GB). Returns files removed."""
+    n = 0
+    if path.exists():
+        for f in path.rglob("*"):
+            if f.is_file() and is_fastdl_temp(f):
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+    return n
 
 
 class _DirProgress:
@@ -104,17 +134,21 @@ class _DirProgress:
         import threading
 
         self.path, self.total, self.write, self.interval = path, total_bytes, write, interval
+        self.base = 0  # bytes already there when the download started (finished small files)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="away-download-progress", daemon=True)
 
     def _draw(self) -> None:
-        self.write("\r" + progress_bar(dir_bytes(self.path), self.total))
+        self.write("\r" + progress_bar(dir_bytes(self.path) - self.base, self.total, final=False))
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
             self._draw()
 
     def __enter__(self) -> _DirProgress:
+        self.base = 0
+        self.base = dir_bytes(self.path)
+        self.total = max(self.total - self.base, 0) if self.total > 0 else self.total
         self._thread.start()
         return self
 
@@ -166,6 +200,29 @@ def _hub_download(model: str, out: Path, write: Callable[[str], object]) -> Path
     return Path(path)
 
 
+FAST_ATTEMPTS = 3  # fast-download runs (each resumes the last) before the huggingface_hub fallback
+FAST_PAUSE_S = (5.0, 20.0)
+
+
+def slow_hint(model: str, progress: Callable[[str], None]) -> Callable[[float, float | None], None]:
+    """Build fastdl's ``on_slow`` callback: estimate the time left and suggest the smaller model."""
+    from away.app import fastdl
+
+    def hint(rate: float, eta: float | None) -> None:
+        msg = f"  Slow connection ({rate / 1_000_000:.2f} MB/s): about {fastdl.format_eta(eta)} left for '{model}'."
+        smaller = "small" if model not in ("small", "base", "tiny") else None
+        if smaller:
+            mb = ASR_SIZES_MB[smaller]
+            msg += (
+                f"\n  Tip: press Ctrl+C and run `away setup --asr-model {smaller}` (~{mb} MB, about "
+                f"{fastdl.format_eta(mb * 1_000_000 / rate)}) for a quicker, slightly less accurate model. "
+                "This download keeps its progress and resumes if you rerun setup later."
+            )
+        progress(msg)
+
+    return hint
+
+
 def download_asr(
     model: str,
     dest_dir: Path,
@@ -174,27 +231,49 @@ def download_asr(
     write: Callable[[str], object] | None = None,
     fast: Callable[..., Path] | None = None,
     slow: Callable[[str, Path, Callable[[str], object]], Path] | None = None,
+    attempts: int = FAST_ATTEMPTS,
+    sleep: Callable[[float], None] | None = None,
 ) -> Path:
     """Download Whisper ``model`` into ``dest_dir/whisper-<model>``.
 
-    Primary path: parallel, resumable, checksum-verified ranged download (``away.app.fastdl``).
-    Any failure other than a checksum mismatch falls back to faster-whisper's huggingface_hub download.
+    Primary path: parallel, resumable, checksum-verified ranged download (``away.app.fastdl``). A failed run
+    keeps its ``.part`` + sidecar, waits, and resumes (up to ``attempts`` runs); only then does it fall back to
+    faster-whisper's huggingface_hub download, as a last resort. A checksum mismatch never falls back.
     """
+    import time
+
     from away.app import fastdl
 
     out = dest_dir / f"whisper-{model}"
     size_mb = ASR_SIZES_MB.get(model, 0)
     write = write or _stdout_writer()
-    fast = fast or fastdl.download_model
-    slow = slow or _hub_download
+    sleep = sleep or time.sleep
     progress(f"  ASR '{model}': downloading ~{size_mb} MB from Hugging Face ({connections} connections) ...")
-    try:
-        return Path(fast(model, out, write, connections=connections))
-    except fastdl.ChecksumError:
-        raise
-    except Exception as exc:
-        progress(f"  fast download unavailable ({type(exc).__name__}: {exc}); using the standard downloader ...")
-    return Path(slow(model, out, write))
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            if fast is not None:
+                return Path(fast(model, out, write, connections=connections))
+            return Path(
+                fastdl.download_model(model, out, write, connections=connections, on_slow=slow_hint(model, progress))
+            )
+        except fastdl.ChecksumError:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            last = exc
+            if i + 1 < attempts:
+                pause = FAST_PAUSE_S[min(i, len(FAST_PAUSE_S) - 1)]
+                progress(
+                    f"  download interrupted ({type(exc).__name__}: {exc}); "
+                    f"progress kept, resuming in {pause:.0f} s ..."
+                )
+                sleep(pause)
+    progress(f"  fast download unavailable ({type(last).__name__}: {last}); using the standard downloader ...")
+    path = Path((slow or _hub_download)(model, out, write))
+    cleanup_fastdl_temp(out)
+    return path
 
 
 def model_path(models_dir: Path, name: str) -> Path | None:

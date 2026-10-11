@@ -7,10 +7,15 @@ lossy links (a 1.6 GB ``large-v3-turbo`` took >50 min on some Philippine connect
   checksum (LFS ``sha256`` for big files, the git blob ``sha1`` for small ones),
 * downloads big files as N parallel HTTP ``Range`` requests pulled from a shared work queue (fast
   connections take more chunks), each written at its offset into a preallocated ``.part`` file,
-* retries each chunk with exponential backoff and records finished chunks in a JSON sidecar, so a
-  rerun of ``away setup`` resumes where the last one stopped,
+* retries each chunk with exponential backoff, continuing a broken chunk from the byte where it stopped,
+  and records finished (and partly finished) chunks in a JSON sidecar, so a rerun of ``away setup``
+  resumes where the last one stopped (including a ``.part`` left by v0.1.4),
+* re-resolves the Hub ``/resolve/`` URL when the signed CDN link it redirected to expires (HTTP
+  401/403/410 after ~1 h on ``cas-bridge.xethub.hf.co`` / ``cdn-lfs``) and on every retry, so a slow
+  download is never abandoned half way,
 * verifies the checksum, then atomically renames the file into place,
-* draws one live progress line with speed and ETA.
+* draws one live progress line with speed and ETA, and suggests the smaller model once when the
+  measured speed is very slow.
 
 The output folder has the same layout ``faster_whisper.download_model(output_dir=...)`` produces, so
 the rest of the app is unchanged. Servers that ignore ``Range`` get a single-stream download.
@@ -18,6 +23,7 @@ the rest of the app is unchanged. Servers that ignore ``Range`` get a single-str
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import functools
 import hashlib
@@ -40,6 +46,12 @@ CHUNK_SIZE = 16 * 1024 * 1024
 PARALLEL_THRESHOLD = 32 * 1024 * 1024  # smaller files: one stream (the parallel setup costs more than it saves)
 RETRIES = 5
 BACKOFF_S = 1.0
+MAX_BACKOFF_S = 30.0
+EXPIRED_STATUSES = (401, 403, 410)  # what an expired signed CDN URL answers
+MAX_REFRESHES = 50  # URL re-resolves per chunk before giving up (an hour-long link expires ~once an hour)
+SIDECAR_EVERY = 4 * 1024 * 1024  # persist partial-chunk progress at least this often
+SLOW_BPS = 500_000  # below 0.5 MB/s, suggest the smaller model
+SLOW_AFTER_S = 20.0
 TIMEOUT_S = 60.0
 BLOCK = 256 * 1024
 
@@ -52,6 +64,18 @@ class ChecksumError(RuntimeError):
 
 class RangeUnsupported(RuntimeError):
     """The server answered a Range request with the whole file."""
+
+
+class UrlExpired(RuntimeError):
+    """The signed CDN URL stopped working (401/403/410): resolve the Hub URL again for a fresh one."""
+
+
+def is_expired(exc: BaseException) -> bool:
+    import urllib.error
+
+    return isinstance(exc, UrlExpired) or (
+        isinstance(exc, urllib.error.HTTPError) and int(getattr(exc, "code", 0) or 0) in EXPIRED_STATUSES
+    )
 
 
 @dataclass(frozen=True)
@@ -197,6 +221,9 @@ class Meter:
         interval: float = 0.5,
         clock: Callable[[], float] = time.monotonic,
         warmup: float = 1.0,
+        on_slow: Callable[[float, float | None], object] | None = None,
+        slow_bps: float = SLOW_BPS,
+        slow_after: float = SLOW_AFTER_S,
     ) -> None:
         self.total, self.write, self.interval, self.clock, self.warmup = total, write, interval, clock, warmup
         self.done = already
@@ -204,6 +231,20 @@ class Meter:
         self._lock = threading.Lock()
         self._t0 = clock()
         self._last = -1e18
+        self.on_slow, self.slow_bps, self.slow_after = on_slow, slow_bps, slow_after
+        self._slow_told = False
+
+    def _check_slow(self, now: float) -> None:
+        """Call ``on_slow(rate, eta_s)`` once when, after ``slow_after`` s, the speed is below ``slow_bps``."""
+        if self.on_slow is None or self._slow_told or now - self._t0 < self.slow_after:
+            return
+        rate = self.rate()
+        if rate is None or rate >= self.slow_bps:
+            return
+        self._slow_told = True
+        left = max(self.total - self.done, 0)
+        self.write("\n")
+        self.on_slow(rate, left / rate if rate > 0 else None)
 
     def rate(self) -> float | None:
         dt = self.clock() - self._t0
@@ -223,6 +264,7 @@ class Meter:
             self._last = now
             text = "\r" + self.line()
         self.write(text)
+        self._check_slow(now)
 
     def finish(self, ok: bool) -> None:
         with self._lock:
@@ -306,23 +348,58 @@ def _verify_or_raise(tmp: Path, rf: RemoteFile, sidecar: Path | None = None) -> 
         raise ChecksumError(f"{rf.path}: checksum mismatch (expected {want[:12]}..., got {got[:12]}...)")
 
 
-def _load_sidecar(sidecar: Path, tmp: Path, rf: RemoteFile, chunk_size: int) -> set[int]:
+def _load_sidecar(sidecar: Path, tmp: Path, rf: RemoteFile, chunk_size: int) -> tuple[set[int], dict[int, int]]:
+    """(finished chunk indexes, {chunk index: bytes already written from its start}) of a valid sidecar.
+
+    Accepts sidecars written with another chunk size (v0.1.4 wrote 16 MiB chunks without ``partial``):
+    the byte ranges they cover are mapped onto the current chunks so nothing already fetched is lost."""
     try:
         meta = json.loads(sidecar.read_text(encoding="utf-8"))
-        if (
-            meta.get("size") == rf.size
-            and meta.get("sha256") == rf.sha256
-            and meta.get("chunk_size") == chunk_size
-            and tmp.stat().st_size == rf.size
-        ):
-            return {int(i) for i in meta.get("done", [])}
+        if meta.get("size") != rf.size or meta.get("sha256") != rf.sha256 or tmp.stat().st_size != rf.size:
+            return set(), {}
+        old_cs = int(meta.get("chunk_size"))
+        if old_cs <= 0:
+            return set(), {}
+        old = {c.index: c for c in plan_chunks(rf.size, old_cs)}
+        covered: list[tuple[int, int]] = []  # [start, end) byte ranges known to be on disk
+        for i in meta.get("done", []):
+            c = old.get(int(i))
+            if c is not None:
+                covered.append((c.start, c.end + 1))
+        for i, n in (meta.get("partial") or {}).items():
+            c = old.get(int(i))
+            if c is not None and int(n) > 0:
+                covered.append((c.start, c.start + min(int(n), c.length)))
     except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return set()
+        return set(), {}
+    done: set[int] = set()
+    partial: dict[int, int] = {}
+    for c in plan_chunks(rf.size, chunk_size):
+        have = _prefix_covered(c.start, c.end + 1, covered)
+        if have >= c.length:
+            done.add(c.index)
+        elif have > 0:
+            partial[c.index] = have
+    return done, partial
 
 
-def _save_sidecar(sidecar: Path, rf: RemoteFile, chunk_size: int, done: set[int]) -> None:
-    meta = {"size": rf.size, "sha256": rf.sha256, "chunk_size": chunk_size, "done": sorted(done)}
+def _prefix_covered(start: int, end: int, ranges: list[tuple[int, int]]) -> int:
+    """How many bytes from ``start`` (up to ``end``) are contiguously covered by ``ranges``."""
+    pos = start
+    for s, e in sorted(ranges):
+        if s <= pos < e:
+            pos = min(e, end)
+        if pos >= end:
+            break
+    return pos - start
+
+
+def _save_sidecar(
+    sidecar: Path, rf: RemoteFile, chunk_size: int, done: set[int], partial: dict[int, int] | None = None
+) -> None:
+    meta: dict[str, Any] = {"size": rf.size, "sha256": rf.sha256, "chunk_size": chunk_size, "done": sorted(done)}
+    if partial:
+        meta["partial"] = {str(k): v for k, v in sorted(partial.items()) if v > 0 and k not in done}
     tmp = sidecar.with_name(sidecar.name + ".tmp")
     tmp.write_text(json.dumps(meta), encoding="utf-8")
     tmp.replace(sidecar)
@@ -356,14 +433,53 @@ def _probe(url: str, opener: Opener) -> tuple[str, bool]:
     return str(final or url), ok
 
 
-def _fetch_chunk(url: str, tmp: Path, ch: Chunk, meter: Meter, opener: Opener, stop: threading.Event) -> None:
-    written = 0
+class Resolver:
+    """The current signed CDN URL for a Hub ``/resolve/`` URL, shared by the download workers.
+
+    When a worker sees the URL expire (or any error) it calls :meth:`refresh` with the generation it used;
+    only the first caller per generation re-probes, the others reuse the fresh URL."""
+
+    def __init__(self, url: str, opener: Opener, final: str | None = None) -> None:
+        self.url, self.opener = url, opener
+        self.final = final or url
+        self.generation = 0
+        self.refreshes = 0
+        self._lock = threading.Lock()
+
+    def current(self) -> tuple[str, int]:
+        with self._lock:
+            return self.final, self.generation
+
+    def refresh(self, seen_generation: int) -> str:
+        with self._lock:
+            if seen_generation == self.generation:
+                final, _ranged = _probe(self.url, self.opener)
+                self.final = final
+                self.generation += 1
+                self.refreshes += 1
+            return self.final
+
+
+def _fetch_chunk(
+    url: str,
+    tmp: Path,
+    ch: Chunk,
+    meter: Meter,
+    opener: Opener,
+    stop: threading.Event,
+    have: int = 0,
+    progress: Callable[[int], None] | None = None,
+) -> int:
+    """Fetch the rest of ``ch`` (its first ``have`` bytes are already on disk). Returns bytes on disk for
+    ``ch``; on failure raises with ``progress`` already told how far it got (those bytes are kept)."""
+    start = ch.start + have
+    written = have
     try:
-        with opener(_request(url, {"Range": f"bytes={ch.start}-{ch.end}"}), TIMEOUT_S) as r:
-            if _status(r) != 206 or _content_range_start(r) != ch.start:
-                raise RangeUnsupported(f"server ignored Range for bytes {ch.start}-{ch.end}")
+        with opener(_request(url, {"Range": f"bytes={start}-{ch.end}"}), TIMEOUT_S) as r:
+            if _status(r) != 206 or _content_range_start(r) != start:
+                raise RangeUnsupported(f"server ignored Range for bytes {start}-{ch.end}")
             with tmp.open("r+b") as fh:
-                fh.seek(ch.start)
+                fh.seek(start)
                 while written < ch.length:
                     if stop.is_set():
                         raise RuntimeError("download cancelled")
@@ -373,9 +489,61 @@ def _fetch_chunk(url: str, tmp: Path, ch: Chunk, meter: Meter, opener: Opener, s
                     fh.write(block)
                     written += len(block)
                     meter.add(len(block))
-    except BaseException:
-        meter.add(-written)
+                    if progress is not None:
+                        progress(written)
+    except BaseException as exc:
+        if progress is not None:
+            progress(written)
+        if is_expired(exc) and not isinstance(exc, UrlExpired):
+            raise UrlExpired(f"download link expired (HTTP {getattr(exc, 'code', '?')})") from exc
         raise
+    return written
+
+
+def fetch_chunk_with_retries(
+    resolver: Resolver,
+    tmp: Path,
+    ch: Chunk,
+    meter: Meter,
+    stop: threading.Event,
+    have: int = 0,
+    progress: Callable[[int], None] | None = None,
+    retries: int = RETRIES,
+    backoff: float = BACKOFF_S,
+    sleep: Callable[[float], None] = time.sleep,
+    max_refreshes: int = MAX_REFRESHES,
+) -> None:
+    """One chunk, robustly: an expired link is re-resolved immediately (does not use up a retry); any other
+    error waits with exponential backoff, re-resolves the link, and continues from the last byte written."""
+    attempt = refreshed = 0
+    pos = [have]
+
+    def track(n: int) -> None:
+        pos[0] = n
+        if progress is not None:
+            progress(n)
+
+    while True:
+        url, gen = resolver.current()
+        try:
+            _fetch_chunk(url, tmp, ch, meter, resolver.opener, stop, pos[0], track)
+            return
+        except (ChecksumError, RangeUnsupported):
+            raise
+        except UrlExpired:
+            refreshed += 1
+            if refreshed > max_refreshes or stop.is_set():
+                raise
+            _retry(functools.partial(resolver.refresh, gen), retries, backoff, sleep)
+        except Exception:
+            attempt += 1
+            if attempt >= retries or stop.is_set():
+                raise
+            sleep(min(backoff * (2 ** (attempt - 1)), MAX_BACKOFF_S))
+            # a fresh link per retry (the old one may be the problem); on failure keep the old link and let the
+            # next attempt report the real error
+            with contextlib.suppress(Exception):
+                resolver.refresh(gen)
 
 
 def download_file(
@@ -405,7 +573,8 @@ def download_file(
             _single_stream(final, tmp, meter, opener, retries, backoff, sleep)
             sidecar.unlink(missing_ok=True)
         else:
-            _parallel(final, tmp, sidecar, rf, meter, connections, chunk_size, opener, retries, backoff, sleep)
+            resolver = Resolver(url, opener, final)
+            _parallel(resolver, tmp, sidecar, rf, meter, connections, chunk_size, retries, backoff, sleep)
 
     if tmp.stat().st_size != rf.size:
         got = tmp.stat().st_size
@@ -419,26 +588,26 @@ def download_file(
 
 
 def _parallel(
-    url: str,
+    resolver: Resolver,
     tmp: Path,
     sidecar: Path,
     rf: RemoteFile,
     meter: Meter,
     connections: int,
     chunk_size: int,
-    opener: Opener,
     retries: int,
     backoff: float,
     sleep: Callable[[float], None],
 ) -> None:
     chunks = plan_chunks(rf.size, chunk_size)
-    done = _load_sidecar(sidecar, tmp, rf, chunk_size)
-    if done:
-        meter.done += sum(c.length for c in chunks if c.index in done)  # resumed bytes: progress, not speed
+    done, partial = _load_sidecar(sidecar, tmp, rf, chunk_size)
+    if done or partial:
+        # resumed bytes count as progress, not speed
+        meter.done += sum(c.length for c in chunks if c.index in done) + sum(partial.values())
     else:
         with tmp.open("wb") as fh:  # preallocate so every worker can write at its offset
             fh.truncate(rf.size)
-        _save_sidecar(sidecar, rf, chunk_size, done)
+    _save_sidecar(sidecar, rf, chunk_size, done, partial)
 
     work: queue.Queue[Chunk] = queue.Queue()
     for c in chunks:
@@ -447,6 +616,14 @@ def _parallel(
     stop = threading.Event()
     errors: list[BaseException] = []
     lock = threading.Lock()
+    saved_at: dict[int, int] = {}
+
+    def record(idx: int, n: int, force: bool = False) -> None:
+        with lock:
+            partial[idx] = n
+            if force or n - saved_at.get(idx, 0) >= SIDECAR_EVERY:
+                saved_at[idx] = n
+                _save_sidecar(sidecar, rf, chunk_size, done, partial)
 
     def worker() -> None:
         while not stop.is_set():
@@ -455,15 +632,28 @@ def _parallel(
             except queue.Empty:
                 return
             try:
-                _retry(functools.partial(_fetch_chunk, url, tmp, ch, meter, opener, stop), retries, backoff, sleep)
+                fetch_chunk_with_retries(
+                    resolver,
+                    tmp,
+                    ch,
+                    meter,
+                    stop,
+                    have=partial.get(ch.index, 0),
+                    progress=functools.partial(record, ch.index),
+                    retries=retries,
+                    backoff=backoff,
+                    sleep=sleep,
+                )
             except BaseException as exc:
                 with lock:
                     errors.append(exc)
+                    _save_sidecar(sidecar, rf, chunk_size, done, partial)  # keep every byte for the next run
                 stop.set()
                 return
             with lock:
                 done.add(ch.index)
-                _save_sidecar(sidecar, rf, chunk_size, done)
+                partial.pop(ch.index, None)
+                _save_sidecar(sidecar, rf, chunk_size, done, partial)
 
     threads = [
         threading.Thread(target=worker, name=f"away-dl-{i}", daemon=True)
@@ -474,7 +664,10 @@ def _parallel(
     for t in threads:
         t.join()
     if errors:
-        raise errors[0]
+        err = errors[0]
+        if isinstance(err, UrlExpired) and err.__cause__ is not None:
+            raise err.__cause__
+        raise err
 
 
 # ---------------------------------------------------------------- whole model
@@ -494,8 +687,11 @@ def download_model(
     clock: Callable[[], float] = time.monotonic,
     interval: float = 0.5,
     warmup: float = 1.0,
+    on_slow: Callable[[float, float | None], object] | None = None,
 ) -> Path:
-    """Download the faster-whisper files of ``model`` into ``out_dir``; returns ``out_dir``."""
+    """Download the faster-whisper files of ``model`` into ``out_dir``; returns ``out_dir``.
+
+    ``on_slow(rate_bytes_per_s, eta_s)`` is called once if the connection turns out to be very slow."""
     repo = repo_for(model)
     files = _retry(lambda: list_files(repo, opener, revision, base), retries, backoff, sleep)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -508,6 +704,7 @@ def download_model(
         interval=interval,
         clock=clock,
         warmup=warmup,
+        on_slow=on_slow,
     )
     ok = False
     try:

@@ -284,6 +284,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.stop_event = threading.Event()
         self.bus = EventBus()
         self.models_dir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
+        try:
+            from away.app.performance import current_profile
+
+            self.profile = current_profile(cfg)
+        except Exception as exc:  # detection must never stop the app
+            from away.app.tuning import Profile
+
+            self.profile = Profile(reasons=[f"hardware detection failed: {exc}"])
+        self.asr_device = self.profile.device
         backend: MouseBackend
         if dry_run:
             backend = RecordingBackend()
@@ -391,6 +400,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
     def _start_voice(self) -> None:
         import queue
 
+        from away.app.performance import effective_asr_model
         from away.voice.always_on import AmbientSession, StreamingEndpointer, VoiceController
         from away.voice.asr import make_asr
         from away.voice.cleanup import LLMCleaner, RuleCleaner, Vocabulary
@@ -403,14 +413,39 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         vocab = Vocabulary.load(v.vocabulary_file)
         rules = RuleCleaner(vocab, numbers_as_digits=v.numbers_as_digits, numbers_min_value=v.numbers_min_value)
         cleaner = LLMCleaner(rules) if v.llm_cleanup else rules
+        prof = self.profile
+        model = effective_asr_model(self.cfg, prof)
+
+        def gpu_fallback(reason: str) -> None:
+            self.asr_device = "cpu"
+            self.bus.publish("voice.gpu_fallback", {"reason": reason})
+            try:
+                from away.app.frozen import notify
+
+                notify("Project Away: GPU not used", reason)
+            except Exception:
+                pass
+
+        self.asr_device = prof.device
         asr = make_asr(
             v.asr_backend,
-            v.asr_model,
-            v.device,
-            v.compute_type,
+            model,
+            prof.device,
+            prof.compute_type,
             v.language,
-            str(self.models_dir / f"whisper-{v.asr_model}"),
+            str(self.models_dir / f"whisper-{model}"),
             vocab.hotwords() if v.hotwords else None,
+            cpu_threads=prof.cpu_threads,
+            beam_size=prof.beam_size,
+            on_fallback=gpu_fallback,
+        )
+        self.bus.publish(
+            "voice.asr_ready",
+            {
+                "model": model,
+                "device": self.asr_device,
+                "compute_type": prof.compute_type if self.asr_device == prof.device else "int8",
+            },
         )
         face_gate = self.cfg.face.enabled and self.cfg.face.gate_dictation
         gate = self.pipeline.gate.allow if face_gate else None
@@ -582,13 +617,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         if len(self.cfg.hands.cameras) >= 2 and hands is not None:
             self._multicam_loop(hands, faces)
             return
-        for t, rgb in camera_frames(self.cfg.hands.camera_index, self.cfg.hands.mirror):
+        prof = self.profile
+        frames = camera_frames(
+            self.cfg.hands.camera_index, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps
+        )
+        for n, (t, rgb) in enumerate(frames):
             if self.stop_event.is_set():
                 break
-            if hands is not None:
+            if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
                 self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
-            if faces is not None:
+            if faces is not None and n % max(1, prof.face_every) == 0:
                 obs = faces.process(rgb, t)
                 self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
 

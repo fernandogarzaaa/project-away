@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -42,6 +43,8 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
         language: str | None = None,
         download_root: str | None = None,
         hotwords: str | None = None,
+        cpu_threads: int = 0,
+        beam_size: int = 5,
     ) -> None:
         from faster_whisper import WhisperModel
 
@@ -52,12 +55,16 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
             device=device,
             compute_type=compute_type,
             download_root=download_root,
+            cpu_threads=max(0, int(cpu_threads)),
         )
+        self.device = device
+        self.compute_type = compute_type
         self.language = language
         self.hotwords = hotwords
+        self.beam_size = max(1, int(beam_size))
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
-        return whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords)
+        return whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords, self.beam_size)
 
 
 def resolve_whisper_model(model: str, download_root: str | None) -> str:
@@ -79,7 +86,12 @@ def supports_kwarg(fn: object, name: str) -> bool:
 
 
 def whisper_transcribe(
-    model: object, audio: NDArray[np.float32], language: str | None, prompt: str | None, hotwords: str | None
+    model: object,
+    audio: NDArray[np.float32],
+    language: str | None,
+    prompt: str | None,
+    hotwords: str | None,
+    beam_size: int = 5,
 ) -> str:
     """Call ``WhisperModel.transcribe`` with the vocabulary as ``initial_prompt`` and, when the installed
     faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``."""
@@ -88,7 +100,7 @@ def whisper_transcribe(
         "language": language,
         "initial_prompt": prompt,
         "vad_filter": False,
-        "beam_size": 5,
+        "beam_size": beam_size,
         "condition_on_previous_text": False,
     }
     if hotwords and supports_kwarg(fn, "hotwords"):
@@ -128,11 +140,53 @@ def make_asr(
     language: str | None = None,
     download_root: str | None = None,
     hotwords: str | None = None,
+    cpu_threads: int = 0,
+    beam_size: int = 5,
+    on_fallback: Callable[[str], object] | None = None,
+    factory: Callable[..., ASRBackend] | None = None,
 ) -> ASRBackend:
+    """Build the ASR backend. On ``device="cuda"`` the GPU libraries are activated first; if CUDA cannot
+    load or run (no cuBLAS, old driver, out of VRAM) it falls back to the CPU (int8) and calls
+    ``on_fallback(reason)`` so the app can tell the user why."""
     if backend == "parakeet":
         try:
             import nemo.collections.asr  # noqa: F401
         except ImportError as exc:
             raise ImportError(PARAKEET_MISSING) from exc
         return ParakeetASR() if model in WHISPER_MODELS else ParakeetASR(model)
-    return FasterWhisperASR(model, device, compute_type, language, download_root, hotwords)
+    build = factory or FasterWhisperASR
+    if device == "cuda":
+        from away.app import gpupack
+
+        gpupack.activate()
+        try:
+            asr = build(model, "cuda", compute_type, language, download_root, hotwords, cpu_threads, beam_size)
+            warm_up(asr)  # cuBLAS is loaded lazily: make it fail here, not on the first dictation
+            return asr
+        except Exception as exc:
+            reason = cuda_failure_reason(exc)
+            if on_fallback is not None:
+                on_fallback(reason)
+            device, compute_type = "cpu", "int8"
+    return build(model, device, compute_type, language, download_root, hotwords, cpu_threads, beam_size)
+
+
+def warm_up(asr: ASRBackend) -> None:
+    asr.transcribe(np.zeros(16000, dtype=np.float32))
+
+
+def cuda_failure_reason(exc: BaseException) -> str:
+    """One line for the user: what went wrong on the GPU and what fixes it."""
+    msg = f"{type(exc).__name__}: {exc}"
+    low = msg.lower()
+    if "cublas" in low:
+        fix = "the CUDA library cuBLAS 12 is missing: run `away gpu install` (or Settings > Performance)"
+    elif "out of memory" in low:
+        fix = "the GPU ran out of memory: pick a smaller model (voice.asr_model: small)"
+    elif "driver" in low or "insufficient" in low:
+        fix = "the NVIDIA driver is too old for CUDA 12: update it from nvidia.com"
+    elif "no cuda" in low or "cuda device" in low or "not compiled" in low:
+        fix = "no usable CUDA device"
+    else:
+        fix = "CUDA failed to start"
+    return f"GPU unavailable ({fix}); using the CPU instead. Details: {msg[:300]}"

@@ -132,9 +132,9 @@ class VoiceConfig:
     max_utterance_s: float = 15.0
     commands_enabled: bool = True  # an utterance that exactly matches a bound phrase runs it instead of typing
     asr_backend: str = "faster-whisper"  # faster-whisper | parakeet
-    asr_model: str = "large-v3-turbo"  # or "small" for weak CPUs
-    device: str = "auto"
-    compute_type: str = "auto"
+    asr_model: str = "auto"  # auto = picked from your hardware (`away hardware`); or large-v3-turbo, small, base...
+    device: str = "auto"  # auto | cuda | cpu (explicit wins over performance.mode)
+    compute_type: str = "auto"  # auto | float16 | int8_float16 | int8 | float32
     language: str | None = None
     vad: str = "silero"  # silero | energy
     output: str = "paste"  # paste | type
@@ -185,6 +185,24 @@ class AppSection:
     toggle_hotkey: str = "f9"  # global on/off for gesture control ("" = off)
 
 
+PERFORMANCE_MODES = ("auto", "cpu", "gpu")
+
+
+@dataclass
+class PerformanceConfig:
+    """Hardware-dependent settings. ``auto`` detects CPU/RAM/GPU and picks them (`away hardware` shows what and
+    why); any number set here (non-zero) overrides the automatic choice."""
+
+    mode: str = "auto"  # auto (GPU when an NVIDIA GPU + CUDA libraries are usable) | cpu | gpu
+    cpu_threads: int = 0  # Whisper CPU threads (0 = auto)
+    beam_size: int = 0  # Whisper beam size (0 = auto; 1 = fastest)
+    camera_width: int = 0  # single-camera capture size / rate (0 = auto)
+    camera_height: int = 0
+    camera_fps: int = 0
+    hands_every: int = 0  # run hand tracking on 1 in N frames (0 = auto)
+    face_every: int = 0  # run face tracking on 1 in N frames (0 = auto)
+
+
 UPDATE_CHANNELS = ("stable", "beta")
 
 
@@ -205,6 +223,7 @@ class AppConfig:
     face: FaceConfig = field(default_factory=FaceConfig)
     wifi: WifiConfig = field(default_factory=WifiConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -270,6 +289,25 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError(f"voice.ptt_mode must be toggle|hold, got {cfg.voice.ptt_mode!r}")
     if cfg.voice.asr_backend not in ("faster-whisper", "parakeet"):
         raise ValueError(f"voice.asr_backend must be faster-whisper|parakeet, got {cfg.voice.asr_backend!r}")
+    perf = cfg.performance
+    if perf.mode not in PERFORMANCE_MODES:
+        raise ValueError(f"performance.mode must be {'|'.join(PERFORMANCE_MODES)}, got {perf.mode!r}")
+    for name, top in (
+        ("cpu_threads", 256),
+        ("beam_size", 10),
+        ("camera_width", 7680),
+        ("camera_height", 4320),
+        ("camera_fps", 240),
+        ("hands_every", 10),
+        ("face_every", 30),
+    ):
+        val = getattr(perf, name)
+        if isinstance(val, bool) or not isinstance(val, int) or not 0 <= val <= top:
+            raise ValueError(f"performance.{name} must be an integer in [0, {top}] (0 = auto), got {val!r}")
+    if cfg.voice.device not in ("auto", "cuda", "cpu"):
+        raise ValueError(f"voice.device must be auto|cuda|cpu, got {cfg.voice.device!r}")
+    if not str(cfg.voice.asr_model or "").strip():
+        raise ValueError("voice.asr_model must not be empty (use 'auto')")
     if cfg.updates.channel not in UPDATE_CHANNELS:
         raise ValueError(f"updates.channel must be {'|'.join(UPDATE_CHANNELS)}, got {cfg.updates.channel!r}")
     if cfg.wifi.source not in ("rssi", "picoscenes", "iax", "synthetic"):

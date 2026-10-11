@@ -12,7 +12,7 @@
 ; /AUTOUPDATE=1 relaunches the tray app when the install finishes. A silent install skips the model
 ; download when the models are already on disk (an upgrade keeps them); missing ones download on first launch.
 #ifndef AppVersion
-  #define AppVersion "0.1.4"
+  #define AppVersion "0.1.5"
 #endif
 
 [Setup]
@@ -53,7 +53,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Model download during installation. ProjectAway.exe is a windowed app; for `setup` it opens its own
 ; console window so the download progress is visible. A failed download is retried on first launch.
-Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe"; StatusMsg: "Downloading hand-tracking and speech models (~1.6 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models and not models\small; Check: ShouldDownloadModels
+Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe"; StatusMsg: "Detecting your hardware and downloading the models it needs (0.5-2.2 GB; with an NVIDIA GPU also the GPU pack). A console window shows progress..."; Flags: waituntilterminated; Tasks: models and not models\small; Check: ShouldDownloadModels
 Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe --asr-model small"; StatusMsg: "Downloading hand-tracking and speech models (~0.5 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models\small; Check: ShouldDownloadModels
 ; Launch the tray app when the wizard closes (ticked by default).
 Filename: "{app}\ProjectAway.exe"; Parameters: "tray"; Description: "Launch Project Away now"; Flags: nowait postinstall skipifsilent

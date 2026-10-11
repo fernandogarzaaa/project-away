@@ -128,6 +128,8 @@ away voice show | mode always_on|push_to_talk|toggle | wake-word away|off | inte
 away settings                                # GUI editor (tkinter); prints CLI help when there is no display
 away update --check                          # current vs latest release (exit 0 up to date, 10 update available)
 away update [--yes]                          # download, verify SHA-256, install (see "Updates")
+away hardware [--json]                       # detected CPU/RAM/GPU + the performance profile and why
+away gpu install | status | remove           # NVIDIA GPU pack (cuBLAS 12) for Whisper on CUDA
 ```
 
 Invalid configs fail with every problem listed and its YAML path, e.g.
@@ -299,6 +301,19 @@ metric; real palms vary by about 10–15%. The checkerboard path runs `calibrate
 
 Each view runs its own MediaPipe instance in sequence, so two cameras cost about twice the CPU of one.
 
+## Hardware auto-tuning and GPU
+
+`away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
+WMI or `lspci`, Apple Silicon) and the profile picked from them: Whisper model, CPU or CUDA, compute type,
+threads, beam size, camera resolution/fps and face-tracking frame skipping, each with the reason. Explicit
+settings (`performance.mode: auto|cpu|gpu`, `voice.device`, `voice.asr_model`, `performance.*`) win.
+
+NVIDIA GPUs: the one-click installers ship CPU-only; setup (or *Settings > Performance*, or
+`away gpu install`) downloads the **GPU pack**, the cuBLAS 12 libraries from NVIDIA's official PyPI wheel
+(~570 MB, SHA-256 verified). That is the only CUDA library CTranslate2 4.8 loads. pip installs:
+`pip install nvidia-cublas-cu12==12.8.4.1`. If CUDA fails at runtime, dictation falls back to the CPU and
+says why. Details: [docs/INSTALL.md](docs/INSTALL.md#hardware-auto-tuning-and-the-nvidia-gpu).
+
 ## Updates
 
 The installed app checks GitHub Releases when the tray starts and every 24 hours. When a new version is out
@@ -323,7 +338,11 @@ Same options under **Settings → Voice & input**; from a terminal: `away update
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 661 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 798 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
+| GPU pack | Real `nvidia-cublas-cu12` 12.8.4.1 wheels downloaded, SHA-256 verified and extracted (Windows: 568 MB download, 788 MB kept; Linux x86-64: 594 / 868 MB); the DLLs import only each other + KERNEL32 |
+| Whisper on an NVIDIA GPU (CUDA) | **Untested** (no GPU in the build sandbox); CPU fallback path unit-tested |
+| Download link expiry (HTTP 403 after ~1 h) | Re-resolve + mid-chunk resume tested against a local fake Hub; interrupt + resume of `large-v3-turbo` verified against the real Hub |
 | Multi-camera geometry | Synthetic: two virtual cameras with known extrinsics. Pose from noisy (0.5 px) hand landmarks within 1.5°, palm-scaled baseline within 10%, exact noise-free triangulation, checkerboard stereo calibration under 0.5 px |
 | Multi-camera fusion | Synthetic: best-view and weighted selection, timestamp pairing and dropout, occlusion handover with no jump, push gesture, 3D pinch rejecting an edge-on false pinch, Cameras-tab model |
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |

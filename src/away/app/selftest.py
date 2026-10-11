@@ -145,7 +145,24 @@ def _away_data() -> str:
     return "static_pose.npz + gesture_tcn.onnx present"
 
 
+def _hardware() -> str:
+    """Detection + the device speech recognition will use (no model is loaded)."""
+    from away import config as cfgmod
+    from away.app import gpupack, hardware, performance
+
+    cfg, _ = cfgmod.load()
+    hw = hardware.detect()
+    prof = performance.current_profile(cfg, hw)
+    gpus = ", ".join(g.name for g in hw.gpus) or "none"
+    pack = "installed" if gpupack.installed() else "not installed"
+    return (
+        f"asr device={prof.device} ({prof.compute_type}, {prof.asr_model}); "
+        f"{hw.cores_physical or '?'} cores, {(hw.ram_mb or 0) / 1024:.1f} GB RAM; GPUs: {gpus}; GPU pack {pack}"
+    )
+
+
 CHECKS: tuple[Check, ...] = (
+    Check("hardware", "hardware detection + speech device", _hardware),
     Check("core", "numpy/scipy/yaml", _numpy),
     Check("away-data", "bundled gesture models", _away_data),
     Check("onnxruntime", "gesture model runtime", _onnxruntime),
@@ -191,10 +208,15 @@ def main(json_path: str | None = None, checks: Sequence[Check] | None = None, di
     from away import __version__
 
     res = run(checks, display)
+    device = None
+    hw_detail = str(res.get("hardware", {}).get("detail", ""))
+    if hw_detail.startswith("asr device="):
+        device = hw_detail.split("=", 1)[1].split(" ", 1)[0]
     report = {
         "version": __version__,
         "frozen": bool(getattr(sys, "frozen", False)),
         "platform": sys.platform,
+        "asr_device": device,
         "ok": all(r["ok"] is not False for r in res.values()),
         "checks": res,
     }

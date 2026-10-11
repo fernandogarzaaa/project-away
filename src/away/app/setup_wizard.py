@@ -2,9 +2,10 @@
 
 1. create the user data/config folders
 2. download MediaPipe .task models (sha256-verified)
-3. download the ASR model (optional, large)
-4. probe camera and microphone (and explain OS permission dialogs)
-5. write config.yaml
+3. detect the hardware; with a usable NVIDIA GPU, offer the GPU pack (cuBLAS, frozen apps only)
+4. download the ASR model the hardware profile picks (or ``--asr-model``)
+5. probe camera and microphone (and explain OS permission dialogs)
+6. write config.yaml
 """
 
 from __future__ import annotations
@@ -68,6 +69,9 @@ def run(
     out: Callable[[str], None] = print,
     downloader: Callable[..., Path] = models.download,
     connections: int = 8,
+    gpu: bool | None = None,
+    gpu_installer: Callable[..., Path] | None = None,
+    profiler: Callable[[cfgmod.AppConfig], object] | None = None,
 ) -> SetupReport:
     rep = SetupReport()
     assume = True if yes else None
@@ -86,16 +90,24 @@ def run(
             rep.models[mf.name] = f"failed: {exc}"
             rep.warnings.append(f"{mf.name} download failed: {exc}")
 
-    out("\n[2/4] Speech recognition model")
+    out("\n[2/4] Hardware and speech recognition model")
+    prof = _profile(cfg, profiler, out)
+    if prof is not None and not skip_asr and gpu is not False:
+        _offer_gpu_pack(cfg, prof, rep, out, gpu, assume, connections, gpu_installer)
+        if rep.models.get("gpu_pack") == "ok":
+            prof = _profile(cfg, profiler, out, quiet=True) or prof
     if skip_asr:
         rep.models["asr"] = "skipped"
     else:
-        model = asr_model or cfg.voice.asr_model
+        auto_model = getattr(prof, "asr_model", None) or "small"
+        model = asr_model or (cfg.voice.asr_model if cfg.voice.asr_model != "auto" else auto_model)
         size = models.ASR_SIZES_MB.get(model, 0)
-        if ask(f"  Download Whisper '{model}' (~{size} MB)? 'small' is ~485 MB for slower PCs.", True, assume):
+        hint = "" if model in ("small", "base", "tiny") else " 'small' is ~485 MB for slower PCs or connections."
+        if ask(f"  Download Whisper '{model}' (~{size} MB)?{hint}", True, assume):
             try:
                 models.download_asr(model, mdir, out, connections=max(1, connections))
-                cfg.voice.asr_model = model
+                if asr_model:  # an explicit choice is remembered; otherwise the config stays "auto"
+                    cfg.voice.asr_model = model
                 rep.models["asr"] = "ok"
             except Exception as exc:
                 rep.models["asr"] = f"failed: {exc}"
@@ -129,3 +141,66 @@ def run(
         out(f"  WARNING: {w}")
     out("\nDone. Start with:  away run   (or the tray app: away tray)")
     return rep
+
+
+def _profile(
+    cfg: cfgmod.AppConfig,
+    profiler: Callable[[cfgmod.AppConfig], object] | None,
+    out: Callable[[str], None],
+    quiet: bool = False,
+) -> object | None:
+    try:
+        if profiler is not None:
+            prof = profiler(cfg)
+        else:
+            from away.app.performance import current_profile
+
+            prof = current_profile(cfg)
+    except Exception as exc:  # detection must never break setup
+        out(f"  hardware detection failed ({exc}); using defaults")
+        return None
+    if not quiet:
+        summary = getattr(prof, "summary", None)
+        if callable(summary):
+            out(f"  detected profile: {summary()}")
+        if getattr(prof, "gpu", None):
+            out(f"  GPU: {getattr(prof, 'gpu', '')}")
+    return prof
+
+
+def _offer_gpu_pack(
+    cfg: cfgmod.AppConfig,
+    prof: object,
+    rep: SetupReport,
+    out: Callable[[str], None],
+    gpu: bool | None,
+    assume: bool | None,
+    connections: int,
+    installer: Callable[..., Path] | None,
+) -> None:
+    """With a usable NVIDIA GPU, mode auto/gpu and no cuBLAS: frozen apps offer the GPU pack, pip installs
+    get the pip line."""
+    from away.app import gpupack
+    from away.app.frozen import is_frozen
+
+    if cfg.performance.mode == "cpu" or cfg.voice.device == "cpu":
+        return
+    if not getattr(prof, "gpu_capable", False) or getattr(prof, "gpu_pack", "") != "recommended":
+        return
+    if not is_frozen() and installer is None:
+        out("  NVIDIA GPU found, but the CUDA library is not installed. " + gpupack.pip_instructions())
+        rep.models["gpu_pack"] = "pip instructions shown"
+        return
+    question = (
+        f"  Use the NVIDIA GPU ({getattr(prof, 'gpu', '')}) for speech recognition? "
+        "Downloads the GPU pack (cuBLAS, ~570 MB, once)."
+    )
+    if not ask(question, True, True if gpu else assume):
+        rep.models["gpu_pack"] = "declined"
+        return
+    try:
+        (installer or gpupack.install)(progress=out, connections=max(1, connections))
+        rep.models["gpu_pack"] = "ok"
+    except Exception as exc:
+        rep.models["gpu_pack"] = f"not installed ({exc})"
+        rep.warnings.append(f"GPU pack download failed ({exc}); speech runs on the CPU. Retry: away gpu install")

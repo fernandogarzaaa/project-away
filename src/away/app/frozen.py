@@ -6,6 +6,9 @@
   them safe: stdin becomes an empty stream (``input()`` -> ``EOFError`` -> the
   default answer), output goes to a visible console on Windows for commands
   that print (``setup``, ``doctor``...) or to a log file otherwise.
+* :func:`disable_quick_edit` turns off the console's QuickEdit mode: with it on, one stray click in the
+  setup window starts a text selection ("Select ..." in the title) and Windows *freezes the process*
+  until a key is pressed, so a download silently stops.
 * :func:`missing_models` / :func:`first_launch` run the non-interactive setup
   the first time the tray app starts without its models (macOS .dmg, Linux
   AppImage/.deb, or a Windows install where the model download was unticked).
@@ -13,6 +16,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import shutil
@@ -28,7 +32,7 @@ from away.app import models
 
 # commands whose output the user should see in a console window (Windows windowed exe)
 CONSOLE_COMMANDS = frozenset(
-    {"setup", "doctor", "selftest", "demo", "config", "bindings", "cameras", "uninstall", "update"}
+    {"setup", "doctor", "selftest", "demo", "config", "bindings", "cameras", "uninstall", "update", "hardware", "gpu"}
 )
 
 
@@ -58,6 +62,68 @@ def wants_console(argv: Sequence[str]) -> bool:
     return bool(argv) and (argv[0] in CONSOLE_COMMANDS or argv[0] in ("--version", "-h", "--help"))
 
 
+ENABLE_QUICK_EDIT_MODE = 0x0040
+ENABLE_EXTENDED_FLAGS = 0x0080
+GENERIC_READ_WRITE = 0x80000000 | 0x40000000
+FILE_SHARE_READ_WRITE = 0x1 | 0x2
+OPEN_EXISTING = 3
+INVALID_HANDLE = (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF, None, 0)
+
+
+def quick_edit_off(mode: int) -> int:
+    """Console input mode with QuickEdit cleared. ``ENABLE_EXTENDED_FLAGS`` must be set or Windows ignores
+    the QuickEdit bit."""
+    return (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+
+
+_saved_console_mode: list[tuple[Any, Any, int]] = []
+
+
+def disable_quick_edit(kernel32: Any = None, platform: str | None = None, restore_at_exit: bool = True) -> bool:
+    """Turn off QuickEdit for this process's console so a click cannot pause setup. Best effort, never raises.
+
+    Uses ``CONIN$`` (works for an attached or newly allocated console, where the std input handle of a GUI
+    exe is invalid). The previous mode is restored at exit, so a cmd window the user ran us from keeps
+    their setting."""
+    plat = platform or sys.platform
+    if plat != "win32":
+        return False
+    try:
+        import ctypes
+
+        k32 = kernel32
+        if k32 is None:  # pragma: no cover - Windows only
+            k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        with contextlib.suppress(AttributeError, TypeError):
+            k32.CreateFileW.restype = ctypes.c_void_p  # a HANDLE is pointer-sized; the c_int default truncates it
+        raw = k32.CreateFileW("CONIN$", GENERIC_READ_WRITE, FILE_SHARE_READ_WRITE, None, OPEN_EXISTING, 0, None)
+        if raw in INVALID_HANDLE:
+            return False
+        handle = ctypes.c_void_p(raw)
+        mode = ctypes.c_uint32(0)
+        if not k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        old = int(mode.value)
+        new = quick_edit_off(old)
+        if new != old and not k32.SetConsoleMode(handle, ctypes.c_uint32(new)):
+            return False
+        if restore_at_exit and new != old:
+            import atexit
+
+            _saved_console_mode.append((k32, handle, old))
+            atexit.register(_restore_console_mode)
+        return True
+    except Exception:
+        return False
+
+
+def _restore_console_mode() -> None:
+    while _saved_console_mode:
+        k32, handle, old = _saved_console_mode.pop()
+        with contextlib.suppress(Exception):
+            k32.SetConsoleMode(handle, old & 0xFFFFFFFF)
+
+
 def _win_console() -> TextIO | None:  # pragma: no cover - Windows only
     """Attach to the parent console (cmd/PowerShell) or open a new one; return a writer for it."""
     import ctypes
@@ -65,6 +131,7 @@ def _win_console() -> TextIO | None:  # pragma: no cover - Windows only
     k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     if not (k32.AttachConsole(-1) or k32.AllocConsole()):
         return None
+    disable_quick_edit(k32)
     try:
         return open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace")
     except OSError:
@@ -83,6 +150,8 @@ def ensure_streams(
     if sys.stdin is None:
         sys.stdin = io.StringIO("")  # input() -> EOFError -> default answer, never a hang or crash
     if sys.stdout is not None and sys.stderr is not None:
+        if plat == "win32" and is_frozen() and wants_console(argv):
+            disable_quick_edit(platform=plat)  # frozen exe run from cmd/PowerShell: a click must not pause setup
         return "tty"
     out: TextIO | None = None
     where = ""
@@ -108,10 +177,23 @@ def missing_models(cfg: cfgmod.AppConfig | None = None, models_dir: Path | None 
     mdir = models_dir or (Path(cfg.models_dir) if cfg.models_dir else paths.models_dir())
     missing = [mf.name for mf in models.MEDIAPIPE_MODELS if not (mdir / mf.name).exists()]
     if cfg.voice.enabled and cfg.voice.asr_backend == "faster-whisper":
-        wdir = mdir / f"whisper-{cfg.voice.asr_model}"
+        model = _asr_model(cfg)
+        wdir = mdir / f"whisper-{model}"
         if not (wdir / "model.bin").exists():
-            missing.append(f"whisper-{cfg.voice.asr_model}")
+            missing.append(f"whisper-{model}")
     return missing
+
+
+def _asr_model(cfg: cfgmod.AppConfig) -> str:
+    """The Whisper model in use (``voice.asr_model``, or the hardware profile's pick when it is ``auto``)."""
+    if cfg.voice.asr_model != "auto":
+        return cfg.voice.asr_model
+    try:
+        from away.app.performance import effective_asr_model
+
+        return effective_asr_model(cfg)
+    except Exception:
+        return "small"
 
 
 def needs_setup(cfg: cfgmod.AppConfig | None = None) -> bool:
@@ -162,14 +244,18 @@ def first_launch(
     if not missing and paths.config_file().exists():
         return None
     size = sum(mf.size_mb for mf in models.MEDIAPIPE_MODELS if mf.name in missing)
-    asr = cfg.voice.asr_model
+    asr = _asr_model(cfg)
     if f"whisper-{asr}" in missing:
         size += models.ASR_SIZES_MB.get(asr, 0)
     notifier(
         "Project Away: first-time setup",
         f"Downloading hand-tracking and speech models (~{size / 1000:.1f} GB). The app starts when done.",
     )
-    rc = cli_main(["setup", "--yes", "--skip-probe", "--asr-model", asr])
+    # an explicit model is passed on; "auto" stays auto (setup offers the GPU pack first, then picks the model)
+    argv = ["setup", "--yes", "--skip-probe"]
+    if cfg.voice.asr_model != "auto":
+        argv += ["--asr-model", cfg.voice.asr_model]
+    rc = cli_main(argv)
     notifier(
         "Project Away",
         "Models ready." if rc == 0 else f"Some downloads failed; they retry next launch. Log: {log_file()}",

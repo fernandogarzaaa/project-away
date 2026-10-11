@@ -253,3 +253,28 @@ def test_cameras_tab_model(tmp_path):
     assert C.load(tmp_path / "c.yaml")[0].hands.cameras == m.cfg.hands.cameras
     assert m.remove_camera(1) is None and m.cfg.hands.cameras == [] and m.cfg.hands.camera_index == 4
     assert "not calibrated" in m.calibration_status()
+
+
+def test_performance_tab_model(monkeypatch, fixed_hardware):
+    from away.app import frozen, gpupack, hardware
+    from away.app.settings_gui import SettingsModel
+
+    model = SettingsModel(C.AppConfig())
+    info = model.performance_info()
+    assert info["mode"] == "auto" and info["profile"].asr_model == "small"
+    assert any(line.startswith("Profile (cpu-mid)") for line in info["lines"])
+    assert info["pack_status"].startswith("no NVIDIA GPU") and not info["can_install"]
+    assert model.set_voice("performance.mode", "gpu") is None and model.cfg.performance.mode == "gpu"
+    assert "must be one of" in model.set_voice("performance.mode", "turbo")
+    # an RTX 2060 in the frozen app without the pack: the download button is offered
+    g = hardware.GPU("nvidia", "NVIDIA GeForce RTX 2060", 6144, 5000, (7, 5), "560.94", "12.6", "nvml")
+    rtx = hardware.Hardware(os="win32", arch="amd64", cores_physical=6, ram_mb=16384, gpus=[g])
+    monkeypatch.setattr(frozen, "is_frozen", lambda: True)
+    monkeypatch.setattr(gpupack, "platform_tag", lambda *a: "win_amd64")
+    model.set_voice("performance.mode", "auto")
+    info = model.performance_info(rtx)
+    assert info["can_install"] and "not installed" in info["pack_status"]
+    monkeypatch.setattr(gpupack, "install", lambda **k: (_ for _ in ()).throw(OSError("offline")))
+    assert "resume" in SettingsModel.install_gpu_pack(lambda s: None)
+    monkeypatch.setattr(gpupack, "install", lambda **k: None)
+    assert SettingsModel.install_gpu_pack(lambda s: None) is None

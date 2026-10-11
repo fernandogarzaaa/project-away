@@ -57,6 +57,62 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hardware(args: argparse.Namespace) -> int:
+    from away.app import gpupack, hardware, performance
+
+    cfg, _ = cfgmod.load()
+    hw = hardware.detect()
+    prof = performance.current_profile(cfg, hw)
+    if args.json:
+        print(json.dumps({"hardware": hw.to_dict(), "profile": prof.to_dict(), "gpu_pack": gpupack.status()}, indent=2))
+        return 0
+    print("\n".join(performance.describe(hw, prof)))
+    if hw.notes:
+        print("Notes:")
+        for n in hw.notes:
+            print(f"  - {n}")
+    if prof.gpu_pack == "recommended":
+        from away.app.frozen import is_frozen
+
+        print("\nEnable the GPU: " + ("away gpu install" if is_frozen() else gpupack.PIP_HINT))
+    return 0
+
+
+def cmd_gpu(args: argparse.Namespace) -> int:
+    from away.app import gpupack, hardware
+    from away.app.frozen import is_frozen
+
+    if args.action == "status":
+        st = gpupack.status()
+        hw = hardware.detect()
+        g = hw.nvidia
+        st["nvidia_gpu"] = (
+            f"{g.name} ({g.vram_mb or '?'} MB, compute {g.cc_str}, driver {g.driver_version})" if g else None
+        )
+        st["cublas_loadable"] = gpupack.cublas_available()
+        print(json.dumps(st, indent=2))
+        return 0
+    if args.action == "remove":
+        removed = gpupack.remove()
+        print("GPU pack removed." if removed else "GPU pack is not installed.")
+        return 0
+    # install
+    if gpupack.platform_tag() is None:
+        return _fail("the GPU pack needs Windows or Linux on x86-64 with an NVIDIA GPU (macOS has no CUDA)")
+    if not is_frozen() and not args.force:
+        print(gpupack.pip_instructions())
+        print("(To download it into the Project Away data folder anyway: away gpu install --force)")
+        return 0
+    if hardware.detect().nvidia is None and not args.force:
+        return _fail("no NVIDIA GPU detected (use --force to download the GPU pack anyway)")
+    try:
+        gpupack.install(connections=max(1, args.connections))
+    except Exception as exc:
+        return _fail(f"GPU pack download failed: {exc} (run it again to resume)")
+    print("Done. Speech recognition uses the GPU from the next start (performance.mode: auto).")
+    return 0
+
+
 def cmd_selftest(args: argparse.Namespace) -> int:
     from away.app import selftest
 
@@ -72,6 +128,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         skip_asr=args.skip_asr,
         skip_probe=args.skip_probe,
         connections=args.connections,
+        gpu=args.gpu,
     )
     return 1 if any(v.startswith("failed") for v in rep.models.values() if v) else 0
 
@@ -695,7 +752,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("setup", help="first-run wizard: download models, check camera/mic, write config")
     s.add_argument("--yes", "-y", action="store_true", help="accept defaults (non-interactive)")
-    s.add_argument("--asr-model", help="Whisper model (large-v3-turbo | small | ...)")
+    s.add_argument(
+        "--asr-model",
+        help="Whisper model (default: picked from your hardware, see `away hardware`; "
+        "'small' ~485 MB for slow PCs or connections)",
+    )
     s.add_argument("--skip-asr", action="store_true")
     s.add_argument("--skip-probe", action="store_true", help="do not open camera/mic")
     s.add_argument(
@@ -705,6 +766,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="parallel connections for the Whisper download (default 8; 1 = single stream)",
     )
+    s.add_argument(
+        "--gpu",
+        dest="gpu",
+        action="store_true",
+        default=None,
+        help="with an NVIDIA GPU: download the GPU pack without asking",
+    )
+    s.add_argument("--no-gpu", dest="gpu", action="store_false", help="do not offer the GPU pack")
     s.set_defaults(fn=cmd_setup)
 
     r = sub.add_parser("run", help="run gestures + dictation in the foreground")
@@ -815,6 +884,16 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--check", action="store_true", help="only print current/latest (exit 0 up to date, 10 available)")
     up.add_argument("--yes", "-y", action="store_true", help="install without asking")
     up.set_defaults(fn=cmd_update)
+
+    hwp = sub.add_parser("hardware", help="show detected CPU/RAM/GPU and the performance profile picked from them")
+    hwp.add_argument("--json", action="store_true")
+    hwp.set_defaults(fn=cmd_hardware)
+
+    gp = sub.add_parser("gpu", help="install | status | remove the NVIDIA GPU pack (cuBLAS for Whisper on CUDA)")
+    gp.add_argument("action", choices=["install", "status", "remove"])
+    gp.add_argument("--force", action="store_true", help="download even from a pip install / without a detected GPU")
+    gp.add_argument("--connections", type=int, default=8, metavar="N")
+    gp.set_defaults(fn=cmd_gpu)
 
     sub.add_parser("doctor", help="show installed extras, models and paths").set_defaults(fn=cmd_doctor)
 

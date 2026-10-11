@@ -12,7 +12,7 @@ import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -36,6 +36,10 @@ class Hub:
         self.fail: dict[int, int] = {}  # range start -> remaining failures (HTTP 500)
         self.truncate: dict[int, int] = {}  # range start -> remaining truncated (short) responses
         self.api_down = False
+        self.gen = 0  # each /resolve/ hands out a new signed CDN link ?sig=gen
+        self.min_sig = 0  # links with an older sig are expired (HTTP 403)
+        self.expire_at: set[int] = set()  # a Range request starting here expires every link handed out so far
+        self.resolves = 0
         self.log: list[tuple[str, str | None]] = []
         self.lock = threading.Lock()
 
@@ -64,8 +68,10 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             rng = self.headers.get("Range")
+            path, _, query = self.path.partition("?")
+            sig = int(query.split("=", 1)[1]) if query.startswith("sig=") else 0
             with hub.lock:
-                hub.log.append((self.path, rng))
+                hub.log.append((path, rng))
             if self.path == f"/api/models/{REPO}/tree/main":
                 if hub.api_down:
                     self.send_error(503)
@@ -78,16 +84,28 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                 return
             prefix = f"/{REPO}/resolve/main/"
             if self.path.startswith(prefix):
+                with hub.lock:
+                    hub.gen += 1
+                    hub.resolves += 1
+                    gen = hub.gen
                 self.send_response(302)
-                self.send_header("Location", "/cdn/" + self.path[len(prefix) :])
+                self.send_header("Location", "/cdn/" + self.path[len(prefix) :] + f"?sig={gen}")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            if self.path.startswith("/cdn/") and self.path[5:] in hub.files:
-                data = hub.files[self.path[5:]]
+            if path.startswith("/cdn/") and path[5:] in hub.files:
+                data = hub.files[path[5:]]
                 if rng and not hub.no_range:
                     s, e = (int(x) for x in rng.split("=")[1].split("-"))
                     e = min(e, len(data) - 1)
+                    with hub.lock:
+                        if s in hub.expire_at:
+                            hub.expire_at.discard(s)
+                            hub.min_sig = hub.gen + 1
+                        expired = sig < hub.min_sig
+                    if expired:
+                        self.send_error(403, "Request has expired")
+                        return
                     with hub.lock:
                         if hub.fail.get(s, 0) > 0:
                             hub.fail[s] -= 1
@@ -325,7 +343,9 @@ def test_transient_chunk_failures_are_retried(hub: tuple[Hub, str], tmp_path: Pa
     lines = _run(base, tmp_path, connections=4, sleeps=sleeps, backoff=0.5)
     assert (tmp_path / "model.bin").read_bytes() == h.files["model.bin"]
     assert h.ranges("model.bin").count("bytes=3000-3999") == 3
-    assert h.ranges("model.bin").count("bytes=7000-7999") == 2
+    # the half-delivered chunk continues from the byte where the connection dropped
+    assert h.ranges("model.bin").count("bytes=7000-7999") == 1
+    assert h.ranges("model.bin").count("bytes=7500-7999") == 1
     assert sorted(sleeps) == [0.5, 0.5, 1.0]  # backoff doubles per attempt of the same chunk
     total = sum(len(h.files[n]) for n in ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt"))
     # partial bytes from failed attempts are not double counted
@@ -513,3 +533,204 @@ def test_setup_wizard_passes_connections(monkeypatch: pytest.MonkeyPatch, tmp_pa
         connections=0,
     )
     assert got == [1]  # clamped to at least one connection
+
+
+# ---------------------------------------------------------------- v0.1.5: expiring links, resume, slow hint
+def test_expired_signed_link_is_re_resolved_and_download_continues(hub: tuple[Hub, str], tmp_path: Path) -> None:
+    h, base = hub
+    h.expire_at = {4000, 8000}  # the CDN link expires twice mid-download (HTTP 403)
+    sleeps: list[float] = []
+    lines = _run(base, tmp_path, connections=3, sleeps=sleeps)
+    assert (tmp_path / "model.bin").read_bytes() == h.files["model.bin"]
+    assert h.resolves >= 3  # first probe + at least one fresh link per expiry
+    assert sleeps == []  # an expired link is refreshed at once, it does not burn a retry/backoff
+    total = sum(len(h.files[n]) for n in ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt"))
+    assert f"{total / 1e6:,.0f}/{total / 1e6:,.0f} MB" in lines[-2]
+
+
+def test_link_that_keeps_expiring_eventually_raises_http_error(
+    hub: tuple[Hub, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, base = hub
+    monkeypatch.setattr(fastdl, "MAX_REFRESHES", 2)
+    monkeypatch.setattr(
+        fastdl.Resolver, "refresh", lambda self, gen: self.final
+    )  # the Hub keeps handing out dead links
+    h.expire_at = {2000}
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _run(base, tmp_path, connections=2)
+    assert ei.value.code == 403
+    assert (tmp_path / "model.bin.part.json").exists()  # progress kept for the next run
+
+
+def test_fetch_chunk_with_retries_refreshes_the_link_per_retry(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class R(fastdl.Resolver):
+        def refresh(self, seen_generation: int) -> str:
+            calls.append("refresh")
+            self.generation += 1
+            self.final = f"http://cdn/u{self.generation}"
+            return self.final
+
+    tmp = tmp_path / "f.part"
+    tmp.write_bytes(b"\0" * 10)
+    attempts: list[tuple[str, int]] = []
+
+    def opener(req: urllib.request.Request, timeout: float) -> Any:
+        attempts.append((req.full_url, int(req.headers["Range"].split("=")[1].split("-")[0])))
+        if len(attempts) == 1:
+            raise ConnectionResetError("reset")
+        if len(attempts) == 2:
+            raise urllib.error.HTTPError(req.full_url, 410, "Gone", {}, None)  # type: ignore[arg-type]
+
+        class Resp:
+            status = 206
+            headers: ClassVar[dict[str, str]] = {"Content-Range": f"bytes {attempts[-1][1]}-9/10"}
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                pass
+
+            def read(self, n: int) -> bytes:
+                data, self.data = getattr(self, "data", b"x" * (10 - attempts[-1][1])), b""
+                return data
+
+        return Resp()
+
+    r = R("http://hub/resolve", opener, "http://cdn/u0")
+    sleeps: list[float] = []
+    meter = fastdl.Meter(10, lambda s: None)
+    fastdl.fetch_chunk_with_retries(
+        r, tmp, fastdl.Chunk(0, 0, 9), meter, threading.Event(), have=4, sleep=sleeps.append, backoff=2.0
+    )
+    assert [a[0] for a in attempts] == ["http://cdn/u0", "http://cdn/u1", "http://cdn/u2"]
+    assert calls == ["refresh", "refresh"]
+    assert all(a[1] == 4 for a in attempts)  # always continues after the 4 bytes already on disk
+    assert sleeps == [2.0]  # only the connection reset waited
+    assert tmp.read_bytes() == b"\0" * 4 + b"x" * 6
+
+
+def test_v014_sidecar_with_16mib_chunks_is_resumed_with_other_chunk_size(tmp_path: Path) -> None:
+    rf = fastdl.RemoteFile("model.bin", 10_000, sha256="ab" * 32)
+    tmp = tmp_path / "model.bin.part"
+    tmp.write_bytes(b"\0" * 10_000)
+    side = tmp_path / "model.bin.part.json"
+    # a v0.1.4 sidecar: chunk_size 4000 (stands in for 16 MiB), chunks 0 and 2 done, no "partial"
+    side.write_text(json.dumps({"size": 10_000, "sha256": "ab" * 32, "chunk_size": 4000, "done": [0, 2]}))
+    done, partial = fastdl._load_sidecar(side, tmp, rf, 1000)
+    assert done == {0, 1, 2, 3, 8, 9} and partial == {}
+    done, partial = fastdl._load_sidecar(side, tmp, rf, 4000)
+    assert done == {0, 2} and partial == {}
+    done, partial = fastdl._load_sidecar(side, tmp, rf, 3000)
+    assert done == {0, 3} and partial == {1: 1000}  # chunk 2 = 6000-8999: 8000+ is covered but not a prefix
+    # partial progress written by v0.1.5
+    side.write_text(
+        json.dumps({"size": 10_000, "sha256": "ab" * 32, "chunk_size": 1000, "done": [0], "partial": {"1": 250}})
+    )
+    assert fastdl._load_sidecar(side, tmp, rf, 1000) == ({0}, {1: 250})
+    # wrong size / digest / broken json => start over
+    side.write_text(json.dumps({"size": 9, "sha256": "ab" * 32, "chunk_size": 1000, "done": [0]}))
+    assert fastdl._load_sidecar(side, tmp, rf, 1000) == (set(), {})
+    side.write_text("{not json")
+    assert fastdl._load_sidecar(side, tmp, rf, 1000) == (set(), {})
+
+
+def test_interrupted_chunk_resumes_mid_chunk_on_the_next_run(hub: tuple[Hub, str], tmp_path: Path) -> None:
+    h, base = hub
+    data = h.files["model.bin"]
+    part = bytearray(len(data))
+    part[0:1000] = data[0:1000]
+    part[1000:1600] = data[1000:1600]
+    (tmp_path / "model.bin.part").write_bytes(bytes(part))
+    meta = {
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "chunk_size": 1000,
+        "done": [0],
+        "partial": {"1": 600},
+    }
+    (tmp_path / "model.bin.part.json").write_text(json.dumps(meta))
+    _run(base, tmp_path, connections=2)
+    assert (tmp_path / "model.bin").read_bytes() == data
+    got = h.ranges("model.bin")
+    assert "bytes=1600-1999" in got and "bytes=0-999" not in got and "bytes=1000-1999" not in got
+
+
+def test_meter_reports_slow_connection_once() -> None:
+    now = [0.0]
+    out: list[str] = []
+    told: list[tuple[float, float | None]] = []
+    m = fastdl.Meter(
+        10_000_000,
+        out.append,
+        clock=lambda: now[0],
+        interval=0.0,
+        on_slow=lambda r, e: told.append((r, e)),
+        slow_after=20.0,
+    )
+    now[0] = 10.0
+    m.add(1_000_000)  # 0.1 MB/s, but too early to judge
+    assert told == []
+    now[0] = 25.0
+    m.add(1_500_000)  # 2.5 MB in 25 s = 0.1 MB/s
+    assert len(told) == 1 and abs(told[0][0] - 100_000) < 1 and abs(told[0][1] - 75.0) < 0.01
+    now[0] = 30.0
+    m.add(10)
+    assert len(told) == 1  # once per run
+    fast: list[object] = []
+    m2 = fastdl.Meter(10_000_000, out.append, clock=lambda: now[0], interval=0.0, on_slow=fast.append, slow_after=0.0)
+    now[0] = 31.0
+    m2.add(5_000_000)  # 5 MB/s: no hint
+    assert fast == []
+
+
+def test_slow_hint_suggests_small_model() -> None:
+    msgs: list[str] = []
+    models.slow_hint("large-v3-turbo", msgs.append)(100_000, 16_200.0)
+    assert "0.10 MB/s" in msgs[0] and "4h30m" in msgs[0] and "--asr-model small" in msgs[0] and "resumes" in msgs[0]
+    msgs.clear()
+    models.slow_hint("small", msgs.append)(100_000, 4000.0)
+    assert "--asr-model" not in msgs[0]
+
+
+def test_download_asr_resumes_fast_path_before_falling_back(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def fast(model: str, out: Path, write: Any, connections: int) -> Path:
+        calls.append(connections)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError("u", 403, "Forbidden", {}, None)  # type: ignore[arg-type]
+        return out
+
+    def slow(*a: Any) -> Path:
+        raise AssertionError("must not fall back while the fast path recovers")
+
+    msgs: list[str] = []
+    sleeps: list[float] = []
+    p = models.download_asr(
+        "tiny", tmp_path, msgs.append, write=lambda s: None, fast=fast, slow=slow, sleep=sleeps.append
+    )
+    assert p == tmp_path / "whisper-tiny" and len(calls) == 3 and sleeps == [5.0, 20.0]
+    assert sum("progress kept" in m for m in msgs) == 2
+
+
+def test_fallback_cleans_fastdl_leftovers_after_success(tmp_path: Path) -> None:
+    out = tmp_path / "whisper-tiny"
+
+    def fast(*a: Any, **k: Any) -> Path:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "model.bin.part").write_bytes(b"\0" * 100)
+        (out / "model.bin.part.json").write_text("{}")
+        raise urllib.error.URLError("down")
+
+    def slow(model: str, o: Path, write: Any) -> Path:
+        (o / "model.bin").write_bytes(b"m")
+        return o
+
+    models.download_asr(
+        "tiny", tmp_path, lambda s: None, write=lambda s: None, fast=fast, slow=slow, sleep=lambda s: None
+    )
+    assert sorted(p.name for p in out.iterdir()) == ["model.bin"]

@@ -30,7 +30,7 @@ from away.bindings import (
     parse_action,
     split_trigger,
 )
-from away.config import UPDATE_CHANNELS, VOICE_MODES, AppConfig
+from away.config import PERFORMANCE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
 from away.hands.gestures import GestureEvent
 
 TUNABLE_LABELS = {
@@ -90,7 +90,9 @@ VOICE_FIELDS = {
     "voice.intent": ("dictation", "command"),
     "voice.ambient_fallback": ("commands_only", "type"),
     "updates.channel": UPDATE_CHANNELS,
+    "performance.mode": PERFORMANCE_MODES,
 }
+PERFORMANCE_LABELS = {"auto": "Auto (detect)", "cpu": "CPU only", "gpu": "GPU (NVIDIA CUDA)"}
 
 
 @dataclass
@@ -315,6 +317,7 @@ class SettingsModel:
             "updates.check",
             "updates.auto_install",
             "updates.channel",
+            "performance.mode",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -457,6 +460,45 @@ class SettingsModel:
             return "not calibrated (fusion works; depth/push/3D pinch need calibration)"
         when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ex.created))
         return f"calibrated {when} by {ex.method}, reprojection error {ex.reprojection_error_px:.2f} px"
+
+    # -------------------------------------------------------- performance
+    def performance_info(self, hw: Any = None) -> dict[str, Any]:
+        """Detected hardware, the profile picked for it, and the GPU pack state for the Performance tab."""
+        from away.app import gpupack, hardware, performance
+        from away.app.frozen import is_frozen
+
+        hw = hw or hardware.cached()
+        prof = performance.current_profile(self.cfg, hw)
+        frozen = is_frozen()
+        if prof.gpu_pack == "installed":
+            pack = "GPU pack installed"
+        elif prof.gpu_pack == "recommended":
+            pack = "GPU pack not installed: download it to use the GPU" if frozen else gpupack.pip_instructions()
+        elif prof.gpu_pack == "not-needed" and prof.gpu_capable:
+            pack = "CUDA libraries found (pip / CUDA toolkit)"
+        elif prof.gpu_pack == "unavailable":
+            pack = "GPU present but not usable for speech (see reasons)"
+        else:
+            pack = "no NVIDIA GPU: not needed"
+        return {
+            "lines": performance.describe(hw, prof),
+            "mode": self.cfg.performance.mode,
+            "profile": prof,
+            "pack_status": pack,
+            "can_install": bool(frozen and prof.gpu_pack == "recommended" and gpupack.platform_tag() is not None),
+            "can_remove": gpupack.installed(),
+        }
+
+    @staticmethod
+    def install_gpu_pack(progress: Any = print) -> str | None:
+        """Download the GPU pack (blocking; the window runs it on a thread). Returns an error or None."""
+        from away.app import gpupack
+
+        try:
+            gpupack.install(write=lambda s: None, progress=progress)
+        except Exception as exc:
+            return f"GPU pack download failed: {exc} (try again to resume)"
+        return None
 
     # -------------------------------------------------------- gesture test
     def describe_event(self, ev: GestureEvent) -> str | None:
@@ -605,6 +647,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_tuning(nb)
         self._build_voice(nb)
         self._build_cameras(nb)
+        self._build_performance(nb)
         self._build_test(nb)
 
         bottom = ttk.Frame(root, padding=6)
@@ -953,6 +996,77 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self._cam_refresh()
         if self._cam_thread is not None and self._cam_thread.is_alive():
             self.root.after(150, self._cam_poll)
+
+    def _build_performance(self, nb: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(nb, padding=8)
+        nb.add(f, text="Performance")
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        ttk.Label(row, text="Speech recognition runs on:").pack(side="left")
+        self.perf_var = tk.StringVar()
+        labels = [PERFORMANCE_LABELS[m] for m in PERFORMANCE_MODES]
+        cb = ttk.Combobox(row, textvariable=self.perf_var, values=labels, state="readonly", width=20)
+        cb.pack(side="left", padx=6)
+
+        def on_mode(_e: Any = None) -> None:
+            mode = next(k for k, v in PERFORMANCE_LABELS.items() if v == self.perf_var.get())
+            self._report(self.m.set_voice("performance.mode", mode), "saved on Save; applies at the next start")
+            self._perf_refresh()
+
+        cb.bind("<<ComboboxSelected>>", on_mode)
+        self.perf_text = tk.Text(f, height=18, width=96, wrap="word", relief="flat", background="#f6f6f6")
+        self.perf_text.pack(fill="both", expand=True, pady=6)
+        pack_row = ttk.Frame(f)
+        pack_row.pack(fill="x")
+        self.pack_var = tk.StringVar()
+        ttk.Label(pack_row, textvariable=self.pack_var, wraplength=560).pack(side="left")
+        self.pack_btn = ttk.Button(pack_row, text="Download GPU pack (~570 MB)", command=self._perf_install)
+        self.pack_btn.pack(side="right")
+        self.pack_rm = ttk.Button(pack_row, text="Remove GPU pack", command=self._perf_remove)
+        self.pack_rm.pack(side="right", padx=4)
+        self._perf_refresh()
+
+    def _perf_refresh(self) -> None:
+        try:
+            info = self.m.performance_info()
+        except Exception as exc:
+            self.pack_var.set(f"hardware detection failed: {exc}")
+            return
+        self.perf_var.set(PERFORMANCE_LABELS.get(info["mode"], info["mode"]))
+        self.perf_text.configure(state="normal")
+        self.perf_text.delete("1.0", "end")
+        self.perf_text.insert("end", "\n".join(info["lines"]))
+        self.perf_text.configure(state="disabled")
+        self.pack_var.set(info["pack_status"])
+        self.pack_btn.configure(state="normal" if info["can_install"] else "disabled")
+        self.pack_rm.configure(state="normal" if info["can_remove"] else "disabled")
+
+    def _perf_install(self) -> None:
+        self.pack_btn.configure(state="disabled")
+        self.pack_var.set("Downloading the GPU pack... (you can keep using this window)")
+
+        def run() -> None:
+            msgs: list[str] = []
+            err = self.m.install_gpu_pack(msgs.append)
+
+            def done() -> None:
+                from away.app import gpupack
+
+                getattr(gpupack.cublas_available, "cache_clear", lambda: None)()
+                self._report(err, "GPU pack installed: speech recognition uses the GPU from the next start")
+                self._perf_refresh()
+
+            self.root.after(0, done)
+
+        threading.Thread(target=run, daemon=True, name="gpu-pack").start()
+
+    def _perf_remove(self) -> None:
+        from away.app import gpupack
+
+        gpupack.remove()
+        self._report(None, "GPU pack removed")
+        self._perf_refresh()
 
     def _build_test(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk

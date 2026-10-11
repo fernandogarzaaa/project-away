@@ -61,7 +61,7 @@ class HandTracker:
 
 
 def camera_frames(
-    index: int = 0, mirror: bool = True, width: int = 640, height: int = 480
+    index: int = 0, mirror: bool = True, width: int = 640, height: int = 480, fps: int = 0
 ) -> Iterator[tuple[float, Any]]:
     """Yield (monotonic time, RGB frame). Mirrored by default so motion matches the screen."""
     import cv2
@@ -69,6 +69,8 @@ def camera_frames(
     cap = cv2.VideoCapture(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    if fps > 0:
+        cap.set(cv2.CAP_PROP_FPS, fps)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open camera {index} (permission denied or no device?)")
     try:
