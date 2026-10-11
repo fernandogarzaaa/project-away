@@ -4,6 +4,68 @@ Hands-free PC control, free and local. Webcam hand gestures drive the cursor, pu
 
 Nothing leaves your machine unless you point the optional LLM cleanup at an endpoint yourself.
 
+## User guide (no technical knowledge needed)
+
+### 1. Installing
+
+1. Download `ProjectAway-…-windows-x64-setup.exe` from the [Releases page](https://github.com/fernandogarzaaa/project-away/releases/latest).
+2. Windows will warn that the app is unrecognized (it isn't code-signed yet). Click **More info → Run anyway**, then **Install**.
+3. The installer then downloads the speech and tracking models, about **1.6 GB**. **This is the slow part — read this first:**
+   - On a slow or unstable connection it can take **hours**, and the progress bar may **stall** at the same number for a long time. That's normal; it isn't frozen for good.
+   - **If it fails, stalls for ages, or the window closes: just open Project Away again.** Each time it starts, it checks for missing models and carries on downloading **from where it stopped** — nothing already downloaded is lost. You may need to do this a few times.
+   - You can also use **Start menu → Project Away: re-download models** to resume.
+   - Leave the PC awake and plugged in, and avoid other big downloads while it runs.
+4. When it's done, a hand icon appears in the system tray (bottom-right, by the clock — check the **^** arrow). Gestures and voice are on straight away.
+5. **Have an NVIDIA graphics card?** Open **Settings → Performance → Install GPU pack** (about 570 MB, once). Voice typing gets much faster and more accurate.
+
+### 2. Setting up your space
+
+- **Camera:** at or just above your screen, facing you, with your hand clearly visible from about 40–80 cm away.
+- **Light:** light coming from in front of you, not a bright window behind you.
+- **Background:** plain is best. Busy backgrounds and other people's hands in view make tracking jumpier.
+- **Two webcams (optional):** better accuracy. Add the second one in **Settings → Cameras**, then press **Calibrate** and slowly wave an open hand where both cameras can see it for about 20 seconds.
+
+### 3. Gestures: how to project away
+
+Hold up one hand, palm toward the screen, and point.
+
+| Do this | What happens |
+|---|---|
+| **Point** with your index finger | Moves the cursor |
+| **Pinch** — tap thumb and index finger together | Left-click |
+| **Pinch twice** quickly | Double-click |
+| **Pinch and hold**, then move | Drag (select text, move windows) — open your fingers to drop |
+| **Two fingers up** (index + middle), move up or down | Scroll |
+| **Open palm**, held still for a moment | Pause / resume gestures |
+| **Swipe** left or right | Left / right arrow key (previous / next slide or photo) |
+
+Tips for smooth control:
+- **Small movements go a long way.** The cursor speeds up when you move fast and slows for precise work, so slow down near small buttons.
+- **Pinch crisply** and keep your hand still while you do — the cursor locks briefly so the click lands where you aimed.
+- **Rest your elbow** on the desk or armrest. Holding your arm up in the air gets tiring fast.
+- Touching your real mouse or keyboard pauses gestures automatically. They come back after a second or two of not touching them.
+- **F9** turns gesture control on or off at any time. The tray menu does the same.
+- Several monitors? The cursor covers all of them. Say **"next monitor"**, **"previous monitor"** or **"monitor two"** to jump.
+
+### 4. Voice
+
+Voice is always listening by default. Just talk, and your words are typed wherever the text cursor is.
+
+- **Punctuation:** say "comma", "period", "question mark", "new line", "new paragraph".
+- **Mistake?** Say **"scratch that"** to remove the sentence you just said.
+- **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening".
+- **Shortcuts:** `Ctrl+Alt+Space` pauses/resumes listening, `Ctrl+Alt+M` mutes the mic, `Ctrl+Alt+E` lets you edit selected text by voice.
+- **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
+- **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
+- Speech is processed on your PC and never saved or uploaded.
+
+### 5. If something goes wrong
+
+- **Models didn't finish downloading:** reopen the app (see Installing above). It resumes.
+- **Cursor doesn't move:** check another app isn't using the camera (Zoom, Teams, the Camera app), then restart Project Away from the tray.
+- **Voice is slow or lagging:** install the GPU pack (Settings → Performance, NVIDIA cards only).
+- **Want to change a gesture or phrase?** Tray → **Settings…** → Bindings.
+
 ## Architecture
 
 ```mermaid
