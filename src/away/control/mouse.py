@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from typing import Any, Protocol
 
@@ -201,10 +202,8 @@ class MouseController:
             try:
                 self.backend.press()
             except BaseException:
-                try:
+                with contextlib.suppress(BaseException):
                     self.backend.release()
-                except BaseException:
-                    pass
                 self.button_down = False
                 raise
         elif ev.kind == "drag_end":
