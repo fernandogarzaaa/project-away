@@ -17,7 +17,6 @@ Flow::
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import hashlib
 import json
@@ -55,15 +54,19 @@ EXIT_GRACE_S = 8.0  # after launching the installer: force the process to exit i
 STATE_FILE = "update-state.json"  # written before installing; the next launch reports the outcome
 EXIT_CODE_FILE = "update-exit-code.txt"  # the Windows helper writes the installer's exit code here
 INSTALL_LOG = "update-install.log"  # Inno Setup /LOG (in <data dir>/logs)
-HELPER_LOG = "update-helper.log"  # the Windows wait-then-install helper's own log
+HELPER_LOG = "update-helper.log"  # the Windows wait-then-install helper's own log (this attempt only)
+HELPER_OLD_LOG = "update-helper.previous.log"  # the attempt before
+FAILED_FILE = "update-failed.json"  # a failed update whose installer is kept for "Run update installer"
+STILL_RUNNING_S = 600.0  # a helper log written this recently, with no exit code yet: still installing
+RUN_INSTALLER_LABEL = "Run update installer"
 TIMEOUT_S = 10.0
 PIP_HINT = "pipx upgrade project-away   (or: pip install -U project-away)"
 
 # Inno Setup silent install. /AUTOUPDATE=1 makes away.iss relaunch the tray app and skip the model
 # download when the models are already there; /NORESTARTAPPLICATIONS avoids a second launch by the
 # Restart Manager (the [Run] entry does the relaunch). The updater adds /DIR= (the running install's
-# folder) and /LOG= (<data dir>/logs/update-install.log). The installer is started by a small detached
-# PowerShell helper only after this process has exited, so no file of the running app is locked.
+# folder) and /LOG= (<data dir>/logs/update-install.log). The installer is started by a small batch file
+# (away-update.cmd, run hidden by cmd.exe) only after this process has exited, so no file is locked.
 WINDOWS_SILENT_ARGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS")
 
 Fetch = Callable[[str, float], bytes]
@@ -499,68 +502,131 @@ def win_arg(arg: str) -> str:
     return f'"{arg}"'
 
 
-def _ps_str(text: str) -> str:
-    return "'" + str(text).replace("'", "''") + "'"
+# cmd.exe treats these specially outside double quotes; % is special even inside them (doubled to %%)
+_CMD_SPECIAL = set(" \t&|<>^(),;=!'`")
+_CMD_ECHO_ESCAPE = {"^": "^^", "&": "^&", "|": "^|", "<": "^<", ">": "^>", "(": "^(", ")": "^)", "%": "%%"}
 
 
-def windows_helper_script(
-    pid: int, argv: Sequence[str], app_exe: Path | None, exit_file: Path, helper_log: Path, wait_s: int = 60
+def cmd_arg(arg: str) -> str:
+    """One argument for a line of a batch file. The installer path and every ``/KEY=value`` whose value is not
+    plain (paths) are double-quoted (``/DIR="C:\\a b"``, the form Inno Setup documents); ``%`` is doubled so
+    cmd.exe never expands part of a path as a variable."""
+    s = str(arg)
+    if s.startswith("/") and "=" in s:
+        k, v = s.split("=", 1)
+        if v and not re.fullmatch(r"[A-Za-z0-9._-]+", v):
+            s = f'{k}="{v}"'
+    elif not s.startswith("/") or any(c in _CMD_SPECIAL for c in s):
+        s = f'"{s}"'
+    return s.replace("%", "%%")
+
+
+def cmd_set(name: str, value: object) -> str:
+    """``set "NAME=value"``: the quoted form keeps & ( ) ^ literal; only % needs doubling."""
+    return f'set "{name}={str(value).replace("%", "%%")}"'
+
+
+def cmd_echo_text(text: str) -> str:
+    """Text that ``echo`` prints literally (no redirection or command chaining from a path with & or >)."""
+    return "".join(_CMD_ECHO_ESCAPE.get(c, c) for c in str(text))
+
+
+HELPER_SCRIPT = "away-update.cmd"  # written into <data dir>\updates next to the installer
+HELPER_DONE = "update helper finished"  # the helper's last log line
+HELPER_STARTED = "update helper started"
+
+
+def windows_helper_batch(
+    pid: int,
+    argv: Sequence[str],
+    app_exe: PurePath | None,
+    exit_file: PurePath,
+    helper_log: PurePath,
+    wait_s: int = 60,
 ) -> str:
-    """PowerShell: wait for this app (and any other copy of ProjectAway.exe from the install folder, e.g. the
-    Settings window) to exit, stop leftovers after ``wait_s``, then run the installer, wait for it and write
-    its exit code to ``exit_file`` so the next launch can report the result."""
-    installer, args = str(argv[0]), " ".join(win_arg(str(a)) for a in argv[1:])
-    exe = _ps_str(str(app_exe) if app_exe else "")
-    name = _ps_str(PureWindowsPath(str(app_exe)).stem if app_exe else "ProjectAway")
-    return "\n".join(
-        [
-            "$ErrorActionPreference = 'SilentlyContinue'",
-            f"$log = {_ps_str(str(helper_log))}",
-            "function Log($m) { Add-Content -Path $log -Value ((Get-Date -Format s) + ' ' + $m) }",
-            f"Log 'update helper: waiting for Project Away (pid {pid}) to exit'",
-            f"Wait-Process -Id {pid} -Timeout {wait_s}",
-            f"$exe = {exe}",
-            f"$deadline = (Get-Date).AddSeconds({max(5, wait_s // 2)})",
-            "do {",
-            f"  $left = @(Get-Process -Name {name} | Where-Object {{ $exe -eq '' -or $_.Path -eq $exe }})",
-            "  if ($left.Count -eq 0) { break }",
-            "  Start-Sleep -Milliseconds 500",
-            "} while ((Get-Date) -lt $deadline)",
-            "if ($left.Count -gt 0) { Log ('stopping ' + $left.Count + ' Project Away process(es) still running');"
-            " $left | Stop-Process -Force; Start-Sleep -Seconds 1 }",
-            f"Log ('starting installer: ' + {_ps_str(installer)} + ' ' + {_ps_str(args)})",
-            f"$p = Start-Process -FilePath {_ps_str(installer)} -ArgumentList {_ps_str(args)} -PassThru",
-            "if ($p) {",
-            "  $h = $p.Handle",  # cache the handle, or ExitCode is empty after WaitForExit
-            "  $p.WaitForExit()",
-            "  Log ('installer exit code ' + $p.ExitCode)",
-            f"  Set-Content -Path {_ps_str(str(exit_file))} -Value $p.ExitCode",
-            "} else {",
-            "  Log ('could not start the installer: ' + $Error[0])",
-            f"  Set-Content -Path {_ps_str(str(exit_file))} -Value 'launch-failed'",
-            "}",
-        ]
-    )
+    """The plain batch file that installs the update once this app has quit (CRLF line endings added by
+    :func:`write_helper_batch`). In order: log that it started (first action), wait up to ``wait_s`` for
+    ``pid`` to exit, force-close any ``ProjectAway.exe`` still running, run the installer with
+    ``start "" /wait`` and write its exit code to ``exit_file`` (``launch-failed`` if the file is missing).
 
-
-def windows_helper_command(script: str) -> list[str]:
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")  # no quoting pitfalls
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-EncodedCommand",
-        encoded,
+    ``ping -n 2 127.0.0.1`` is the one-second sleep: ``timeout /t 1`` exits at once with "Input redirection
+    is not supported" when stdin is not a console, which it never is here."""
+    installer = str(argv[0])
+    image = PureWindowsPath(str(app_exe)).name if app_exe else "ProjectAway.exe"
+    line = 'start "" /wait ' + " ".join(cmd_arg(str(a)) for a in [installer, *argv[1:]])
+    texts = [str(x) for x in (*argv, exit_file, helper_log, image)]
+    lines = [
+        "@echo off",
+        "rem Project Away update helper. Waits for Project Away to quit, runs the installer silently and",
+        "rem records its exit code for the next start. Written by the app before each update; safe to delete.",
     ]
+    if not all(t.isascii() for t in texts):
+        lines.append("chcp 65001 >nul 2>&1")  # this file is UTF-8 and a path is not ASCII
+    lines += [
+        "setlocal",
+        cmd_set("LOG", helper_log),
+        f'>>"%LOG%" echo %DATE% %TIME% {HELPER_STARTED}: waiting for Project Away (pid {int(pid)}) to exit',
+        cmd_set("SETUP", installer),
+        cmd_set("EXITFILE", exit_file),
+        cmd_set("APPEXE", image),
+        "set /a WAITED=0",
+        ":wait_app",
+        f'tasklist /FI "PID eq {int(pid)}" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul',
+        "if errorlevel 1 goto app_gone",
+        f"if %WAITED% GEQ {int(wait_s)} goto app_timeout",
+        "ping -n 2 127.0.0.1 >nul",
+        "set /a WAITED+=1",
+        "goto wait_app",
+        ":app_timeout",
+        f'>>"%LOG%" echo %DATE% %TIME% Project Away is still running after {int(wait_s)} s',
+        ":app_gone",
+        '>>"%LOG%" echo %DATE% %TIME% Project Away has exited (waited about %WAITED% s)',
+        'tasklist /FI "IMAGENAME eq %APPEXE%" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul',
+        "if errorlevel 1 goto run_setup",
+        '>>"%LOG%" echo %DATE% %TIME% closing %APPEXE% processes that are still running',
+        'taskkill /F /IM "%APPEXE%" >>"%LOG%" 2>&1',
+        "ping -n 3 127.0.0.1 >nul",
+        ":run_setup",
+        'if exist "%SETUP%" goto setup_found',
+        '>>"%LOG%" echo %DATE% %TIME% installer file not found: ' + cmd_echo_text(installer),
+        '>"%EXITFILE%" echo launch-failed',
+        f'>>"%LOG%" echo %DATE% %TIME% {HELPER_DONE}',
+        "exit /b 1",
+        ":setup_found",
+        '>>"%LOG%" echo %DATE% %TIME% starting installer: ' + cmd_echo_text(" ".join(win_arg(str(a)) for a in argv)),
+        line,
+        'set "RC=%ERRORLEVEL%"',
+        '>"%EXITFILE%" echo %RC%',
+        '>>"%LOG%" echo %DATE% %TIME% installer exit code %RC%',
+        f'>>"%LOG%" echo %DATE% %TIME% {HELPER_DONE}',
+        "exit /b 0",
+    ]
+    return "\n".join(lines) + "\n"
 
 
-def windows_start_command(argv: Sequence[str]) -> str:
-    """Last-resort launch (no PowerShell): ``cmd /c start "" "setup.exe" /VERYSILENT ...``."""
-    return 'cmd.exe /c start "" ' + " ".join(win_arg(str(a)) for a in argv)
+def write_helper_batch(path: Path, script: str) -> Path:
+    """Write the batch file with CRLF line endings (cmd.exe's ``goto`` can miss labels in an LF-only file);
+    UTF-8, which cmd reads correctly for ASCII and after the ``chcp 65001`` line for anything else."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(script.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
+    return path
+
+
+def cmd_exe(env: Mapping[str, str] | None = None) -> str:
+    """Full path of cmd.exe (never one found next to the app), ``cmd.exe`` when SystemRoot is unknown."""
+    root = (os.environ if env is None else env).get("SystemRoot")
+    return str(PureWindowsPath(root, "System32", "cmd.exe")) if root else "cmd.exe"
+
+
+def windows_helper_command(script: PurePath, env: Mapping[str, str] | None = None) -> str:
+    """``"C:\\Windows\\System32\\cmd.exe" /d /s /c ""<script>""``: /s strips exactly the outer quotes, so a
+    script path with spaces works; /d skips any AutoRun command from the registry."""
+    return f'"{cmd_exe(env)}" /d /s /c ""{script}""'
+
+
+def windows_direct_command(argv: Sequence[str]) -> str:
+    """Fallback: the installer itself as one command line (Inno Setup's own parser handles the quoting)."""
+    return " ".join([f'"{argv[0]}"', *(win_arg(str(a)) for a in argv[1:])])
 
 
 def deb_command(deb: Path) -> list[str]:
@@ -631,9 +697,14 @@ def replace_appimage(new_file: Path, target: Path) -> Path:
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000  # survive the app's exit even if it runs inside a kill-on-close job
+CREATE_NO_WINDOW = 0x08000000  # a console program (cmd.exe) gets a hidden console; never with DETACHED_PROCESS
+LIVENESS_S = 3.0  # after starting the helper: how long to wait for its first log line before trusting it
 
 
-def _detached_kwargs(platform: str, breakaway: bool = False) -> dict[str, Any]:
+def _detached_kwargs(platform: str, breakaway: bool = False, console: bool = False) -> dict[str, Any]:
+    """Popen kwargs for a process that outlives this one. On Windows a console helper (``console=True``,
+    cmd.exe) gets CREATE_NO_WINDOW: a real but hidden console, which batch tools such as tasklist and find
+    expect. DETACHED_PROCESS (no console at all) is only for GUI programs such as the installer."""
     kw: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
@@ -641,12 +712,40 @@ def _detached_kwargs(platform: str, breakaway: bool = False) -> dict[str, Any]:
         "close_fds": True,
     }
     if platform.startswith("win"):
-        kw["creationflags"] = (
-            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | (CREATE_BREAKAWAY_FROM_JOB if breakaway else 0)
-        )
+        flags = (CREATE_NO_WINDOW if console else DETACHED_PROCESS) | CREATE_NEW_PROCESS_GROUP
+        kw["creationflags"] = flags | (CREATE_BREAKAWAY_FROM_JOB if breakaway else 0)
     else:
         kw["start_new_session"] = True
     return kw
+
+
+def wait_alive(
+    proc: Any,
+    first_log: Path | None,
+    timeout_s: float = LIVENESS_S,
+    sleep: Callable[[float], object] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[bool, str]:
+    """Is the process we just started really running? ``(alive, why)``.
+
+    Alive as soon as ``first_log`` has content (the helper got as far as its first line), or when the process
+    is still running after ``timeout_s``. Dead when it exits before writing anything."""
+    poll = getattr(proc, "poll", None)
+    if not callable(poll):
+        return True, "started (cannot be checked)"
+    deadline = clock() + timeout_s
+    while True:
+        if first_log is not None:
+            with contextlib.suppress(OSError):
+                if first_log.stat().st_size > 0:
+                    return True, "running (helper log started)"
+        code = poll()
+        if code is not None:
+            return False, f"exited at once with code {code}" + (" and wrote no log" if first_log else "")
+        if clock() >= deadline:
+            note = " (no helper log line yet)" if first_log else ""
+            return True, f"still running after {timeout_s:.0f} s{note}"
+        sleep(0.1)
 
 
 def launch_windows_installer(
@@ -657,34 +756,56 @@ def launch_windows_installer(
     launcher: Callable[..., Any],
     data_dir: Path,
     platform: str = "win32",
+    alive_s: float = LIVENESS_S,
+    sleep: Callable[[float], object] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> str:
-    """Start the detached helper that installs once this process is gone. Returns how it was started.
+    """Start what installs the update once this process is gone, check it is alive, return how it started.
 
-    Tries, in order: PowerShell helper with CREATE_BREAKAWAY_FROM_JOB, the helper without it (a job that
-    forbids breakaway rejects the flag), then ``cmd /c start`` of the installer itself."""
+    Tries, in order, moving on when a launch raises or the process dies within ``alive_s``:
+
+    1. ``away-update.cmd`` (plain batch helper) via cmd.exe, CREATE_NO_WINDOW + breakaway from any job;
+    2. the same without breakaway (a job that forbids breakaway rejects the flag);
+    3. the installer itself, detached + breakaway (``CloseApplications=force`` closes this app if needed);
+    4. the installer itself, detached.
+
+    Every attempt and its result is logged (away.log)."""
     logs = data_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     install_dir = PureWindowsPath(str(target.path)).parent if target.path is not None else None
     argv = windows_command(installer, relaunch, install_dir, logs / INSTALL_LOG)
     exit_file = data_dir / EXIT_CODE_FILE
     exit_file.unlink(missing_ok=True)
-    script = windows_helper_script(pid, argv, target.path, exit_file, logs / HELPER_LOG)
-    helper = windows_helper_command(script)
-    attempts: list[tuple[str, Any, dict[str, Any]]] = [
-        ("powershell helper (breakaway)", helper, _detached_kwargs(platform, breakaway=True)),
-        ("powershell helper", helper, _detached_kwargs(platform)),
-        ("cmd start (breakaway)", windows_start_command(argv), _detached_kwargs(platform, breakaway=True)),
-        ("cmd start", windows_start_command(argv), _detached_kwargs(platform)),
+    helper_log = logs / HELPER_LOG
+    with contextlib.suppress(OSError):  # one attempt per log: the next start reads only this attempt's lines
+        if helper_log.exists():
+            helper_log.replace(logs / HELPER_OLD_LOG)
+    app_exe = PureWindowsPath(str(target.path)) if target.path is not None else None
+    script = write_helper_batch(
+        Path(installer).parent / HELPER_SCRIPT, windows_helper_batch(pid, argv, app_exe, exit_file, helper_log)
+    )
+    helper, direct = windows_helper_command(script), windows_direct_command(argv)
+    attempts: list[tuple[str, str, dict[str, Any], Path | None]] = [
+        ("batch helper (breakaway)", helper, _detached_kwargs(platform, breakaway=True, console=True), helper_log),
+        ("batch helper", helper, _detached_kwargs(platform, console=True), helper_log),
+        ("installer direct (breakaway)", direct, _detached_kwargs(platform, breakaway=True), None),
+        ("installer direct", direct, _detached_kwargs(platform), None),
     ]
+    log.info("update: installer command: %s", " ".join(win_arg(str(a)) for a in argv))
     errors = []
-    for how, cmd, kw in attempts:
+    for how, cmd, kw, first_log in attempts:
         try:
-            launcher(cmd, **kw)
+            proc = launcher(cmd, **kw)
         except OSError as exc:
-            log.warning("update: could not start the installer via %s: %s", how, exc)
+            log.warning("update: %s could not be started: %s", how, exc)
             errors.append(f"{how}: {exc}")
             continue
-        log.info("update: installer scheduled via %s: %s", how, " ".join(argv))
+        alive, why = wait_alive(proc, first_log, alive_s, sleep, clock)
+        if not alive:
+            log.warning("update: %s %s; trying the next method", how, why)
+            errors.append(f"{how}: {why}")
+            continue
+        log.info("update: installer scheduled via %s (%s): %s", how, why, cmd)
         return how
     raise UpdateError("could not start the installer (" + "; ".join(errors) + f"); run {installer} yourself")
 
@@ -709,7 +830,9 @@ def install(
     if kind not in INSTALLABLE:
         raise UpdateError(f"this copy cannot update itself; download the new version from {RELEASES_PAGE}")
     if kind == "windows":
-        launch_windows_installer(Path(path), target, pid, relaunch, launcher, data_dir or _data_dir(), plat)
+        ddir = data_dir or _data_dir()
+        how = launch_windows_installer(Path(path), target, pid, relaunch, launcher, ddir, plat)
+        update_state(ddir, method=how)
         return InstallOutcome(True, "Installing the update; Project Away closes now and restarts when it is done.")
     if kind == "macos":
         dest = macos_destination(target)
@@ -762,7 +885,7 @@ INNO_EXIT_CODES = {
 
 
 def write_state(data_dir: Path, current: str, latest: str, asset: str, installer: Path | None = None) -> Path:
-    """Record an install that is about to happen, for :func:`previous_outcome` on the next launch."""
+    """Record an install that is about to happen, for :func:`previous_install` on the next launch."""
     path = Path(data_dir) / STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"from": current, "to": latest, "asset": asset, "installer": str(installer or ""), "t": time.time()}
@@ -770,35 +893,160 @@ def write_state(data_dir: Path, current: str, latest: str, asset: str, installer
     return path
 
 
-def previous_outcome(data_dir: Path, current: str = __version__, clear: bool = True) -> tuple[bool, str, str] | None:
-    """``(ok, version, message)`` for the install recorded by :func:`write_state`, or None when there is none.
-
-    ``ok`` is True when this copy now runs the version that was being installed (or newer). The state is
-    removed (``clear``) so the outcome is reported once."""
+def update_state(data_dir: Path, **fields: Any) -> None:
+    """Add fields (e.g. ``method``: how the installer was started) to the recorded install, if there is one."""
     path = Path(data_dir) / STATE_FILE
+    with contextlib.suppress(OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data.update(fields)
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def last_log_line(path: Path) -> str:
+    """The last non-empty line of a (small) log file, '' when there is none."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+@dataclass(frozen=True)
+class PreviousInstall:
+    """How the install recorded by :func:`write_state` went, as seen on the next launch."""
+
+    status: str  # ok | failed | installing
+    version: str
+    message: str
+    installer: Path | None = None  # kept installer, for "Run update installer" (failed only, when it exists)
+    helper_line: str = ""  # last line of update-helper.log
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def remedy_text(installer: Path | None) -> str:
+    if installer is not None and installer.is_file():
+        return f"Right-click the tray icon → {RUN_INSTALLER_LABEL}."
+    return f"Download the setup from {RELEASES_PAGE} and run it."
+
+
+def previous_install(
+    data_dir: Path, current: str = __version__, clear: bool = True, now: float | None = None
+) -> PreviousInstall | None:
+    """The outcome of the install recorded by :func:`write_state`, or None when there is none.
+
+    * ``ok``: this copy now runs that version (or newer).
+    * ``installing``: no exit code yet, but the helper log was written in the last ``STILL_RUNNING_S`` and
+      does not end with the helper's "finished" line: the helper is waiting or the installer is running.
+      The state is kept so the outcome is reported on the start after it finishes.
+    * ``failed``: anything else; the message names the reason, the helper's last log line and the remedy,
+      and the kept installer is recorded in ``update-failed.json`` for the tray's "Run update installer".
+
+    ``ok``/``failed`` remove the state (``clear``) so they are reported once."""
+    data_dir = Path(data_dir)
+    path = data_dir / STATE_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    finally:
+    if not isinstance(data, dict) or not data.get("to"):
         if clear:
             path.unlink(missing_ok=True)
-    if not isinstance(data, dict) or not data.get("to"):
         return None
     to = str(data["to"])
-    exit_file = Path(data_dir) / EXIT_CODE_FILE
+    logs = data_dir / "logs"
+    exit_file = data_dir / EXIT_CODE_FILE
+    helper_log = logs / HELPER_LOG
     code = ""
     with contextlib.suppress(OSError):
-        code = exit_file.read_text(encoding="utf-8", errors="replace").strip().lstrip("\ufeff")
-    if clear:
-        exit_file.unlink(missing_ok=True)
+        code = exit_file.read_text(encoding="utf-8", errors="replace").strip().lstrip("\ufeff").strip()
+    helper_line = last_log_line(helper_log)
+    installer = Path(str(data["installer"])) if data.get("installer") else None
+
+    def done() -> None:
+        if clear:
+            path.unlink(missing_ok=True)
+            exit_file.unlink(missing_ok=True)
+
     pv, pc = parse_version(to), parse_version(current)
     if pv is not None and pc is not None and pc >= pv:
-        return True, to, f"Project Away was updated to v{current}."
-    why = INNO_EXIT_CODES.get(code, f"the installer exited with code {code}" if code else "the installer did not run")
-    logs = Path(data_dir) / "logs"
-    msg = f"The update to v{to} did not install (still v{current}): {why}. Details: {logs / INSTALL_LOG}"
-    return False, to, msg
+        done()
+        if clear:
+            (data_dir / FAILED_FILE).unlink(missing_ok=True)
+        return PreviousInstall("ok", to, f"Project Away was updated to v{current}.", None, helper_line)
+
+    if not code and helper_line and HELPER_DONE not in helper_line:
+        t = time.time() if now is None else now
+        try:
+            age = t - helper_log.stat().st_mtime
+        except OSError:
+            age = STILL_RUNNING_S
+        if age < STILL_RUNNING_S:
+            stage = "the installer is running" if "starting installer" in helper_line else "it is getting ready"
+            msg = f"The update to v{to} is still installing ({stage}). Last step: {helper_line}"
+            return PreviousInstall("installing", to, msg, None, helper_line)
+
+    done()
+    if code:
+        why = INNO_EXIT_CODES.get(code, f"the installer exited with code {code}")
+    elif helper_line:
+        why = "the update helper stopped before the installer finished"
+    elif str(data.get("method", "")).startswith("installer direct"):
+        why = "the installer was started directly but did not finish the update"
+    else:
+        why = "the installer did not run (the update helper left no log)"
+    kept = installer if installer is not None and installer.is_file() else None
+    parts = [f"The update to v{to} did not install (still v{current}): {why}."]
+    if helper_line:
+        parts.append(f"Last step: {helper_line}.")
+    parts.append(remedy_text(kept))
+    parts.append(f"Details: {logs / INSTALL_LOG}")
+    msg = " ".join(parts)
+    if kept is not None:
+        record_failure(data_dir, to, kept, msg)
+    return PreviousInstall("failed", to, msg, kept, helper_line)
+
+
+def previous_outcome(data_dir: Path, current: str = __version__, clear: bool = True) -> tuple[bool, str, str] | None:
+    """``(ok, version, message)`` view of :func:`previous_install` (``installing`` counts as not ok)."""
+    out = previous_install(data_dir, current, clear)
+    return None if out is None else (out.ok, out.version, out.message)
+
+
+def record_failure(data_dir: Path, version: str, installer: Path, message: str) -> None:
+    """Remember a failed update whose installer is still on disk (survives restarts until it is fixed)."""
+    with contextlib.suppress(OSError):
+        data = {"version": version, "installer": str(installer), "message": message, "t": time.time()}
+        (Path(data_dir) / FAILED_FILE).write_text(json.dumps(data), encoding="utf-8")
+
+
+def load_failure(data_dir: Path, current: str = __version__) -> tuple[str, Path] | None:
+    """``(version, installer)`` of a recorded failed update that still applies: this copy is older than that
+    version and the installer still exists. A stale record is removed."""
+    path = Path(data_dir) / FAILED_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        version, installer = str(data["version"]), Path(str(data["installer"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if is_newer(version, current) and installer.is_file():
+        return version, installer
+    path.unlink(missing_ok=True)
+    return None
+
+
+def _open_file(path: Path) -> None:  # pragma: no cover - opens a GUI program
+    """Open like a double-click: the installer runs visibly with its normal wizard."""
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def exit_after_update(
@@ -847,6 +1095,7 @@ class UpdateManager:
         error_retry_s: float = ERROR_RETRY_S,
         data_dir: Path | None = None,
         current: str = __version__,
+        open_file: Callable[[Path], object] = _open_file,
     ) -> None:
         self.cfg = updates_cfg
         self.notify, self.on_change, self.quit_app, self.is_idle = notify, on_change, quit_app, is_idle
@@ -856,6 +1105,8 @@ class UpdateManager:
         self.error_retry_s = error_retry_s
         self._data_dir = data_dir
         self.current = current
+        self.open_file = open_file
+        self.failed_installer: Path | None = None  # kept installer of a failed update ("Run update installer")
         self.result: CheckResult | None = None
         self.last_check: float | None = None
         self.last_check_failed = False
@@ -886,6 +1137,31 @@ class UpdateManager:
         if self.installing:
             return f"Installing v{r.latest}..."
         return f"Update to v{r.latest}"
+
+    def run_installer_label(self) -> str | None:
+        """Tray item after a failed update whose installer is still on disk, else None."""
+        p = self.failed_installer
+        if p is None or self.installing or self.exiting:
+            return None
+        return RUN_INSTALLER_LABEL if p.is_file() else None
+
+    def run_installer(self) -> bool:
+        """Tray "Run update installer": open the kept installer like a double-click (its normal, visible
+        wizard; it offers to close Project Away itself). Never raises."""
+        p = self.failed_installer
+        if p is None or not p.is_file():
+            self.notify("Project Away update", f"The installer is gone. {remedy_text(None)}")
+            self.failed_installer = None
+            self.on_change()
+            return False
+        log.info("update: running the update installer visibly: %s", p)
+        try:
+            self.open_file(p)
+        except Exception as exc:
+            log.error("update: could not open %s: %s", p, exc)
+            self.notify("Project Away update", f"Could not start {p.name} ({exc}). Run it from {p.parent}.")
+            return False
+        return True
 
     # -------------------------------------------------------------- decisions
     def _run_check(self) -> CheckResult:
@@ -965,23 +1241,35 @@ class UpdateManager:
             self.on_change()
 
     def report_previous(self) -> tuple[bool, str, str] | None:
-        """On start: tell the user how the last install went (from the state file it left)."""
+        """On start: tell the user how the last install went (from the state file it left). A failure whose
+        installer is still on disk turns on the "Run update installer" tray item (also on later starts)."""
         try:
-            out = previous_outcome(self.data_dir, self.current)
+            out = previous_install(self.data_dir, self.current)
+            if out is None:
+                failure = load_failure(self.data_dir, self.current)
+                if failure is not None:  # reported on an earlier start; keep the one-click remedy
+                    self.failed_version, self.failed_installer = failure
+                    self.on_change()
+                return None
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("update: could not read the previous install state: %s", exc)
             return None
-        if out is None:
-            return None
-        ok, version, msg = out
-        log.info("update: previous install of v%s %s: %s", version, "succeeded" if ok else "FAILED", msg)
-        if ok:
-            self.notify("Project Away updated", msg)
+        status = {"ok": "succeeded", "failed": "FAILED", "installing": "is STILL INSTALLING"}[out.status]
+        log.info("update: previous install of v%s %s: %s", out.version, status, out.message)
+        if out.helper_line:
+            log.info("update: last update-helper.log line: %s", out.helper_line)
+        if out.status == "ok":
+            self.notify("Project Away updated", out.message)
+        elif out.status == "installing":
+            self.failed_version = out.version  # never start a second installer over a running one
+            self.notify("Project Away update still installing", out.message)
         else:
-            self.failed_version = version  # do not auto-install the same version in a loop
-            self.last_error = msg
-            self.notify("Project Away update failed", msg)
-        return out
+            self.failed_version = out.version  # do not auto-install the same version in a loop
+            self.failed_installer = out.installer
+            self.last_error = out.message
+            self.notify("Project Away update failed", out.message)
+            self.on_change()
+        return out.ok, out.version, out.message
 
     def install_now(self) -> InstallOutcome | None:
         """Download, verify and install the available update (tray menu click). Never raises."""
@@ -1001,6 +1289,11 @@ class UpdateManager:
         except Exception as exc:  # UpdateError, or anything unexpected: never take the tray down
             self.last_error = str(exc) if isinstance(exc, UpdateError) else f"update failed: {exc}"
             self.failed_version = r.latest
+            kept = self.data_dir / "updates" / Path(r.asset.name).name if r.asset is not None else None
+            if r.target.kind == "windows" and kept is not None and kept.is_file():  # downloaded and verified
+                self.failed_installer = kept
+                record_failure(self.data_dir, str(r.latest), kept, self.last_error)
+                self.last_error = f"{self.last_error}. {remedy_text(kept)}"
             log.error("update: install of v%s failed: %s", r.latest, self.last_error)
             self.notify("Project Away update failed", self.last_error)
             return None

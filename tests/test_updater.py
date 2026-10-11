@@ -13,6 +13,7 @@ import sys
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -451,12 +452,13 @@ def test_windows_install_launches_detached_installer(tmp_path: Path) -> None:
     out = U.install(setup, U.InstallTarget("windows"), pid=42, launcher=launch, runner=run, platform="win32")
     assert out.exit_app is True
     assert len(launch.calls) == 1 and run.calls == []
-    cmd, kw = launch.calls[0]
-    # v0.1.8: a detached PowerShell helper waits for this process to exit, then runs the installer
-    assert cmd[0] == "powershell.exe" and cmd[-2] == "-EncodedCommand"
-    script = U.base64.b64decode(cmd[-1]).decode("utf-16-le")
-    assert "Wait-Process -Id 42" in script and str(setup) in script and "/AUTOUPDATE=1" in script
-    assert kw["creationflags"] == 0x00000008 | 0x00000200 | 0x01000000 and "start_new_session" not in kw
+    chars, kw = launch.calls[0]
+    cmd = "".join(chars)  # _Recorder stores list(cmd); the helper command line is one string
+    # v0.1.10: a hidden cmd.exe runs away-update.cmd, which waits for this process to exit, then installs
+    assert cmd.endswith(f'/d /s /c ""{setup.parent / U.HELPER_SCRIPT}""')
+    script = (setup.parent / U.HELPER_SCRIPT).read_text(encoding="utf-8")
+    assert '"PID eq 42"' in script and str(setup) in script and "/AUTOUPDATE=1" in script
+    assert kw["creationflags"] == 0x08000000 | 0x00000200 | 0x01000000 and "start_new_session" not in kw
     assert kw["stdin"] is U.subprocess.DEVNULL
 
 
@@ -930,3 +932,346 @@ def test_readme_updates_block_is_valid_config() -> None:
     block = readme.split("## Updates")[1].split("```yaml")[1].split("```")[0]
     cfg, unknown = C.from_dict(yaml.safe_load(block))
     assert unknown == [] and cfg.updates == C.UpdatesConfig()
+
+
+# =========================================================== v0.1.10: batch helper + failure remedy
+# The user's real machine (v0.1.8 -> v0.1.9): the hidden PowerShell helper started but the installer never ran.
+G_DATA = Path(r"C:\Users\garza\AppData\Local\ProjectAway")
+G_EXE = Path(r"C:\Users\garza\AppData\Local\Programs\ProjectAway\ProjectAway.exe")
+G_SETUP = "ProjectAway-0.1.10-windows-x64-setup.exe"
+
+
+def _g_argv(data: Path = G_DATA, exe: Path = G_EXE) -> list[str]:
+    from pathlib import PureWindowsPath as W
+
+    return U.windows_command(
+        W(str(data)) / "updates" / G_SETUP, True, W(str(exe)).parent, W(str(data)) / "logs" / U.INSTALL_LOG
+    )
+
+
+def _g_batch(data: Path = G_DATA, exe: Path = G_EXE, pid: int = 4321) -> str:
+    from pathlib import PureWindowsPath as W
+
+    d = W(str(data))
+    return U.windows_helper_batch(pid, _g_argv(data, exe), W(str(exe)), d / U.EXIT_CODE_FILE, d / "logs" / U.HELPER_LOG)
+
+
+def test_version_parsing_orders_0_1_10_after_0_1_9() -> None:
+    assert U.is_newer("0.1.10", "0.1.9") and not U.is_newer("0.1.9", "0.1.10")
+    assert U.parse_version("v0.1.10") > U.parse_version("0.1.9") > U.parse_version("0.1.8")  # type: ignore[operator]
+    assert max(["0.1.8", "0.1.10", "0.1.9"], key=lambda v: U.parse_version(v) or ()) == "0.1.10"
+    assert __version__ == "0.1.10"
+
+
+def test_batch_helper_with_the_users_real_paths() -> None:
+    s = _g_batch()
+    lines = s.splitlines()
+    assert lines[0] == "@echo off"
+    first_cmd = [ln for ln in lines if not ln.startswith(("@echo", "rem ", "setlocal", "set ", "chcp"))][0]
+    assert first_cmd.startswith('>>"%LOG%" echo %DATE% %TIME% update helper started')  # logging comes first
+    assert 'set "LOG=C:\\Users\\garza\\AppData\\Local\\ProjectAway\\logs\\update-helper.log"' in s
+    assert 'set "EXITFILE=C:\\Users\\garza\\AppData\\Local\\ProjectAway\\update-exit-code.txt"' in s
+    assert f'set "SETUP=C:\\Users\\garza\\AppData\\Local\\ProjectAway\\updates\\{G_SETUP}"' in s
+    start = next(ln for ln in lines if ln.startswith('start "" /wait '))
+    assert start == (
+        f'start "" /wait "C:\\Users\\garza\\AppData\\Local\\ProjectAway\\updates\\{G_SETUP}" /VERYSILENT '
+        "/SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /AUTOUPDATE=1 "
+        '/DIR="C:\\Users\\garza\\AppData\\Local\\Programs\\ProjectAway" '
+        '/LOG="C:\\Users\\garza\\AppData\\Local\\ProjectAway\\logs\\update-install.log"'
+    )
+    # order: wait for the pid (bounded), kill leftovers, run the installer, record the exit code
+    i_wait = s.index('tasklist /FI "PID eq 4321" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul')
+    i_bound = s.index("if %WAITED% GEQ 60 goto app_timeout")
+    i_kill = s.index('taskkill /F /IM "%APPEXE%"')
+    i_start = s.index('start "" /wait')
+    i_code = s.index('>"%EXITFILE%" echo %RC%')
+    assert i_wait < i_bound < i_kill < i_start < s.index('set "RC=%ERRORLEVEL%"') < i_code
+    assert s.rstrip().endswith("exit /b 0") and f'>>"%LOG%" echo %DATE% %TIME% {U.HELPER_DONE}' in s
+    assert "ping -n 2 127.0.0.1 >nul" in s and "timeout /t" not in s  # timeout.exe dies with redirected stdin
+    assert "powershell" not in s.lower() and "chcp" not in s  # all ASCII: no code page switch
+    assert '>"%EXITFILE%" echo launch-failed' in s  # installer file missing
+
+
+def test_batch_helper_quotes_spaces_specials_percent_and_unicode(tmp_path: Path) -> None:
+    data = Path(r"C:\Users\Ana María (Work) & Co\AppData\Local\ProjectAway 100%")
+    exe = Path(r"C:\Program Files (x86)\Project Away\ProjectAway.exe")
+    s = _g_batch(data, exe)
+    assert 'set "LOG=C:\\Users\\Ana María (Work) & Co\\AppData\\Local\\ProjectAway 100%%\\logs\\update-helper.log"' in s
+    start = next(ln for ln in s.splitlines() if ln.startswith('start "" /wait '))
+    assert '/DIR="C:\\Program Files (x86)\\Project Away"' in start
+    assert f'"C:\\Users\\Ana María (Work) & Co\\AppData\\Local\\ProjectAway 100%%\\updates\\{G_SETUP}"' in start
+    assert start.count('"') % 2 == 0 and "100%\\" not in start
+    echo = next(ln for ln in s.splitlines() if "installer file not found" in ln)
+    assert "^(Work^) ^& Co" in echo and "100%%" in echo  # echo prints the path, never runs "& Co"
+    assert "chcp 65001 >nul 2>&1" in s.splitlines()[:5]  # UTF-8 file with a non-ASCII path
+    assert U.cmd_arg("/AUTOUPDATE=1") == "/AUTOUPDATE=1" and U.cmd_arg("/VERYSILENT") == "/VERYSILENT"
+    assert U.cmd_arg(r"/DIR=C:\a&b") == r'/DIR="C:\a&b"' and U.cmd_arg(r"C:\x\s.exe") == r'"C:\x\s.exe"'
+    p = U.write_helper_batch(tmp_path / U.HELPER_SCRIPT, s)
+    raw = p.read_bytes()
+    assert b"\r\n" in raw and raw.count(b"\n") == raw.count(b"\r\n")  # CRLF only (cmd's goto needs it)
+    assert raw.decode("utf-8") == s.replace("\n", "\r\n")
+
+
+def test_helper_command_line_and_launch_flags() -> None:
+    script = G_DATA / "updates" / U.HELPER_SCRIPT
+    cmd = U.windows_helper_command(script, {"SystemRoot": r"C:\WINDOWS"})
+    assert cmd == f'"C:\\WINDOWS\\System32\\cmd.exe" /d /s /c ""{script}""'
+    assert U.windows_helper_command(Path(r"C:\A B\x.cmd"), {}) == '"cmd.exe" /d /s /c ""C:\\A B\\x.cmd""'
+    helper = U._detached_kwargs("win32", breakaway=True, console=True)["creationflags"]
+    assert helper == 0x08000000 | 0x00000200 | 0x01000000  # CREATE_NO_WINDOW, never with DETACHED_PROCESS
+    assert U._detached_kwargs("win32", console=True)["creationflags"] == 0x08000000 | 0x00000200
+    assert U._detached_kwargs("win32", breakaway=True)["creationflags"] == 0x00000008 | 0x00000200 | 0x01000000
+    assert U.windows_direct_command(_g_argv()).startswith(f'"{G_DATA}\\updates\\{G_SETUP}" /VERYSILENT')
+
+
+class _Proc:
+    """Popen stand-in: ``codes`` is what poll() returns on successive calls (last value repeats)."""
+
+    def __init__(self, codes: list[int | None], on_poll=None) -> None:
+        self.codes, self.on_poll, self.polls = list(codes), on_poll, 0
+
+    def poll(self) -> int | None:
+        self.polls += 1
+        if self.on_poll:
+            self.on_poll(self.polls)
+        return self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.t += s
+
+
+def test_wait_alive_log_line_running_or_dead(tmp_path: Path) -> None:
+    logf = tmp_path / U.HELPER_LOG
+    c = _Clock()
+    alive, why = U.wait_alive(_Proc([None]), logf, 3.0, c.sleep, c)  # running, no log yet
+    assert alive and "still running" in why and c.t >= 3.0
+    c = _Clock()
+
+    def write(n: int) -> None:
+        if n == 3:
+            logf.write_text("x update helper started\n")
+
+    alive, why = U.wait_alive(_Proc([None], write), logf, 3.0, c.sleep, c)
+    assert alive and "helper log" in why and c.t < 1.0  # returns as soon as the first line is there
+    logf.unlink()
+    c = _Clock()
+    alive, why = U.wait_alive(_Proc([None, None, 1]), logf, 3.0, c.sleep, c)
+    assert not alive and "code 1" in why and "no log" in why
+    assert U.wait_alive(object(), logf)[0] is True  # cannot poll: trust the launch
+
+
+class _ProcLauncher:
+    def __init__(self, procs: list[Any]) -> None:
+        self.procs, self.calls = list(procs), []
+
+    def __call__(self, cmd: Any, **kw: Any) -> Any:
+        self.calls.append((cmd, kw))
+        p = self.procs.pop(0)
+        if isinstance(p, BaseException):
+            raise p
+        return p
+
+
+def test_dead_helper_falls_back_to_the_next_method_and_logs_each(tmp_path: Path, caplog) -> None:
+    setup = tmp_path / "updates" / G_SETUP
+    setup.parent.mkdir()
+    setup.write_bytes(b"x")
+    tgt = U.InstallTarget("windows", G_EXE)
+    c = _Clock()
+    launch = _ProcLauncher([_Proc([None, 0]), _Proc([1]), _Proc([None])])  # helper dies twice, installer runs
+    caplog.set_level("INFO", logger="away.updater")
+    how = U.launch_windows_installer(setup, tgt, 7, True, launch, tmp_path, "win32", 3.0, c.sleep, c)
+    assert how == "installer direct (breakaway)" and len(launch.calls) == 3
+    assert [bool(kw["creationflags"] & U.CREATE_NO_WINDOW) for _c, kw in launch.calls] == [True, True, False]
+    text = caplog.text
+    assert "batch helper (breakaway) exited at once with code 0 and wrote no log; trying the next method" in text
+    assert "batch helper exited at once with code 1" in text
+    assert "installer scheduled via installer direct (breakaway) (still running after 3 s)" in text
+
+    launch = _ProcLauncher([_Proc([2]), _Proc([2]), _Proc([2]), OSError(5, "denied")])
+    with pytest.raises(U.UpdateError, match=r"installer direct: \[Errno 5\] denied"):
+        U.launch_windows_installer(setup, tgt, 7, True, launch, tmp_path, "win32", 3.0, c.sleep, c)
+
+
+def test_live_helper_is_accepted_and_old_helper_log_is_rotated(tmp_path: Path) -> None:
+    setup = tmp_path / "updates" / G_SETUP
+    setup.parent.mkdir()
+    setup.write_bytes(b"x")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / U.HELPER_LOG).write_text("old attempt\n")
+    (tmp_path / U.EXIT_CODE_FILE).write_text("5")
+
+    def started(_n: int) -> None:
+        (logs / U.HELPER_LOG).write_text("2026 update helper started: waiting\n")
+
+    c = _Clock()
+    launch = _ProcLauncher([_Proc([None], started)])
+    tgt = U.InstallTarget("windows", G_EXE)
+    how = U.launch_windows_installer(setup, tgt, 7, True, launch, tmp_path, "win32", 3.0, c.sleep, c)
+    assert how == "batch helper (breakaway)" and len(launch.calls) == 1
+    assert (logs / U.HELPER_OLD_LOG).read_text() == "old attempt\n"
+    assert not (tmp_path / U.EXIT_CODE_FILE).exists()
+
+
+def _failed_state(tmp: Path, installer: bool = True, helper: str | None = None, age: float = 0.0, code: str = ""):
+    setup = tmp / "updates" / G_SETUP
+    if installer:
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_bytes(b"x")
+    U.write_state(tmp, "0.1.9", "0.1.10", G_SETUP, setup)
+    if helper is not None:
+        (tmp / "logs").mkdir(exist_ok=True)
+        hl = tmp / "logs" / U.HELPER_LOG
+        hl.write_text(helper)
+        os.utime(hl, (hl.stat().st_mtime - age, hl.stat().st_mtime - age))
+    if code:
+        (tmp / U.EXIT_CODE_FILE).write_text(code)
+    return setup
+
+
+def test_report_no_helper_log_says_did_not_run_with_tray_remedy(tmp_path: Path) -> None:
+    setup = _failed_state(tmp_path)
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.status == "failed" and out.installer == setup
+    assert "the installer did not run" in out.message and "still v0.1.9" in out.message
+    assert "Right-click the tray icon → Run update installer." in out.message
+    assert setup.exists()  # the installer is kept
+    assert U.load_failure(tmp_path, "0.1.9") == ("0.1.10", setup)  # survives restarts
+    assert U.previous_install(tmp_path, "0.1.9") is None  # reported once
+
+
+def test_report_still_installing_keeps_state_and_quotes_last_line(tmp_path: Path) -> None:
+    line = "Mon 10/12/2026  3:33:05.12 starting installer: C:\\...\\setup.exe /VERYSILENT"
+    _failed_state(tmp_path, helper=f"x update helper started\nx Project Away has exited\n{line}\n")
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.status == "installing" and not out.ok
+    assert "still installing" in out.message and "the installer is running" in out.message
+    assert line in out.message and out.helper_line == line
+    assert (tmp_path / U.STATE_FILE).exists()  # reported again (as success) once the installer relaunches us
+    _failed_state(tmp_path, helper="x update helper started: waiting for Project Away (pid 1) to exit\n")
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.status == "installing" and "getting ready" in out.message
+
+
+def test_report_stale_or_finished_helper_log_is_a_failure_with_last_line(tmp_path: Path) -> None:
+    _failed_state(tmp_path, helper="x update helper started\nx starting installer: s.exe\n", age=3600)
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.status == "failed"
+    assert "the update helper stopped before the installer finished" in out.message
+    assert "Last step: x starting installer: s.exe." in out.message
+    _failed_state(tmp_path, helper=f"x installer exit code 5\nx {U.HELPER_DONE}\n", code="5")
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.status == "failed" and "could not be closed" in out.message
+    assert f"Last step: x {U.HELPER_DONE}." in out.message
+    (tmp_path / "updates" / G_SETUP).unlink()
+    (tmp_path / "logs" / U.HELPER_LOG).unlink()
+    _failed_state(tmp_path, installer=False)
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and out.installer is None and U.RELEASES_PAGE in out.message
+    assert "Run update installer" not in out.message
+    _failed_state(tmp_path)
+    U.update_state(tmp_path, method="installer direct (breakaway)")
+    out = U.previous_install(tmp_path, "0.1.9")
+    assert out is not None and "started directly" in out.message
+
+
+def test_report_success_clears_failure_record(tmp_path: Path) -> None:
+    setup = _failed_state(tmp_path)
+    U.record_failure(tmp_path, "0.1.10", setup, "earlier failure")
+    out = U.previous_install(tmp_path, "0.1.10")
+    assert out is not None and out.ok and out.message == "Project Away was updated to v0.1.10."
+    assert not (tmp_path / U.FAILED_FILE).exists() and U.load_failure(tmp_path, "0.1.10") is None
+
+
+def _mgr(tmp: Path, notes: list, opened: list, current: str = "0.1.9", **kw: Any) -> U.UpdateManager:
+    return U.UpdateManager(
+        C.UpdatesConfig(),
+        notify=lambda t, m: notes.append((t, m)),
+        data_dir=tmp,
+        current=current,
+        open_file=opened.append,
+        **kw,
+    )
+
+
+def test_manager_failed_report_enables_run_installer_item(tmp_path: Path) -> None:
+    setup = _failed_state(tmp_path)
+    notes: list = []
+    opened: list = []
+    m = _mgr(tmp_path, notes, opened)
+    assert m.run_installer_label() is None
+    m.report_previous()
+    assert notes[-1][0] == "Project Away update failed" and "Run update installer" in notes[-1][1]
+    assert m.failed_version == "0.1.10" and m.run_installer_label() == "Run update installer"
+    assert m.run_installer() is True and opened == [setup]  # a visible, double-click style run
+    # next start: the failure was reported already, but the one-click remedy is still there
+    m2 = _mgr(tmp_path, notes2 := [], opened)
+    m2.report_previous()
+    assert notes2 == [] and m2.run_installer_label() == "Run update installer" and m2.failed_version == "0.1.10"
+    setup.unlink()
+    assert m2.run_installer_label() is None
+    assert m2.run_installer() is False and "installer is gone" in notes2[-1][1]
+
+
+def test_manager_still_installing_is_not_called_a_failure(tmp_path: Path) -> None:
+    _failed_state(tmp_path, helper="x update helper started: waiting\n")
+    notes: list = []
+    m = _mgr(tmp_path, notes, [])
+    assert m.report_previous() is not None
+    assert notes[-1][0] == "Project Away update still installing" and "did not" not in notes[-1][1]
+    assert m.failed_version == "0.1.10" and m.run_installer_label() is None
+
+
+def test_manager_failure_during_launch_offers_run_installer(tmp_path: Path) -> None:
+    setup = tmp_path / "updates" / G_SETUP
+    setup.parent.mkdir()
+    setup.write_bytes(b"x")
+    asset = U.Asset(G_SETUP, "https://dl/x", 1, "sha256:" + "0" * 64)
+    rel = U.Release("v0.1.10", "0.1.10", (asset,))
+    res = U.CheckResult("0.1.9", "0.1.10", True, rel, asset, U.InstallTarget("windows", G_EXE))
+
+    def boom(_r: Any) -> U.InstallOutcome:
+        raise U.UpdateError("could not start the installer (batch helper: exited at once with code 1)")
+
+    notes: list = []
+    m = _mgr(tmp_path, notes, [], checker=lambda: res, installer=boom)
+    m.tick(0.0)
+    m.install_now()
+    assert notes[-1][0] == "Project Away update failed"
+    assert notes[-1][1].endswith("Right-click the tray icon → Run update installer.")
+    assert m.run_installer_label() == "Run update installer" and m.menu_label() == "Update to v0.1.10"
+
+
+def test_tray_update_menu_shows_run_installer_only_after_a_failure(tmp_path: Path) -> None:
+    from away.app.tray import update_menu_items
+
+    class Item:
+        def __init__(self, text: Any, action: Any, **kw: Any) -> None:
+            self.text, self.action, self.kw = text, action, kw
+
+        def label(self) -> str:
+            return self.text(None) if callable(self.text) else self.text
+
+        def visible(self) -> bool:
+            v = self.kw.get("visible", True)
+            return bool(v(None) if callable(v) else v)
+
+    fake = SimpleNamespace(MenuItem=Item)
+    m = _mgr(tmp_path, [], [])
+    items = update_menu_items(fake, m, "upd", "run", "chk")
+    shown = [i.label() for i in items if i.visible()]
+    assert shown == ["Check for updates"]
+    setup = _failed_state(tmp_path)
+    m.report_previous()
+    shown = {i.label(): i.action for i in items if i.visible()}
+    assert shown == {"Run update installer": "run", "Check for updates": "chk"}
+    assert m.failed_installer == setup

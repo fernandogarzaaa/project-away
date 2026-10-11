@@ -278,7 +278,10 @@ Installed apps check for a new release when the tray starts and once a day, then
 **Update to vX.Y.Z** item in the tray menu. Click it to download, verify (SHA-256) and install the update;
 the app restarts by itself.
 
-- **Windows:** the new setup.exe runs silently, closes the app, keeps your models and relaunches it.
+- **Windows:** the new setup.exe runs silently, closes the app, keeps your models and relaunches it. If an
+  update does not take, the next start tells you why; then **right-click the tray icon → Run update
+  installer** to run the downloaded setup normally. Copies on v0.1.9 or older may need the v0.1.10 setup
+  run by hand once (download it from the releases page).
 - **macOS:** the app quits, the new `Project Away.app` from the `.dmg` replaces the old one (quarantine flag
   removed, so no second right-click > Open), and it reopens. If the app is not in a folder you can write to,
   you get the `.dmg` path to drag it yourself.

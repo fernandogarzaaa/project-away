@@ -527,21 +527,28 @@ Same options under **Settings → Voice & input**; from a terminal: `away update
 The tray also has **Check for updates**, which always tells you the result; a check that fails (offline
 at sign-in) is retried after 30 minutes instead of the next day.
 
-**Windows updates (v0.1.8):** the installer is downloaded to `%LOCALAPPDATA%\ProjectAway\updates`,
-verified, and started by a small hidden helper that waits until Project Away (and the Settings window) has
-closed, so no file is locked. The app quits by itself (forced after a few seconds if something hangs), the
-installer writes `%LOCALAPPDATA%\ProjectAway\logs\update-install.log`, and the app restarts. On the next
-start you get "Project Away was updated to vX" or, if it did not take, "The update to vX did not install"
-with the reason and the log path. Every step is logged to `away.log`. Copies older than v0.1.8 use the old
-updater, which could leave the app running so the installer could not replace its files: if the tray
-update does not take, download `ProjectAway-0.1.8-windows-x64-setup.exe` from the releases page and run it
-once (quit Project Away first).
+**Windows updates (v0.1.10):** the installer is downloaded to `%LOCALAPPDATA%\ProjectAway\updates`,
+verified, and started by a plain batch file next to it (`away-update.cmd`, run hidden by `cmd.exe`; no
+PowerShell). It logs every step to `%LOCALAPPDATA%\ProjectAway\logs\update-helper.log`, waits until
+Project Away (and the Settings window) has closed, runs the installer silently and records its exit code.
+Before quitting, the app checks that the helper is really running (its first log line, or the process still
+alive after 3 seconds); if not, it starts the installer directly instead. The app quits by itself (forced
+after a few seconds if something hangs), the installer writes `logs\update-install.log`, and the app
+restarts. On the next start you get "Project Away was updated to vX", "The update to vX is still
+installing" (with the helper's last step), or "The update to vX did not install" with the reason, the
+helper's last log line and the remedy: **right-click the tray icon → Run update installer**, which opens
+the kept installer normally (visible, like a double-click). Every step is logged to `away.log`.
+
+**Upgrading from v0.1.9 or older:** those copies still use the old PowerShell helper, which did not run the
+installer on some Windows 11 PCs. If the tray update to v0.1.10 does not take, download
+`ProjectAway-0.1.10-windows-x64-setup.exe` from the releases page and run it once by hand (quit Project
+Away first). Updates after that use the new helper.
 
 ## Verified vs untested
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 992 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1008 tests (1007 pass, 1 skipped where libtk is missing); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -553,7 +560,7 @@ once (quit Project Away first).
 | Multi-camera fusion | Synthetic: best-view and weighted selection, timestamp pairing and dropout, occlusion handover with no jump, push gesture, 3D pinch rejecting an edge-on false pinch, Cameras-tab model |
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
-| Windows auto-update (v0.1.8) | Helper script, launch fallbacks, forced exit, install-state report, download/verify and logging unit-tested; **the PowerShell helper and silent Inno upgrade are untested on a real Windows desktop** |
+| Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |
 | Steady click, sigmoid curve, dwell, wink, auto-pause guard, cursor ring states, numbers to digits, edit-selection rules | Logic unit-tested with synthetic input |
 | Big cursor (v0.1.9) | Controller, crash marker, debounce and pause wiring unit-tested with a fake backend; **the Windows registry + `SystemParametersInfo` resize is untested on a real Windows desktop** |
 | Hand choice (v0.1.9) | Selection, mirroring and two-hand probing unit-tested with fake landmarkers; the handedness convention was checked on real photos (raw vs flipped) with MediaPipe 0.10.18; **untested with a live webcam and two real hands** |

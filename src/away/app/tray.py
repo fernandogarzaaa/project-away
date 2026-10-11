@@ -175,6 +175,30 @@ def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a
         open_path(ctl.settings_path())  # fall back to the YAML file in the default editor
 
 
+def update_menu_items(
+    pystray: Any, updates: Any, on_update: Any, on_run_installer: Any, on_check_updates: Any
+) -> list[Any]:
+    """The update part of the tray menu: "Update to vX" while an update is available, "Run update installer"
+    after a failed update whose installer is still on disk (opens it visibly, like a double-click), and
+    "Check for updates"."""
+    return [
+        pystray.MenuItem(
+            lambda _i: updates.menu_label() or "Update",
+            on_update,
+            visible=lambda _i: updates.menu_label() is not None,
+            enabled=lambda _i: not updates.installing,
+        ),
+        pystray.MenuItem(
+            lambda _i: updates.run_installer_label() or "Run update installer",
+            on_run_installer,
+            visible=lambda _i: updates.run_installer_label() is not None,
+        ),
+        pystray.MenuItem(
+            "Check for updates", on_check_updates, enabled=lambda _i: not (updates.installing or updates.checking)
+        ),
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
     import contextlib
     import logging
@@ -258,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     def on_check_updates(_icon: Any, _item: Any) -> None:
         threading.Thread(target=updates.check_now, name="away-update-check", daemon=True).start()
 
+    def on_run_installer(_icon: Any, _item: Any) -> None:
+        updates.run_installer()
+
     gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
     gate_hint = {"shown": False}
 
@@ -309,15 +336,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
-        pystray.MenuItem(
-            lambda _i: updates.menu_label() or "Update",
-            on_update,
-            visible=lambda _i: updates.menu_label() is not None,
-            enabled=lambda _i: not updates.installing,
-        ),
-        pystray.MenuItem(
-            "Check for updates", on_check_updates, enabled=lambda _i: not (updates.installing or updates.checking)
-        ),
+        *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)

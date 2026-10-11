@@ -3,7 +3,6 @@ Windows auto-updater (wait-then-install helper, job breakaway, forced exit, inst
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import threading
@@ -471,10 +470,6 @@ def test_windows_command_adds_dir_and_log_and_quotes_spaces():
     assert U.win_arg(r"C:\A B\s.exe") == r'"C:\A B\s.exe"'
 
 
-def _decode(cmd: list[str]) -> str:
-    return base64.b64decode(cmd[-1]).decode("utf-16-le")
-
-
 class _Launcher:
     def __init__(self, fail: int = 0) -> None:
         self.calls: list[tuple[Any, dict[str, Any]]] = []
@@ -494,34 +489,35 @@ def test_windows_install_waits_for_the_app_then_installs_and_records_exit_code(t
     data = tmp_path / "data"
     launch = _Launcher()
     tgt = U.InstallTarget("windows", Path(r"C:\Users\A B\AppData\Local\Programs\ProjectAway\ProjectAway.exe"))
+    U.write_state(data, "0.1.7", "0.1.8", SETUP, setup)
     out = U.install(setup, tgt, pid=4321, launcher=launch, platform="win32", data_dir=data)
     assert out.exit_app and len(launch.calls) == 1
     cmd, kw = launch.calls[0]
-    assert cmd[0] == "powershell.exe" and "-NoProfile" in cmd and cmd[-2] == "-EncodedCommand"
-    assert kw["creationflags"] & U.CREATE_BREAKAWAY_FROM_JOB and kw["creationflags"] & U.DETACHED_PROCESS
-    script = _decode(cmd)
-    assert script.index("Wait-Process -Id 4321") < script.index("Start-Process -FilePath")
-    assert "Stop-Process -Force" in script and "Get-Process -Name 'ProjectAway'" in script
-    assert (
-        r"$_.Path -eq $exe" in script and r"'C:\Users\A B\AppData\Local\Programs\ProjectAway\ProjectAway.exe'" in script
-    )
+    assert "cmd.exe" in cmd and "/d /s /c" in cmd and U.HELPER_SCRIPT in cmd  # v0.1.10: batch, not PowerShell
+    assert kw["creationflags"] & U.CREATE_BREAKAWAY_FROM_JOB and kw["creationflags"] & U.CREATE_NO_WINDOW
+    assert not kw["creationflags"] & U.DETACHED_PROCESS
+    script = (setup.parent / U.HELPER_SCRIPT).read_text(encoding="utf-8")
+    assert script.index('"PID eq 4321"') < script.index('start "" /wait')
+    assert 'taskkill /F /IM "%APPEXE%"' in script and 'set "APPEXE=ProjectAway.exe"' in script
     assert '/DIR="C:\\Users\\A B\\AppData\\Local\\Programs\\ProjectAway"' in script
-    assert f'/LOG="{data / "logs" / U.INSTALL_LOG}"' in script or f"/LOG={data / 'logs' / U.INSTALL_LOG}" in script
-    assert "$h = $p.Handle" in script and str(data / U.EXIT_CODE_FILE) in script and "WaitForExit" in script
+    assert f'/LOG="{data / "logs" / U.INSTALL_LOG}"' in script
+    assert f'set "EXITFILE={data / U.EXIT_CODE_FILE}"' in script and '>"%EXITFILE%" echo %RC%' in script
     assert (data / "logs").is_dir()
+    assert json.loads((data / U.STATE_FILE).read_text())["method"] == "batch helper (breakaway)"
 
 
-def test_windows_launch_falls_back_without_breakaway_then_cmd_start(tmp_path):
+def test_windows_launch_falls_back_without_breakaway_then_direct_installer(tmp_path):
     setup = tmp_path / SETUP
     setup.write_bytes(b"x")
     tgt = U.InstallTarget("windows", Path(INNO_EXE))
     launch = _Launcher(fail=1)  # a job that forbids breakaway rejects the flag
-    assert U.launch_windows_installer(setup, tgt, 1, True, launch, tmp_path, "win32") == "powershell helper"
+    assert U.launch_windows_installer(setup, tgt, 1, True, launch, tmp_path, "win32") == "batch helper"
     assert not launch.calls[1][1]["creationflags"] & U.CREATE_BREAKAWAY_FROM_JOB
-    launch = _Launcher(fail=2)  # no PowerShell at all
-    assert U.launch_windows_installer(setup, tgt, 1, True, launch, tmp_path, "win32") == "cmd start (breakaway)"
-    cmd = launch.calls[2][0]
-    assert isinstance(cmd, str) and cmd.startswith('cmd.exe /c start "" ') and "/VERYSILENT" in cmd
+    launch = _Launcher(fail=2)  # cmd.exe cannot be started at all
+    assert U.launch_windows_installer(setup, tgt, 1, True, launch, tmp_path, "win32") == "installer direct (breakaway)"
+    cmd, kw = launch.calls[2]
+    assert isinstance(cmd, str) and cmd.startswith(f'"{setup}" /VERYSILENT') and "/AUTOUPDATE=1" in cmd
+    assert kw["creationflags"] & U.DETACHED_PROCESS and not kw["creationflags"] & U.CREATE_NO_WINDOW
     with pytest.raises(U.UpdateError, match="could not start the installer"):
         U.launch_windows_installer(setup, tgt, 1, True, _Launcher(fail=9), tmp_path, "win32")
 
