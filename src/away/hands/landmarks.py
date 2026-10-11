@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 WRIST = 0
+THUMB_MCP = 2
 THUMB_TIP = 4
 INDEX_MCP, INDEX_PIP, INDEX_TIP = 5, 6, 8
 MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP = 9, 10, 12
@@ -119,8 +120,25 @@ def extended_fingers(lm: Array) -> dict[str, bool]:
     return {name: finger_extended(lm, name) for name in FINGERS}
 
 
+def thumb_fold_ratio(lm_raw: object) -> float:
+    """How far the thumb is tucked in: distance thumb tip -> pinky MCP over thumb MCP -> pinky MCP.
+
+    About 1.1-1.4 for an open palm (thumb out), below ~0.75 when the thumb is folded across the palm or held
+    against the side of the index finger. Scale-, rotation- and handedness-invariant (image plane).
+    """
+    lm = as_array(lm_raw)
+    base = float(np.linalg.norm(lm[THUMB_MCP, :2] - lm[PINKY_MCP, :2]))
+    if base <= 1e-9:
+        return float("inf")
+    return float(np.linalg.norm(lm[THUMB_TIP, :2] - lm[PINKY_MCP, :2]) / base)
+
+
 def classify_pose(lm_raw: object) -> str:
-    """Rule-based static pose: point | two | palm | fist | other (used when no model is trained)."""
+    """Rule-based static pose: point | two | palm | fist | other (used when no model is trained).
+
+    ``palm`` only counts the four fingers; the gesture state machine splits it into the open palm (thumb out)
+    and the four-finger auto-scroll pose (thumb folded) with :func:`thumb_fold_ratio` and hysteresis.
+    """
     lm = as_array(lm_raw)
     ext = extended_fingers(lm)
     n = sum(ext.values())

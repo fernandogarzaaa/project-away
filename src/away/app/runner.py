@@ -12,6 +12,7 @@ import functools
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from away.hands.landmarks import as_array, pinch_ratio
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
 from away.voice.always_on import GateHint
+from away.voice.clap import camera_view
 from away.wifi.classifier import CoarseCSIClassifier
 from away.wifi.features import window_features
 
@@ -79,6 +81,7 @@ class Pipeline:
         self.push = PushDetector(mc.push_distance_m, mc.push_time_s, mc.push_cooldown_s)
         self.wink = WinkTrigger(cfg.face.wink_threshold, cfg.face.wink_open_max, cfg.face.wink_hold)
         self.last_ratio: float | None = None
+        self._hand_views: deque[tuple[float, int, float | None]] = deque(maxlen=90)
         self.last_fused: FusedHand | None = None
         self.fusion = GestureFusion(
             cfg.wifi.fusion_weight if cfg.wifi.enabled else 0.0,
@@ -98,7 +101,10 @@ class Pipeline:
         self.mic_energy = 0.0  # updated by the mic thread
         self._enroll_pending = True
         # detection (state machine) -> mapping (bindings) -> execution (backend / hooks)
-        self.executor = ActionExecutor(self.mouse, cfg.bindings.allow_shell, hooks={"pause": self._pause_hook})
+        self.hand_prefer = cfg.hands.prefer  # hands:right|left|any (voice) changes it until the next restart
+        self.executor = ActionExecutor(
+            self.mouse, cfg.bindings.allow_shell, hooks={"pause": self._pause_hook, "hands": self._hands_hook}
+        )
         self.dispatcher = Dispatcher(
             cfg.bindings, self.executor, self.gestures, active_app=active_app, paused=self.output_paused
         )
@@ -120,9 +126,14 @@ class Pipeline:
         self._auto_paused = auto
         if auto:
             self.mouse._release_if_down()
+            self.gestures.autoscroll.stop()
         else:
             self.mouse.mapper.reset()  # resume from wherever the real mouse left the cursor, no jump
         self.bus.publish("app.auto_paused", {"paused": auto}, t)
+
+    def gestures_active(self) -> bool:
+        """Gesture control is on and not paused (manual pause, F9, clutch, auto-pause): the big cursor shows."""
+        return bool(self.cfg.hands.enabled) and not self.output_paused()
 
     def set_monitors(self, layout: Screen) -> None:
         """New monitor layout (hot-plug): the cursor stays put if it is still on a monitor."""
@@ -135,6 +146,8 @@ class Pipeline:
             state = "paused"
         elif not self.gestures.hand_present:
             state = "hand_lost"
+        elif self.gestures.autoscroll.active:
+            state = "autoscroll"
         elif self.gestures.dragging:
             state = "drag"
         elif self.gestures.pinched:
@@ -151,6 +164,8 @@ class Pipeline:
             "pinch": pinch_progress(self.last_ratio, g.pinch_on, g.pinch_off) if self.gestures.hand_present else 0.0,
             "dwell": self.dwell.progress if self.cfg.hands.dwell.enabled else 0.0,
             "frozen": bool(self.mouse.stabilizer is not None and self.mouse.stabilizer.frozen),
+            "direction": self.gestures.autoscroll.direction,
+            "size": int(self.cfg.hands.cursor.big_cursor_size),
         }
 
     def set_paused(self, paused: bool) -> None:
@@ -159,6 +174,7 @@ class Pipeline:
         self.mouse.enabled = not paused
         if paused:
             self.mouse._release_if_down()
+            self.gestures.autoscroll.stop()
 
     def _pause_hook(self, arg: str, data: dict[str, Any]) -> None:
         if arg == "toggle" and "paused" in data:  # open palm: the detector already flipped its own state
@@ -166,6 +182,13 @@ class Pipeline:
         else:
             self.set_paused({"toggle": not self.paused, "on": True, "off": False}[arg])
         self.bus.publish("app.paused", {"paused": self.paused})
+
+    def _hands_hook(self, arg: str, _data: dict[str, Any]) -> None:
+        """hands:right | left | any (e.g. the voice command "use left hand"): which hand drives the cursor."""
+        if arg not in ("right", "left", "any"):
+            return
+        self.hand_prefer = arg
+        self.bus.publish("hands.prefer", {"prefer": arg})
 
     # live reload of bindings + tunables (settings GUI / CLI edits) ------------
     def apply_config(self, cfg: AppConfig) -> None:
@@ -184,6 +207,10 @@ class Pipeline:
         self.brow = BrowRaiseToggle(f.brow_threshold, f.brow_hold)
         self.mouth = MouthOpenTrigger(f.mouth_threshold, f.mouth_hold)
         self.wink = WinkTrigger(f.wink_threshold, f.wink_open_max, f.wink_hold)
+        if cfg.hands.prefer != self.cfg.hands.prefer:  # a Settings change wins over an earlier voice command
+            self.hand_prefer = cfg.hands.prefer
+        self.cfg.hands.prefer = cfg.hands.prefer
+        self.cfg.hands.enabled = cfg.hands.enabled
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
@@ -249,6 +276,20 @@ class Pipeline:
         elif landmarks is None or depth is None:
             self.push.reset()
         return accepted
+
+    # claps (microphone) ---------------------------------------------------------
+    def note_hands(self, t: float, n_hands: int, gap: float | None) -> None:
+        """What the camera saw this frame, for clap confirmation (two hands close together)."""
+        self._hand_views.append((t, int(n_hands), gap))
+
+    def hands_view(self, t0: float) -> str:
+        """``together`` (two hands close around ``t0``), ``seen`` (camera running), ``none`` (no camera frames)."""
+        return camera_view(self._hand_views, t0)
+
+    def on_clap(self, kind: str, t: float) -> list[str]:
+        """``single`` -> gesture ``clap`` (default pause:off), ``double`` -> ``double_clap`` (pause:on)."""
+        name = "clap" if kind == "single" else "double_clap"
+        return self._synthetic_gesture(GestureEvent(name, t, {"view": self.hands_view(t)}))
 
     def _synthetic_gesture(self, ev: GestureEvent) -> list[str]:
         """Gestures detected outside the state machine (dwell, push) go through the same bindings."""
@@ -364,6 +405,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.gate_hint = GateHint(5)
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
+        from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
+
+        self.big_cursor = BigCursor(
+            NullCursorBackend() if dry_run else default_backend(),
+            cfg.hands.cursor.big_cursor_size,
+            publish=self._publish_quiet,
+        )
+        try:
+            self.big_cursor.recover()  # a crash last time may have left the cursor big
+        except Exception as exc:
+            self.bus.publish("cursor.size_error", {"error": str(exc)})
+        import atexit
+
+        atexit.register(self._restore_cursor)
         self._camera_episode = 0  # bumps when the cameras recover, so a new failure is notified again
         self.bus.subscribe("cameras.degraded", self._on_cameras_degraded)
         self.bus.subscribe("cameras.restored", self._on_cameras_restored)
@@ -386,6 +441,23 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def _publish_quiet(self, topic: str, data: dict[str, Any]) -> None:
         self.bus.publish(topic, data)
+
+    def _restore_cursor(self) -> None:
+        with contextlib.suppress(Exception):
+            self.big_cursor.restore()
+
+    def _cursor_size_loop(self, every_s: float = 0.1) -> None:
+        """Big cursor while gestures are active; back to normal on pause / auto-pause / disable (debounced)."""
+        try:
+            while not self.stop_event.wait(every_s):
+                try:
+                    self.big_cursor.set_level(int(self.cfg.hands.cursor.big_cursor_size))
+                    self.big_cursor.update(self.pipeline.gestures_active())
+                except Exception as exc:
+                    self.bus.publish("cursor.size_error", {"error": str(exc)})
+                    return
+        finally:
+            self._restore_cursor()
 
     def _release_hand(self) -> None:
         self.pipeline.on_hand(time.monotonic(), None)
@@ -441,7 +513,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         return self.voice.dictation if self.voice is not None else None
 
     def _log(self, ev: Any) -> None:
-        if ev.topic not in ("gesture.move", "gesture.scroll", "wifi.state", "app.auto_paused"):
+        if ev.topic not in ("gesture.move", "gesture.scroll", "gesture.autoscroll", "wifi.state", "app.auto_paused"):
             print(f"[{ev.topic}] {ev.data}", flush=True)
 
     # public controls used by the tray --------------------------------------
@@ -680,8 +752,35 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             except Exception as exc:
                 self.bus.publish("edit.unavailable", {"error": str(exc)})
 
+        from away.voice.clap import ClapControl
+
+        def dictation_busy() -> bool:
+            vc = self.voice
+            if vc is None:
+                return False
+            if vc.dictation is not None and vc.dictation.recording:
+                return True
+            amb = vc.ambient
+            return bool(amb is not None and vc.listening and amb.ep.in_speech)
+
+        self.claps = ClapControl(
+            self.cfg.voice,
+            v.sample_rate,
+            busy=dictation_busy,
+            hands=self.pipeline.hands_view,
+            on_candidate=lambda c, ok, view: self._publish_quiet(
+                "clap.candidate", {"score": round(c.score, 2), "accepted": ok, "camera": view}
+            ),
+        )
+
         def on_chunk(chunk: np.ndarray) -> None:
             self.pipeline.mic_energy = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+            if not self.voice.muted:  # a muted mic hears nothing, claps included
+                try:
+                    for kind, t in self.claps.feed(chunk, time.monotonic()):
+                        self.pipeline.on_clap(kind, t)
+                except Exception as exc:
+                    self._publish_quiet("clap.error", {"error": str(exc)})
             if self.editor is not None and self.editor.recording:
                 self.editor.feed(chunk)
                 return
@@ -757,7 +856,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         hand_model = self.models_dir / "hand_landmarker.task"
         face_model = self.models_dir / "face_landmarker.task"
-        hands = HandTracker(hand_model, self.cfg.hands.max_hands) if self.cfg.hands.enabled else None
+        hands = (
+            HandTracker(
+                hand_model,
+                self.cfg.hands.max_hands,
+                prefer=lambda: self.pipeline.hand_prefer,
+                mirrored=self.cfg.hands.mirror,
+            )
+            if self.cfg.hands.enabled
+            else None
+        )
         faces = None
         if self.cfg.face.enabled and face_model.exists():
             from away.face.landmarker import FaceLandmarker
@@ -768,6 +876,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         def process(n: int, t: float, rgb: Any) -> None:
             if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
+                self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
                 self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
             if faces is not None and n % max(1, prof.face_every) == 0:
                 obs = faces.process(rgb, t)
@@ -908,7 +1017,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             from away.hands.tracker import HandTracker
 
             model = self.models_dir / "hand_landmarker.task"
-            trackers = [first_tracker] + [HandTracker(model, 1) for _ in cams[1:]]
+            first_tracker.selector.mirrored = cams[0].mirror  # each camera's own frame orientation
+            trackers = [first_tracker] + [
+                HandTracker(
+                    model, self.cfg.hands.max_hands, prefer=lambda: self.pipeline.hand_prefer, mirrored=c.mirror
+                )
+                for c in cams[1:]
+            ]
         ex = load_extrinsics()
         fuser = MultiViewFuser(cams, mc, ex)
         share = self.camera_share
@@ -991,6 +1106,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                     continue
                                 t_i, rgb = item
                                 fr = trackers[i].process(rgb, t_i)
+                                note = getattr(self.pipeline, "note_hands", None)
+                                if i == primary and note is not None:
+                                    note(t_i, getattr(fr, "n_hands", 1), getattr(fr, "hands_gap", None))
                                 if fr.landmarks is None:
                                     views.append(None)
                                     continue
@@ -1067,6 +1185,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         if self.cfg.wifi.enabled:
             self.threads.append(threading.Thread(target=self._wifi_loop, daemon=True, name="wifi"))
         self.threads.append(threading.Thread(target=self._watch_config, daemon=True, name="config-watch"))
+        if self.cfg.hands.enabled:
+            self.threads.append(threading.Thread(target=self._cursor_size_loop, daemon=True, name="cursor-size"))
         if self.monitor_watcher.enabled:
             self.threads.append(threading.Thread(target=self._watch_monitors, daemon=True, name="monitors"))
         for th in self.threads:
@@ -1094,6 +1214,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         except Exception as exc:
             # Shutdown must continue even if the OS input backend has failed.
             self.bus.publish("mouse.release_error", {"error": str(exc)})
+        self._restore_cursor()  # the user's own cursor size, right away (no debounce)
         for lst in [*self._listeners, *getattr(self, "_input_listeners", [])]:
             try:
                 lst.stop()

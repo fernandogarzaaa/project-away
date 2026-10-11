@@ -268,7 +268,7 @@ def test_v014_asr_model_is_migrated_to_auto(tmp_path):
     cfg, _ = C.load(p)
     assert cfg.voice.asr_model == "auto" and cfg.migrations and cfg.config_version == C.CONFIG_VERSION
     C.save(cfg, p)
-    assert "config_version: 2" in p.read_text() and "migrations" not in p.read_text()
+    assert f"config_version: {C.CONFIG_VERSION}" in p.read_text() and "migrations" not in p.read_text()
     # a choice made in v0.1.6+ (config_version 2) is the user's: kept
     p.write_text("config_version: 2\nvoice:\n  asr_model: large-v3-turbo\n", encoding="utf-8")
     cfg2, _ = C.load(p)

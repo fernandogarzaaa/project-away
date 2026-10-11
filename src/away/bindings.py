@@ -14,6 +14,7 @@ Actions (what happens) are written ``kind:argument``::
     none
     mouse:click | double_click | right_click | middle_click | scroll_up | scroll_down
     mouse:move (point only) | mouse:drag (pinch_hold only) | mouse:scroll (two_finger_scroll only)
+    mouse:autoscroll (four_finger_scroll only)
     key:ctrl+tab              press a key combo
     type:Hello there          type text
     launch:firefox            start an app (no shell); launch:https://... opens a URL
@@ -22,6 +23,7 @@ Actions (what happens) are written ``kind:argument``::
     mic:toggle | on | off     mute/unmute the microphone
     voice:command_mode | dictation_mode | toggle_mode
     pause:toggle | on | off   pause/resume gesture control
+    hands:right | left | any  which hand drives the cursor (hands.prefer, until the app restarts)
     cursor:next_monitor | prev_monitor | primary_monitor | monitor 2
                               jump the cursor to the centre of a monitor (numbers from `away monitors`)
 
@@ -50,11 +52,14 @@ GESTURE_TRIGGERS = (
     "double_pinch",
     "pinch_hold",
     "two_finger_scroll",
+    "four_finger_scroll",
     "open_palm",
     "swipe_left",
     "swipe_right",
     "push",
     "dwell",
+    "clap",
+    "double_clap",
 )
 FACE_TRIGGERS = ("brow_raise", "mouth_open", "wink_left", "wink_right")
 HOTKEY_SLOTS = ("ptt", "mute")
@@ -79,6 +84,7 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
         "move",
         "drag",
         "scroll",
+        "autoscroll",
     ),
     "key": None,  # free: a key combo
     "type": None,  # free text
@@ -88,11 +94,17 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "mic": ("toggle", "on", "off"),
     "voice": ("command_mode", "dictation_mode", "toggle_mode"),
     "pause": ("toggle", "on", "off"),
+    "hands": ("right", "left", "any"),
     "cursor": CURSOR_ARGS,
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
 # continuous mouse actions only make sense on the matching continuous gesture
-CONTINUOUS_ONLY = {"move": "point", "drag": "pinch_hold", "scroll": "two_finger_scroll"}
+CONTINUOUS_ONLY = {
+    "move": "point",
+    "drag": "pinch_hold",
+    "scroll": "two_finger_scroll",
+    "autoscroll": "four_finger_scroll",
+}
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 
@@ -226,11 +238,14 @@ def default_profile() -> Profile:
             "double_pinch": a("mouse:double_click"),
             "pinch_hold": a("mouse:drag"),
             "two_finger_scroll": a("mouse:scroll"),
+            "four_finger_scroll": a("mouse:autoscroll"),  # hands.gestures.autoscroll_enabled
             "open_palm": a("pause:toggle"),
             "swipe_left": a("key:left"),
             "swipe_right": a("key:right"),
             "push": a("mouse:click"),  # only detected with depth (multi-camera, or hands.multicam.push_monocular)
             "dwell": a("mouse:click"),  # only detected when hands.dwell.enabled
+            "clap": a("pause:off"),  # microphone, voice.clap_enabled: one clap resumes gesture control
+            "double_clap": a("pause:on"),  # two claps within voice.clap_double_window pause it
         },
         voice={
             "click": a("mouse:click"),
@@ -252,6 +267,9 @@ def default_profile() -> Profile:
             "monitor one": a("cursor:monitor 1"),
             "monitor two": a("cursor:monitor 2"),
             "monitor three": a("cursor:monitor 3"),
+            "use left hand": a("hands:left"),
+            "use right hand": a("hands:right"),
+            "use either hand": a("hands:any"),
         },
         face={
             "brow_raise": a("dictation:toggle"),

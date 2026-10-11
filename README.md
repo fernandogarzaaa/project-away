@@ -36,8 +36,34 @@ Hold up one hand, palm toward the screen, and point.
 | **Pinch twice** quickly | Double-click |
 | **Pinch and hold**, then move | Drag (select text, move windows) — open your fingers to drop |
 | **Two fingers up** (index + middle), move up or down | Scroll |
-| **Open palm**, held still for a moment | Pause / resume gestures |
+| **Four fingers up, thumb tucked in**, then move your hand up or down | **Auto-scroll**: keeps scrolling on its own, faster the further you move from where you started. Make a **fist** to stop |
+| **Open palm** (thumb out too), held still for a moment | Pause / resume gestures |
 | **Swipe** left or right | Left / right arrow key (previous / next slide or photo) |
+| **Clap once** | Turn gestures on (resume) |
+| **Clap twice** quickly | Pause gestures |
+
+**Auto-scroll, step by step:** hold up four fingers with your thumb folded across your palm for a moment (the
+cursor ring, if you turned it on, goes orange). Where your hand is at that moment is the "middle". Move your hand
+a little above it to scroll up, below it to scroll down; the further away, the faster. Hold your hand still and
+it keeps scrolling at that speed, so you can read a long page without moving. Moving left or right scrolls
+sideways. Close your hand into a **fist** to stop (it also stops if your hand leaves the camera for more than
+half a second, if you pause, or if you make another gesture). Keeping your thumb tucked in matters: with the
+thumb out it is the open palm, which pauses.
+
+**Claps:** the microphone listens for a sharp hand clap. One clap turns gestures back on; two claps within about
+half a second pause them (a single clap waits that half second to make sure a second one isn't coming). Claps
+are ignored while you're in the middle of saying something. If the camera can see both your hands come together
+it is extra sure it was a clap. Turn it off, or make it pickier, in **Settings → Voice & input**.
+
+**Big cursor:** while gestures are on, the Windows mouse pointer is made bigger so you can see it from across the
+room. It shrinks back to your normal size whenever gestures pause, so the size also tells you whether gestures
+are on. Choose the size (or 0 for off) in **Settings → Voice & input → Cursor size while gestures are active**.
+On Mac and Linux the pointer itself isn't changed; the cursor ring grows instead.
+
+**Holding something in the other hand?** Pick **Settings → Voice & input → Which hand controls the cursor**:
+*right* or *left* ignores the other hand completely (handy when you hold your phone), *any* sticks with whichever
+hand it is already following. You can also say **"use left hand"**, **"use right hand"** or **"use either
+hand"**.
 
 Tips for smooth control:
 - **Small movements go a long way.** The cursor speeds up when you move fast and slows for precise work, so slow down near small buttons.
@@ -53,7 +79,7 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 
 - **Punctuation:** say "comma", "period", "question mark", "new line", "new paragraph".
 - **Mistake?** Say **"scratch that"** to remove the sentence you just said.
-- **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening".
+- **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening", "use left hand", "use right hand", "use either hand".
 - **Shortcuts:** `Ctrl+Alt+Space` pauses/resumes listening, `Ctrl+Alt+M` mutes the mic, `Ctrl+Alt+E` lets you edit selected text by voice.
 - **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
 - **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
@@ -141,6 +167,8 @@ Every control is a **trigger → action** binding you can change without touchin
 | `gesture:double_pinch` | `mouse:double_click` |
 | `gesture:pinch_hold` | `mouse:drag` |
 | `gesture:two_finger_scroll` | `mouse:scroll` |
+| `gesture:four_finger_scroll` (thumb folded; `hands.gestures.autoscroll_enabled`) | `mouse:autoscroll` |
+| `gesture:clap` / `double_clap` (microphone; `voice.clap_enabled`) | `pause:off` / `pause:on` |
 | `gesture:open_palm` (hold) | `pause:toggle` (pause/resume gestures) |
 | `gesture:swipe_left` / `swipe_right` | `key:left` / `key:right` |
 | `face:brow_raise` (needs `face.brow_raise_toggle: true`) | `dictation:toggle` |
@@ -158,6 +186,7 @@ Every control is a **trigger → action** binding you can change without touchin
 | `voice:"pause gestures"` / `"resume gestures"` | `pause:on` / `pause:off` |
 | `voice:"next monitor"` / `"previous monitor"` | `cursor:next_monitor` / `cursor:prev_monitor` |
 | `voice:"monitor one"` / `"monitor two"` / `"monitor three"` | `cursor:monitor 1` / `2` / `3` |
+| `voice:"use left hand"` / `"use right hand"` / `"use either hand"` | `hands:left` / `hands:right` / `hands:any` |
 
 **Triggers:** the gestures above plus your own (record with `away record --custom --label wave`, then
 `away calibrate`), any spoken phrase (matched ignoring case and punctuation), `face:brow_raise`,
@@ -166,11 +195,13 @@ Every control is a **trigger → action** binding you can change without touchin
 gestures on/off) and `voice.edit_hotkey` (default Ctrl+Alt+E, edit the selected text by voice).
 
 **Actions:** `none` · `mouse:click|double_click|right_click|middle_click|scroll_up|scroll_down`
-(`mouse:move`, `mouse:drag`, `mouse:scroll` only on point / pinch_hold / two_finger_scroll) ·
+(`mouse:move`, `mouse:drag`, `mouse:scroll`, `mouse:autoscroll` only on point / pinch_hold /
+two_finger_scroll / four_finger_scroll) ·
 `key:ctrl+tab` · `type:any text` · `launch:firefox` or `launch:https://…` (no shell) ·
 `shell:command` (**off unless** `bindings.allow_shell: true`) · `dictation:toggle|start|stop` ·
 `mic:toggle|on|off` · `voice:command_mode|dictation_mode|toggle_mode` · `pause:toggle|on|off` ·
-`cursor:next_monitor|prev_monitor|primary_monitor|monitor N` (jump to the centre of a monitor).
+`cursor:next_monitor|prev_monitor|primary_monitor|monitor N` (jump to the centre of a monitor) ·
+`hands:right|left|any` (which hand drives the cursor until the app restarts).
 
 ### Multiple monitors
 
@@ -240,6 +271,27 @@ Sliders in the Settings window, or in YAML: `hands.cursor.gain` (sensitivity), `
 distance / time), `double_pinch_window`, `drag_hold`, `clutch_hold`; `voice.vad_sensitivity`,
 `end_silence_ms`, `max_utterance_s`. Each is range-checked.
 
+v0.1.9 additions:
+
+- **Big cursor** (`hands.cursor.big_cursor_size`, 0 = off, 1-5 = 1.5x/2x/3x/4x/6x of 32 px, default 2): on
+  Windows the accessibility cursor size (`HKCU\Control Panel\Cursors\CursorBaseSize`) is raised while gesture
+  control is active and put back on pause, auto-pause, clutch, F9, double clap, disable and quit (at most one
+  change per 300 ms so auto-pause flapping does not thrash it). Your original size is saved to
+  `big_cursor.json` in the data folder first; if Away crashes while the cursor is big, the next start restores it.
+- **Hand choice** (`hands.prefer: any | right | left`, `hands.max_hands: 2`): MediaPipe looks for two hands;
+  `right`/`left` uses only that hand (MediaPipe's handedness is corrected for the mirrored camera image),
+  `any` locks onto the hand it is following. Two-hand detection is only run every few frames until a second
+  hand actually appears, so one hand costs about the same CPU as before. `max_hands: 1` turns it off.
+- **Auto-scroll** (`hands.gestures.autoscroll_*`): `autoscroll_enabled`, `autoscroll_hold` (0.2 s before it
+  starts), `autoscroll_dead_zone` (0.25 palm lengths), `autoscroll_gain` (12), `autoscroll_max_speed`
+  (30 notches/s), `autoscroll_stop_hold` (fist, 0.2 s), `autoscroll_horizontal`. Offsets are measured in palm
+  lengths, so it feels the same near or far from the camera.
+- **Claps** (`voice.clap_*`): `clap_enabled`, `clap_sensitivity` (0.5), `clap_double_window` (0.6 s),
+  `clap_require_hands` (only when the camera sees both hands close together). Detection uses the voice
+  microphone: a sharp, short (under ~50 ms), broadband transient that is far louder than the moment before it.
+  Two hands close together on camera lower the bar; with no camera frames it is stricter. Ignored while you are
+  mid-utterance and while the mic is muted. The Settings **Test gesture** tab shows claps as well as gestures.
+
 Pointer accuracy:
 
 - **Steady click** (`hands.cursor.click_freeze: true`): the cursor freezes while the pinch is closing
@@ -255,8 +307,8 @@ Pointer accuracy:
 - **Face clicks**: `face.wink_trigger` / `wink_threshold` / `wink_open_max` / `wink_hold`, plus
   `brow_threshold`, `mouth_threshold` and the hold times. Thresholds are per user, so tune them in Settings.
 - **Cursor ring** (`cursor_overlay: true` or `away run --cursor-overlay`): a small ring by the pointer
-  that fills as the pinch closes, turns solid on pinch, blue while dragging, purple while dwelling and
-  grey when paused.
+  that fills as the pinch closes, turns solid on pinch, blue while dragging, purple while dwelling,
+  orange with an arrow while auto-scrolling and grey when paused.
 - **Auto-pause** (`app.auto_pause: true`): touching the real mouse or keyboard pauses gesture output
   until it has been idle for `app.auto_pause_idle_ms`. Away's own synthetic input is ignored.
 
@@ -489,7 +541,7 @@ once (quit Project Away first).
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 930 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 992 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -503,6 +555,10 @@ once (quit Project Away first).
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
 | Windows auto-update (v0.1.8) | Helper script, launch fallbacks, forced exit, install-state report, download/verify and logging unit-tested; **the PowerShell helper and silent Inno upgrade are untested on a real Windows desktop** |
 | Steady click, sigmoid curve, dwell, wink, auto-pause guard, cursor ring states, numbers to digits, edit-selection rules | Logic unit-tested with synthetic input |
+| Big cursor (v0.1.9) | Controller, crash marker, debounce and pause wiring unit-tested with a fake backend; **the Windows registry + `SystemParametersInfo` resize is untested on a real Windows desktop** |
+| Hand choice (v0.1.9) | Selection, mirroring and two-hand probing unit-tested with fake landmarkers; the handedness convention was checked on real photos (raw vs flipped) with MediaPipe 0.10.18; **untested with a live webcam and two real hands** |
+| Four-finger auto-scroll (v0.1.9) | State machine and thumb-fold split unit-tested with synthetic hands; the thumb-fold measure checked on 11 real photos (folded 0.2-0.4, open palm 1.3-1.5); **untested live** |
+| Clap control (v0.1.9) | Detector tested on synthetic claps vs vowels, plosives, beeps and noise, plus timing and dictation gating; **untested with a real microphone and room** |
 | faster-whisper `hotwords` | Parameter verified on the installed faster-whisper 1.2.1 by signature; **not run on real speech** |
 | Cursor ring window, pynput auto-pause listeners, F9 / edit hotkeys, clipboard edit flow | **Untested** on real desktops |
 | Static pose model | 99.27% acc / 0.982 macro-F1 on 4,094 HaGRID v2 samples from 520 unseen people (MediaPipe-annotated, not live webcam) |

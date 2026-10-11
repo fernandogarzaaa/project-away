@@ -1,4 +1,4 @@
-"""At-cursor feedback ring (tkinter): pinch progress, drag, paused, dwell, hand lost.
+"""At-cursor feedback ring (tkinter): pinch progress, drag, paused, dwell, hand lost, auto-scroll.
 
 :func:`ring_spec` is pure (tested). :func:`run_cursor_overlay` polls a state
 function (``Pipeline.cursor_state``) about 30 times a second and draws a small
@@ -23,13 +23,37 @@ COLORS = {
     "dwell": "#CE93D8",
     "hand_lost": "#9E9E9E",
     "click": "#FFFFFF",
+    "autoscroll": "#FF8A65",
 }
 SIZE = 34  # window size in px
 OFFSET = (18, 18)  # from the cursor hotspot (keeps the ring out from under the pointer)
 
 
+def ring_size(state: dict[str, Any], platform: str | None = None) -> int:
+    """Window size in px. Off Windows the system cursor cannot be enlarged, so the ring grows with
+    ``hands.cursor.big_cursor_size`` while gestures are active (it stays small when paused)."""
+    from away.app.bigcursor import ring_scale
+
+    if (platform or sys.platform).startswith("win") or state.get("state") == "paused":
+        return SIZE
+    return round(SIZE * ring_scale(int(state.get("size", 0) or 0)))
+
+
+def arrow_points(direction: str, size: int, pad: float) -> list[float]:
+    """Triangle (x1, y1, x2, y2, x3, y3) pointing ``up|down|left|right`` inside a ``size`` px square."""
+    c, r = size / 2.0, size / 2.0 - pad - 3
+    pts = {
+        "up": [(c, c - r), (c - r * 0.8, c + r * 0.5), (c + r * 0.8, c + r * 0.5)],
+        "down": [(c, c + r), (c - r * 0.8, c - r * 0.5), (c + r * 0.8, c - r * 0.5)],
+        "left": [(c - r, c), (c + r * 0.5, c - r * 0.8), (c + r * 0.5, c + r * 0.8)],
+        "right": [(c + r, c), (c - r * 0.5, c - r * 0.8), (c - r * 0.5, c + r * 0.8)],
+    }[direction]
+    return [v for p in pts for v in p]
+
+
 def ring_spec(state: dict[str, Any]) -> dict[str, Any]:
-    """What to draw: ``{"color", "extent", "filled", "visible", "width"}``; ``extent`` in degrees (0..360)."""
+    """What to draw: ``{"color", "extent", "filled", "visible", "width", "arrow"}``; ``extent`` in degrees
+    (0..360); ``arrow`` is the auto-scroll direction (``up|down|left|right``) or None."""
     s = str(state.get("state", "idle"))
     pinch = float(state.get("pinch", 0.0) or 0.0)
     dwell = float(state.get("dwell", 0.0) or 0.0)
@@ -37,6 +61,17 @@ def ring_spec(state: dict[str, Any]) -> dict[str, Any]:
         return {"color": COLORS["paused"], "extent": 360.0, "filled": False, "visible": True, "width": 2}
     if s == "hand_lost":
         return {"color": COLORS["hand_lost"], "extent": 360.0, "filled": False, "visible": True, "width": 1}
+    if s == "autoscroll":  # orange ring, plus an arrow once the hand leaves the dead zone
+        arrow = state.get("direction")
+        arrow = arrow if arrow in ("up", "down", "left", "right") else None
+        return {
+            "color": COLORS["autoscroll"],
+            "extent": 360.0,
+            "filled": False,
+            "visible": True,
+            "width": 3,
+            "arrow": arrow,
+        }
     if s == "drag":
         return {"color": COLORS["drag"], "extent": 360.0, "filled": True, "visible": True, "width": 4}
     if s == "dwell":
@@ -71,6 +106,7 @@ def run_cursor_overlay(state_fn: Callable[[], dict[str, Any]], status_bus: Any =
             root.attributes("-alpha", 0.85)  # X11/macOS: no colour keying; a slightly see-through square
     cv = tk.Canvas(root, width=SIZE, height=SIZE, bg=key, highlightthickness=0)
     cv.pack()
+    cur = {"size": SIZE}
     root.update_idletasks()
     _click_through(root)
     if status_bus is not None:
@@ -90,10 +126,14 @@ def run_cursor_overlay(state_fn: Callable[[], dict[str, Any]], status_bus: Any =
         except Exception:
             st = {"state": "hand_lost"}
         spec = ring_spec(st)
+        size = ring_size(st)
+        if size != cur["size"]:
+            cur["size"] = size
+            cv.configure(width=size, height=size)
         cv.delete("all")
         if spec["visible"]:
             pad = spec["width"] + 1
-            box = (pad, pad, SIZE - pad, SIZE - pad)
+            box = (pad, pad, size - pad, size - pad)
             if spec["filled"]:
                 cv.create_oval(*box, outline=spec["color"], width=spec["width"], fill=spec["color"])
             elif spec["extent"] >= 359.9:
@@ -102,8 +142,10 @@ def run_cursor_overlay(state_fn: Callable[[], dict[str, Any]], status_bus: Any =
                 cv.create_arc(
                     *box, start=90, extent=-spec["extent"], style="arc", outline=spec["color"], width=spec["width"]
                 )
+            if spec.get("arrow"):
+                cv.create_polygon(*arrow_points(spec["arrow"], size, pad), fill=spec["color"], outline="")
         x, y = int(st.get("x", 0)), int(st.get("y", 0))
-        root.geometry(f"{SIZE}x{SIZE}+{x + OFFSET[0]}+{y + OFFSET[1]}")
+        root.geometry(f"{size}x{size}+{x + OFFSET[0]}+{y + OFFSET[1]}")
         root.after(33, tick)
 
     tick()

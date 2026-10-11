@@ -31,16 +31,21 @@ EVENT_TRIGGER = {
     "drag_start": "pinch_hold",
     "drag_end": "pinch_hold",
     "scroll": "two_finger_scroll",
+    "autoscroll_start": "four_finger_scroll",
+    "autoscroll": "four_finger_scroll",
+    "autoscroll_stop": "four_finger_scroll",
     "clutch": "open_palm",
     "swipe_left": "swipe_left",
     "swipe_right": "swipe_right",
     "push": "push",  # multi-camera depth: hand pushed toward the screen
     "dwell": "dwell",  # cursor rested in place (hands.dwell)
+    "clap": "clap",  # one clap (microphone, voice.clap_enabled)
+    "double_clap": "double_clap",
 }
 PINCH_CLICK_EVENTS = ("click", "double_click", "drag_start")
 SCROLL_STEP = 3.0  # wheel notches for mouse:scroll_up / scroll_down
 URL_PREFIXES = ("http://", "https://", "mailto:", "file://", "ftp://")
-HOOK_KINDS = ("dictation", "mic", "voice", "pause")
+HOOK_KINDS = ("dictation", "mic", "voice", "pause", "hands")
 
 Hook = Callable[[str, dict[str, Any]], None]
 
@@ -231,21 +236,26 @@ class Dispatcher:
         if trig is None:
             return NONE
         act = self.resolve("gestures", trig)
-        if ev.kind == "drag_end":
-            mouse.handle(ev)  # always release a held button
+        if ev.kind in ("drag_end", "autoscroll_stop"):
+            mouse.handle(ev)  # always release a held button / end scrolling
             return act
         if self.paused() and act.kind != "pause":
             return NONE
         if ev.kind in PINCH_CLICK_EVENTS and act.kind == "mouse":
             mouse.steady(ev.t)  # steady click: land where the cursor was before the pinch began
-        cont = {"point": "move", "pinch_hold": "drag", "two_finger_scroll": "scroll"}.get(trig)
+        cont = {
+            "point": "move",
+            "pinch_hold": "drag",
+            "two_finger_scroll": "scroll",
+            "four_finger_scroll": "autoscroll",
+        }.get(trig)
         if cont is not None and act == Action("mouse", cont):
-            if ev.kind in ("move", "drag_start", "scroll"):
+            if ev.kind in ("move", "drag_start", "scroll", "autoscroll_start", "autoscroll"):
                 mouse.handle(ev)
-                self._record(f"gesture:{trig}", act, quiet=ev.kind != "drag_start")
+                self._record(f"gesture:{trig}", act, quiet=ev.kind not in ("drag_start", "autoscroll_start"))
             return act
-        if ev.kind == "move":
-            return NONE  # a non-drag action on pinch_hold fires once on drag_start, not every frame
+        if ev.kind in ("move", "autoscroll"):
+            return NONE  # a non-continuous action fires once (drag_start / autoscroll_start), not every frame
         if trig in ("two_finger_scroll",) or ev.kind == "custom":
             last = self._last_fire.get(trig, -1e9)
             if ev.t - last < self.bindings.discrete_cooldown:

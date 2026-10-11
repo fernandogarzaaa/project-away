@@ -11,6 +11,10 @@ event                   trigger
                         (the backend issues ONE extra click; the OS sees two)
 ``drag_start/drag_end`` pinch held > ``drag_hold`` or moved > ``drag_move``
 ``scroll``              index+middle extended ("two"), vertical hand motion
+``autoscroll_start``    four fingers up, thumb folded, held ``autoscroll_hold``
+``autoscroll``          every frame while auto-scrolling: notches to scroll
+                        (offset from the start position = direction/speed)
+``autoscroll_stop``     fist, another gesture, hand gone > 0.5 s, or pause
 ``clutch``              open palm held still for ``clutch_hold`` -> toggles
                         pause; while paused only the clutch is honoured
 ``swipe_left/right``    open palm moving fast horizontally
@@ -31,7 +35,17 @@ from typing import Any
 import numpy as np
 
 from away.config import GestureConfig
-from away.hands.landmarks import INDEX_TIP, THUMB_TIP, WRIST, as_array, classify_pose, pinch_ratio
+from away.hands.autoscroll import AutoScroller
+from away.hands.landmarks import (
+    INDEX_TIP,
+    THUMB_TIP,
+    WRIST,
+    as_array,
+    classify_pose,
+    palm_size,
+    pinch_ratio,
+    thumb_fold_ratio,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +58,10 @@ class GestureEvent:
 SWIPE_COOLDOWN = 0.5
 CLUTCH_MAX_DRIFT = 0.05
 SCROLL_MIN_DELTA = 0.002
+# thumb_fold_ratio hysteresis that splits "four fingers up" into the open palm (thumb out, clutch/swipe) and the
+# four-finger auto-scroll pose (thumb folded). Real photos: open palms 1.3-1.5, thumb folded 0.2-0.4.
+THUMB_FOLD_ON = 0.75
+THUMB_FOLD_OFF = 0.95
 
 
 class GestureStateMachine:
@@ -52,6 +70,7 @@ class GestureStateMachine:
         # Detection vs mapping: the clutch pose is always *detected*; whether it pauses the machine is decided by
         # the bindings (open_palm -> pause:toggle sets this True; any other binding sets it False).
         self.clutch_pauses = True
+        self.autoscroll = AutoScroller(self.cfg)  # survives reset(): a short hand dropout does not end it
         self.reset()
 
     # ------------------------------------------------------------------ state
@@ -69,6 +88,7 @@ class GestureStateMachine:
         self._wrist_hist: deque[tuple[float, float, float]] = deque()
         self._last_swipe_t = -1e9
         self._scroll_prev_y: float | None = None
+        self._thumb_folded = False
 
     # ---------------------------------------------------------------- helpers
     def _update_pinch(self, ratio: float) -> bool:
@@ -92,6 +112,21 @@ class GestureStateMachine:
             return GestureEvent(kind, t, {"dx": dx, "duration": t - t0})
         return None
 
+    def pose_of(self, lm: Any) -> str:
+        """Rule pose plus the thumb split: ``four`` (thumb folded, auto-scroll) vs ``palm`` (thumb out).
+
+        With auto-scroll disabled a four-finger hand stays ``palm`` (the pre-v0.1.9 behaviour)."""
+        pose = classify_pose(lm)
+        if pose != "palm":
+            self._thumb_folded = False
+            return pose
+        r = thumb_fold_ratio(lm)
+        self._thumb_folded = r < (THUMB_FOLD_OFF if self._thumb_folded else THUMB_FOLD_ON)
+        return "four" if self._thumb_folded and self.cfg.autoscroll_enabled else "palm"
+
+    def stop_autoscroll(self, t: float, reason: str) -> list[GestureEvent]:
+        return [GestureEvent("autoscroll_stop", t, {"reason": reason})] if self.autoscroll.stop() else []
+
     # ------------------------------------------------------------------- step
     def update(self, t: float, landmarks: object | None, pinch: float | None = None) -> list[GestureEvent]:
         """Feed one frame (``None`` = no hand). Returns the events it produced.
@@ -104,6 +139,9 @@ class GestureStateMachine:
                 events.append(GestureEvent("drag_end", t, {"reason": "hand_lost"}))
             if self.hand_present:
                 events.append(GestureEvent("hand_lost", t))
+            stop = self.autoscroll.lost(t)
+            if stop is not None:
+                events.append(GestureEvent("autoscroll_stop", t, stop))
             paused = self.paused
             last_tap = self._last_tap_t
             self.reset()
@@ -114,7 +152,7 @@ class GestureStateMachine:
         lm = as_array(landmarks)
         self.hand_present = True
         wx, wy = float(lm[WRIST, 0]), float(lm[WRIST, 1])
-        pose = classify_pose(lm)
+        pose = self.pose_of(lm)
         ratio = pinch_ratio(lm) if pinch is None else float(pinch)
 
         # --- clutch (open palm held still) works even while paused
@@ -135,6 +173,16 @@ class GestureStateMachine:
 
         if self.paused:
             self._wrist_hist.clear()
+            return events + self.stop_autoscroll(t, "paused")
+
+        # --- four-finger auto-scroll: while it runs, nothing else moves, clicks or scrolls
+        res = self.autoscroll.update(t, pose, (wx, wy), palm_size(lm), pinched=ratio < self.cfg.pinch_on)
+        if res is not None:
+            events.append(GestureEvent(res[0], t, res[1]))
+        if self.autoscroll.active or (res is not None and res[0] == "autoscroll_stop"):
+            self._wrist_hist.clear()
+            self._scroll_prev_y = None
+            self._palm_t0 = None
             return events
 
         # --- swipes (open palm, fast horizontal)

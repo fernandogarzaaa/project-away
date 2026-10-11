@@ -45,11 +45,13 @@ def make_hand(
     scale: float = 0.12,
     rotation: float = 0.0,
     handedness: str = "Right",
+    thumb_fold: float = 0.0,
 ) -> Array:
     """Return (21, 3) landmarks in image coordinates.
 
     curls: 0 = straight, 1 = fully curled, per finger (thumb ignored).
     pinch: 0..1 moves the thumb tip onto the index tip.
+    thumb_fold: 0..1 tucks the thumb across the palm (1 = folded, the four-finger auto-scroll pose).
     """
     c = {"index": 0.0, "middle": 0.0, "ring": 0.0, "pinky": 0.0}
     if curls:
@@ -70,6 +72,10 @@ def make_hand(
             cum += c[name] * math.radians(90)
             p = p + np.array([d[0] * seg * math.cos(cum), d[1] * seg * math.cos(cum), seg * math.sin(cum)])
             lm[base + 1 + k] = p
+    if thumb_fold > 0:
+        palm = np.array([-0.05, -0.55, 0.0])
+        lm[4] = lm[4] + thumb_fold * (palm - lm[4])
+        lm[3] = lm[3] + 0.6 * thumb_fold * (np.array([0.2, -0.5, 0.0]) - lm[3])
     if pinch > 0:
         target = lm[INDEX_TIP].copy()
         lm[4] = lm[4] + pinch * (target - lm[4])
@@ -89,6 +95,7 @@ def make_hand(
 POSES: dict[str, dict[str, object]] = {
     "point": {"curls": {"index": 0.0, "middle": 1.0, "ring": 1.0, "pinky": 1.0}},
     "palm": {"curls": {}},
+    "four": {"curls": {}, "thumb_fold": 1.0},  # four fingers up, thumb folded (auto-scroll)
     "fist": {"curls": {"index": 1.0, "middle": 1.0, "ring": 1.0, "pinky": 1.0}},
     "two": {"curls": {"index": 0.0, "middle": 0.0, "ring": 1.0, "pinky": 1.0}},
     "pinch": {"curls": {"index": 0.35, "middle": 0.6, "ring": 0.8, "pinky": 0.8}, "pinch": 1.0},

@@ -40,6 +40,9 @@ class RecordingBackend:
     def scroll(self, dy: float) -> None:
         self.calls.append(("scroll", (dy,)))
 
+    def hscroll(self, dx: float) -> None:
+        self.calls.append(("hscroll", (dx,)))
+
     def key(self, name: str) -> None:
         self.calls.append(("key", (name,)))
 
@@ -62,6 +65,7 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
         self._button = mouse.Button.left
         self._keys = keyboard.Key
         self._scroll_acc = 0.0
+        self._hscroll_acc = 0.0
 
     def move(self, x: int, y: int) -> None:
         self._m.position = (x, y)
@@ -81,6 +85,14 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
         if steps:
             self._m.scroll(0, steps)
             self._scroll_acc -= steps
+
+    def hscroll(self, dx: float) -> None:
+        """Horizontal wheel notches (+ = right); fractions carry over like :meth:`scroll`."""
+        self._hscroll_acc += dx
+        steps = int(self._hscroll_acc)
+        if steps:
+            self._m.scroll(steps, 0)
+            self._hscroll_acc -= steps
 
     def key(self, name: str) -> None:
         # Use the same guaranteed cleanup path as multi-key chords. A failure in
@@ -215,6 +227,13 @@ class MouseController:
             self._release_if_down()
         elif ev.kind == "scroll":
             self.backend.scroll(float(ev.data["dy"]))
+        elif ev.kind == "autoscroll":
+            dy, dx = float(ev.data.get("dy", 0.0)), float(ev.data.get("dx", 0.0))
+            if dy:
+                self.backend.scroll(dy)
+            hscroll = getattr(self.backend, "hscroll", None)
+            if dx and hscroll is not None:
+                hscroll(dx)
         elif ev.kind in self.swipe_keys:
             self.backend.key(self.swipe_keys[ev.kind])
 

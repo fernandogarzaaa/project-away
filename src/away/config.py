@@ -48,6 +48,9 @@ class CursorConfig:
     # factor = (desktop span / primary span) ** monitor_reach; 0 = none, 1 = scales fully with the desktop
     monitor_reach: float = 0.5
     monitor_refresh_s: float = 3.0  # re-detect plugged/unplugged monitors this often (0 = only at start)
+    # Enlarge the system cursor while gesture control is active (users sit far from the screen); it shrinks back
+    # on pause, so the size also shows the state. 0 = off, 1..5 = 1.5x, 2x, 3x, 4x, 6x (Windows only)
+    big_cursor_size: int = 2
 
 
 @dataclass
@@ -63,6 +66,15 @@ class GestureConfig:
     clutch_hold: float = 0.4  # open palm held this long toggles pause
     use_model: bool = False  # gate discrete gestures with the temporal model (enable after `away calibrate`)
     model_min_conf: float = 0.7
+    # four fingers up (thumb folded) = auto-scroll: hand above/below where the gesture started scrolls that way,
+    # faster the further it is, and keeps scrolling while the hand holds still; a fist stops it
+    autoscroll_enabled: bool = True
+    autoscroll_hold: float = 0.2  # four-finger pose held this long before auto-scroll starts
+    autoscroll_dead_zone: float = 0.25  # offset from the start position (palm lengths) that does not scroll
+    autoscroll_gain: float = 12.0  # wheel notches/s per palm length beyond the dead zone (before the curve)
+    autoscroll_max_speed: float = 30.0  # wheel notches per second
+    autoscroll_stop_hold: float = 0.2  # fist held this long stops auto-scroll
+    autoscroll_horizontal: bool = True  # hand left/right of the start scrolls sideways (the larger offset wins)
 
 
 @dataclass
@@ -105,7 +117,8 @@ class MultiCamConfig:
 class HandsConfig:
     enabled: bool = True
     camera_index: int = 0  # single-camera mode (used when `cameras` is empty)
-    max_hands: int = 1
+    max_hands: int = 2  # hands MediaPipe looks for; 2 lets `prefer` ignore the other hand (1 = lighter on CPU)
+    prefer: str = "any"  # which hand drives the cursor: right | left | any (any = keep the hand being tracked)
     mirror: bool = True
     cursor: CursorConfig = field(default_factory=lambda: CursorConfig(curve="sigmoid"))
     gestures: GestureConfig = field(default_factory=GestureConfig)
@@ -151,6 +164,11 @@ class VoiceConfig:
     numbers_as_digits: bool = True  # "twenty five" -> 25
     numbers_min_value: int = 10  # smaller numbers stay words ("one of them")
     edit_hotkey: str = "<ctrl>+<alt>+e"  # speak an instruction that edits the selected text ("" = off)
+    # clap control (uses the voice microphone): one clap = resume gesture control, two claps = pause it
+    clap_enabled: bool = True
+    clap_sensitivity: float = 0.5  # 0 = only sharp, loud claps .. 1 = softer claps (more false triggers)
+    clap_double_window: float = 0.6  # second clap within this many seconds = double clap (a single waits this long)
+    clap_require_hands: bool = False  # only accept claps while the camera sees both hands close together
 
 
 @dataclass
@@ -221,7 +239,7 @@ class UpdatesConfig:
     allow_unverified: bool = False  # install a download that has no published SHA-256 (not recommended)
 
 
-CONFIG_VERSION = 2  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6
+CONFIG_VERSION = 3  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9
 
 
 @dataclass
@@ -246,6 +264,7 @@ class AppConfig:
 # Values older versions wrote into every config file as plain defaults (setup/Settings save the whole
 # config), so finding them there says nothing about the user's choice.
 OLD_WRITTEN_DEFAULTS = {("voice", "asr_model"): ("large-v3-turbo",)}  # v0.1.0-v0.1.4 default
+HAND_PREFERENCES = ("any", "right", "left")
 
 
 def migrate(data: dict[str, Any]) -> list[str]:
@@ -266,6 +285,13 @@ def migrate(data: dict[str, Any]) -> list[str]:
             if isinstance(sec, dict) and sec.get(key) in olds:
                 notes.append(f"{section}.{key}: {sec[key]} (old default written by setup) -> auto")
                 sec[key] = "auto"
+    if ver < 3:
+        hands = data.get("hands")
+        if isinstance(hands, dict) and hands.get("max_hands") == 1:
+            # v0.1.8 and older wrote the old default max_hands: 1 into every file; v0.1.9 needs 2 to tell the
+            # cursor hand from the other one (hands.prefer)
+            notes.append("hands.max_hands: 1 (old default written by setup) -> 2")
+            hands["max_hands"] = 2
     data["config_version"] = CONFIG_VERSION
     return notes
 
@@ -312,8 +338,9 @@ def from_dict(data: dict[str, Any] | None) -> tuple[AppConfig, list[str]]:
     cfg = AppConfig()
     if data:
         data = dict(data)
-        if isinstance(data.get("voice"), dict):
-            data["voice"] = dict(data["voice"])
+        for sec in ("voice", "hands"):
+            if isinstance(data.get(sec), dict):
+                data[sec] = dict(data[sec])
         notes = migrate(data)
         data.pop("migrations", None)
         _merge(cfg, data, "", unknown)
@@ -368,6 +395,14 @@ def validate(cfg: AppConfig) -> None:
     r = c.monitor_refresh_s
     if isinstance(r, bool) or not isinstance(r, (int, float)) or not 0 <= float(r) <= 300:
         raise ValueError(f"hands.cursor.monitor_refresh_s must be seconds in [0, 300] (0 = off), got {r!r}")
+    if cfg.hands.prefer not in HAND_PREFERENCES:
+        raise ValueError(f"hands.prefer must be {'|'.join(HAND_PREFERENCES)}, got {cfg.hands.prefer!r}")
+    mh = cfg.hands.max_hands
+    if isinstance(mh, bool) or not isinstance(mh, int) or not 1 <= mh <= 4:
+        raise ValueError(f"hands.max_hands must be an integer in [1, 4], got {mh!r}")
+    bc = c.big_cursor_size
+    if isinstance(bc, bool) or not isinstance(bc, int) or not 0 <= bc <= 5:
+        raise ValueError(f"hands.cursor.big_cursor_size must be an integer in [0, 5] (0 = off), got {bc!r}")
     validate_cameras(cfg.hands.cameras)
     if cfg.hands.multicam.fusion not in ("weighted", "best_view"):
         raise ValueError(f"hands.multicam.fusion must be weighted|best_view, got {cfg.hands.multicam.fusion!r}")
@@ -441,6 +476,12 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.gestures.double_pinch_window", g.double_pinch_window, 0.1, 1.5),
         ("hands.gestures.drag_hold", g.drag_hold, 0.05, 2.0),
         ("hands.gestures.clutch_hold", g.clutch_hold, 0.1, 3.0),
+        ("hands.cursor.big_cursor_size", c.big_cursor_size, 0, 5),
+        ("hands.gestures.autoscroll_hold", g.autoscroll_hold, 0.05, 1.0),
+        ("hands.gestures.autoscroll_dead_zone", g.autoscroll_dead_zone, 0.0, 2.0),
+        ("hands.gestures.autoscroll_gain", g.autoscroll_gain, 0.5, 100.0),
+        ("hands.gestures.autoscroll_max_speed", g.autoscroll_max_speed, 1.0, 200.0),
+        ("hands.gestures.autoscroll_stop_hold", g.autoscroll_stop_hold, 0.05, 1.5),
         ("voice.vad_sensitivity", v.vad_sensitivity, 0.0, 1.0),
         ("voice.end_silence_ms", v.end_silence_ms, 150, 3000),
         ("voice.min_utterance_ms", v.min_utterance_ms, 50, 2000),
@@ -469,6 +510,8 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("face.wink_hold", cfg.face.wink_hold, 0.05, 3.0),
         ("app.auto_pause_idle_ms", cfg.app.auto_pause_idle_ms, 100, 10000),
         ("voice.numbers_min_value", cfg.voice.numbers_min_value, 0, 1000000),
+        ("voice.clap_sensitivity", cfg.voice.clap_sensitivity, 0.0, 1.0),
+        ("voice.clap_double_window", cfg.voice.clap_double_window, 0.2, 1.5),
     ]
 
 

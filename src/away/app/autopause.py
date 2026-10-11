@@ -92,6 +92,7 @@ class GuardedBackend:
             "press",
             "release",
             "scroll",
+            "hscroll",
             "key",
             "click_button",
             "hotkey",

@@ -8,6 +8,7 @@ clear message when there is no display or no Tk.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import copy
 import math
@@ -32,7 +33,7 @@ from away.bindings import (
     parse_action,
     split_trigger,
 )
-from away.config import PERFORMANCE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
+from away.config import HAND_PREFERENCES, PERFORMANCE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
 from away.hands.gestures import GestureEvent
 
 TUNABLE_LABELS = {
@@ -50,6 +51,12 @@ TUNABLE_LABELS = {
     "hands.gestures.double_pinch_window": "Double-pinch window (s)",
     "hands.gestures.drag_hold": "Pinch-hold before drag (s)",
     "hands.gestures.clutch_hold": "Open-palm hold to pause (s)",
+    "hands.cursor.big_cursor_size": "Cursor size while gestures are active (0 = off)",
+    "hands.gestures.autoscroll_hold": "Auto-scroll: four-finger hold before it starts (s)",
+    "hands.gestures.autoscroll_dead_zone": "Auto-scroll: dead zone (palm lengths)",
+    "hands.gestures.autoscroll_gain": "Auto-scroll: speed (gain)",
+    "hands.gestures.autoscroll_max_speed": "Auto-scroll: max speed (notches/s)",
+    "hands.gestures.autoscroll_stop_hold": "Auto-scroll: fist hold to stop (s)",
     "voice.vad_sensitivity": "Voice sensitivity (always-on)",
     "voice.end_silence_ms": "End of utterance silence (ms)",
     "voice.min_utterance_ms": "Shortest utterance (ms)",
@@ -77,8 +84,11 @@ TUNABLE_LABELS = {
     "face.wink_hold": "Wink hold (s)",
     "app.auto_pause_idle_ms": "Auto-pause: resume after idle (ms)",
     "voice.numbers_min_value": "Numbers as digits from",
+    "voice.clap_sensitivity": "Clap sensitivity (higher = softer claps count)",
+    "voice.clap_double_window": "Double-clap window (s)",
 }
 INT_TUNABLES = {
+    "hands.cursor.big_cursor_size",
     "voice.end_silence_ms",
     "voice.min_utterance_ms",
     "hands.cursor.click_rewind_ms",
@@ -86,6 +96,7 @@ INT_TUNABLES = {
     "voice.numbers_min_value",
 }
 VOICE_FIELDS = {
+    "hands.prefer": HAND_PREFERENCES,
     "hands.cursor.curve": ("sigmoid", "power"),
     "hands.multicam.fusion": ("weighted", "best_view"),
     "voice.mode": VOICE_MODES,
@@ -321,6 +332,11 @@ class SettingsModel:
             "updates.channel",
             "performance.mode",
             "face.gate_dictation",
+            "hands.prefer",
+            "hands.gestures.autoscroll_enabled",
+            "hands.gestures.autoscroll_horizontal",
+            "voice.clap_enabled",
+            "voice.clap_require_hands",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -622,6 +638,14 @@ class SettingsModel:
         """Text for the live 'test gesture' indicator: ``pinch -> mouse:click``."""
         if ev.kind in ("hand_lost",):
             return "no hand"
+        if ev.kind == "autoscroll":
+            d = ev.data.get("direction")
+            if not d:
+                return "auto-scroll: hold (move the hand up / down to scroll)"
+            speed = max(abs(float(ev.data.get("vx", 0.0))), abs(float(ev.data.get("vy", 0.0))))
+            return f"auto-scroll {d}  {speed:.0f} notches/s"
+        if ev.kind == "autoscroll_stop":
+            return f"auto-scroll stopped ({str(ev.data.get('reason', '')).replace('pose:', '')})"
         trig = event_trigger(ev)
         if trig is None:
             return None
@@ -679,6 +703,7 @@ def gesture_test_worker(
     frames: Any = None,
     tracker_factory: Any = None,
     lease_timeout: float = 4.0,
+    clap_mic: Any = None,
 ) -> None:
     """Camera -> hand landmarks -> state machine -> indicator text (no actions are executed).
 
@@ -691,6 +716,7 @@ def gesture_test_worker(
 
     cfg = model.cfg
     idx = cfg.hands.camera_index
+    real_devices = frames is None  # with a real camera the real microphone listens for claps too
     if frames is None:  # pragma: no cover - real camera
         from away.hands.tracker import camera_frames as frames
     if tracker_factory is None:  # pragma: no cover - real MediaPipe
@@ -699,7 +725,9 @@ def gesture_test_worker(
             from away.hands.tracker import HandTracker
 
             mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
-            return HandTracker(mdir / "hand_landmarker.task", 1)
+            return HandTracker(
+                mdir / "hand_landmarker.task", cfg.hands.max_hands, prefer=cfg.hands.prefer, mirrored=cfg.hands.mirror
+            )
 
     lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-test")
     try:
@@ -710,23 +738,68 @@ def gesture_test_worker(
             out.put("waiting for Project Away to release the camera...")
         tracker = tracker_factory()
         sm = GestureStateMachine(cfg.hands.gestures)
+        last: str | None = None
+        views: Any = collections.deque(maxlen=90)
+        mic = start_clap_test(model, out, views, clap_mic) if (real_devices or clap_mic is not None) else None
         try:
             for t, rgb in frames(idx, cfg.hands.mirror):
                 if stop.is_set():
                     break
                 fr = tracker.process(rgb, t)
+                views.append((t, getattr(fr, "n_hands", 0), getattr(fr, "hands_gap", None)))
                 for ev in sm.update(t, fr.landmarks):
                     if ev.kind == "move":
                         continue
                     txt = model.describe_event(ev)
-                    if txt:
+                    if txt and txt != last:  # auto-scroll reports every frame: only show changes
                         out.put(txt)
+                        last = txt
         except Exception as exc:
             out.put(camera_error_message(exc, idx, lease.app_running, lease.handed_over))
         finally:
             tracker.close()
+            if mic is not None:
+                with contextlib.suppress(Exception):
+                    mic.__exit__(None, None, None)
     finally:
         lease.close()
+
+
+def clap_test_handler(model: SettingsModel, out: Any, views: Any) -> Any:
+    """Mic chunk -> clap detection -> indicator text (``clap -> pause:off``). Nothing is executed."""
+    import time as _time
+
+    from away.voice.clap import ClapControl, camera_view
+
+    ctl = ClapControl(model.cfg.voice, model.cfg.voice.sample_rate, hands=lambda t0: camera_view(views, t0))
+
+    def on_chunk(chunk: Any, t: float | None = None) -> None:
+        for kind, tc in ctl.feed(chunk, _time.monotonic() if t is None else t):
+            name = "clap" if kind == "single" else "double_clap"
+            txt = model.describe_event(GestureEvent(name, tc, {}))
+            if txt:
+                out.put(txt)
+
+    return on_chunk
+
+
+def start_clap_test(model: SettingsModel, out: Any, views: Any, mic: Any = None) -> Any:
+    """Listen for claps during the camera test (voice.clap_enabled). ``mic(on_chunk)`` returns a started
+    context manager; the default opens the microphone with sounddevice. None when unavailable."""
+    if not model.cfg.voice.clap_enabled:
+        return None
+    handler = clap_test_handler(model, out, views)
+    try:
+        if mic is None:  # pragma: no cover - real microphone
+            from away.voice.dictation import MicStream
+
+            stream = MicStream(handler, model.cfg.voice.sample_rate)
+            stream.__enter__()
+            return stream
+        return mic(handler)
+    except Exception as exc:  # no mic / sounddevice missing: the gesture test still runs
+        out.put(f"(clap test unavailable: {exc})")
+        return None
 
 
 def camera_confidence_worker(
@@ -938,6 +1011,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.vvars: dict[str, Any] = {}
         r = 0
         for path, label in (
+            ("hands.prefer", "Which hand controls the cursor"),
             ("hands.cursor.curve", "Cursor acceleration curve"),
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
@@ -961,9 +1035,13 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("face.mouth_open_trigger", "Mouth-open trigger"),
             ("face.wink_trigger", "Wink triggers (left / right)"),
             ("hands.dwell.enabled", "Dwell click (rest the cursor)"),
+            ("hands.gestures.autoscroll_enabled", "Four-finger auto-scroll (thumb folded; a fist stops it)"),
+            ("hands.gestures.autoscroll_horizontal", "Auto-scroll sideways too (hand left / right)"),
             ("hands.cursor.click_freeze", "Steady click (freeze while pinching)"),
             ("app.auto_pause", "Pause while I use the mouse / keyboard"),
             ("voice.numbers_as_digits", "Spoken numbers as digits"),
+            ("voice.clap_enabled", "Clap: single = activate, double = pause"),
+            ("voice.clap_require_hands", "Clap: only when the camera sees both hands together"),
             ("cursor_overlay", "Ring at the cursor (next start)"),
             ("updates.check", "Check for updates (GitHub releases, daily; nothing is sent about you)"),
             ("updates.auto_install", "Install updates automatically when idle"),
@@ -993,6 +1071,37 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                     row=r, column=2
                 )
             self.vvars[path] = var
+            r += 1
+        cspec = {t.path: t for t in self.m.tunables()}["hands.cursor.big_cursor_size"]
+        ttk.Label(f, text=cspec.label).grid(row=r, column=0, sticky="w", pady=3)
+        cvar = tk.DoubleVar(value=cspec.value)
+        tk.Scale(
+            f,
+            from_=cspec.lo,
+            to=cspec.hi,
+            resolution=1,
+            orient="horizontal",
+            length=240,
+            variable=cvar,
+            command=lambda v: self._on_scale("hands.cursor.big_cursor_size", float(v)),
+        ).grid(row=r, column=1, columnspan=2, sticky="w")
+        self.scales["hands.cursor.big_cursor_size#voice"] = (cvar, None)
+        r += 1
+        for cpath in ("voice.clap_sensitivity", "voice.clap_double_window"):
+            cs = {t.path: t for t in self.m.tunables()}[cpath]
+            ttk.Label(f, text=cs.label).grid(row=r, column=0, sticky="w", pady=3)
+            csv = tk.DoubleVar(value=cs.value)
+            tk.Scale(
+                f,
+                from_=cs.lo,
+                to=cs.hi,
+                resolution=cs.resolution,
+                orient="horizontal",
+                length=240,
+                variable=csv,
+                command=lambda val, p=cpath: self._on_scale(p, float(val)),
+            ).grid(row=r, column=1, columnspan=2, sticky="w")
+            self.scales[f"{cpath}#voice"] = (csv, None)
             r += 1
         spec = {t.path: t for t in self.m.tunables()}["voice.vad_sensitivity"]
         ttk.Label(f, text="Voice sensitivity (always-on)").grid(row=r, column=0, sticky="w", pady=3)
@@ -1286,7 +1395,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             f, text="Start camera test", command=self._toggle_test, state="normal" if ok else "disabled"
         )
         self.test_btn.pack(anchor="w")
-        ttk.Label(f, text="Shows which trigger was detected and what it is bound to. Nothing is executed.").pack(
+        ttk.Label(f, text="Shows the gesture or clap detected and what it is bound to. Nothing is executed.").pack(
             anchor="w", pady=6
         )
         self._test_thread: threading.Thread | None = None

@@ -7,7 +7,7 @@ on a still image there.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,49 +15,145 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from away.hands.select import HandObs, HandSelector
+
 
 @dataclass
 class HandFrame:
     t: float
-    landmarks: NDArray[np.float64] | None  # (21, 3) image coords of the first hand
-    handedness: str
+    landmarks: NDArray[np.float64] | None  # (21, 3) image coords of the selected hand (hands.prefer)
+    handedness: str  # MediaPipe's label for this image (see away.hands.select for what it means)
     image: Any = None
     score: float = 1.0  # MediaPipe handedness confidence (used by multi-camera fusion)
+    hand: str = ""  # the user's real hand: right | left ("" = no hand)
+    n_hands: int = 0  # hands MediaPipe saw in this frame (the other one is ignored)
+    hands_gap: float | None = None  # with 2+ hands: closest distance between palm centres (image units)
+
+
+# Two hands cost more: with num_hands=2 and only one hand in view, MediaPipe re-runs palm detection on every
+# frame looking for the second one (about 2x the CPU of num_hands=1 measured on one CPU). So a one-hand
+# landmarker tracks normally and a two-hand one probes every PROBE_EVERY frames; once it sees two hands it takes
+# over (both are then tracked, no palm detection) until it has seen one or none for DUAL_EXIT_FRAMES frames.
+PROBE_EVERY = 6
+DUAL_EXIT_FRAMES = 15
+
+
+def _parse(res: Any) -> list[HandObs]:
+    hands = []
+    for i, pts in enumerate(res.hand_landmarks or []):
+        lm = np.array([[p.x, p.y, p.z] for p in pts], dtype=np.float64)
+        cats = res.handedness[i] if res.handedness and i < len(res.handedness) else []
+        label = cats[0].category_name if cats else "Right"
+        score = float(cats[0].score) if cats else 1.0
+        hands.append(HandObs(lm, label, score))
+    return hands
+
+
+def hands_gap(hands: list[HandObs]) -> float | None:
+    """Closest distance between two hands' palm centres (middle-finger MCP), None with fewer than 2 hands."""
+    if len(hands) < 2:
+        return None
+    pts = [np.asarray(h.landmarks, dtype=np.float64)[9, :2] for h in hands]
+    return min(float(np.linalg.norm(a - b)) for i, a in enumerate(pts) for b in pts[i + 1 :])
 
 
 class HandTracker:
-    def __init__(self, model_path: Path, max_hands: int = 1, min_conf: float = 0.5) -> None:
-        import mediapipe as mp
-        from mediapipe.tasks.python import BaseOptions, vision
+    def __init__(
+        self,
+        model_path: Path | None,
+        max_hands: int = 1,
+        min_conf: float = 0.5,
+        *,
+        prefer: str | Callable[[], str] = "any",
+        mirrored: bool = True,
+        factory: Callable[[int], Any] | None = None,
+        image_fn: Callable[[Any], Any] | None = None,
+        probe_every: int = PROBE_EVERY,
+    ) -> None:
+        """``factory(num_hands)`` builds a landmarker with ``detect_for_video(image, ms)`` (tests inject fakes)."""
+        if factory is None:  # pragma: no cover - real MediaPipe
+            import mediapipe as mp
+            from mediapipe.tasks.python import BaseOptions, vision
 
-        self._mp = mp
-        opts = vision.HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(model_path)),
-            running_mode=vision.RunningMode.VIDEO,
-            num_hands=max_hands,
-            min_hand_detection_confidence=min_conf,
-            min_hand_presence_confidence=min_conf,
-            min_tracking_confidence=min_conf,
-        )
-        self.landmarker = vision.HandLandmarker.create_from_options(opts)
-        self._last_ms = -1
+            def factory(n: int) -> Any:
+                opts = vision.HandLandmarkerOptions(
+                    base_options=BaseOptions(model_asset_path=str(model_path)),
+                    running_mode=vision.RunningMode.VIDEO,
+                    num_hands=n,
+                    min_hand_detection_confidence=min_conf,
+                    min_hand_presence_confidence=min_conf,
+                    min_tracking_confidence=min_conf,
+                )
+                return vision.HandLandmarker.create_from_options(opts)
+
+            def image_fn(rgb: Any) -> Any:
+                return mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+
+        self._image = image_fn or (lambda rgb: rgb)
+        self.max_hands = max(1, int(max_hands))
+        self.selector = HandSelector(prefer, mirrored)
+        self.probe_every = max(1, int(probe_every))
+        self._one = factory(1)
+        self._multi = factory(self.max_hands) if self.max_hands > 1 else None
+        self.landmarker = self._one  # kept for callers that poke at it
+        self._last_ms = {id(self._one): -1, id(self._multi): -1}
+        self.dual = False
+        self._n = 0
+        self._few = 0
+        self._wrong = False
+        self.multi_runs = 0  # frames the two-hand landmarker ran (tests / diagnostics)
+
+    def _run(self, lmk: Any, image: Any, ms: int) -> list[HandObs]:
+        key = id(lmk)
+        if ms <= self._last_ms[key]:  # VIDEO mode needs strictly increasing timestamps per landmarker
+            ms = self._last_ms[key] + 1
+        self._last_ms[key] = ms
+        if lmk is self._multi:
+            self.multi_runs += 1
+        return _parse(lmk.detect_for_video(image, ms))
+
+    def detect(self, rgb: Any, t: float) -> list[HandObs]:
+        """Every hand in the frame (one landmarker run, picked as described at PROBE_EVERY)."""
+        ms = int(t * 1000)
+        image = self._image(rgb)
+        self._n += 1
+        if self._multi is None:
+            return self._run(self._one, image, ms)
+        if self.dual:
+            hands = self._run(self._multi, image, ms)
+            self._few = self._few + 1 if len(hands) < 2 else 0
+            if self._few >= DUAL_EXIT_FRAMES:
+                self.dual = False
+            return hands
+        probe = self._n % self.probe_every == 0 or (self._wrong and self._n % 2 == 0)
+        if probe:
+            hands = self._run(self._multi, image, ms)
+            if len(hands) >= 2:
+                self.dual, self._few = True, 0
+            return hands
+        return self._run(self._one, image, ms)
 
     def process(self, rgb: NDArray[np.uint8], t: float) -> HandFrame:
-        ms = int(t * 1000)
-        if ms <= self._last_ms:  # VIDEO mode needs strictly increasing timestamps
-            ms = self._last_ms + 1
-        self._last_ms = ms
-        image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-        res = self.landmarker.detect_for_video(image, ms)
-        if not res.hand_landmarks:
-            return HandFrame(t, None, "Right")
-        lm = np.array([[p.x, p.y, p.z] for p in res.hand_landmarks[0]], dtype=np.float64)
-        hand = res.handedness[0][0].category_name if res.handedness else "Right"
-        score = float(res.handedness[0][0].score) if res.handedness else 1.0
-        return HandFrame(t, lm, hand, score=score)
+        hands = self.detect(rgb, t)
+        gap = hands_gap(hands)
+        self._wrong = self.selector.wrong_side(hands)
+        pick = self.selector.select(t, hands)
+        if pick is None:
+            return HandFrame(t, None, "Right", n_hands=len(hands), hands_gap=gap)
+        return HandFrame(
+            t,
+            pick.landmarks,
+            pick.label,
+            score=pick.score,
+            hand=self.selector.side(pick),
+            n_hands=len(hands),
+            hands_gap=gap,
+        )
 
     def close(self) -> None:
-        self.landmarker.close()
+        for lmk in (self._one, self._multi):
+            if lmk is not None:
+                lmk.close()
 
 
 def camera_frames(
