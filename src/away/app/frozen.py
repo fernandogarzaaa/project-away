@@ -32,8 +32,31 @@ from away.app import models
 
 # commands whose output the user should see in a console window (Windows windowed exe)
 CONSOLE_COMMANDS = frozenset(
-    {"setup", "doctor", "selftest", "demo", "config", "bindings", "cameras", "uninstall", "update", "hardware", "gpu"}
+    {
+        "setup",
+        "doctor",
+        "selftest",
+        "demo",
+        "config",
+        "bindings",
+        "cameras",
+        "calibrate-cameras",
+        "monitors",
+        "uninstall",
+        "update",
+        "hardware",
+        "gpu",
+    }
 )
+
+
+def away_command(args: Sequence[str], frozen: bool | None = None, executable: str | None = None) -> list[str]:
+    """argv that runs ``away ARGS`` in a new process: the installed app exe *is* the CLI when frozen
+    (``ProjectAway.exe calibrate-cameras``); from Python it is ``python -m away ...``."""
+    exe = executable or sys.executable
+    if is_frozen() if frozen is None else frozen:
+        return [exe, *args]
+    return [exe, "-m", "away", *args]
 
 
 def is_frozen() -> bool:

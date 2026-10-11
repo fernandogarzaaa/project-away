@@ -232,7 +232,9 @@ def test_cameras_tab_model(tmp_path):
     from away.multicam.capture import CameraDevice
 
     m = SettingsModel(AppConfig(), tmp_path / "c.yaml")
-    assert m.camera_rows() == [] and m.camera_mode() == "single camera"
+    rows = m.camera_rows()  # single-camera mode shows the implicit default camera as the primary row
+    assert [(r["device"], r["role"], r["implicit"]) for r in rows] == [(0, "primary", True)]
+    assert m.camera_mode() == "single camera"
     devs = [CameraDevice(0, "/dev/video0", "Integrated Webcam"), CameraDevice(2, "/dev/video2", "Logitech BRIO")]
     choices = m.device_choices(devs)
     assert choices == ["0: Integrated Webcam", "2: Logitech BRIO"]

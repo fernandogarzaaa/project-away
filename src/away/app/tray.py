@@ -133,6 +133,37 @@ class TrayController:
 
         self.last_activity = time.monotonic() if now is None else now
 
+    # face gate ------------------------------------------------------------
+    def face_gate_on(self) -> bool:
+        cfg = self.app.cfg
+        return bool(cfg.face.enabled and cfg.face.gate_dictation)
+
+    def set_face_gate(self, on: bool, path: Any = None) -> bool:
+        """Turn the face gate on/off in the config file (the app hot-reloads it). Off also sets
+        ``voice.ambient_fallback: type`` so speech is typed without a wake word. Returns the new state."""
+        from pathlib import Path
+
+        p = Path(path) if path is not None else paths.config_file()
+        cfg, _ = cfgmod.load(p) if p.exists() else (self.app.cfg, [])
+        cfg.face.gate_dictation = bool(on)
+        if not on:
+            cfg.voice.ambient_fallback = "type"
+        cfgmod.save(cfg, p)
+        self.app.cfg.face.gate_dictation = bool(on)
+        if not on:
+            self.app.cfg.voice.ambient_fallback = "type"
+        return bool(on)
+
+    # GPU pack ---------------------------------------------------------------
+    def gpu_pack_offer(self) -> str | None:
+        """Why to offer the NVIDIA GPU pack (GPU present, pack missing), or None."""
+        try:
+            from away.app.performance import gpu_pack_offer
+
+            return gpu_pack_offer(self.app.cfg, getattr(self.app, "profile", None))
+        except Exception:
+            return None
+
     def quit(self) -> None:
         self.app.stop()
 
@@ -148,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     import contextlib
     import threading
 
+    from away.control.monitors import enable_dpi_awareness
+
+    enable_dpi_awareness()  # before pystray/pynput/tkinter (Windows; no-op elsewhere)
     import pystray
 
     from away.app.runner import AwayApp
@@ -215,6 +249,35 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     def on_update(_icon: Any, _item: Any) -> None:
         threading.Thread(target=updates.install_now, name="away-update-install", daemon=True).start()
 
+    gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
+    gate_hint = {"shown": False}
+
+    def on_face_gate(icon: Any, _item: Any) -> None:
+        try:
+            on = ctl.set_face_gate(not ctl.face_gate_on())
+            notify("Project Away", "Face gate on" if on else "Face gate off: speech is typed without a wake word")
+        except Exception as exc:
+            notify("Project Away", f"could not change the face gate: {exc}")
+        _safe_update_menu(icon)
+
+    def on_gpu_install(icon: Any, _item: Any) -> None:
+        from away.app import gpupack
+
+        def run() -> None:
+            gpu_offer["installing"] = True
+            notify("Project Away", "Downloading the GPU pack (~570 MB)...")
+            try:
+                gpupack.install()
+                gpu_offer["text"] = None
+                notify("Project Away", "GPU pack installed: restart Project Away to use the GPU for speech")
+            except Exception as exc:
+                notify("Project Away: GPU pack", f"download failed: {exc} (try again to resume)")
+            finally:
+                gpu_offer["installing"] = False
+                _safe_update_menu(icon)
+
+        threading.Thread(target=run, name="gpu-pack", daemon=True).start()
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda _i: ctl.title(), None, enabled=False),
         pystray.MenuItem(lambda _i: "Resume" if ctl.paused else "Pause", on_pause, default=True),
@@ -222,6 +285,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem(
             lambda _i: "Start listening" if ctl.voice_state() == "stopped" else "Stop listening / dictation",
             on_dictation,
+        ),
+        pystray.MenuItem(
+            "Face gate (type only when facing the camera)",
+            on_face_gate,
+            checked=lambda _i: ctl.face_gate_on(),
+            visible=lambda _i: gate_hint["shown"] or not ctl.face_gate_on(),
+        ),
+        pystray.MenuItem(
+            "Install GPU pack (faster speech)",
+            on_gpu_install,
+            visible=lambda _i: bool(gpu_offer["text"]),
+            enabled=lambda _i: not gpu_offer["installing"],
         ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
@@ -237,6 +312,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     for topic in ("voice.state", "app.paused", "gesture.clutch"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
+    app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))
+
+    def _gate_hint(_e: Any) -> None:
+        gate_hint["shown"] = True
+        _safe_update_menu(icon)
+
+    app.bus.subscribe("voice.gate_hint", _gate_hint)
+    if gpu_offer["text"]:
+        from away.app.notices import once
+
+        if once("gpu-pack-offer"):  # one notification ever; the menu item stays until it is installed
+            notify(
+                "Project Away: faster speech available", f"{gpu_offer['text']}. Use the tray menu: Install GPU pack."
+            )
     ctl.mark_activity()  # the idle clock starts at launch
 
     def _sync(ic: Any) -> None:

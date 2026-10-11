@@ -42,6 +42,12 @@ class CursorConfig:
     click_freeze: bool = True  # hold the cursor still while a pinch is closing
     click_rewind_ms: int = 100  # click where the cursor was this long before the pinch started closing
     freeze_margin: float = 0.35  # start freezing when pinch ratio < pinch_on * (1 + margin)
+    # multi-monitor: all | primary | [1, 3] (numbers from `away monitors`, left to right)
+    monitors: str | list[int] = "all"
+    # extra reach for fast moves on a desktop wider/taller than the primary monitor:
+    # factor = (desktop span / primary span) ** monitor_reach; 0 = none, 1 = scales fully with the desktop
+    monitor_reach: float = 0.5
+    monitor_refresh_s: float = 3.0  # re-detect plugged/unplugged monitors this often (0 = only at start)
 
 
 @dataclass
@@ -215,8 +221,12 @@ class UpdatesConfig:
     allow_unverified: bool = False  # install a download that has no published SHA-256 (not recommended)
 
 
+CONFIG_VERSION = 2  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6
+
+
 @dataclass
 class AppConfig:
+    config_version: int = CONFIG_VERSION
     app: AppSection = field(default_factory=AppSection)
     hands: HandsConfig = field(default_factory=HandsConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
@@ -229,6 +239,35 @@ class AppConfig:
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
     models_dir: str | None = None
     bindings: BindingsConfig = field(default_factory=BindingsConfig)
+    # what :func:`migrate` changed while loading (not saved); the app re-saves the file when non-empty
+    migrations: list[str] = field(default_factory=list, compare=False, repr=False)
+
+
+# Values older versions wrote into every config file as plain defaults (setup/Settings save the whole
+# config), so finding them there says nothing about the user's choice.
+OLD_WRITTEN_DEFAULTS = {("voice", "asr_model"): ("large-v3-turbo",)}  # v0.1.0-v0.1.4 default
+
+
+def migrate(data: dict[str, Any]) -> list[str]:
+    """Upgrade a raw config mapping written by an older version, in place. Returns what changed.
+
+    v1 -> v2: ``voice.asr_model: large-v3-turbo`` was the hard-coded default up to v0.1.4 and setup wrote it
+    into the file, so on a PC without a working GPU it pinned the slowest model to the CPU. It becomes
+    ``auto`` (the hardware profile picks large-v3-turbo on a usable GPU, a CPU-sized model otherwise).
+    A model the user picked in v0.1.6+ is saved with ``config_version: 2`` and never touched.
+    """
+    notes: list[str] = []
+    ver = data.get("config_version", 1)
+    if not isinstance(ver, int) or isinstance(ver, bool):
+        ver = 1
+    if ver < 2:
+        for (section, key), olds in OLD_WRITTEN_DEFAULTS.items():
+            sec = data.get(section)
+            if isinstance(sec, dict) and sec.get(key) in olds:
+                notes.append(f"{section}.{key}: {sec[key]} (old default written by setup) -> auto")
+                sec[key] = "auto"
+    data["config_version"] = CONFIG_VERSION
+    return notes
 
 
 def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> Any:
@@ -272,7 +311,13 @@ def from_dict(data: dict[str, Any] | None) -> tuple[AppConfig, list[str]]:
     unknown: list[str] = []
     cfg = AppConfig()
     if data:
+        data = dict(data)
+        if isinstance(data.get("voice"), dict):
+            data["voice"] = dict(data["voice"])
+        notes = migrate(data)
+        data.pop("migrations", None)
         _merge(cfg, data, "", unknown)
+        cfg.migrations = notes
         v = data.get("voice")
         if isinstance(v, dict) and "mode" not in v and v.get("ptt_mode") == "hold":
             cfg.voice.mode = "push_to_talk"  # legacy configs
@@ -317,6 +362,12 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError(f"hands.cursor.curve must be power|sigmoid, got {c.curve!r}")
     if not c.sigmoid_low <= c.sigmoid_high:
         raise ValueError("hands.cursor.sigmoid_low must be <= sigmoid_high")
+    from away.control.monitors import parse_monitor_spec
+
+    c.monitors = parse_monitor_spec(c.monitors)
+    r = c.monitor_refresh_s
+    if isinstance(r, bool) or not isinstance(r, (int, float)) or not 0 <= float(r) <= 300:
+        raise ValueError(f"hands.cursor.monitor_refresh_s must be seconds in [0, 300] (0 = off), got {r!r}")
     validate_cameras(cfg.hands.cameras)
     if cfg.hands.multicam.fusion not in ("weighted", "best_view"):
         raise ValueError(f"hands.multicam.fusion must be weighted|best_view, got {cfg.hands.multicam.fusion!r}")
@@ -407,6 +458,7 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.cursor.speed_right", c.speed_right, 0.1, 5.0),
         ("hands.cursor.click_rewind_ms", c.click_rewind_ms, 0, 500),
         ("hands.cursor.freeze_margin", c.freeze_margin, 0.0, 1.0),
+        ("hands.cursor.monitor_reach", c.monitor_reach, 0.0, 1.0),
         ("hands.dwell.radius_px", cfg.hands.dwell.radius_px, 2.0, 200.0),
         ("hands.dwell.time_s", cfg.hands.dwell.time_s, 0.2, 5.0),
         ("hands.multicam.pair_tolerance_ms", cfg.hands.multicam.pair_tolerance_ms, 1.0, 500.0),
@@ -424,7 +476,7 @@ def to_dict(cfg: AppConfig) -> dict[str, Any]:
     d = {
         f.name: asdict(getattr(cfg, f.name)) if is_dataclass(getattr(cfg, f.name)) else getattr(cfg, f.name)
         for f in fields(cfg)
-        if f.name != "bindings"
+        if f.name not in ("bindings", "migrations")
     }
 
     def fix(x: Any) -> Any:

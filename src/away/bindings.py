@@ -22,6 +22,8 @@ Actions (what happens) are written ``kind:argument``::
     mic:toggle | on | off     mute/unmute the microphone
     voice:command_mode | dictation_mode | toggle_mode
     pause:toggle | on | off   pause/resume gesture control
+    cursor:next_monitor | prev_monitor | primary_monitor | monitor 2
+                              jump the cursor to the centre of a monitor (numbers from `away monitors`)
 
 Profiles: ``default`` holds the full map. Any other profile lists the
 ``apps`` (process names, case-insensitive, ``.exe`` optional) it applies to
@@ -60,6 +62,11 @@ CATEGORIES = ("gestures", "voice", "face", "hotkeys")
 CATEGORY_PREFIX = {"gestures": "gesture", "voice": "voice", "face": "face", "hotkeys": "hotkey"}
 PREFIX_CATEGORY = {v: k for k, v in CATEGORY_PREFIX.items()}
 
+MAX_MONITORS = 9
+CURSOR_ARGS = ("next_monitor", "prev_monitor", "primary_monitor", *(f"monitor {i}" for i in range(1, MAX_MONITORS + 1)))
+_CURSOR_ALIASES = {"previous_monitor": "prev_monitor", "next": "next_monitor", "prev": "prev_monitor"}
+_NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
 ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "none": (),
     "mouse": (
@@ -81,6 +88,7 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "mic": ("toggle", "on", "off"),
     "voice": ("command_mode", "dictation_mode", "toggle_mode"),
     "pause": ("toggle", "on", "off"),
+    "cursor": CURSOR_ARGS,
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
 # continuous mouse actions only make sense on the matching continuous gesture
@@ -118,6 +126,35 @@ def normalize_phrase(text: str) -> str:
     return " ".join(t.split())
 
 
+def normalize_cursor_arg(arg: str) -> str:
+    """``Monitor_2`` / ``monitor2`` / ``monitor two`` -> ``monitor 2``; ``previous_monitor`` -> ``prev_monitor``."""
+    a = " ".join(arg.strip().lower().replace("-", " ").split())
+    m = re.fullmatch(r"(?:monitor|screen|display)[ _]?(\w+)", a)
+    if m and m.group(1) not in ("next", "prev", "previous", "primary"):
+        n = m.group(1)
+        if n in _NUMBER_WORDS:
+            n = str(_NUMBER_WORDS.index(n))
+        return f"monitor {n}"
+    a = a.replace(" ", "_")
+    return _CURSOR_ALIASES.get(a, a)
+
+
+def phrase_variants(phrase: str) -> list[str]:
+    """Other spellings a recogniser may produce for a normalised phrase: single digits <-> words
+    (``monitor 2`` <-> ``monitor two``), so "monitor two" matches whichever way Whisper writes it."""
+    words = phrase.split()
+    swapped = []
+    for w in words:
+        if w.isdigit() and len(w) == 1:
+            swapped.append(_NUMBER_WORDS[int(w)])
+        elif w in _NUMBER_WORDS:
+            swapped.append(str(_NUMBER_WORDS.index(w)))
+        else:
+            swapped.append(w)
+    alt = " ".join(swapped)
+    return [alt] if alt != phrase else []
+
+
 def parse_action(value: Any, *, allow_shell: bool = False) -> Action:
     """Parse ``"key:ctrl+tab"`` or ``{"key": "ctrl+tab"}``; raises ValueError with a clear message."""
     if value is None:
@@ -142,6 +179,8 @@ def parse_action(value: Any, *, allow_shell: bool = False) -> Action:
     if kind == "none":
         return NONE
     allowed = ACTION_ARGS[kind]
+    if kind == "cursor" and arg:
+        arg = normalize_cursor_arg(arg)
     if not sep or not arg:
         if allowed:
             raise ValueError(f"action {kind!r} needs an argument: {kind}:{'|'.join(allowed)}")
@@ -208,6 +247,11 @@ def default_profile() -> Profile:
             "dictation mode": a("voice:dictation_mode"),
             "pause gestures": a("pause:on"),
             "resume gestures": a("pause:off"),
+            "next monitor": a("cursor:next_monitor"),
+            "previous monitor": a("cursor:prev_monitor"),
+            "monitor one": a("cursor:monitor 1"),
+            "monitor two": a("cursor:monitor 2"),
+            "monitor three": a("cursor:monitor 3"),
         },
         face={
             "brow_raise": a("dictation:toggle"),
@@ -248,9 +292,12 @@ class BindingsConfig:
         if category == "voice":
             trigger = normalize_phrase(trigger)
         prof = self.profiles.get(profile)
-        if prof is not None and trigger in prof.table(category):
-            return prof.table(category)[trigger]
-        return self.default.table(category).get(trigger, NONE)
+        for t in [trigger, *(phrase_variants(trigger) if category == "voice" else [])]:
+            if prof is not None and t in prof.table(category):
+                return prof.table(category)[t]
+            if t in self.default.table(category):
+                return self.default.table(category)[t]
+        return NONE
 
     def effective(self, profile: str = "default") -> dict[str, dict[str, Action]]:
         out: dict[str, dict[str, Action]] = {}
@@ -262,7 +309,12 @@ class BindingsConfig:
         return out
 
     def voice_phrases(self, profile: str = "default") -> dict[str, Action]:
-        return self.effective(profile)["voice"]
+        """Every bound phrase, plus digit/word spellings of it (``monitor 2`` for ``monitor two``)."""
+        phrases = dict(self.effective(profile)["voice"])
+        for p, act in list(phrases.items()):
+            for alt in phrase_variants(p):
+                phrases.setdefault(alt, act)
+        return phrases
 
     # ----------------------------------------------------------------- edits
     def set(self, trigger_id: str, action: str | Action, profile: str = "default") -> Action:

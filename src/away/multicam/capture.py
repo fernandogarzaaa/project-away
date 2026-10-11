@@ -32,30 +32,135 @@ class CameraDevice:
     path: str  # /dev/video0 on Linux, "camera 0" elsewhere
     name: str
     ok: bool | None = None  # opened and returned a frame (only when probed)
+    in_use: bool = False  # held by the running Project Away app (not probed, so it is not disturbed)
+
+    @property
+    def key(self) -> str:
+        return str(self.index if self.index is not None else self.path)
 
 
 def list_cameras(
-    sysfs: str = "/sys/class/video4linux", dev: str = "/dev", probe: bool = False, max_index: int = 8
+    sysfs: str = "/sys/class/video4linux",
+    dev: str = "/dev",
+    probe: bool = False,
+    max_index: int = 8,
+    in_use: set[str] | None = None,
+    platform: str | None = None,
+    run: Callable[..., Any] | None = None,
 ) -> list[CameraDevice]:
-    """Enumerate cameras. Linux: V4L2 capture nodes with their names (``probe`` also opens each one).
-    Windows/macOS have no cheap device list, so OpenCV indices ``0..max_index-1`` are opened and the
-    ones that return a frame are listed."""
-    if not os.path.isdir(sysfs):  # pragma: no cover - Windows/macOS
-        found = [_probe(CameraDevice(i, f"camera {i}", f"camera {i}")) for i in range(max_index)]
-        return [c for c in found if c.ok]
-    out: list[CameraDevice] = []
-    for node in sorted(glob.glob(os.path.join(sysfs, "video*")), key=_node_num):
-        base = os.path.basename(node)
-        idx_file = Path(node) / "index"
-        # each UVC camera exposes a capture node (index 0) plus metadata nodes; keep the capture node
-        if idx_file.exists() and idx_file.read_text().strip() not in ("", "0"):
-            continue
-        name_file = Path(node) / "name"
-        name = name_file.read_text().strip() if name_file.exists() else base
-        out.append(CameraDevice(_node_num(node), dev.rstrip("/") + "/" + base, name))  # V4L paths are POSIX
-    if probe:  # pragma: no cover - opens devices
-        out = [_probe(c) for c in out]
+    """Enumerate cameras without opening them where the OS allows it.
+
+    * Linux: V4L2 capture nodes with their names (``probe`` also opens each one).
+    * Windows: camera/image-class PnP devices by name (PowerShell CIM query, 8 s timeout), numbered in
+      that order as OpenCV indices (best effort; DirectShow usually enumerates in the same order).
+    * macOS: ``system_profiler SPCameraDataType``.
+    * Otherwise (or when the query finds nothing): OpenCV indices ``0..max_index-1`` are opened.
+
+    ``in_use``: device keys (``"0"``, ``"/dev/video0"``) the running app holds (camera_share owner file);
+    they are listed and marked instead of probed, since an exclusive camera would fail to open and vanish
+    from the list. ``None`` reads the owner file.
+    """
+    plat = platform or sys.platform
+    if in_use is None:
+        in_use = _app_cameras()
+    if os.path.isdir(sysfs):
+        out: list[CameraDevice] = []
+        for node in sorted(glob.glob(os.path.join(sysfs, "video*")), key=_node_num):
+            base = os.path.basename(node)
+            idx_file = Path(node) / "index"
+            # each UVC camera exposes a capture node (index 0) plus metadata nodes; keep the capture node
+            if idx_file.exists() and idx_file.read_text().strip() not in ("", "0"):
+                continue
+            name_file = Path(node) / "name"
+            name = name_file.read_text().strip() if name_file.exists() else base
+            num = _node_num(node)
+            path = dev.rstrip("/") + "/" + base  # V4L paths are POSIX
+            out.append(CameraDevice(num, path, name, in_use=str(num) in in_use or path in in_use))
+        if probe:  # pragma: no cover - opens devices
+            out = [c if c.in_use else _probe(c) for c in out]
+        return out
+    names: list[str] = []
+    if plat == "win32":
+        names = windows_camera_names(run)
+    elif plat == "darwin":
+        names = macos_camera_names(run)
+    if names:
+        devs = [CameraDevice(i, f"camera {i}", n, in_use=str(i) in in_use) for i, n in enumerate(names)]
+        if probe:  # pragma: no cover - opens devices
+            devs = [c if c.in_use else _probe(c) for c in devs]
+        return devs
+    found = []  # pragma: no cover - no name query worked: open each index
+    for i in range(max_index):
+        c = CameraDevice(i, f"camera {i}", f"camera {i}", in_use=str(i) in in_use)
+        found.append(c if c.in_use else _probe(c))
+    return [c for c in found if c.ok or c.in_use]
+
+
+def _app_cameras() -> set[str]:
+    try:
+        from away.app.camera_share import CameraShare
+
+        return CameraShare().owned_devices()
+    except Exception:
+        return set()
+
+
+WINDOWS_CAMERA_QUERY = (
+    "Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in @('Camera','Image') -and "
+    "$_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"
+)
+
+
+def parse_name_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for line in text.splitlines():
+        n = line.strip()
+        if n and n not in out:
+            out.append(n)
     return out
+
+
+def windows_camera_names(run: Callable[..., Any] | None = None) -> list[str]:
+    """Names of the connected cameras from Windows PnP (does not open them). [] on any failure."""
+    import subprocess
+
+    runner = run or subprocess.run
+    try:
+        r = runner(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_CAMERA_QUERY],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    return parse_name_lines(r.stdout or "") if r.returncode == 0 else []
+
+
+def parse_system_profiler(text: str) -> list[str]:
+    import json
+
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    items = data.get("SPCameraDataType", []) if isinstance(data, dict) else []
+    return [str(i.get("_name")) for i in items if isinstance(i, dict) and i.get("_name")]
+
+
+def macos_camera_names(run: Callable[..., Any] | None = None) -> list[str]:
+    import subprocess
+
+    runner = run or subprocess.run
+    try:
+        r = runner(
+            ["system_profiler", "-json", "SPCameraDataType"], capture_output=True, text=True, timeout=8, check=False
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    return parse_system_profiler(r.stdout or "") if r.returncode == 0 else []
 
 
 def _node_num(path: str) -> int:
@@ -137,6 +242,10 @@ class FramePairer:
                 raise ValueError("frame timestamps must be non-decreasing per camera")
             self._buf[cam].append((t, frame))
             self._last_seen[cam] = max(self._last_seen[cam], t)
+
+    def seen(self, cam: int) -> bool:
+        """Has camera ``cam`` delivered at least one frame?"""
+        return self._last_seen[cam] > -1e9
 
     def alive(self, now: float | None = None) -> list[bool]:
         now = self.clock() if now is None else now

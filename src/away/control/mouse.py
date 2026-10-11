@@ -218,6 +218,25 @@ class MouseController:
         elif ev.kind in self.swipe_keys:
             self.backend.key(self.swipe_keys[ev.kind])
 
+    def jump_monitor(self, arg: str) -> bool:
+        """``cursor:`` action argument (``next_monitor`` | ``prev_monitor`` | ``primary_monitor`` |
+        ``monitor N``): move the pointer to the centre of that monitor. False when there is none."""
+        if not self.enabled:
+            return False
+        target = {"next_monitor": "next", "prev_monitor": "prev", "primary_monitor": "primary"}.get(arg)
+        if target is None and arg.startswith("monitor "):
+            target = arg.split(" ", 1)[1]
+        if target is None:
+            return False
+        # a held drag stays held: "next monitor" while dragging carries a window to the next screen
+        pos = self.mapper.jump(target)
+        if pos is None:
+            return False
+        if self.stabilizer is not None:
+            self.stabilizer.reset()
+        self.backend.move(*pos)
+        return True
+
     def _release_if_down(self) -> None:
         if self.button_down:
             self.backend.release()
@@ -225,13 +244,9 @@ class MouseController:
 
 
 def screen_size() -> tuple[int, int]:  # pragma: no cover - needs a display
-    try:
-        import tkinter
+    """Size of the primary monitor (kept for callers that only need one screen; the cursor uses
+    :func:`away.control.monitors.enumerate_monitors`, which sees every monitor)."""
+    from away.control.monitors import enumerate_monitors
 
-        root = tkinter.Tk()
-        root.withdraw()
-        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.destroy()
-        return int(w), int(h)
-    except Exception:
-        return 1920, 1080
+    p = enumerate_monitors().primary
+    return p.width, p.height

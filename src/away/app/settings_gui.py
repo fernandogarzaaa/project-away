@@ -8,8 +8,10 @@ clear message when there is no display or no Tk.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import math
+import os
 import queue
 import sys
 import threading
@@ -318,6 +320,7 @@ class SettingsModel:
             "updates.auto_install",
             "updates.channel",
             "performance.mode",
+            "face.gate_dictation",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -334,6 +337,9 @@ class SettingsModel:
         except ValueError as exc:
             _set(self.cfg, path, old)
             return str(exc)
+        if path == "face.gate_dictation" and not value:
+            # no face gate and no wake word must still type (commands_only would silently drop dictation)
+            self.cfg.voice.ambient_fallback = "type"
         return None
 
     # ------------------------------------------------------------ file ops
@@ -374,9 +380,41 @@ class SettingsModel:
         return None
 
     # -------------------------------------------------------------- cameras
+    def app_cameras(self) -> set[str]:
+        """Devices the running Project Away app holds right now (from its camera-owner heartbeat)."""
+        share = getattr(self, "camera_share", None)
+        if share is None:
+            from away.app.camera_share import CameraShare
+
+            share = self.camera_share = CameraShare()
+        try:
+            return set(share.owned_devices())
+        except Exception:
+            return set()
+
     def camera_rows(self) -> list[dict[str, Any]]:
-        """Configured cameras for the Cameras tab (empty list = single-camera mode)."""
-        return [dict(vars(c)) for c in self.cfg.hands.cameras]
+        """Cameras for the Cameras tab. Single-camera mode shows the implicit camera
+        (``hands.camera_index``) as the primary row, marked ``implicit``."""
+        busy = self.app_cameras()
+        h, perf = self.cfg.hands, self.cfg.performance
+        if not h.cameras:
+            rows = [
+                {
+                    "device": h.camera_index,
+                    "role": "primary",
+                    "width": perf.camera_width or 640,
+                    "height": perf.camera_height or 480,
+                    "fps": perf.camera_fps or 30,
+                    "hfov_deg": 70.0,
+                    "mirror": h.mirror,
+                    "implicit": True,
+                }
+            ]
+        else:
+            rows = [{**vars(c), "implicit": False} for c in h.cameras]
+        for r in rows:
+            r["in_use"] = str(r["device"]) in busy
+        return rows
 
     def camera_mode(self) -> str:
         n = len(self.cfg.hands.cameras)
@@ -388,10 +426,17 @@ class SettingsModel:
             from away.multicam.capture import list_cameras
 
             try:
-                devices = list_cameras()
+                devices = list_cameras(in_use=self.app_cameras())
             except Exception:
                 devices = []
-        return [f"{d.index if d.index is not None else d.path}: {d.name}" for d in devices]
+        self.known_devices = {str(d.index if d.index is not None else d.path) for d in devices} | {
+            str(d.path) for d in devices
+        }
+        return [
+            f"{d.index if d.index is not None else d.path}: {d.name}"
+            + (" (in use by Project Away)" if getattr(d, "in_use", False) else "")
+            for d in devices
+        ]
 
     @staticmethod
     def parse_device(choice: str) -> int | str:
@@ -408,9 +453,20 @@ class SettingsModel:
         self.cfg.hands.cameras = new
         return None
 
+    def _unknown_device(self, device: int | str) -> str | None:
+        """Refuse a device the last 'Refresh list' did not find (a typo or a missing camera would make
+        the multi-camera setup start with a dead view)."""
+        known = getattr(self, "known_devices", None)
+        if known and str(device) not in known:
+            return f"camera {device} was not found; pick a device from the list (press Refresh list)"
+        return None
+
     def add_camera(self, device: int | str, role: str = "secondary") -> str | None:
         from away.config import CameraSpec
 
+        err = self._unknown_device(device)
+        if err:
+            return err
         new = [copy.copy(c) for c in self.cfg.hands.cameras]
         if not new:  # leaving single-camera mode: the current camera becomes the primary
             new.append(CameraSpec(self.cfg.hands.camera_index, "primary", mirror=self.cfg.hands.mirror))
@@ -418,6 +474,8 @@ class SettingsModel:
         return self._cams_try(new)
 
     def remove_camera(self, i: int) -> str | None:
+        if not self.cfg.hands.cameras:
+            return "this is the only camera (single-camera mode); pick another device for it instead"
         new = [copy.copy(c) for j, c in enumerate(self.cfg.hands.cameras) if j != i]
         if len(new) == 1:  # back to single-camera mode
             if isinstance(new[0].device, int):
@@ -428,6 +486,8 @@ class SettingsModel:
     def set_camera(self, i: int, field: str, value: Any) -> str | None:
         if field not in ("device", "role", "width", "height", "fps", "hfov_deg", "mirror"):
             return f"unknown camera setting {field!r}"
+        if not self.cfg.hands.cameras and i == 0:
+            return self._set_single_camera(field, value)
         new = [copy.copy(c) for c in self.cfg.hands.cameras]
         if not 0 <= i < len(new):
             return "no such camera"
@@ -448,6 +508,49 @@ class SettingsModel:
                 c.role = "secondary"
         setattr(new[i], field, value)
         return self._cams_try(new)
+
+    def _set_single_camera(self, field: str, value: Any) -> str | None:
+        """Edit the implicit camera of single-camera mode (hands.camera_index + performance.camera_*)."""
+        h, perf = self.cfg.hands, self.cfg.performance
+        if field == "device":
+            dev = self.parse_device(value)
+            if not isinstance(dev, int):
+                return "single-camera mode takes a numbered device (0, 1, ...); add a second camera to use a path"
+            h.camera_index = dev
+            return None
+        if field == "role":
+            return None if value == "primary" else "the only camera is always the primary"
+        if field == "mirror":
+            h.mirror = bool(value)
+            return None
+        if field == "hfov_deg":
+            return None  # only used to triangulate two cameras
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return f"{field} must be a whole number"
+        old = getattr(perf, f"camera_{field}")
+        setattr(perf, f"camera_{field}", v)
+        try:
+            cfgmod.validate(self.cfg)
+        except ValueError as exc:
+            setattr(perf, f"camera_{field}", old)
+            return str(exc)
+        return None
+
+    def calibration_command(self, status_file: Path) -> list[str]:
+        """argv for the calibration subprocess (the installed exe is the CLI; ``-m away`` only from Python)."""
+        from away.app.frozen import away_command
+
+        return away_command(["calibrate-cameras", "--config", str(self.path), "--status-file", str(status_file)])
+
+    @staticmethod
+    def calibration_status_file() -> Path:
+        from away import paths
+
+        d = paths.data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "calibration-status.json"
 
     @staticmethod
     def calibration_status() -> str:
@@ -512,6 +615,28 @@ class SettingsModel:
         return f"{trig}  ->  {act}"
 
 
+def read_calibration_status(path: Path) -> dict[str, Any] | None:
+    import json
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def calibration_outcome(status: dict[str, Any] | None, rc: int, stderr: str) -> tuple[str | None, str | None]:
+    """``(error, ok)`` for the status line once the calibration process has exited."""
+    if status and status.get("state") == "done":
+        return None, str(status.get("message") or "calibrated")
+    if status and status.get("state") == "failed":
+        return str(status.get("message") or "calibration failed"), None
+    if rc == 0:
+        return None, "calibrated"
+    tail = (stderr.strip().splitlines() or [""])[-1][-200:]
+    return f"calibration failed (exit {rc}){': ' + tail if tail else ''}", None
+
+
 def camera_available() -> tuple[bool, str]:
     """Can the live gesture test run? (cv2 + mediapipe + downloaded hand model)."""
     import importlib.util
@@ -531,31 +656,63 @@ def camera_available() -> tuple[bool, str]:
     return True, "camera test ready"
 
 
-def gesture_test_worker(model: SettingsModel, out: queue.Queue[str], stop: threading.Event) -> None:  # pragma: no cover
-    """Camera -> hand landmarks -> state machine -> indicator text (no actions are executed)."""
+def gesture_test_worker(
+    model: SettingsModel,
+    out: queue.Queue[str],
+    stop: threading.Event,
+    *,
+    share: Any = None,
+    frames: Any = None,
+    tracker_factory: Any = None,
+    lease_timeout: float = 4.0,
+) -> None:
+    """Camera -> hand landmarks -> state machine -> indicator text (no actions are executed).
+
+    The running app holds the webcam (exclusive on Windows), so the camera is borrowed from it first
+    (:class:`~away.app.camera_share.CameraLease`) and given back when the test stops or the window closes.
+    """
     from away import paths
+    from away.app.camera_share import CameraLease, CameraShare, camera_error_message
     from away.hands.gestures import GestureStateMachine
-    from away.hands.tracker import HandTracker, camera_frames
 
     cfg = model.cfg
-    mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
-    tracker = HandTracker(mdir / "hand_landmarker.task", 1)
-    sm = GestureStateMachine(cfg.hands.gestures)
+    idx = cfg.hands.camera_index
+    if frames is None:  # pragma: no cover - real camera
+        from away.hands.tracker import camera_frames as frames
+    if tracker_factory is None:  # pragma: no cover - real MediaPipe
+
+        def tracker_factory() -> Any:
+            from away.hands.tracker import HandTracker
+
+            mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
+            return HandTracker(mdir / "hand_landmarker.task", 1)
+
+    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-test")
     try:
-        for t, rgb in camera_frames(cfg.hands.camera_index, cfg.hands.mirror):
-            if stop.is_set():
-                break
-            fr = tracker.process(rgb, t)
-            for ev in sm.update(t, fr.landmarks):
-                if ev.kind == "move":
-                    continue
-                txt = model.describe_event(ev)
-                if txt:
-                    out.put(txt)
-    except Exception as exc:
-        out.put(f"camera error: {exc}")
+        lease.open()
+        if lease.handed_over:
+            out.put("Project Away paused hand tracking for the test (it resumes when you stop)")
+        elif lease.app_running:
+            out.put("waiting for Project Away to release the camera...")
+        tracker = tracker_factory()
+        sm = GestureStateMachine(cfg.hands.gestures)
+        try:
+            for t, rgb in frames(idx, cfg.hands.mirror):
+                if stop.is_set():
+                    break
+                fr = tracker.process(rgb, t)
+                for ev in sm.update(t, fr.landmarks):
+                    if ev.kind == "move":
+                        continue
+                    txt = model.describe_event(ev)
+                    if txt:
+                        out.put(txt)
+        except Exception as exc:
+            out.put(camera_error_message(exc, idx, lease.app_running, lease.handed_over))
+        finally:
+            tracker.close()
     finally:
-        tracker.close()
+        lease.close()
 
 
 def camera_confidence_worker(
@@ -572,6 +729,9 @@ def camera_confidence_worker(
     primary = next((i for i, c in enumerate(cams) if c.role == "primary"), 0)
     pairer = FramePairer(len(cams), primary, model.cfg.hands.multicam.pair_tolerance_ms / 1000.0, 0.5)
     threads = [CameraThread(i, c, pairer, stop) for i, c in enumerate(cams)]
+    from away.app.camera_share import CameraLease
+
+    lease = CameraLease(who="settings-confidence").open()  # borrow the cameras from the running app
     try:
         trackers = [HandTracker(mdir / "hand_landmarker.task", 1) for _ in cams]
         for th in threads:
@@ -597,9 +757,12 @@ def camera_confidence_worker(
                 )
             out.put(confs)
     except Exception as exc:
-        out.put(f"camera error: {exc}")
+        from away.app.camera_share import camera_error_message
+
+        out.put(camera_error_message(exc, "", lease.app_running, lease.handed_over))
     finally:
         stop.set()
+        lease.close()
 
 
 class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb only
@@ -776,6 +939,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             r += 1
         for path, label in (
             ("voice.wake_word_enabled", "Require wake word"),
+            ("face.gate_dictation", "Face gate: only type when I face the camera and speak (off = always type)"),
             ("voice.commands_enabled", "Voice commands"),
             ("app.always_on", "Active as soon as the app starts (gestures + voice)"),
             ("app.start_minimized", "Start minimized to tray"),
@@ -852,7 +1016,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         f.columnconfigure(1, weight=1)
         ttk.Label(f, text="Device:").grid(row=2, column=0, sticky="w")
         self.cam_dev = tk.StringVar()
-        self.cam_dev_cb = ttk.Combobox(f, textvariable=self.cam_dev, width=34)
+        self.cam_dev_cb = ttk.Combobox(f, textvariable=self.cam_dev, width=34, state="readonly")
         self.cam_dev_cb.grid(row=2, column=1, sticky="we", padx=4)
         ttk.Button(f, text="Refresh list", command=self._cam_refresh_devices).grid(row=2, column=2)
         ttk.Label(f, text="Role:").grid(row=3, column=0, sticky="w")
@@ -910,8 +1074,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         for i, r in enumerate(self.m.camera_rows()):
             conf = self._cam_confs[i] if i < len(self._cam_confs) else None
             bar = "-" if conf is None else ("#" * round(conf * 10)).ljust(10, ".") + f" {conf:.2f}"
+            dev = str(r["device"]) + (" (in use by Project Away)" if r.get("in_use") else "")
+            role = r["role"] + (" (default)" if r.get("implicit") else "")
             self.cam_tree.insert(
-                "", "end", values=(r["role"], r["device"], f"{r['width']}x{r['height']}", r["fps"], r["hfov_deg"], bar)
+                "", "end", values=(role, dev, f"{r['width']}x{r['height']}", r["fps"], r["hfov_deg"], bar)
             )
         self.cam_calib.set(self.m.calibration_status())
 
@@ -951,23 +1117,39 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             return
         if self.m.dirty:
             self._on_save()
+        status_file = self.m.calibration_status_file()
+        with contextlib.suppress(OSError):
+            status_file.unlink()
         self._report(None, "calibrating: move your open hand through both cameras' view for ~20 s...")
+        result: dict[str, Any] = {}
 
         def run() -> None:
-            r = subprocess.run(
-                [sys.executable, "-m", "away", "calibrate-cameras", "--config", str(self.m.path)],
-                capture_output=True,
-                text=True,
-            )
-            msg = (r.stdout.strip().splitlines() or [""])[-1] if r.returncode == 0 else r.stderr.strip()[-200:]
+            try:
+                r = subprocess.run(
+                    self.m.calibration_command(status_file),
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "AWAY_NO_CONSOLE": "1"},
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                result["rc"], result["err"] = r.returncode, (r.stderr or "")
+            except Exception as exc:
+                result["rc"], result["err"] = -1, str(exc)
 
-            def done() -> None:
-                self._report(None, msg)
-                self._cam_refresh()
+        th = threading.Thread(target=run, daemon=True, name="calibrate")
+        th.start()
 
-            self.root.after(0, done)
+        def poll() -> None:
+            st = read_calibration_status(status_file)
+            if th.is_alive():
+                if st and st.get("message"):
+                    self._report(None, str(st["message"]))
+                self.root.after(500, poll)
+                return
+            self._report(*calibration_outcome(st, result.get("rc", -1), str(result.get("err", ""))))
+            self._cam_refresh()
 
-        threading.Thread(target=run, daemon=True).start()
+        self.root.after(500, poll)
 
     def _cam_live(self) -> None:
         if self._cam_thread is not None and self._cam_thread.is_alive():
@@ -1287,6 +1469,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         self._test_stop.set()
         self._cam_stop.set()
+        for th in (self._test_thread, self._cam_thread):  # give the camera back to the app before exiting
+            if th is not None and th.is_alive():
+                th.join(timeout=1.5)
         if self.m.dirty and messagebox.askyesno("Unsaved changes", "Save changes before closing?"):
             self._on_save()
         self.root.destroy()

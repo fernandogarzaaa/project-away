@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import threading
 import time
@@ -242,7 +243,11 @@ def decide(
     if intent == "command":
         return Decision("ignore", "command mode: not a bound phrase", phrase=phrase)
     if not may_type:
-        return Decision("ignore", "no face gate available: commands only (set voice.ambient_fallback: type)")
+        return Decision(
+            "ignore",
+            "no face gate available: commands only (turn the face gate off in Settings, or set "
+            "voice.ambient_fallback: type, to type without a wake word)",
+        )
     return Decision("type", "dictation", text=body.strip(), phrase=phrase)
 
 
@@ -278,8 +283,10 @@ class AmbientSession:
         commands_enabled: bool = True,
         clock: Callable[[], float] = time.monotonic,
         submit: Callable[[Callable[[], None]], None] | None = None,
+        gate_info: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.asr, self.cleaner, self.sink, self.ep = asr, cleaner, sink, endpointer
+        self.gate_info = gate_info  # the face gate's evidence for its last decision (logged with the utterance)
         self.commands = commands
         self.run_command = run_command
         self.bus = bus
@@ -357,7 +364,11 @@ class AmbientSession:
                 res.typed = text
             self._wake_until = -1e9
         self.results.append(res)
-        self._publish("voice.utterance", {"decision": d.kind, "reason": d.reason, "text": res.typed or d.phrase})
+        data: dict[str, Any] = {"decision": d.kind, "reason": d.reason, "text": res.typed or d.phrase}
+        if gate is not None and self.gate_info is not None:
+            with contextlib.suppress(Exception):
+                data["gate"] = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
+        self._publish("voice.utterance", data)
         return res
 
 
@@ -503,3 +514,76 @@ class VoiceController:
             }[arg]
             if self.bus is not None:
                 self.bus.publish("voice.state", {"state": self.state, "mode": self.mode, "intent": self.intent})
+
+
+class ASRQueue:
+    """Bounded hand-off from the mic thread to the speech-recognition worker.
+
+    When recognition cannot keep up, the *oldest* waiting utterance is dropped (the newest speech is the
+    one you are waiting for), ``on_drop`` is called for each, and ``on_overload`` once per session so the
+    user hears about it instead of speech vanishing silently.
+    """
+
+    def __init__(
+        self,
+        maxsize: int = 3,
+        on_drop: Callable[[int], None] | None = None,
+        on_overload: Callable[[], None] | None = None,
+    ) -> None:
+        if maxsize < 1:
+            raise ValueError("maxsize must be >= 1")
+        self.maxsize = maxsize
+        self.on_drop = on_drop
+        self.on_overload = on_overload
+        self.dropped = 0
+        self.warned = False
+        self._q: deque[Callable[[], None]] = deque()
+        self._cv = threading.Condition()
+
+    def __len__(self) -> int:
+        with self._cv:
+            return len(self._q)
+
+    def put(self, job: Callable[[], None]) -> None:
+        overload = did_drop = False
+        with self._cv:
+            if len(self._q) >= self.maxsize:
+                self._q.popleft()
+                self.dropped += 1
+                did_drop = True
+                overload = not self.warned
+                self.warned = True
+            self._q.append(job)
+            self._cv.notify()
+            dropped = self.dropped
+        if did_drop and self.on_drop is not None:
+            self.on_drop(dropped)
+        if overload and self.on_overload is not None:
+            self.on_overload()
+
+    def get(self, timeout: float = 0.5) -> Callable[[], None] | None:
+        with self._cv:
+            if not self._q:
+                self._cv.wait(timeout)
+            return self._q.popleft() if self._q else None
+
+
+class GateHint:
+    """Counts consecutive utterances the face gate rejected; after ``threshold`` of them, fires once per
+    session (the tray then suggests turning the face gate off)."""
+
+    def __init__(self, threshold: int = 5) -> None:
+        self.threshold = threshold
+        self.count = 0
+        self.fired = False
+
+    def observe(self, data: dict[str, Any]) -> bool:
+        reason = str(data.get("reason", ""))
+        if data.get("decision") == "ignore" and reason.startswith("face gate"):
+            self.count += 1
+        elif data.get("decision") in ("type", "command"):
+            self.count = 0
+        if self.count >= self.threshold and not self.fired:
+            self.fired = True
+            return True
+        return False

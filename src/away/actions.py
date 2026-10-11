@@ -140,6 +140,10 @@ class ActionExecutor:
                 self.log.append(f"refused {a}: bindings.allow_shell is false")
                 return False
             self.shell_runner(a.arg)
+        elif a.kind == "cursor":
+            if not self.mouse.jump_monitor(a.arg):
+                self.log.append(f"no monitor for {a}")
+                return False
         elif a.kind in HOOK_KINDS:
             hook = self.hooks.get(a.kind)
             if hook is None:
@@ -261,7 +265,7 @@ class Dispatcher:
         if category == "voice":
             name = normalize_phrase(name)
         act = self.resolve(category, name)
-        if self.paused() and act.kind == "mouse":
+        if self.paused() and act.kind in ("mouse", "cursor"):
             return NONE
         if self.executor.run(act, dict(data or {})):
             prefix = {"voice": "voice", "face": "face", "hotkeys": "hotkey", "gestures": "gesture"}[category]

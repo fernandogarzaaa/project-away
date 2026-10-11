@@ -144,10 +144,17 @@ def make_asr(
     beam_size: int = 5,
     on_fallback: Callable[[str], object] | None = None,
     factory: Callable[..., ASRBackend] | None = None,
+    cpu_model: str | None = None,
+    cpu_download_root: str | None = None,
+    cpu_beam_size: int | None = None,
 ) -> ASRBackend:
     """Build the ASR backend. On ``device="cuda"`` the GPU libraries are activated first; if CUDA cannot
     load or run (no cuBLAS, old driver, out of VRAM) it falls back to the CPU (int8) and calls
-    ``on_fallback(reason)`` so the app can tell the user why."""
+    ``on_fallback(reason)`` so the app can tell the user why.
+
+    ``cpu_model``: the model to use on that CPU fallback (the hardware profile's CPU pick). A GPU-sized
+    model such as large-v3-turbo cannot keep up on most CPUs, so falling back to it would just drop
+    speech. A CUDA error that only shows up later, on a real transcription, switches the same way."""
     if backend == "parakeet":
         try:
             import nemo.collections.asr  # noqa: F401
@@ -155,6 +162,13 @@ def make_asr(
             raise ImportError(PARAKEET_MISSING) from exc
         return ParakeetASR() if model in WHISPER_MODELS else ParakeetASR(model)
     build = factory or FasterWhisperASR
+
+    def build_cpu() -> ASRBackend:
+        m = cpu_model or model
+        root = cpu_download_root if cpu_model and cpu_model != model else download_root
+        beam = cpu_beam_size if cpu_beam_size else beam_size
+        return build(m, "cpu", "int8", language, root, hotwords, cpu_threads, beam)
+
     if device == "cuda":
         from away.app import gpupack
 
@@ -162,20 +176,63 @@ def make_asr(
         try:
             asr = build(model, "cuda", compute_type, language, download_root, hotwords, cpu_threads, beam_size)
             warm_up(asr)  # cuBLAS is loaded lazily: make it fail here, not on the first dictation
-            return asr
+            return FallbackASR(asr, build_cpu, on_fallback, cpu_model or model)
         except Exception as exc:
-            reason = cuda_failure_reason(exc)
+            reason = cuda_failure_reason(exc, cpu_model if cpu_model and cpu_model != model else None)
             if on_fallback is not None:
                 on_fallback(reason)
-            device, compute_type = "cpu", "int8"
+            return build_cpu()
     return build(model, device, compute_type, language, download_root, hotwords, cpu_threads, beam_size)
+
+
+CUDA_ERROR_WORDS = ("cublas", "cudnn", "cuda", "cudart")
+
+
+def is_cuda_error(exc: BaseException) -> bool:
+    low = f"{type(exc).__name__}: {exc}".lower()
+    return any(w in low for w in CUDA_ERROR_WORDS)
+
+
+class FallbackASR:
+    """A GPU backend that switches itself to the CPU (once) when CUDA fails during a transcription."""
+
+    def __init__(
+        self,
+        gpu: ASRBackend,
+        build_cpu: Callable[[], ASRBackend],
+        on_fallback: Callable[[str], object] | None = None,
+        cpu_model: str = "",
+    ) -> None:
+        self.gpu = gpu
+        self.build_cpu = build_cpu
+        self.on_fallback = on_fallback
+        self.cpu_model = cpu_model
+        self.cpu: ASRBackend | None = None
+        self.name = getattr(gpu, "name", "faster-whisper")
+
+    @property
+    def device(self) -> str:
+        return "cpu" if self.cpu is not None else "cuda"
+
+    def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
+        if self.cpu is not None:
+            return self.cpu.transcribe(audio, prompt)
+        try:
+            return self.gpu.transcribe(audio, prompt)
+        except Exception as exc:
+            if not is_cuda_error(exc):
+                raise
+            self.cpu = self.build_cpu()
+            if self.on_fallback is not None:
+                self.on_fallback(cuda_failure_reason(exc, self.cpu_model or None))
+            return self.cpu.transcribe(audio, prompt)
 
 
 def warm_up(asr: ASRBackend) -> None:
     asr.transcribe(np.zeros(16000, dtype=np.float32))
 
 
-def cuda_failure_reason(exc: BaseException) -> str:
+def cuda_failure_reason(exc: BaseException, cpu_model: str | None = None) -> str:
     """One line for the user: what went wrong on the GPU and what fixes it."""
     msg = f"{type(exc).__name__}: {exc}"
     low = msg.lower()
@@ -189,4 +246,5 @@ def cuda_failure_reason(exc: BaseException) -> str:
         fix = "no usable CUDA device"
     else:
         fix = "CUDA failed to start"
-    return f"GPU unavailable ({fix}); using the CPU instead. Details: {msg[:300]}"
+    cpu = f"the CPU with the smaller '{cpu_model}' model" if cpu_model else "the CPU"
+    return f"GPU unavailable ({fix}); using {cpu} instead. Details: {msg[:300]}"

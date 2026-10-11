@@ -64,9 +64,24 @@ def cmd_hardware(args: argparse.Namespace) -> int:
     hw = hardware.detect()
     prof = performance.current_profile(cfg, hw)
     if args.json:
-        print(json.dumps({"hardware": hw.to_dict(), "profile": prof.to_dict(), "gpu_pack": gpupack.status()}, indent=2))
+        from away.control import monitors
+
+        print(
+            json.dumps(
+                {
+                    "hardware": hw.to_dict(),
+                    "profile": prof.to_dict(),
+                    "gpu_pack": gpupack.status(),
+                    "monitors": monitors.enumerate_monitors().to_dict(),
+                },
+                indent=2,
+            )
+        )
         return 0
     print("\n".join(performance.describe(hw, prof)))
+    from away.control import monitors
+
+    print("Monitors: " + "\n".join(monitors.enumerate_monitors().lines()))
     if hw.notes:
         print("Notes:")
         for n in hw.notes:
@@ -75,6 +90,25 @@ def cmd_hardware(args: argparse.Namespace) -> int:
         from away.app.frozen import is_frozen
 
         print("\nEnable the GPU: " + ("away gpu install" if is_frozen() else gpupack.PIP_HINT))
+    return 0
+
+
+def cmd_monitors(args: argparse.Namespace) -> int:
+    from away.control import monitors
+
+    layout = monitors.enumerate_monitors()
+    cfg, _ = cfgmod.load()
+    sel = monitors.select_monitors(layout, cfg.hands.cursor.monitors)
+    if args.json:
+        d = layout.to_dict()
+        d["dpi_awareness"] = monitors.enable_dpi_awareness()
+        d["cursor_monitors"] = [layout.monitors.index(m) + 1 for m in sel]
+        print(json.dumps(d, indent=2))
+        return 0
+    print("\n".join(layout.lines()))
+    used = ", ".join(str(layout.monitors.index(m) + 1) for m in sel)
+    print(f"  cursor uses: {used} (hands.cursor.monitors: {cfg.hands.cursor.monitors})")
+    print('  jump with the voice commands "next monitor", "previous monitor", "monitor one/two/three"')
     return 0
 
 
@@ -513,6 +547,8 @@ def cmd_cameras(args: argparse.Namespace) -> int:
         print("no cameras found (none connected, or no permission to /dev/video*)")
     for d in devs:
         state = "" if d.ok is None else ("  ok" if d.ok else "  (could not open)")
+        if d.in_use:
+            state = "  (in use by Project Away)"
         print(f"{d.index if d.index is not None else '-':>3}  {d.path:<14} {d.name}{state}")
     if cfg.hands.cameras:
         print("\nconfigured (hands.cameras):")
@@ -569,9 +605,36 @@ def cmd_calibrate_cameras(args: argparse.Namespace) -> int:
         )
         return 0
     cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
+    status = getattr(args, "status_file", None)
     if len(cfg.hands.cameras) < 2:
-        return _fail("calibration needs two cameras in hands.cameras (see `away cameras list` / `away cameras add`)")
-    return _run_camera_calibration(cfg, args)  # pragma: no cover - needs cameras
+        msg = "calibration needs two cameras in hands.cameras (see `away cameras list` / `away cameras add`)"
+        write_calibration_status(status, state="failed", message=msg)
+        return _fail(msg)
+    from away.app.camera_share import borrowed_cameras
+
+    write_calibration_status(status, state="running", progress=0, message="asking Project Away for the cameras...")
+    with borrowed_cameras(who="calibrate") as lease:  # pragma: no cover - needs cameras
+        if lease.handed_over:
+            print("Project Away released the cameras for calibration; they are handed back afterwards.")
+        try:
+            return _run_camera_calibration(cfg, args)
+        except Exception as exc:
+            write_calibration_status(status, state="failed", message=f"calibration failed: {exc}")
+            raise
+
+
+def write_calibration_status(path: str | None, **data: Any) -> None:
+    """Progress/result for the Settings window (``--status-file``); never raises."""
+    if not path:
+        return
+    import contextlib
+    import os
+    import time
+
+    with contextlib.suppress(OSError):
+        tmp = f"{path}.tmp"
+        Path(tmp).write_text(json.dumps({**data, "t": time.time()}), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> int:  # pragma: no cover - cameras
@@ -586,6 +649,8 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
     from away.multicam.capture import CameraThread, FramePairer
     from away.multicam.fusion import ViewObs
 
+    status = getattr(args, "status_file", None)
+    write_calibration_status(status, state="running", progress=0, message="opening the cameras...")
     cams = cfg.hands.cameras
     primary = next(i for i, c in enumerate(cams) if c.role == "primary")
     pairer = FramePairer(len(cams), primary, cfg.hands.multicam.pair_tolerance_ms / 1000, 0.5)
@@ -608,7 +673,9 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
                     continue
                 if cal_b.add([None if f is None else f[1] for f in s[1]]):
                     last = s[0]
-                    print(f"  views: {min(len(v) for v in cal_b.views.values())}/{args.views}", flush=True)
+                    n = min(len(v) for v in cal_b.views.values())
+                    print(f"  views: {n}/{args.views}", flush=True)
+                    write_calibration_status(status, state="running", message=f"checkerboard views {n}/{args.views}")
             ex, rep = cal_b.solve(min_views=min(args.views, 8))
         else:
             model = _models_dir(cfg) / "hand_landmarker.task"
@@ -638,18 +705,26 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
                 pct = int(cal_h.progress() * 100)
                 if pct // 10 != shown:
                     shown = pct // 10
-                    print(f"  {pct}% ({int(end - time.monotonic())} s left)", flush=True)
+                    left = int(end - time.monotonic())
+                    print(f"  {pct}% ({left} s left)", flush=True)
+                    write_calibration_status(
+                        status, state="running", progress=pct, message=f"calibrating: {pct}% ({left} s left)"
+                    )
             ex, rep = cal_h.solve(cfg.hands.multicam.palm_length_m)
     finally:
         stop.set()
-    for th in threads:
-        if th.error:
-            print(f"camera {th.spec.device!r}: {th.error}", file=sys.stderr)
+    errors = [f"camera {th.spec.device!r}: {th.error}" for th in threads if th.error]
+    for e in errors:
+        print(e, file=sys.stderr)
     print(json.dumps(rep.per_camera, indent=2))
     if ex is None:
-        return _fail(rep.message)
+        msg = rep.message + (f" ({'; '.join(errors)})" if errors else "")
+        write_calibration_status(status, state="failed", message=msg)
+        return _fail(msg)
     p = G.save_extrinsics(ex)
-    print(f"{rep.message}\nsaved extrinsics to {p}")
+    done = f"calibrated, reprojection error {ex.reprojection_error_px:.2f} px"
+    write_calibration_status(status, state="done", message=done, error_px=ex.reprojection_error_px)
+    print(f"{rep.message}\n{done}\nsaved extrinsics to {p}")
     return 0
 
 
@@ -864,6 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument("--views", type=int, default=15, help="checkerboard views to collect")
     cc.add_argument("--print-board", metavar="PNG", help="write a printable checkerboard image and exit")
     cc.add_argument("--config")
+    cc.add_argument("--status-file", help=argparse.SUPPRESS)  # progress JSON for the Settings window
     cc.set_defaults(fn=cmd_calibrate_cameras)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
@@ -889,6 +965,12 @@ def build_parser() -> argparse.ArgumentParser:
     hwp.add_argument("--json", action="store_true")
     hwp.set_defaults(fn=cmd_hardware)
 
+    mp = sub.add_parser(
+        "monitors", help="list the monitors the gesture cursor can reach (numbered 1..N, left to right)"
+    )
+    mp.add_argument("--json", action="store_true")
+    mp.set_defaults(fn=cmd_monitors)
+
     gp = sub.add_parser("gpu", help="install | status | remove the NVIDIA GPU pack (cuBLAS for Whisper on CUDA)")
     gp.add_argument("action", choices=["install", "status", "remove"])
     gp.add_argument("--force", action="store_true", help="download even from a pip install / without a detected GPU")
@@ -906,6 +988,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows: per-monitor DPI awareness before pynput or tkinter exist, so monitor rectangles and cursor
+    # moves share physical pixels (no-op elsewhere; AWAY_DPI_AWARE=0 turns it off)
+    from away.control.monitors import enable_dpi_awareness
+
+    enable_dpi_awareness()
     args = build_parser().parse_args(argv)
     return int(args.fn(args))
 

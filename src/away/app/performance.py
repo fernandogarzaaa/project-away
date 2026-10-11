@@ -27,6 +27,52 @@ def effective_asr_model(cfg: Any, profile: tuning.Profile | None = None) -> str:
     return (profile or current_profile(cfg)).asr_model
 
 
+# rough cost order (lower = heavier) to compare a chosen model with what the CPU can sustain
+MODEL_WEIGHT = {
+    "large-v3": 0,
+    "large-v3-turbo": 0,
+    "distil-large-v3": 0,
+    "medium": 0.5,
+    "small": 1,
+    "base": 2,
+    "tiny": 3,
+}
+
+
+def cpu_profile(cfg: Any, hw: hardware.Hardware | None = None) -> tuning.Profile:
+    """The profile this machine gets when speech runs on the CPU (what a CUDA fallback should use)."""
+    ov = tuning.Overrides.from_config(cfg)
+    ov.mode, ov.device, ov.asr_model = "cpu", "cpu", "auto"
+    return tuning.choose_profile(hw or hardware.cached(), ov, cuda_runtime=False, pack_installed=gpupack.installed())
+
+
+def heavier(model: str, than: str) -> bool:
+    return MODEL_WEIGHT.get(model, 1) < MODEL_WEIGHT.get(than, 1)
+
+
+def asr_plan(cfg: Any, profile: tuning.Profile, cpu: tuning.Profile | None = None) -> tuple[str, str, str | None]:
+    """``(model, cpu_fallback_model, notice)`` for starting speech recognition.
+
+    * GPU profile: the chosen model, and the CPU pick for a CUDA fallback.
+    * CPU profile with a model heavier than the CPU can sustain (e.g. large-v3-turbo carried over from an
+      old config, or chosen while the GPU pack is missing): the CPU pick instead, with a notice saying how
+      to get the big model back (install the GPU pack). ``voice.device: cpu`` set explicitly keeps the
+      user's model: they asked for exactly that.
+    """
+    model = effective_asr_model(cfg, profile)
+    cpu = cpu or (profile if profile.device == "cpu" and cfg.voice.asr_model == "auto" else cpu_profile(cfg))
+    cpu_model = cpu.asr_model
+    if profile.device != "cpu" or cfg.voice.device == "cpu" or not heavier(model, cpu_model):
+        return model, cpu_model, None
+    hint = (
+        "install the GPU pack (Settings > Performance) to use it on your NVIDIA GPU"
+        if profile.gpu_capable
+        else "set voice.device: cpu to force it anyway"
+    )
+    note = f"{model} is too slow for this CPU, so speech recognition uses {cpu_model}; {hint}"
+    return cpu_model, cpu_model, note
+
+
 def gpu_pack_offer(cfg: Any, profile: tuning.Profile | None = None, frozen: bool | None = None) -> str | None:
     """Why to offer the GPU pack now, or ``None``: an NVIDIA GPU that can run CUDA 12, mode auto/gpu, the
     pack is not installed and cuBLAS cannot be loaded otherwise. Only frozen apps download it (pip installs

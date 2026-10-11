@@ -94,6 +94,8 @@ Every control is a **trigger → action** binding you can change without touchin
 | `voice:"stop listening"` / `"start listening"` | `dictation:stop` / `dictation:start` |
 | `voice:"command mode"` / `"dictation mode"` | `voice:command_mode` / `voice:dictation_mode` |
 | `voice:"pause gestures"` / `"resume gestures"` | `pause:on` / `pause:off` |
+| `voice:"next monitor"` / `"previous monitor"` | `cursor:next_monitor` / `cursor:prev_monitor` |
+| `voice:"monitor one"` / `"monitor two"` / `"monitor three"` | `cursor:monitor 1` / `2` / `3` |
 
 **Triggers:** the gestures above plus your own (record with `away record --custom --label wave`, then
 `away calibrate`), any spoken phrase (matched ignoring case and punctuation), `face:brow_raise`,
@@ -105,7 +107,40 @@ gestures on/off) and `voice.edit_hotkey` (default Ctrl+Alt+E, edit the selected 
 (`mouse:move`, `mouse:drag`, `mouse:scroll` only on point / pinch_hold / two_finger_scroll) ·
 `key:ctrl+tab` · `type:any text` · `launch:firefox` or `launch:https://…` (no shell) ·
 `shell:command` (**off unless** `bindings.allow_shell: true`) · `dictation:toggle|start|stop` ·
-`mic:toggle|on|off` · `voice:command_mode|dictation_mode|toggle_mode` · `pause:toggle|on|off`.
+`mic:toggle|on|off` · `voice:command_mode|dictation_mode|toggle_mode` · `pause:toggle|on|off` ·
+`cursor:next_monitor|prev_monitor|primary_monitor|monitor N` (jump to the centre of a monitor).
+
+### Multiple monitors
+
+The cursor moves across every monitor (v0.1.6; before that it was stuck on the primary). `away monitors`
+lists them, numbered 1..N **left to right** (then top to bottom), with where the list came from: Windows
+`EnumDisplayMonitors`, macOS Quartz/AppKit, Linux `screeninfo` or `xrandr --listmonitors`, falling back to the
+primary monitor only (with the reason) when none works. The same list is in `away hardware` and the selftest.
+
+- **Layouts:** side by side, stacked, a monitor left of / above the primary (negative coordinates), mixed
+  sizes. The cursor is always clamped onto a real monitor, never into the gap beside a smaller screen.
+- **Speed:** relative-mode speed is measured against the **primary** monitor, so slow, precise moves feel
+  exactly as on one screen. Only fast moves get extra reach on a bigger desktop:
+  `(desktop width / primary width) ** hands.cursor.monitor_reach`. With three equal monitors and the default
+  `monitor_reach: 0.5` a quick flick goes ~1.7x further, so crossing all three takes a few flicks rather than
+  three times the arm sweep. `0` = no extra reach, `1` = scales fully with the desktop.
+- **Jump:** say "next monitor", "previous monitor" or "monitor two" (Whisper writing "monitor 2" works too),
+  or bind `cursor:next_monitor` / `cursor:monitor 3` to any gesture or hotkey. A held drag stays held, so
+  "next monitor" while dragging carries a window across.
+- **Which monitors:** `hands.cursor.monitors: all` (default) | `primary` | `[1, 3]`.
+- **Hot-plug:** monitors are re-detected every `hands.cursor.monitor_refresh_s` (3 s; `0` = only at start),
+  no restart needed.
+- **Windows DPI:** the app makes itself per-monitor DPI aware at startup (before pynput/tkinter), so monitor
+  rectangles and cursor positions are both physical pixels on mixed-scaling setups. `AWAY_DPI_AWARE=0` turns
+  that off.
+
+```yaml
+hands:
+  cursor:
+    monitors: all          # all | primary | [1, 3]
+    monitor_reach: 0.5     # extra reach for fast moves on a wide desktop
+    monitor_refresh_s: 3   # re-detect plugged/unplugged monitors
+```
 
 ### Per-app profiles
 
@@ -180,8 +215,15 @@ Always-on listens continuously, cuts speech into utterances with an energy VAD (
 - **Wake word on** (`voice.wake_word_enabled: true`, `wake_word: away`): only utterances starting with
   the wake word count ("away, scroll down"). A bare "away" opens a `wake_window` for the next utterance.
 - **Wake word off:** text is typed only when the face gate agrees that you are at the screen and your
-  mouth is moving (active-speaker detection), so TV or background talk is ignored. With no camera,
-  `voice.ambient_fallback: commands_only` (default) runs bound phrases but types nothing.
+  mouth is moving (active-speaker detection), so TV or background talk is ignored. A visible face whose
+  mouth moves counts even when the head is turned (off-axis webcam), and a short gap in face tracking
+  while the CPU is busy is tolerated. Each `voice.utterance` log line carries the gate's evidence (face
+  frames, speaking fraction, mouth score). After 5 rejections in a row the tray suggests turning the gate
+  off (tray menu **Face gate**, or Settings). With the face gate off (`face.gate_dictation: false`), speech
+  is typed without a wake word. With no camera, `voice.ambient_fallback: commands_only` (default) runs
+  bound phrases but types nothing.
+- If speech recognition cannot keep up (e.g. a big model on the CPU), a short backlog is kept, the oldest
+  utterance is dropped, and you get one notification saying so.
 - `voice.intent: command` never types, it only runs voice commands. Say "command mode" /
   "dictation mode" to switch.
 - "stop listening" / "start listening", the mute hotkey and the tray's **Mic on** item control it.
@@ -241,7 +283,7 @@ A laptop webcam and an external camera can work together. A hand that one camera
 that is occluded, is usually clear in the other.
 
 ```bash
-away cameras list                 # V4L2 names on Linux; probes indices on Windows/macOS
+away cameras list                 # device names (V4L2 / Windows PnP / macOS) without opening them
 away cameras add 2                # index, /dev/video2, or part of the name ("brio")
 away calibrate-cameras            # wave an open hand through both views for ~20 s
 away calibrate-cameras --method checkerboard --checkerboard 9x6 --square-mm 25   # accurate option
@@ -301,6 +343,17 @@ metric; real palms vary by about 10–15%. The checkerboard path runs `calibrate
 
 Each view runs its own MediaPipe instance in sequence, so two cameras cost about twice the CPU of one.
 
+A camera that cannot be opened or sends no frames is skipped with a notification and tracking continues
+on the one that works, so a wrong or busy secondary camera never stops hand tracking.
+
+**Sharing the camera with Settings (v0.1.6):** webcams are exclusive on Windows, so while the app tracks
+your hand, Settings' *Test gesture*, *Live confidence* and *Calibrate* (and `away calibrate-cameras`) ask
+the running app to hand the cameras over: it pauses tracking, releases them, and takes them back when
+the test ends or the window closes (a small heartbeat file in the data folder; a crashed Settings window
+releases its claim within 5 s). The Cameras tab lists the default camera in single-camera mode and marks
+the one the app is using. If a camera still cannot be opened, you are told it is in use by Project Away
+or another app instead of a bare "permission denied".
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -311,8 +364,11 @@ settings (`performance.mode: auto|cpu|gpu`, `voice.device`, `voice.asr_model`, `
 NVIDIA GPUs: the one-click installers ship CPU-only; setup (or *Settings > Performance*, or
 `away gpu install`) downloads the **GPU pack**, the cuBLAS 12 libraries from NVIDIA's official PyPI wheel
 (~570 MB, SHA-256 verified). That is the only CUDA library CTranslate2 4.8 loads. pip installs:
-`pip install nvidia-cublas-cu12==12.8.4.1`. If CUDA fails at runtime, dictation falls back to the CPU and
-says why. Details: [docs/INSTALL.md](docs/INSTALL.md#hardware-auto-tuning-and-the-nvidia-gpu).
+`pip install nvidia-cublas-cu12==12.8.4.1`. If CUDA fails (at startup or later), dictation falls back to
+the CPU **with the CPU-sized model** from the profile (not large-v3-turbo, which cannot keep up on most
+CPUs) and says why; the tray offers *Install GPU pack* (one notification, then a menu item). A
+`voice.asr_model: large-v3-turbo` written by v0.1.4's setup is migrated to `auto` (configs now carry
+`config_version: 2`; a model you pick from now on is kept). Details: [docs/INSTALL.md](docs/INSTALL.md#hardware-auto-tuning-and-the-nvidia-gpu).
 
 ## Updates
 
@@ -338,7 +394,9 @@ Same options under **Settings → Voice & input**; from a terminal: `away update
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 798 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 850 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
+| Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
 | GPU pack | Real `nvidia-cublas-cu12` 12.8.4.1 wheels downloaded, SHA-256 verified and extracted (Windows: 568 MB download, 788 MB kept; Linux x86-64: 594 / 868 MB); the DLLs import only each other + KERNEL32 |
 | Whisper on an NVIDIA GPU (CUDA) | **Untested** (no GPU in the build sandbox); CPU fallback path unit-tested |

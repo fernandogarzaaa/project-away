@@ -161,6 +161,15 @@ def _hardware() -> str:
     )
 
 
+def _monitors() -> str:
+    """Monitor enumeration (never raises; reports the primary-only fallback and why)."""
+    from away.control import monitors
+
+    layout = monitors.enumerate_monitors()
+    note = f" [{layout.note}]" if layout.note else ""
+    return f"{layout.summary()}; DPI awareness: {monitors.enable_dpi_awareness()}{note}"
+
+
 CHECKS: tuple[Check, ...] = (
     Check("hardware", "hardware detection + speech device", _hardware),
     Check("core", "numpy/scipy/yaml", _numpy),
@@ -175,6 +184,7 @@ CHECKS: tuple[Check, ...] = (
     Check("torch", "calibrate / custom gestures / train", _torch),
     Check("onnx", "model export (train)", _onnx),
     Check("pynput", "mouse + keyboard control", _pynput, needs_display=True),
+    Check("monitors", "multi-monitor cursor (monitor list)", _monitors),
     Check("pystray", "tray icon", _pystray, needs_display=True),
     Check("pyperclip", "paste dictation", _pyperclip),
 )

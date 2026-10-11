@@ -7,6 +7,7 @@ hotkeys and Wi-Fi threads around it.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import sys
 import threading
@@ -28,14 +29,23 @@ from away.face.speaker import ActiveSpeakerDetector
 from away.face.speaking import SpeakingScorer
 from away.face.tracking import FaceTracker
 from away.fusion import GestureFusion
-from away.hands.cursor import CursorMapper
+from away.hands.cursor import CursorMapper, Screen
 from away.hands.filters import OneEuro2D
 from away.hands.gestures import GestureEvent, GestureStateMachine
 from away.hands.landmarks import as_array, pinch_ratio
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
+from away.voice.always_on import GateHint
 from away.wifi.classifier import CoarseCSIClassifier
 from away.wifi.features import window_features
+
+
+def effective_ambient_fallback(cfg: AppConfig) -> str:
+    """Always-on without a wake word: ``type`` when the user turned the face gate off (that must still type;
+    ``commands_only`` there silently dropped all dictation), else ``voice.ambient_fallback``."""
+    if cfg.voice.ambient_fallback == "type" or not cfg.face.gate_dictation:
+        return "type"
+    return cfg.voice.ambient_fallback
 
 
 class Pipeline:
@@ -43,7 +53,7 @@ class Pipeline:
         self,
         cfg: AppConfig,
         backend: MouseBackend | None = None,
-        screen: tuple[int, int] = (1920, 1080),
+        screen: Screen = (1920, 1080),
         bus: EventBus | None = None,
         temporal: Any = None,
         active_app: Any = None,
@@ -107,6 +117,10 @@ class Pipeline:
             self.mouse.mapper.reset()  # resume from wherever the real mouse left the cursor, no jump
         self.bus.publish("app.auto_paused", {"paused": auto}, t)
 
+    def set_monitors(self, layout: Screen) -> None:
+        """New monitor layout (hot-plug): the cursor stays put if it is still on a monitor."""
+        self.mouse.mapper.set_monitors(layout, keep_position=True)
+
     def cursor_state(self) -> dict[str, Any]:
         """Snapshot for the at-cursor overlay (polled; nothing is published per frame)."""
         g = self.cfg.hands.gestures
@@ -156,6 +170,7 @@ class Pipeline:
                 setattr(dst, k, v)
         c = self.cfg.hands.cursor
         self.mouse.mapper.filter = OneEuro2D(c.min_cutoff, c.beta, c.d_cutoff)
+        self.mouse.mapper.refresh_selection()  # hands.cursor.monitors / monitor_reach
         self.mouse.stabilizer = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
         self.dwell = DwellDetector(self.cfg.hands.dwell.radius_px, self.cfg.hands.dwell.time_s)
         f = self.cfg.face  # per-user face-click thresholds
@@ -243,9 +258,17 @@ class Pipeline:
             self.gate.enroll({fid: b[2] for fid, b in zip(ids, boxes)})
             self._enroll_pending = False
             self.bus.publish("face.enrolled", {"face_id": self.gate.primary}, t)
+        elif len(ids) == 1 and self.gate.primary not in ids:
+            # one face at the screen but the tracker gave it a new id (looked away, left and came back):
+            # it is the user; otherwise the gate would count them as "someone else speaking"
+            self.gate.primary = ids[0]
+            self.bus.publish("face.enrolled", {"face_id": ids[0], "reacquired": True}, t)
         scores = {fid: self.speaking.update(fid, bs) for fid, bs in zip(ids, blendshapes)}
         active = self.asd.update(scores, self.mic_energy)
-        self.gate.observe(t, active, len(ids))
+        user_score = (
+            scores.get(self.gate.primary) if self.gate.primary in scores else max(scores.values(), default=None)
+        )
+        self.gate.observe(t, active, len(ids), user_score)
         if self.cfg.face.brow_raise_toggle and self.gate.primary in ids:
             bs = blendshapes[ids.index(self.gate.primary)]  # type: ignore[arg-type]
             if self.brow.update(t, bs):
@@ -293,14 +316,22 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             self.profile = Profile(reasons=[f"hardware detection failed: {exc}"])
         self.asr_device = self.profile.device
+        from away.app.camera_share import CameraShare
+        from away.control import monitors
+
+        self.camera_share = CameraShare()
         backend: MouseBackend
         if dry_run:
             backend = RecordingBackend()
-            screen = (1920, 1080)
+            self.monitor_layout = monitors.single(1920, 1080, source="dry-run")
         else:
-            from away.control.mouse import PynputBackend, screen_size
+            from away.control.mouse import PynputBackend
 
-            backend, screen = PynputBackend(), screen_size()
+            monitors.enable_dpi_awareness()  # no-op when cli/tray main already did it (before pynput/tk)
+            self.monitor_layout = monitors.enumerate_monitors()
+            backend = PynputBackend()
+        screen = self.monitor_layout
+        self.monitor_watcher = monitors.MonitorWatcher(self.monitor_layout, float(cfg.hands.cursor.monitor_refresh_s))
         temporal = None
         if cfg.hands.gestures.use_model:
             from away.hands.runtime import TemporalGestureClassifier, find_model
@@ -321,9 +352,66 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.editor: Any = None  # SelectionEditor (voice.edit_hotkey)
         self.threads: list[threading.Thread] = []
         self._listeners: list[Any] = []
+        self.asr_model = ""
+        self._notices: set[str] = set()
+        self.gate_hint = GateHint(5)
         self.bus.subscribe("*", self._log)
+        self.bus.subscribe("voice.utterance", self._on_utterance)
+        self.bus.subscribe("cameras.degraded", self._on_cameras_degraded)
+        self._save_migrations()
+        self.bus.publish(
+            "monitors.detected", {"layout": self.monitor_layout.summary(), "note": self.monitor_layout.note}
+        )
         if not cfg.app.always_on:  # start paused and muted until the user resumes from the tray
             self.pipeline.set_paused(True)
+
+    # notices -------------------------------------------------------------------
+    def notice(self, title: str, message: str, key: str | None = None) -> bool:
+        """A user-facing heads-up (the tray shows it as a notification). ``key``: at most once per run."""
+        if key is not None:
+            if key in self._notices:
+                return False
+            self._notices.add(key)
+        self.bus.publish("app.notice", {"title": title, "message": message, "key": key})
+        return True
+
+    def _publish_quiet(self, topic: str, data: dict[str, Any]) -> None:
+        self.bus.publish(topic, data)
+
+    def _release_hand(self) -> None:
+        self.pipeline.on_hand(time.monotonic(), None)
+
+    def _on_cameras_degraded(self, ev: Any) -> None:
+        msg = str(ev.data.get("message") or "a camera could not be opened and was skipped")
+        print(f"warning: {msg}", flush=True)
+        self.notice("Project Away: camera skipped", msg, key="cameras-degraded")
+
+    def _on_utterance(self, ev: Any) -> None:
+        if self.gate_hint.observe(ev.data):
+            self.bus.publish(
+                "voice.gate_hint",
+                {"count": self.gate_hint.count, "gate": ev.data.get("gate")},
+            )
+            self.notice(
+                "Project Away: speech ignored by the face gate",
+                f"{self.gate_hint.count} things you said were ignored because the camera did not see you facing "
+                "it and talking. Turn off face gating from the tray menu (or Settings > Voice) to always type.",
+                key="gate-hint",
+            )
+
+    def _save_migrations(self) -> None:
+        """Re-save a config an older version wrote, so its migration (e.g. asr_model -> auto) sticks."""
+        if not self.cfg.migrations or self.dry_run:
+            return
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            if path.exists():
+                cfgmod.save(self.cfg, path)
+            self.bus.publish("config.migrated", {"changes": list(self.cfg.migrations), "path": str(path)})
+        except Exception as exc:
+            self.bus.publish("config.error", {"error": f"could not save the migrated config: {exc}"})
 
     @property
     def dictation(self) -> Any:  # tray compatibility
@@ -348,6 +436,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def voice_state(self) -> str:
         return self.voice.state if self.voice is not None else "off"
+
+    # monitors ----------------------------------------------------------------
+    def _watch_monitors(self) -> None:
+        """Re-detect monitors every hands.cursor.monitor_refresh_s (hot-plug without a restart)."""
+        w = self.monitor_watcher
+        while not self.stop_event.wait(max(0.5, float(w.interval) or 3.0)):
+            w.interval = float(self.cfg.hands.cursor.monitor_refresh_s)
+            new = w.poll(time.monotonic())
+            if new is not None:
+                self.monitor_layout = new
+                self.pipeline.set_monitors(new)
+                self.bus.publish("monitors.changed", {"layout": new.summary()})
 
     # config hot-reload (settings GUI / CLI write the file) --------------------
     def _watch_config(self) -> None:
@@ -378,7 +478,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             amb.wake_word = v.wake_word if v.wake_word_enabled else None
             amb.wake_window = v.wake_window
             amb.intent = v.intent
-            amb.fallback = v.ambient_fallback
+            amb.fallback = effective_ambient_fallback(new)
+            face_gate = new.face.enabled and new.face.gate_dictation
+            amb.gate = self.pipeline.gate.allow_ambient if face_gate else None
             amb.commands_enabled = v.commands_enabled
             amb.ep.set_sensitivity(v.vad_sensitivity)
         for k, val in vars(v).items():
@@ -398,10 +500,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.pipeline.fire("voice", phrase)
 
     def _start_voice(self) -> None:
-        import queue
-
-        from away.app.performance import effective_asr_model
-        from away.voice.always_on import AmbientSession, StreamingEndpointer, VoiceController
+        from away.app.performance import asr_plan
+        from away.voice.always_on import AmbientSession, ASRQueue, StreamingEndpointer, VoiceController
         from away.voice.asr import make_asr
         from away.voice.cleanup import LLMCleaner, RuleCleaner, Vocabulary
         from away.voice.context import active_app
@@ -414,17 +514,23 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         rules = RuleCleaner(vocab, numbers_as_digits=v.numbers_as_digits, numbers_min_value=v.numbers_min_value)
         cleaner = LLMCleaner(rules) if v.llm_cleanup else rules
         prof = self.profile
-        model = effective_asr_model(self.cfg, prof)
+        try:
+            model, cpu_model, slow_note = asr_plan(self.cfg, prof)
+        except Exception as exc:  # hardware detection problems must not stop voice
+            from away.app.performance import effective_asr_model
+
+            model, cpu_model, slow_note = effective_asr_model(self.cfg, prof), None, None
+            self.bus.publish("voice.plan_error", {"error": str(exc)})
+        if slow_note:
+            self.notice("Project Away: smaller speech model", slow_note, key="asr-downsized")
+        self.asr_model = model
 
         def gpu_fallback(reason: str) -> None:
             self.asr_device = "cpu"
-            self.bus.publish("voice.gpu_fallback", {"reason": reason})
-            try:
-                from away.app.frozen import notify
-
-                notify("Project Away: GPU not used", reason)
-            except Exception:
-                pass
+            if cpu_model:
+                self.asr_model = cpu_model
+            self.bus.publish("voice.gpu_fallback", {"reason": reason, "model": self.asr_model})
+            self.notice("Project Away: GPU not used", reason, key="gpu-fallback")
 
         self.asr_device = prof.device
         asr = make_asr(
@@ -438,16 +544,19 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             cpu_threads=prof.cpu_threads,
             beam_size=prof.beam_size,
             on_fallback=gpu_fallback,
+            cpu_model=cpu_model,
+            cpu_download_root=str(self.models_dir / f"whisper-{cpu_model}") if cpu_model else None,
         )
         self.bus.publish(
             "voice.asr_ready",
             {
-                "model": model,
+                "model": self.asr_model,
                 "device": self.asr_device,
                 "compute_type": prof.compute_type if self.asr_device == prof.device else "int8",
             },
         )
         face_gate = self.cfg.face.enabled and self.cfg.face.gate_dictation
+        fallback = effective_ambient_fallback(self.cfg)
         gate = self.pipeline.gate.allow if face_gate else None
         sink = ListSink() if self.dry_run else make_sink(v.output)
         commands = self._run_voice_command if v.commands_enabled else None
@@ -463,24 +572,39 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             vocab.terms(),
             command_handler=commands,
         )
-        work: queue.Queue[Any] = queue.Queue(maxsize=8)  # ASR runs off the mic callback thread
+
+        def overloaded() -> None:
+            dev = self.asr_device
+            fix = (
+                "install the GPU pack (Settings > Performance)"
+                if dev == "cpu" and prof.gpu_capable
+                else "pick a smaller model (voice.asr_model: small or base)"
+            )
+            self.notice(
+                "Project Away: speech model too slow",
+                f"Speech recognition ({self.asr_model} on {dev.upper()}) cannot keep up, so older speech was "
+                f"skipped; {fix}.",
+                key="asr-overload",
+            )
+
+        # ASR runs off the mic callback thread; a short bounded backlog, oldest dropped when it overflows
+        work = ASRQueue(
+            3,
+            on_drop=lambda n: self._publish_quiet("voice.dropped", {"reason": "ASR busy", "dropped_total": n}),
+            on_overload=overloaded,
+        )
 
         def worker() -> None:
             while not self.stop_event.is_set():
-                try:
-                    job = work.get(timeout=0.5)
-                except queue.Empty:
+                job = work.get(timeout=0.5)
+                if job is None:
                     continue
                 try:
                     job()
                 except Exception as exc:
                     self.bus.publish("voice.error", {"error": str(exc)})
 
-        def submit(job: Any) -> None:
-            try:
-                work.put_nowait(job)
-            except queue.Full:
-                self.bus.publish("voice.dropped", {"reason": "ASR busy"})
+        submit = work.put
 
         ambient = AmbientSession(
             asr,
@@ -502,9 +626,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             wake_word=v.wake_word if v.wake_word_enabled else None,
             wake_window=v.wake_window,
             intent=v.intent,
-            fallback=v.ambient_fallback,
+            fallback=fallback,
             commands_enabled=v.commands_enabled,
             submit=submit,
+            gate_info=lambda: self.pipeline.gate.last_explain,
         )
         self.voice = VoiceController(v.mode, dictation, ambient, self.bus)
         if not self.cfg.app.always_on:
@@ -604,6 +729,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self._listeners.append(lst)
 
     def _camera_loop(self) -> None:
+        from away.app.camera_loop import CameraLoop
         from away.hands.tracker import HandTracker, camera_frames
 
         hand_model = self.models_dir / "hand_landmarker.task"
@@ -614,25 +740,53 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             from away.face.landmarker import FaceLandmarker
 
             faces = FaceLandmarker(face_model)
-        if len(self.cfg.hands.cameras) >= 2 and hands is not None:
-            self._multicam_loop(hands, faces)
-            return
-        prof = self.profile
-        frames = camera_frames(
-            self.cfg.hands.camera_index, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps
-        )
-        for n, (t, rgb) in enumerate(frames):
-            if self.stop_event.is_set():
-                break
-            if hands is not None and n % max(1, prof.hands_every) == 0:
-                fr = hands.process(rgb, t)
-                self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
-            if faces is not None and n % max(1, prof.face_every) == 0:
-                obs = faces.process(rgb, t)
-                self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
+        try:
+            idx: Any = self.cfg.hands.camera_index
+            if len(self.cfg.hands.cameras) >= 2 and hands is not None:
+                fallback = self._multicam_loop(hands, faces)
+                if fallback is None:
+                    return
+                idx = fallback  # a camera failed: keep tracking on the one that works
+            prof = self.profile
 
-    def _multicam_loop(self, first_tracker: Any, faces: Any) -> None:
-        """Two or more cameras: threaded capture -> timestamp pairing -> per-view hands -> fusion -> pipeline."""
+            def open_frames() -> Any:
+                from away.multicam.capture import resolve_device
+
+                dev: Any = resolve_device(idx) if isinstance(idx, str) else idx
+                return camera_frames(dev, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps)
+
+            def process(n: int, t: float, rgb: Any) -> None:
+                if hands is not None and n % max(1, prof.hands_every) == 0:
+                    fr = hands.process(rgb, t)
+                    self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
+                if faces is not None and n % max(1, prof.face_every) == 0:
+                    obs = faces.process(rgb, t)
+                    self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
+
+            CameraLoop(
+                open_frames,
+                process,
+                self.stop_event,
+                cameras=[idx],
+                share=self.camera_share,
+                publish=self._publish_quiet,
+                on_release=self._release_hand,
+            ).run()
+        finally:
+            # close the landmarkers only after this thread stopped calling them (shutdown race)
+            for tr in (hands, faces):
+                close = getattr(tr, "close", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        close()
+
+    def _multicam_loop(self, first_tracker: Any, faces: Any, probe_s: float = 3.0) -> Any:
+        """Two or more cameras: threaded capture -> timestamp pairing -> per-view hands -> fusion -> pipeline.
+
+        The captures restart after a hand-over to Settings (camera_share) without restarting the app.
+        Returns None when it stopped normally, or the device to track on alone when cameras failed to open
+        (a missing or busy secondary camera must never stop hand tracking)."""
+        from away.app.camera_loop import degrade_plan, is_shutdown_error
         from away.hands.tracker import HandTracker
         from away.multicam.capture import CameraThread, FramePairer
         from away.multicam.fusion import MultiViewFuser, ViewObs, hand_crop, sharpness_score
@@ -640,52 +794,108 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         cams, mc = self.cfg.hands.cameras, self.cfg.hands.multicam
         primary = next(i for i, c in enumerate(cams) if c.role == "primary")
-        pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
-        threads = [CameraThread(i, c, pairer, self.stop_event) for i, c in enumerate(cams)]
-        for th in threads:
-            th.start()
         model = self.models_dir / "hand_landmarker.task"
         trackers = [first_tracker] + [HandTracker(model, 1) for _ in cams[1:]]
         ex = load_extrinsics()
         fuser = MultiViewFuser(cams, mc, ex)
-        self.bus.publish("cameras.started", {"cameras": len(cams), "calibrated": fuser.calibrated})
-        dropped: set[int] = set()
-        while not self.stop_event.is_set():
-            s = pairer.pop_set()
-            if s is None:
-                time.sleep(0.002)
-                continue
-            t_ref, frames = s
-            alive = pairer.alive()
-            for i, ok in enumerate(alive):
-                if not ok and i not in dropped:
-                    dropped.add(i)
-                    self.bus.publish("cameras.dropped", {"camera": i, "error": threads[i].error})
-                elif ok and i in dropped:
-                    dropped.discard(i)
-                    self.bus.publish("cameras.recovered", {"camera": i})
-            views: list[Any] = []
-            for i, item in enumerate(frames):
-                if item is None:
-                    views.append(None)
-                    continue
-                t_i, rgb = item
-                fr = trackers[i].process(rgb, t_i)
-                if fr.landmarks is None:
-                    views.append(None)
-                    continue
-                h, w = rgb.shape[:2]
-                crop = hand_crop(rgb, fr.landmarks)
-                sharp = sharpness_score(crop.mean(axis=2)) if crop.size else None
-                views.append(ViewObs(i, t_i, fr.landmarks, fr.handedness, fr.score, (w, h), sharp))
-            fused = fuser.update(t_ref, views)
-            self.camera_confidences = dict(fuser.last_confidences)
-            self.pipeline.on_fused(fused, t_ref)
-            prim_frame = frames[primary]
-            if faces is not None and prim_frame is not None:
-                t_p, rgb_p = prim_frame
-                obs = faces.process(rgb_p, t_p)
-                self.pipeline.on_faces(t_p, [o.box for o in obs], [o.blendshapes for o in obs])
+        share = self.camera_share
+        devices = [c.device for c in cams]
+        try:
+            while not self.stop_event.is_set():
+                session = threading.Event()
+                pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
+                threads = [CameraThread(i, c, pairer, session) for i, c in enumerate(cams)]
+                for th in threads:
+                    th.start()
+                deadline = time.monotonic() + probe_s  # which cameras actually deliver frames?
+                while time.monotonic() < deadline and not self.stop_event.is_set():
+                    if all(pairer.seen(i) or not th.is_alive() for i, th in enumerate(threads)):
+                        break
+                    time.sleep(0.05)
+                failed = {i for i, th in enumerate(threads) if not pairer.seen(i)}
+                mode, device, why = degrade_plan(devices, primary, failed)
+                if failed:
+                    errs = {str(devices[i]): threads[i].error or "no frames" for i in sorted(failed)}
+                    self.bus.publish("cameras.degraded", {"failed": errs, "message": why or "", "mode": mode})
+                if mode == "single" and not self.stop_event.is_set():
+                    session.set()
+                    for th in threads:
+                        th.join(timeout=2.0)
+                    share.clear_owner()
+                    return device
+                self.bus.publish("cameras.started", {"cameras": len(cams), "calibrated": fuser.calibrated})
+                dropped: set[int] = set()
+                next_check = 0.0
+                handover = False
+                try:
+                    while not self.stop_event.is_set():
+                        now = time.monotonic()
+                        if now >= next_check:
+                            next_check = now + 1.0
+                            share.publish_owner(devices)
+                            if share.requested():
+                                handover = True
+                                break
+                        s = pairer.pop_set()
+                        if s is None:
+                            time.sleep(0.002)
+                            continue
+                        t_ref, frames = s
+                        alive = pairer.alive()
+                        for i, ok in enumerate(alive):
+                            if not ok and i not in dropped:
+                                dropped.add(i)
+                                self.bus.publish("cameras.dropped", {"camera": i, "error": threads[i].error})
+                            elif ok and i in dropped:
+                                dropped.discard(i)
+                                self.bus.publish("cameras.recovered", {"camera": i})
+                        views: list[Any] = []
+                        try:
+                            for i, item in enumerate(frames):
+                                if item is None:
+                                    views.append(None)
+                                    continue
+                                t_i, rgb = item
+                                fr = trackers[i].process(rgb, t_i)
+                                if fr.landmarks is None:
+                                    views.append(None)
+                                    continue
+                                h, w = rgb.shape[:2]
+                                crop = hand_crop(rgb, fr.landmarks)
+                                sharp = sharpness_score(crop.mean(axis=2)) if crop.size else None
+                                views.append(ViewObs(i, t_i, fr.landmarks, fr.handedness, fr.score, (w, h), sharp))
+                            fused = fuser.update(t_ref, views)
+                            self.camera_confidences = dict(fuser.last_confidences)
+                            self.pipeline.on_fused(fused, t_ref)
+                            prim_frame = frames[primary]
+                            if faces is not None and prim_frame is not None:
+                                t_p, rgb_p = prim_frame
+                                obs = faces.process(rgb_p, t_p)
+                                self.pipeline.on_faces(t_p, [o.box for o in obs], [o.blendshapes for o in obs])
+                        except Exception as exc:
+                            if self.stop_event.is_set() or is_shutdown_error(exc):
+                                self.stop_event.set()
+                                return
+                            raise
+                finally:
+                    session.set()
+                    for th in threads:
+                        th.join(timeout=2.0)
+                if handover:
+                    self.pipeline.on_fused(None, time.monotonic())
+                    share.clear_owner()
+                    share.ack_released(devices)
+                    self.bus.publish("camera.handover", {"released": True, "cameras": devices})
+                    while share.requested() and not self.stop_event.is_set():
+                        self.stop_event.wait(0.5)
+                    share.clear_released()
+                    self.bus.publish("camera.handover", {"released": False, "cameras": devices})
+        finally:
+            share.clear_owner()
+            for tr in trackers[1:]:
+                with contextlib.suppress(Exception):
+                    tr.close()
+        return None
 
     def _wifi_loop(self) -> None:
         from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource, stack_csi
@@ -725,6 +935,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         if self.cfg.wifi.enabled:
             self.threads.append(threading.Thread(target=self._wifi_loop, daemon=True, name="wifi"))
         self.threads.append(threading.Thread(target=self._watch_config, daemon=True, name="config-watch"))
+        if self.monitor_watcher.enabled:
+            self.threads.append(threading.Thread(target=self._watch_monitors, daemon=True, name="monitors"))
         for th in self.threads:
             th.start()
         if self.guard is not None:
@@ -736,10 +948,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.bus.publish("autopause.unavailable", {"error": str(exc)})
         self._restart_hotkeys()
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 3.0) -> None:
         # Stop producing new events first, then make a best-effort release of
         # any synthetic mouse button still held by an in-progress drag.
         self.stop_event.set()
+        # Let the camera thread finish its current frame and close MediaPipe itself before the
+        # interpreter shuts the executors down ("cannot schedule new futures after shutdown").
+        for th in getattr(self, "threads", []):
+            if th.name == "camera" and th.is_alive() and th is not threading.current_thread():
+                th.join(timeout=join_timeout)
         try:
             self.pipeline.set_paused(True)
         except Exception as exc:

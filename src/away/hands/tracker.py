@@ -72,7 +72,8 @@ def camera_frames(
     if fps > 0:
         cap.set(cv2.CAP_PROP_FPS, fps)
     if not cap.isOpened():
-        raise RuntimeError(f"cannot open camera {index} (permission denied or no device?)")
+        cap.release()
+        raise RuntimeError(f"cannot open camera {index} (in use by another app, no device, or permission denied)")
     try:
         while True:
             ok, frame = cap.read()
