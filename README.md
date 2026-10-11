@@ -146,7 +146,7 @@ flowchart LR
 |---|---|
 | `hands/` | landmarks, One Euro filter, cursor mapping (power or sigmoid curve, per-direction speed), gesture state machine, `stabilize.py` (steady click, dwell) |
 | `multicam/` | `capture.py` (enumeration, camera threads, `FramePairer`), `geometry.py` (intrinsics, pose from hands, triangulation, checkerboard), `calibration.py`, `fusion.py` (per-view confidence, best-view/weighted fusion, 3D pinch, push) |
-| `face/` | face landmarker, active speaker, brow / mouth / wink triggers |
+| `face/` | face landmarker, active speaker, brow / mouth / wink triggers, optional iPhone (Live Link Face) source |
 | `voice/` | always-on + push-to-talk, ASR (vocabulary as prompt + `hotwords`), cleanup, `numbers.py`, `edit.py` (edit selected text) |
 | `app/` | runner (pipeline + device threads), tray, settings GUI, overlays, `autopause.py` |
 | `bindings.py` / `actions.py` | trigger -> action mapping and execution |
@@ -154,6 +154,7 @@ flowchart LR
 ## Quickstart
 
 Full per-OS instructions: [docs/INSTALL.md](docs/INSTALL.md). Wi-Fi sensing: [docs/wifi-setup.md](docs/wifi-setup.md).
+Experimental iPhone face tracking (free Live Link Face app over Wi-Fi): [docs/iphone.md](docs/iphone.md).
 
 ```bash
 pipx install ".[all]"        # Python 3.10–3.12
@@ -281,6 +282,7 @@ away update --check                          # current vs latest release (exit 0
 away update [--yes]                          # download, verify SHA-256, install (see "Updates")
 away hardware [--json]                       # detected CPU/RAM/GPU + the performance profile and why
 away gpu install | status | remove           # NVIDIA GPU pack (cuBLAS 12) for Whisper on CUDA
+away iphone listen | compare [--seconds N]   # experimental iPhone face source (docs/iphone.md)
 ```
 
 Invalid configs fail with every problem listed and its YAML path, e.g.
@@ -367,6 +369,8 @@ Pointer accuracy:
 - **Dwell click** (`hands.dwell`): rest the cursor within `radius_px` for `time_s` and `gesture:dwell` fires.
 - **Face clicks**: `face.wink_trigger` / `wink_threshold` / `wink_open_max` / `wink_hold`, plus
   `brow_threshold`, `mouth_threshold` and the hold times. Thresholds are per user, so tune them in Settings.
+  `face.source: webcam|iphone|auto` (default `webcam`) can take the blendshapes from an iPhone's TrueDepth
+  camera instead; see [docs/iphone.md](docs/iphone.md) (experimental).
 - **Cursor ring** (`cursor_overlay: true` or `away run --cursor-overlay`): a small ring by the pointer
   that fills as the pinch closes, turns solid on pinch, blue while dragging, purple while dwelling,
   orange with an arrow while auto-scrolling and grey when paused.
@@ -746,6 +750,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Frozen bundle with every feature (`away selftest`: torch, onnx, onnxruntime, MediaPipe, OpenCV, faster-whisper + Silero VAD, PortAudio, tkinter, pynput, pystray) | All 13 checks pass in the dev venv (Linux aarch64). The frozen build with the new bundle was **not completed in the sandbox** (too slow on its filesystem). Windows/macOS/Linux x86_64: **CI-verified on tag only** (the release workflow fails if any check fails) |
 | Windows `.exe` installer, macOS `.dmg` | **CI-built and smoke-tested on tag only; untested on real hardware** |
 | Auto-update (`away update`, tray item) | Version compare, asset choice, SHA-256 verify, command lines and AppImage replace unit-tested with no network (`tests/test_updater.py`); real installs on each OS **untested** |
+| iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

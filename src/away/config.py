@@ -221,8 +221,23 @@ class VoiceConfig:
 
 
 @dataclass
+class IPhoneFaceConfig:
+    """Live Link Face (iOS) receiver; used when ``face.source`` is ``iphone`` or ``auto``. See docs/iphone.md."""
+
+    host: str = "0.0.0.0"  # interface to listen on (0.0.0.0 = all)
+    port: int = 11111  # the Live Link Face app's default target port (UDP)
+    stale_after: float = 0.5  # seconds without a face packet before the iPhone counts as gone (auto -> webcam)
+    max_rate: float = 30.0  # feed the face pipeline at most this many frames/s (the phone sends ~60)
+    swap_sides: bool = False  # flip Left/Right blendshapes if winks come out reversed vs the webcam
+
+
+FACE_SOURCES = ("webcam", "iphone", "auto")
+
+
+@dataclass
 class FaceConfig:
     enabled: bool = True
+    source: str = "webcam"  # webcam | iphone | auto (experimental iPhone via Live Link Face; see docs/iphone.md)
     gate_dictation: bool = True
     speaking_threshold: float = 0.25
     correlation_window: float = 1.5  # seconds
@@ -237,6 +252,7 @@ class FaceConfig:
     wink_threshold: float = 0.5  # eyeBlink score of the closed eye
     wink_open_max: float = 0.3  # the other eye must stay below this (a blink closes both)
     wink_hold: float = 0.25
+    iphone: IPhoneFaceConfig = field(default_factory=IPhoneFaceConfig)
 
 
 @dataclass
@@ -480,6 +496,19 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError("voice.asr_model must not be empty (use 'auto')")
     if cfg.updates.channel not in UPDATE_CHANNELS:
         raise ValueError(f"updates.channel must be {'|'.join(UPDATE_CHANNELS)}, got {cfg.updates.channel!r}")
+    if cfg.face.source not in FACE_SOURCES:
+        raise ValueError(f"face.source must be {'|'.join(FACE_SOURCES)}, got {cfg.face.source!r}")
+    ip = cfg.face.iphone
+    if isinstance(ip.port, bool) or not isinstance(ip.port, int) or not 1 <= ip.port <= 65535:
+        raise ValueError(f"face.iphone.port must be an integer in [1, 65535], got {ip.port!r}")
+    if not isinstance(ip.host, str) or not ip.host.strip():
+        raise ValueError("face.iphone.host must be an IP address or hostname (0.0.0.0 = all interfaces)")
+    if not isinstance(ip.swap_sides, bool):
+        raise ValueError(f"face.iphone.swap_sides must be true or false, got {ip.swap_sides!r}")
+    for name, lo, hi in (("stale_after", 0.05, 10.0), ("max_rate", 1.0, 120.0)):
+        val = getattr(ip, name)
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= float(val) <= hi:
+            raise ValueError(f"face.iphone.{name} must be a number in [{lo}, {hi}], got {val!r}")
     if cfg.wifi.source not in ("rssi", "picoscenes", "iax", "synthetic"):
         raise ValueError(f"wifi.source invalid: {cfg.wifi.source!r}")
     c = cfg.hands.cursor
