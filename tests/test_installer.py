@@ -48,7 +48,7 @@ def test_setup_yes_never_reads_stdin(monkeypatch):
     monkeypatch.setattr(sys, "stdin", None)
     monkeypatch.setattr("builtins.input", lambda p: (_ for _ in ()).throw(AssertionError("blocked on input")))
     got = []
-    monkeypatch.setattr(models, "download_asr", lambda m, d, out: got.append(m))
+    monkeypatch.setattr(models, "download_asr", lambda m, d, out, **k: got.append(m))
     rep = setup_wizard.run(yes=True, asr_model="small", skip_probe=True, out=lambda s: None, downloader=_fake_dl)
     assert got == ["small"] and rep.models["asr"] == "ok"
     assert Path(rep.config_path).exists()
@@ -57,7 +57,7 @@ def test_setup_yes_never_reads_stdin(monkeypatch):
 def test_setup_without_yes_and_without_stdin_uses_defaults(monkeypatch):
     monkeypatch.setattr(sys, "stdin", None)
     got = []
-    monkeypatch.setattr(models, "download_asr", lambda m, d, out: got.append(m))
+    monkeypatch.setattr(models, "download_asr", lambda m, d, out, **k: got.append(m))
     rep = setup_wizard.run(skip_probe=True, out=lambda s: None, downloader=_fake_dl)
     assert rep.models["asr"] == "ok" and got == [C.AppConfig().voice.asr_model]
 
@@ -287,7 +287,17 @@ def test_release_workflow_smoke_and_strict():
 
 def test_spec_bundles_everything_but_nemo():
     spec = (ROOT / "packaging" / "pyinstaller" / "away.spec").read_text()
-    for pkg in ("torch", "onnx", "tkinter", "pystray", "pynput", "sounddevice", "mediapipe", "faster_whisper"):
+    for pkg in (
+        "torch",
+        "onnx",
+        "tkinter",
+        "pystray",
+        "pynput",
+        "sounddevice",
+        "mediapipe",
+        "faster_whisper",
+        "hf_xet",
+    ):
         assert f'optional("{pkg}"' in spec, pkg
     assert '"nemo"' in spec and '"matplotlib"' not in spec  # mediapipe.tasks.python.vision imports matplotlib
 

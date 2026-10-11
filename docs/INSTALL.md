@@ -34,6 +34,8 @@ by a separate step:
 | Whisper `large-v3-turbo` (default speech model) | ~1.6 GB | default |
 | Whisper `small` (for slower PCs) | ~0.5 GB | Windows: tick *Use the smaller speech model*; elsewhere `setup --yes --asr-model small` |
 
+The Whisper download uses 8 parallel connections, verifies each file's checksum, and resumes where it stopped if interrupted (run `setup` again); tune with `setup --connections N` (1 = single stream).
+
 Approximate installer sizes (CPU PyTorch is most of it; GitHub allows 2 GB per file and the release
 workflow fails above 1.9 GB):
 

@@ -67,6 +67,7 @@ def run(
     skip_probe: bool = False,
     out: Callable[[str], None] = print,
     downloader: Callable[..., Path] = models.download,
+    connections: int = 8,
 ) -> SetupReport:
     rep = SetupReport()
     assume = True if yes else None
@@ -93,7 +94,7 @@ def run(
         size = models.ASR_SIZES_MB.get(model, 0)
         if ask(f"  Download Whisper '{model}' (~{size} MB)? 'small' is ~485 MB for slower PCs.", True, assume):
             try:
-                models.download_asr(model, mdir, out)
+                models.download_asr(model, mdir, out, connections=max(1, connections))
                 cfg.voice.asr_model = model
                 rep.models["asr"] = "ok"
             except Exception as exc:

@@ -139,16 +139,10 @@ def quiet_hf_hub() -> None:
         logging.getLogger(name).setLevel(logging.ERROR)
 
 
-def download_asr(model: str, dest_dir: Path, progress: Callable[[str], None] = print) -> Path:  # pragma: no cover
+def _stdout_writer() -> Callable[[str], None]:
     import sys
 
-    quiet_hf_hub()
-    from faster_whisper import download_model
-
-    out = dest_dir / f"whisper-{model}"
-    size_mb = ASR_SIZES_MB.get(model, 0)
-    progress(f"  ASR '{model}': downloading ~{size_mb} MB from Hugging Face ...")
-    stream = sys.stdout
+    stream = sys.stdout  # None in a windowed frozen exe
 
     def write(text: str) -> None:
         if stream is None:
@@ -159,9 +153,48 @@ def download_asr(model: str, dest_dir: Path, progress: Callable[[str], None] = p
         except (OSError, ValueError):
             pass
 
-    with _DirProgress(out, size_mb * 1_000_000, write):
+    return write
+
+
+def _hub_download(model: str, out: Path, write: Callable[[str], object]) -> Path:  # pragma: no cover - network
+    """Fallback: faster-whisper's own huggingface_hub download (uses hf_xet when it is installed)."""
+    quiet_hf_hub()
+    from faster_whisper import download_model
+
+    with _DirProgress(out, ASR_SIZES_MB.get(model, 0) * 1_000_000, write):
         path = download_model(model, output_dir=str(out))
     return Path(path)
+
+
+def download_asr(
+    model: str,
+    dest_dir: Path,
+    progress: Callable[[str], None] = print,
+    connections: int = 8,
+    write: Callable[[str], object] | None = None,
+    fast: Callable[..., Path] | None = None,
+    slow: Callable[[str, Path, Callable[[str], object]], Path] | None = None,
+) -> Path:
+    """Download Whisper ``model`` into ``dest_dir/whisper-<model>``.
+
+    Primary path: parallel, resumable, checksum-verified ranged download (``away.app.fastdl``).
+    Any failure other than a checksum mismatch falls back to faster-whisper's huggingface_hub download.
+    """
+    from away.app import fastdl
+
+    out = dest_dir / f"whisper-{model}"
+    size_mb = ASR_SIZES_MB.get(model, 0)
+    write = write or _stdout_writer()
+    fast = fast or fastdl.download_model
+    slow = slow or _hub_download
+    progress(f"  ASR '{model}': downloading ~{size_mb} MB from Hugging Face ({connections} connections) ...")
+    try:
+        return Path(fast(model, out, write, connections=connections))
+    except fastdl.ChecksumError:
+        raise
+    except Exception as exc:
+        progress(f"  fast download unavailable ({type(exc).__name__}: {exc}); using the standard downloader ...")
+    return Path(slow(model, out, write))
 
 
 def model_path(models_dir: Path, name: str) -> Path | None:

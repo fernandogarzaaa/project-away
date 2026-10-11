@@ -12,7 +12,7 @@
 ; /AUTOUPDATE=1 relaunches the tray app when the install finishes. A silent install skips the model
 ; download when the models are already on disk (an upgrade keeps them); missing ones download on first launch.
 #ifndef AppVersion
-  #define AppVersion "0.1.3"
+  #define AppVersion "0.1.4"
 #endif
 
 [Setup]

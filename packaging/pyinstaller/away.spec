@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH).parents[1]  # noqa: F821  (SPECPATH is injected by PyInstaller)
 APP = "ProjectAway"
@@ -27,7 +27,7 @@ hidden = collect_submodules("away")
 missing = []
 
 
-def optional(pkg, data=True, libs=False, subs=False, hidden_mods=()):
+def optional(pkg, data=True, libs=False, subs=False, hidden_mods=(), meta=False):
     # find_spec, not import: pynput/pystray fail to *import* on a headless build machine
     if importlib.util.find_spec(pkg) is None:
         print(f"[away.spec] package {pkg!r} not installed, skipping")
@@ -40,12 +40,18 @@ def optional(pkg, data=True, libs=False, subs=False, hidden_mods=()):
         binaries += collect_dynamic_libs(pkg)
     if subs:
         hidden += collect_submodules(pkg)
+    if meta:
+        datas += copy_metadata(pkg)
     hidden += list(hidden_mods)
 
 
 optional("mediapipe", libs=True)  # .task graphs, C library; tasks.vision imports matplotlib (do not exclude it)
 optional("cv2")
 optional("faster_whisper")  # ships the Silero VAD ONNX in faster_whisper/assets/
+# hf_xet: huggingface_hub imports it lazily, so PyInstaller never sees it. Without it the fallback Whisper
+# download (when away.app.fastdl's parallel path fails) is a single slow HTTP stream. meta: huggingface_hub
+# detects it via importlib.metadata, so the dist-info must ship too.
+optional("hf_xet", libs=True, subs=True, meta=True)
 optional("ctranslate2", libs=True)
 optional("onnxruntime", libs=True)
 optional("onnx")
@@ -144,7 +150,7 @@ if sys.platform == "darwin":
         bundle_identifier="com.fernandogarzaaa.projectaway",
         info_plist={
             "CFBundleDisplayName": "Project Away",
-            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.3"),
+            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.4"),
             "LSUIElement": True,  # menu-bar (tray) app, no Dock icon
             "NSCameraUsageDescription": "Project Away tracks your hands and face locally to control the pointer.",
             "NSMicrophoneUsageDescription": "Project Away transcribes push-to-talk dictation locally.",

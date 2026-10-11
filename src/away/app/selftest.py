@@ -92,6 +92,16 @@ def _faster_whisper() -> str:
     return f"faster-whisper {faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, VAD {assets}"
 
 
+def _hf_xet() -> str:
+    import hf_xet
+    import hf_xet.hf_xet  # noqa: F401  (the native Rust extension .so/.pyd)
+    from huggingface_hub.utils import _runtime
+
+    # huggingface_hub finds hf_xet through importlib.metadata: the dist-info must be bundled too
+    assert _runtime.is_xet_available(), "huggingface_hub does not see hf_xet (missing dist-info?)"
+    return f"hf_xet {_runtime.get_xet_version()}"
+
+
 def _sounddevice() -> str:
     import sounddevice as sd
 
@@ -142,6 +152,7 @@ CHECKS: tuple[Check, ...] = (
     Check("mediapipe", "hand + face tracking", _mediapipe),
     Check("opencv", "camera capture", _opencv),
     Check("faster-whisper", "dictation (Whisper + Silero VAD)", _faster_whisper),
+    Check("hf-xet", "fast Whisper download fallback (Xet)", _hf_xet),
     Check("sounddevice", "microphone (PortAudio)", _sounddevice),
     Check("tkinter", "settings window", _tkinter),
     Check("torch", "calibrate / custom gestures / train", _torch),

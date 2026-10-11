@@ -66,7 +66,13 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 def cmd_setup(args: argparse.Namespace) -> int:
     from away.app import setup_wizard
 
-    rep = setup_wizard.run(yes=args.yes, asr_model=args.asr_model, skip_asr=args.skip_asr, skip_probe=args.skip_probe)
+    rep = setup_wizard.run(
+        yes=args.yes,
+        asr_model=args.asr_model,
+        skip_asr=args.skip_asr,
+        skip_probe=args.skip_probe,
+        connections=args.connections,
+    )
     return 1 if any(v.startswith("failed") for v in rep.models.values() if v) else 0
 
 
@@ -692,6 +698,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--asr-model", help="Whisper model (large-v3-turbo | small | ...)")
     s.add_argument("--skip-asr", action="store_true")
     s.add_argument("--skip-probe", action="store_true", help="do not open camera/mic")
+    s.add_argument(
+        "--connections",
+        type=int,
+        default=8,
+        metavar="N",
+        help="parallel connections for the Whisper download (default 8; 1 = single stream)",
+    )
     s.set_defaults(fn=cmd_setup)
 
     r = sub.add_parser("run", help="run gestures + dictation in the foreground")
