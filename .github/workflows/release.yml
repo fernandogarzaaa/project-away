@@ -25,8 +25,6 @@ env:
 jobs:
   python-dist:
     runs-on: ubuntu-latest
-    env:
-      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,9 +35,20 @@ jobs:
         with:
           name: python-dist
           path: dist/*
-      - name: Publish to PyPI (skipped unless a PYPI_API_TOKEN secret exists)
-        if: ${{ env.PYPI_API_TOKEN != '' }}
-        run: pip install twine && twine upload -u __token__ -p "$PYPI_API_TOKEN" dist/*
+
+  pypi:
+    # Separate job so a PyPI hiccup never blocks the installer release.
+    needs: python-dist
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing (OIDC), no token secret needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
 
   linux:
     runs-on: ubuntu-22.04  # older glibc => the bundle runs on more distros

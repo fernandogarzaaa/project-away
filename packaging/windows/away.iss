@@ -6,7 +6,7 @@
 ; then downloads the MediaPipe + Whisper models in a visible console window, enables start-at-sign-in
 ; and a desktop shortcut (both pre-ticked), and launches the tray app.
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 
 [Setup]
