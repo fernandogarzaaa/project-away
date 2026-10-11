@@ -49,6 +49,8 @@ jobs:
           name: python-dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true  # re-running a tag never fails on an already-uploaded version
 
   linux:
     runs-on: ubuntu-22.04  # older glibc => the bundle runs on more distros
