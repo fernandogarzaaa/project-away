@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only while the account is on private-repo Actions minutes (macOS = 10x, Windows = 2x).
+# Run locally instead: ruff check . && mypy src && pytest -q
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
