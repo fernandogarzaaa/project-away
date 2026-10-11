@@ -852,6 +852,97 @@ def camera_confidence_worker(
         lease.close()
 
 
+# ---------------------------------------------------------------------------------- layout helpers
+# Pure functions behind the window layout, so the sizes and texts are unit-tested without a display.
+BASE_DPI = 96.0
+DEFAULT_SIZE = (900, 640)  # logical (96 dpi) pixels; fits a 1366x768 screen with the taskbar at 100 %
+MIN_SIZE = (600, 420)  # logical; the scroll bars handle anything smaller than the content
+FONT_PT = 10  # ttk default fonts (positive = points, so they follow `tk scaling`)
+BUTTON_PADDING = (10, 4)  # ttk.Button padding in pixels (x, y): text never touches the border
+
+
+def tk_scaling(pixels_per_inch: float) -> float:
+    """``tk scaling`` value (pixels per point) for a display: 96 dpi -> 1.333, 144 dpi (150 %) -> 2.0."""
+    ppi = float(pixels_per_inch) if pixels_per_inch and pixels_per_inch > 0 else BASE_DPI
+    return ppi / 72.0
+
+
+def ui_scale(pixels_per_inch: float) -> float:
+    """Windows scale factor (1.0 = 100 %, 1.25, 1.5...) from the display DPI; never below 1."""
+    ppi = float(pixels_per_inch) if pixels_per_inch and pixels_per_inch > 0 else BASE_DPI
+    return max(1.0, ppi / BASE_DPI)
+
+
+def window_geometry(screen_w: int, screen_h: int, scale: float = 1.0) -> tuple[int, int, int, int]:
+    """``(width, height, x, y)``: :data:`DEFAULT_SIZE` scaled for the DPI, shrunk to fit the screen (minus a
+    margin and the taskbar) and centred. 1366x768 at 100 % -> 900x640."""
+    max_w, max_h = max(320, screen_w - 40), max(240, int(screen_h * 0.88))
+    w = min(int(DEFAULT_SIZE[0] * scale), max_w)
+    h = min(int(DEFAULT_SIZE[1] * scale), max_h)
+    return w, h, max(0, (screen_w - w) // 2), max(0, (screen_h - h) // 3)
+
+
+def min_window_size(screen_w: int, screen_h: int, scale: float = 1.0) -> tuple[int, int]:
+    """Smallest window that still shows every bottom-bar button: :data:`MIN_SIZE` scaled, never larger than
+    what :func:`window_geometry` opens."""
+    w, h, _x, _y = window_geometry(screen_w, screen_h, scale)
+    return min(int(MIN_SIZE[0] * scale), w), min(int(MIN_SIZE[1] * scale), h)
+
+
+def wheel_steps(delta: int = 0, num: int = 0, platform: str | None = None) -> int:
+    """Scroll units for a mouse-wheel event (negative = up). Windows: ``delta`` in multiples of 120 (a
+    high-resolution wheel sends smaller values: still one step); macOS: ``delta`` is already in steps;
+    X11: Button-4 = up, Button-5 = down."""
+    plat = platform or sys.platform
+    if num == 4:
+        return -1
+    if num == 5:
+        return 1
+    if not delta:
+        return 0
+    if plat == "darwin":
+        return -int(delta)
+    steps = int(-delta / 120)
+    return steps if steps else (-1 if delta > 0 else 1)
+
+
+def short_path(path: Path | str, max_len: int = 48) -> str:
+    """A path that fits a status line: the whole path when short, else ``…\\<parent>\\<name>``."""
+    s = str(path)
+    if len(s) <= max_len:
+        return s
+    sep = "\\" if "\\" in s else "/"
+    parts = [p for p in s.replace("\\", "/").split("/") if p]
+    tail = sep.join(parts[-2:])
+    if len(tail) + 2 > max_len:
+        tail = parts[-1]
+    return "…" + sep + tail
+
+
+def status_text(kind: str, path: Path | str | None = None, dirty: bool = False) -> str:
+    """The bottom status line, short enough for one line of a narrow window."""
+    p = short_path(path) if path is not None else ""
+    if kind == "saved":
+        return "Saved. Changes apply within a second."
+    if kind == "imported":
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1] if path is not None else "bindings"
+        return f"Imported {name}."
+    if kind == "exported":
+        return f"Exported to {p}."
+    return ("Unsaved changes. " if dirty else "") + f"Config file: {p}"
+
+
+def status_wraplength(width: int, margin: int = 16) -> int:
+    """``wraplength`` for the full-width status label of a window ``width`` pixels wide."""
+    return max(120, int(width) - margin)
+
+
+def scroll_window_height(canvas_h: int, content_h: int) -> int:
+    """Height of the frame inside a scrollable tab: the visible height when the content fits (so a tab that
+    stretches, such as the bindings list, still fills the window), else the content's own height."""
+    return max(int(canvas_h), int(content_h))
+
+
 class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb only
     def __init__(self, root: Any, model: SettingsModel) -> None:
         import tkinter as tk
@@ -867,8 +958,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._test_q: queue.Queue[str] = queue.Queue()
         self._test_stop = threading.Event()
         root.title("Project Away settings")
-        root.geometry("860x620")
-        root.minsize(720, 520)
+        self._scrollers: list[tuple[Any, Any]] = []  # (outer tab frame, canvas) of every scrollable tab
+        scale = self._apply_style()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h, x, y = window_geometry(sw, sh, scale)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+        root.minsize(*min_window_size(sw, sh, scale))
 
         top = ttk.Frame(root, padding=6)
         top.pack(fill="x")
@@ -891,17 +986,16 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             "<<ComboboxSelected>>", lambda _e: self._report(model.set_active_profile(self.active_var.get()))
         )
 
-        nb = ttk.Notebook(root)
-        nb.pack(fill="both", expand=True, padx=6)
-        self._build_bindings(nb)
-        self._build_tuning(nb)
-        self._build_voice(nb)
-        self._build_cameras(nb)
-        self._build_performance(nb)
-        self._build_test(nb)
-
-        bottom = ttk.Frame(root, padding=6)
-        bottom.pack(fill="x")
+        # The bottom bar is packed before the notebook so it keeps its space however small the window gets;
+        # the tabs scroll instead. Status text gets its own full-width row under the buttons.
+        status_row = ttk.Frame(root, padding=(8, 0, 8, 6))
+        status_row.pack(side="bottom", fill="x")
+        self.status = tk.StringVar(value=status_text("config", model.path))
+        status_lbl = ttk.Label(status_row, textvariable=self.status, foreground="#555", anchor="w", justify="left")
+        status_lbl.pack(fill="x")
+        status_row.bind("<Configure>", lambda e: status_lbl.configure(wraplength=status_wraplength(e.width)))
+        bottom = ttk.Frame(root, padding=(6, 6, 6, 2))
+        bottom.pack(side="bottom", fill="x")
         for text, cmd in (
             ("Save", self._on_save),
             ("Reset profile", self._on_reset_profile),
@@ -911,18 +1005,105 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("Close", self._on_close),
         ):
             ttk.Button(bottom, text=text, command=cmd).pack(side="left", padx=3)
-        self.status = tk.StringVar(value=f"config: {model.path}")
-        ttk.Label(bottom, textvariable=self.status, foreground="#555").pack(side="left", padx=8)
+
+        nb = ttk.Notebook(root)
+        nb.pack(fill="both", expand=True, padx=6)
+        self._build_bindings(nb)
+        self._build_tuning(nb)
+        self._build_voice(nb)
+        self._build_cameras(nb)
+        self._build_performance(nb)
+        self._build_test(nb)
+        self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
+
+    # ---------------------------------------------------------------- layout
+    def _apply_style(self) -> float:
+        """Readable fonts (about 10 pt, following the real DPI) and button padding; returns the UI scale."""
+        from tkinter import font as tkfont
+
+        root = self.root
+        ppi = 96.0
+        with contextlib.suppress(Exception):
+            ppi = float(root.winfo_fpixels("1i"))
+            root.tk.call("tk", "scaling", tk_scaling(ppi))
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont"):
+            with contextlib.suppress(Exception):
+                tkfont.nametofont(name).configure(size=FONT_PT)
+        style = self.ttk.Style(root)
+        style.configure("TButton", padding=BUTTON_PADDING)
+        with contextlib.suppress(Exception):  # Treeview rows sized for the font, not a fixed 20 px
+            line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+            style.configure("Treeview", rowheight=int(line) + 6)
+        return ui_scale(ppi)
+
+    def _scroll_tab(self, nb: Any, text: str, padding: int = 8) -> Any:
+        """A notebook tab whose content scrolls vertically (scroll bar + mouse wheel). Returns the frame to
+        fill. The inner frame is as wide as the tab and at least as tall, so stretching layouts still fill it."""
+        tk, ttk = self.tk, self.ttk
+        outer = ttk.Frame(nb)
+        nb.add(outer, text=text)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        f = ttk.Frame(canvas, padding=padding)
+        win = canvas.create_window((0, 0), window=f, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def fit(_e: Any = None) -> None:
+            h = scroll_window_height(canvas.winfo_height(), f.winfo_reqheight())
+            canvas.itemconfigure(win, width=canvas.winfo_width(), height=h)
+            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), h))
+
+        f.bind("<Configure>", lambda _e: canvas.after_idle(fit))
+        canvas.bind("<Configure>", fit)
+        self._scrollers.append((outer, canvas))
+        return f
+
+    def _bind_wheel(self) -> None:
+        """One mouse-wheel handler for the window: it scrolls the tab under the pointer, and only when that
+        tab's content is taller than the window. Lists keep their own wheel scrolling; a combo box no
+        longer changes its value when the wheel passes over it (it scrolls the tab instead)."""
+        root = self.root
+
+        def canvas_under(e: Any) -> Any:
+            w = None
+            with contextlib.suppress(Exception):
+                w = root.winfo_containing(e.x_root, e.y_root)
+            while w is not None:
+                for outer, canvas in self._scrollers:
+                    if w is outer or w is canvas:
+                        return canvas
+                w = getattr(w, "master", None)
+            return None
+
+        def on_wheel(e: Any, own_list: bool = True) -> str | None:
+            if own_list:
+                with contextlib.suppress(Exception):
+                    if root.winfo_containing(e.x_root, e.y_root).winfo_class() in ("Treeview", "Listbox", "Text"):
+                        return None
+            canvas = canvas_under(e)
+            steps = wheel_steps(getattr(e, "delta", 0) or 0, int(getattr(e, "num", 0) or 0))
+            if canvas is not None and steps and canvas.yview() != (0.0, 1.0):
+                canvas.yview_scroll(steps, "units")
+            return None
+
+        def combo_wheel(e: Any) -> str:
+            on_wheel(e, own_list=False)
+            return "break"
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind_all(seq, on_wheel, add="+")
+            root.bind_class("TCombobox", seq, combo_wheel)
 
     # ---------------------------------------------------------------- tabs
     def _build_bindings(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        f = ttk.Frame(nb, padding=6)
-        nb.add(f, text="Bindings")
+        f = self._scroll_tab(nb, "Bindings", 6)
         cols = ("trigger", "action", "from")
-        self.tree = ttk.Treeview(f, columns=cols, show="headings", height=14)
+        self.tree = ttk.Treeview(f, columns=cols, show="headings", height=8)  # grows with the window
         for c, w in zip(cols, (240, 320, 100)):
             self.tree.heading(c, text=c.title())
             self.tree.column(c, width=w, anchor="w")
@@ -970,16 +1151,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _build_tuning(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        outer = ttk.Frame(nb)
-        nb.add(outer, text="Tuning")
-        canvas = tk.Canvas(outer, highlightthickness=0)
-        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        f = ttk.Frame(canvas, padding=6)
-        f.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=f, anchor="nw")
-        canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        f = self._scroll_tab(nb, "Tuning", 6)
         self.scales: dict[str, tuple[Any, Any]] = {}
         for i, t in enumerate(self.m.tunables()):
             ttk.Label(f, text=t.label).grid(row=i, column=0, sticky="w", padx=4, pady=1)
@@ -1006,8 +1178,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _build_voice(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        f = ttk.Frame(nb, padding=8)
-        nb.add(f, text="Voice & input")
+        f = self._scroll_tab(nb, "Voice & input")
         self.vvars: dict[str, Any] = {}
         r = 0
         for path, label in (
@@ -1124,8 +1295,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _build_cameras(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        f = ttk.Frame(nb, padding=8)
-        nb.add(f, text="Cameras")
+        f = self._scroll_tab(nb, "Cameras")
         self.cam_mode = tk.StringVar()
         ttk.Label(f, textvariable=self.cam_mode, font=("TkDefaultFont", 10, "bold")).grid(
             row=0, column=0, columnspan=6, sticky="w"
@@ -1311,8 +1481,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _build_performance(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        f = ttk.Frame(nb, padding=8)
-        nb.add(f, text="Performance")
+        f = self._scroll_tab(nb, "Performance")
         row = ttk.Frame(f)
         row.pack(fill="x")
         ttk.Label(row, text="Speech recognition runs on:").pack(side="left")
@@ -1382,8 +1551,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def _build_test(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        f = ttk.Frame(nb, padding=8)
-        nb.add(f, text="Test gesture")
+        f = self._scroll_tab(nb, "Test gesture")
         ok, msg = camera_available()
         self.test_status = tk.StringVar(value=msg)
         ttk.Label(f, textvariable=self.test_status).pack(anchor="w")
@@ -1407,7 +1575,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         elif ok:
             self.status.set(ok)
         else:
-            self.status.set(("unsaved changes - " if self.m.dirty else "") + f"config: {self.m.path}")
+            self.status.set(status_text("config", self.m.path, self.m.dirty))
 
     def refresh(self) -> None:
         m = self.m
@@ -1541,7 +1709,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         except ValueError as exc:
             self._report(str(exc))
             return
-        self._report(None, f"saved to {p} (a running Away picks it up within a second)")
+        self._report(None, status_text("saved", p))
 
     def _on_reset_profile(self) -> None:
         self.m.reset_profile()
@@ -1563,14 +1731,14 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         replace = messagebox.askyesno("Import", "Replace all bindings? (No = merge into the current ones)")
         err = self.m.import_bindings(Path(p), replace)
         self.refresh()
-        self._report(err, None if err else f"imported {p}")
+        self._report(err, None if err else status_text("imported", p))
 
     def _on_export(self) -> None:
         from tkinter import filedialog
 
         p = filedialog.asksaveasfilename(defaultextension=".yaml", filetypes=[("YAML", "*.yaml")])
         if p:
-            self._report(None, f"exported to {self.m.export_bindings(Path(p))}")
+            self._report(None, status_text("exported", self.m.export_bindings(Path(p))))
 
     def _toggle_test(self) -> None:
         if self._test_thread is not None and self._test_thread.is_alive():
@@ -1616,6 +1784,9 @@ def main(config_path: Path | None = None, argv: list[str] | None = None) -> int:
     try:
         import tkinter as tk
 
+        from away.control.monitors import enable_dpi_awareness
+
+        enable_dpi_awareness()  # Windows: before Tk, or text is bitmap-scaled (blurry) or clipped; no-op if set
         root = tk.Tk()
     except Exception as exc:
         print(
