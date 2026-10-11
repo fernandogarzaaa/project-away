@@ -465,6 +465,7 @@ def test_no_install_when_not_frozen_or_unknown(tmp_path: Path, kind: str) -> Non
     assert launch.calls == [] and run.calls == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AppImages are Linux-only; Windows has no POSIX exec bits")
 def test_appimage_atomic_replace(tmp_path: Path) -> None:
     target = tmp_path / "apps" / "ProjectAway-0.1.2-linux-x86_64.AppImage"
     target.parent.mkdir()

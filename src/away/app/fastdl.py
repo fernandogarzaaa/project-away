@@ -81,6 +81,24 @@ def endpoint() -> str:
     return os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
 
 
+# Copy of faster_whisper.utils._MODELS (1.2): used when faster-whisper is missing or its private table moved.
+KNOWN_REPOS = {
+    **{
+        m: f"Systran/faster-whisper-{m}"
+        for m in ("tiny.en", "tiny", "base.en", "base", "small.en", "small", "medium.en", "medium")
+    },
+    **{m: f"Systran/faster-whisper-{m}" for m in ("large-v1", "large-v2", "large-v3")},
+    "large": "Systran/faster-whisper-large-v3",
+    "distil-large-v2": "Systran/faster-distil-whisper-large-v2",
+    "distil-medium.en": "Systran/faster-distil-whisper-medium.en",
+    "distil-small.en": "Systran/faster-distil-whisper-small.en",
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "distil-large-v3.5": "distil-whisper/distil-large-v3.5-ct2",
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+}
+
+
 def repo_for(model: str) -> str:
     """The Hub repo faster-whisper downloads for ``model`` (``small`` -> ``Systran/faster-whisper-small``)."""
     if "/" in model:
@@ -89,7 +107,7 @@ def repo_for(model: str) -> str:
         from faster_whisper.utils import _MODELS
     except Exception:  # faster-whisper missing or its private table moved
         _MODELS = {}
-    repo = _MODELS.get(model)
+    repo = _MODELS.get(model) or KNOWN_REPOS.get(model)
     if repo is None:
         raise ValueError(f"unknown Whisper model {model!r}")
     return str(repo)

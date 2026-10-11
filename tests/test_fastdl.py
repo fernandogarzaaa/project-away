@@ -186,6 +186,22 @@ def test_repo_for_matches_faster_whisper() -> None:
         fastdl.repo_for("nope")
 
 
+def test_repo_for_without_faster_whisper(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", None)  # import raises ImportError
+    assert fastdl.repo_for("small") == "Systran/faster-whisper-small"
+    assert fastdl.repo_for("large-v3-turbo") == "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+    assert fastdl.repo_for("distil-large-v3.5") == "distil-whisper/distil-large-v3.5-ct2"
+    with pytest.raises(ValueError):
+        fastdl.repo_for("nope")
+
+
+def test_known_repos_match_installed_faster_whisper() -> None:
+    utils = pytest.importorskip("faster_whisper.utils")
+    assert fastdl.KNOWN_REPOS == utils._MODELS
+
+
 def test_select_files_uses_faster_whisper_patterns_and_checksums() -> None:
     entries = [
         {"type": "file", "path": "model.bin", "size": 133, "oid": "ptr", "lfs": {"oid": "a" * 64, "size": 999}},
