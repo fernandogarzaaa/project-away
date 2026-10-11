@@ -81,7 +81,7 @@ jobs:
           xvfb-run -a dist/*.AppImage --appimage-extract-and-run selftest --json appimage.json
           python scripts/check_selftest.py appimage.json
           sudo apt-get install -y ./dist/*.deb
-          xvfb-run -a away selftest --json deb.json
+          xvfb-run -a /usr/bin/away selftest --json deb.json
           python scripts/check_selftest.py deb.json
       - name: Release asset size limit (GitHub allows 2 GB per file)
         run: python scripts/check_selftest.py --max-size-mb 1900 dist/*.AppImage dist/*.deb
