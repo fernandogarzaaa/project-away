@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import glob
+import math
 import os
 import re
 import sys
@@ -105,6 +106,16 @@ class FramePairer:
         clock: Callable[[], float] = time.monotonic,
         maxlen: int = 6,
     ) -> None:
+        if n_cams < 1:
+            raise ValueError("n_cams must be at least 1")
+        if not 0 <= primary < n_cams:
+            raise ValueError("primary must identify a camera in range")
+        if not math.isfinite(tolerance_s) or tolerance_s < 0:
+            raise ValueError("tolerance_s must be finite and non-negative")
+        if not math.isfinite(dropout_s) or dropout_s <= 0:
+            raise ValueError("dropout_s must be finite and positive")
+        if maxlen < 1:
+            raise ValueError("maxlen must be at least 1")
         self.n = n_cams
         self.primary = primary
         self.tolerance_s = tolerance_s
@@ -116,7 +127,14 @@ class FramePairer:
         self._lock = threading.Lock()
 
     def push(self, cam: int, t: float, frame: Any) -> None:
+        """Add a frame, rejecting invalid camera IDs and unordered timestamps."""
+        if not 0 <= cam < self.n:
+            raise ValueError(f"camera index {cam} is outside [0, {self.n})")
+        if not math.isfinite(t):
+            raise ValueError("frame timestamp must be finite")
         with self._lock:
+            if self._buf[cam] and t < self._buf[cam][-1][0]:
+                raise ValueError("frame timestamps must be non-decreasing per camera")
             self._buf[cam].append((t, frame))
             self._last_seen[cam] = max(self._last_seen[cam], t)
 
@@ -127,6 +145,8 @@ class FramePairer:
     def pop_set(self, now: float | None = None) -> tuple[float, list[tuple[float, Any] | None]] | None:
         """Next synchronised set ``(t_ref, [ (t, frame) | None per camera ])``, or None if nothing new."""
         now = self.clock() if now is None else now
+        if not math.isfinite(now):
+            raise ValueError("now must be finite")
         with self._lock:
             alive = self.alive(now)
             ref: int | None = None

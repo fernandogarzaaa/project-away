@@ -698,9 +698,19 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._restart_hotkeys()
 
     def stop(self) -> None:
+        # Stop producing new events first, then make a best-effort release of
+        # any synthetic mouse button still held by an in-progress drag.
         self.stop_event.set()
+        try:
+            self.pipeline.set_paused(True)
+        except Exception as exc:
+            # Shutdown must continue even if the OS input backend has failed.
+            self.bus.publish("mouse.release_error", {"error": str(exc)})
         for lst in [*self._listeners, *getattr(self, "_input_listeners", [])]:
-            lst.stop()
+            try:
+                lst.stop()
+            except Exception as exc:
+                self.bus.publish("listener.stop_error", {"error": str(exc)})
 
     def run_forever(self) -> None:
         self.start()
