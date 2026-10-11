@@ -40,8 +40,9 @@ def run(yes: bool = False, keep_config: bool = False, dry_run: bool = False) -> 
     if not victims:
         print("  no Project Away user data found")
     if not dry_run and victims and not yes:
-        ans = input("Delete these folders (models, recordings, config)? [y/N] ").strip().lower()
-        if ans not in ("y", "yes"):
+        from away.app.setup_wizard import ask
+
+        if not ask("Delete these folders (models, recordings, config)?", False, None):
             print("aborted")
             return []
     removed = []

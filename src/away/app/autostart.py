@@ -12,7 +12,8 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def launch_command() -> list[str]:
     if getattr(sys, "frozen", False):  # PyInstaller bundle
-        return [sys.executable, "tray"]
+        # inside an AppImage sys.executable is a temporary mount; $APPIMAGE is the file the user keeps
+        return [os.environ.get("APPIMAGE") or sys.executable, "tray"]
     return [sys.executable, "-m", "away", "tray"]
 
 

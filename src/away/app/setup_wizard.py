@@ -47,11 +47,15 @@ PERMISSION_HELP = {
 
 
 def ask(prompt: str, default: bool, assume: bool | None) -> bool:
+    """Yes/no question. Never blocks without a user: ``assume`` (``--yes``), no stdin (a windowed frozen exe
+    has ``sys.stdin is None``), a closed stdin or EOF all return the default."""
     if assume is not None:
         return assume
+    if sys.stdin is None or getattr(sys.stdin, "closed", False):
+        return default
     try:
         ans = input(f"{prompt} [{'Y/n' if default else 'y/N'}] ").strip().lower()
-    except EOFError:
+    except (EOFError, RuntimeError, OSError):  # RuntimeError: "input(): lost sys.stdin"
         return default
     return default if not ans else ans in ("y", "yes")
 
