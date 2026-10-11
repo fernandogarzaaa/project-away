@@ -30,7 +30,7 @@ from away.bindings import (
     parse_action,
     split_trigger,
 )
-from away.config import VOICE_MODES, AppConfig
+from away.config import UPDATE_CHANNELS, VOICE_MODES, AppConfig
 from away.hands.gestures import GestureEvent
 
 TUNABLE_LABELS = {
@@ -89,6 +89,7 @@ VOICE_FIELDS = {
     "voice.mode": VOICE_MODES,
     "voice.intent": ("dictation", "command"),
     "voice.ambient_fallback": ("commands_only", "type"),
+    "updates.channel": UPDATE_CHANNELS,
 }
 
 
@@ -311,6 +312,9 @@ class SettingsModel:
             "cursor_overlay",
             "hands.cursor.curve",
             "hands.multicam.fusion",
+            "updates.check",
+            "updates.auto_install",
+            "updates.channel",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -718,6 +722,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
             ("voice.ambient_fallback", "No wake word + no camera"),
+            ("updates.channel", "Update channel"),
         ):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=3)
             var = tk.StringVar()
@@ -739,6 +744,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("app.auto_pause", "Pause while I use the mouse / keyboard"),
             ("voice.numbers_as_digits", "Spoken numbers as digits"),
             ("cursor_overlay", "Ring at the cursor (next start)"),
+            ("updates.check", "Check for updates (GitHub releases, daily; nothing is sent about you)"),
+            ("updates.auto_install", "Install updates automatically when idle"),
         ):
             var = tk.BooleanVar()
             ttk.Checkbutton(

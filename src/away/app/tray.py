@@ -59,6 +59,7 @@ class TrayController:
     def __init__(self, app: Any) -> None:
         self.app = app
         self.paused = False
+        self.last_activity = float("-inf")
 
     def toggle_pause(self) -> bool:
         self.paused = not self.paused
@@ -118,6 +119,20 @@ class TrayController:
             return [sys.executable, "settings"]
         return [sys.executable, "-m", "away", "settings"]
 
+    def is_idle(self, idle_s: float = 600.0, now: float | None = None) -> bool:
+        """Safe moment for a silent auto-update: gestures paused, or no action fired for ``idle_s``."""
+        import time
+
+        if self.paused or bool(getattr(getattr(self.app, "pipeline", None), "paused", False)):
+            return True
+        t = time.monotonic() if now is None else now
+        return t - self.last_activity >= idle_s
+
+    def mark_activity(self, now: float | None = None) -> None:
+        import time
+
+        self.last_activity = time.monotonic() if now is None else now
+
     def quit(self) -> None:
         self.app.stop()
 
@@ -130,9 +145,13 @@ def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
+    import contextlib
+    import threading
+
     import pystray
 
     from away.app.runner import AwayApp
+    from away.app.updater import UpdateManager
 
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
@@ -165,8 +184,36 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         open_path(ctl.settings_path())
 
     def on_quit(icon: Any, _item: Any) -> None:
+        updates.stop()
         ctl.quit()
         icon.stop()
+
+    def notify(title: str, message: str) -> None:
+        try:
+            icon.notify(message, title)
+        except Exception:
+            from away.app.frozen import notify as desktop_notify
+
+            desktop_notify(title, message)
+
+    def _safe_update_menu(ic: Any) -> None:
+        # some pystray backends cannot rebuild the menu from another thread; the next open does
+        with contextlib.suppress(Exception):
+            ic.update_menu()
+
+    def quit_for_update() -> None:
+        on_quit(icon, None)
+
+    updates = UpdateManager(
+        cfg.updates,
+        notify=notify,
+        on_change=lambda: _safe_update_menu(icon),
+        quit_app=quit_for_update,
+        is_idle=ctl.is_idle,
+    )
+
+    def on_update(_icon: Any, _item: Any) -> None:
+        threading.Thread(target=updates.install_now, name="away-update-install", daemon=True).start()
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda _i: ctl.title(), None, enabled=False),
@@ -178,17 +225,26 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
+        pystray.MenuItem(
+            lambda _i: updates.menu_label() or "Update",
+            on_update,
+            visible=lambda _i: updates.menu_label() is not None,
+            enabled=lambda _i: not updates.installing,
+        ),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
     for topic in ("voice.state", "app.paused", "gesture.clutch"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
+    app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
+    ctl.mark_activity()  # the idle clock starts at launch
 
     def _sync(ic: Any) -> None:
         ctl.paused = bool(app.pipeline.paused)
         refresh(ic)
         ic.update_menu()
 
+    updates.start()  # no-op when updates.check is false; first check right away, then every 24 h
     icon.run()
     return 0
 

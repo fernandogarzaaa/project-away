@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from away import __version__, paths
 from away import config as cfgmod
@@ -612,6 +613,75 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+EXIT_UPDATE_AVAILABLE = 10
+
+
+def _confirm(prompt: str) -> bool:
+    """Ask yes/no on a real terminal; without one (windowed exe, piped stdin) the answer is no."""
+    from away.app.frozen import stdin_usable
+
+    if not stdin_usable():
+        return False
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except (EOFError, RuntimeError, OSError):
+        return False
+
+
+def cmd_update(args: argparse.Namespace, fetch: Any = None, opener: Any = None, installer: Any = None) -> int:
+    """`away update [--check] [--yes]`: exit 0 up to date / installed, 10 update available (not installed), 1 error."""
+    from away.app import models, updater
+
+    try:
+        cfg, _ = cfgmod.load()
+        ucfg = cfg.updates
+    except Exception:  # a broken config must not block updating to a fixed version
+        ucfg = cfgmod.UpdatesConfig()
+    res = updater.check(channel=ucfg.channel, fetch=fetch)
+    print(f"current: {res.current}")
+    print(f"latest:  {res.latest or 'unknown'}")
+    if res.error:
+        print(f"error: {res.error}", file=sys.stderr)
+        return 1
+    if not res.update_available:
+        print("Project Away is up to date.")
+        return 0
+    if args.check:
+        print(res.summary())
+        return EXIT_UPDATE_AVAILABLE
+    if res.target.kind == "pip":
+        print(f"Installed with pip/pipx; not modifying it. Upgrade with:\n  {updater.PIP_HINT}")
+        return EXIT_UPDATE_AVAILABLE
+    if not res.can_install or res.asset is None:
+        print(res.summary())
+        return EXIT_UPDATE_AVAILABLE
+    question = f"Download and install {res.asset.name} ({res.asset.size / 1_000_000:,.0f} MB)? [y/N] "
+    if res.target.kind == "deb":
+        question = f"Download {res.asset.name} and install it with `pkexec apt install` (admin password)? [y/N] "
+    if not args.yes and not _confirm(question):
+        print("Not installed. Run `away update --yes` to install without asking.")
+        return EXIT_UPDATE_AVAILABLE
+
+    def bar(done: int, total: int) -> None:
+        sys.stdout.write("\r" + models.progress_bar(done, total))
+        sys.stdout.flush()
+
+    try:
+        path = updater.download(res.asset, progress=bar, opener=opener)
+        print()
+        source = updater.verify_download(path, res.asset, res.release, fetch, ucfg.allow_unverified)
+        print(f"verified SHA-256 ({source})" if source != "none" else "WARNING: installing an unverified download")
+        do_install = installer or updater.install
+        # the CLI only relaunches on Windows (the installer closes a running tray app and restarts it)
+        outcome = do_install(path, res.target, relaunch=res.target.kind == "windows")
+    except updater.UpdateError as exc:
+        print()
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(outcome.message)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="away", description="Project Away: hands-free PC control (local-first).")
     p.add_argument("--version", action="version", version=f"project-away {__version__}")
@@ -727,6 +797,11 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--keep-config", action="store_true")
     u.add_argument("--dry-run", action="store_true")
     u.set_defaults(fn=cmd_uninstall)
+
+    up = sub.add_parser("update", help="check GitHub for a new version and install it (exit 10 = update available)")
+    up.add_argument("--check", action="store_true", help="only print current/latest (exit 0 up to date, 10 available)")
+    up.add_argument("--yes", "-y", action="store_true", help="install without asking")
+    up.set_defaults(fn=cmd_update)
 
     sub.add_parser("doctor", help="show installed extras, models and paths").set_defaults(fn=cmd_doctor)
 

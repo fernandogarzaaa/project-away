@@ -27,7 +27,9 @@ from away import paths
 from away.app import models
 
 # commands whose output the user should see in a console window (Windows windowed exe)
-CONSOLE_COMMANDS = frozenset({"setup", "doctor", "selftest", "demo", "config", "bindings", "cameras", "uninstall"})
+CONSOLE_COMMANDS = frozenset(
+    {"setup", "doctor", "selftest", "demo", "config", "bindings", "cameras", "uninstall", "update"}
+)
 
 
 def is_frozen() -> bool:

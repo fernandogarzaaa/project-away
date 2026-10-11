@@ -217,6 +217,25 @@ away run
 - **Ctrl+Alt+E** edits the selected text by voice (`voice.edit_hotkey`). Clipboard access needs the
   `control` extra (pyperclip; on Linux also `xclip` or `xsel`).
 
+## Updates
+
+Installed apps check for a new release when the tray starts and once a day, then show a notification and an
+**Update to vX.Y.Z** item in the tray menu. Click it to download, verify (SHA-256) and install the update;
+the app restarts by itself.
+
+- **Windows:** the new setup.exe runs silently, closes the app, keeps your models and relaunches it.
+- **macOS:** the app quits, the new `Project Away.app` from the `.dmg` replaces the old one (quarantine flag
+  removed, so no second right-click > Open), and it reopens. If the app is not in a folder you can write to,
+  you get the `.dmg` path to drag it yourself.
+- **Linux AppImage:** the file is replaced in place (same name) and restarted.
+- **Linux .deb:** asks for your admin password via `pkexec apt install`; nothing happens without your OK.
+- **pipx / pip:** never changed automatically. Run `pipx upgrade project-away`.
+
+From a terminal: `away update --check` (exit code 10 means an update is available) and `away update --yes`.
+Turn checks off with `updates.check: false`, or install without asking when idle with
+`updates.auto_install: true` (both also in **Settings → Voice & input**). The check is one anonymous request
+to the GitHub Releases API; nothing about you is sent.
+
 ## Where things are stored
 
 | | Windows | macOS | Linux |
@@ -224,7 +243,8 @@ away run
 | Config (`config.yaml`) | `%APPDATA%\ProjectAway` | `~/Library/Application Support/ProjectAway` | `~/.config/project-away` |
 | Models, recordings | `%LOCALAPPDATA%\ProjectAway` | `~/Library/Application Support/ProjectAway` | `~/.local/share/project-away` |
 
-Override with `AWAY_CONFIG_DIR` / `AWAY_DATA_DIR`. Nothing leaves your machine unless you turn on the optional
+Override with `AWAY_CONFIG_DIR` / `AWAY_DATA_DIR`. Apart from the anonymous update check (see **Updates**;
+`updates.check: false` turns it off), nothing leaves your machine unless you turn on the optional
 LLM cleanup (`voice.llm_cleanup: true` + `AWAY_LLM_BASE_URL`), which sends the dictated text to the endpoint you
 configure (a local Ollama/LM Studio server keeps it on-device). Always-on listening keeps audio in memory only;
 no recordings are saved unless you run `away record` (hand landmarks, not audio).

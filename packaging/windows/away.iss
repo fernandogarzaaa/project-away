@@ -5,6 +5,12 @@
 ; One click: installs the app (every feature bundled: tracking, dictation, tray, settings, training),
 ; then downloads the MediaPipe + Whisper models in a visible console window, enables start-at-sign-in
 ; and a desktop shortcut (both pre-ticked), and launches the tray app.
+;
+; Auto-update (away/app/updater.py) runs this installer silently:
+;   ProjectAway-X.Y.Z-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS
+;       /NORESTARTAPPLICATIONS /AUTOUPDATE=1
+; /AUTOUPDATE=1 relaunches the tray app when the install finishes. A silent install skips the model
+; download when the models are already on disk (an upgrade keeps them); missing ones download on first launch.
 #ifndef AppVersion
   #define AppVersion "0.1.2"
 #endif
@@ -47,10 +53,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Model download during installation. ProjectAway.exe is a windowed app; for `setup` it opens its own
 ; console window so the download progress is visible. A failed download is retried on first launch.
-Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe"; StatusMsg: "Downloading hand-tracking and speech models (~1.6 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models and not models\small
-Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe --asr-model small"; StatusMsg: "Downloading hand-tracking and speech models (~0.5 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models\small
+Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe"; StatusMsg: "Downloading hand-tracking and speech models (~1.6 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models and not models\small; Check: ShouldDownloadModels
+Filename: "{app}\ProjectAway.exe"; Parameters: "setup --yes --skip-probe --asr-model small"; StatusMsg: "Downloading hand-tracking and speech models (~0.5 GB). A console window shows progress..."; Flags: waituntilterminated; Tasks: models\small; Check: ShouldDownloadModels
 ; Launch the tray app when the wizard closes (ticked by default).
 Filename: "{app}\ProjectAway.exe"; Parameters: "tray"; Description: "Launch Project Away now"; Flags: nowait postinstall skipifsilent
+; Auto-update: relaunch the tray app after a silent update (only when the updater passed /AUTOUPDATE=1).
+Filename: "{app}\ProjectAway.exe"; Parameters: "tray"; Flags: nowait; Check: IsAutoUpdate
 
 [UninstallRun]
 ; remove the start-at-login entry the app itself may have created (`away autostart on`)
@@ -60,3 +68,21 @@ Filename: "{sys}\reg.exe"; Parameters: "delete HKCU\Software\Microsoft\Windows\C
 ; models/config live in %LOCALAPPDATA%\ProjectAway and %APPDATA%\ProjectAway; ask-free cleanup is opt-in:
 ; run "ProjectAway.exe uninstall" before uninstalling to delete them.
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function IsAutoUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:AUTOUPDATE|0}') = '1';
+end;
+
+function ModelsPresent: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\ProjectAway\models\hand_landmarker.task'))
+    and FileExists(ExpandConstant('{localappdata}\ProjectAway\models\face_landmarker.task'));
+end;
+
+// interactive installs keep the user's choice; silent installs (auto-update) skip models already on disk
+function ShouldDownloadModels: Boolean;
+begin
+  Result := (not WizardSilent) or (not ModelsPresent);
+end;

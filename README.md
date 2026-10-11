@@ -126,6 +126,8 @@ away bindings import my-controls.yaml [--replace]   # default merges
 away profile list | use NAME|auto | new NAME --apps chrome chrome.exe [--copy-from default] | remove NAME
 away voice show | mode always_on|push_to_talk|toggle | wake-word away|off | intent dictation|command | sensitivity 0.6
 away settings                                # GUI editor (tkinter); prints CLI help when there is no display
+away update --check                          # current vs latest release (exit 0 up to date, 10 update available)
+away update [--yes]                          # download, verify SHA-256, install (see "Updates")
 ```
 
 Invalid configs fail with every problem listed and its YAML path, e.g.
@@ -297,11 +299,31 @@ metric; real palms vary by about 10–15%. The checkerboard path runs `calibrate
 
 Each view runs its own MediaPipe instance in sequence, so two cameras cost about twice the CPU of one.
 
+## Updates
+
+The installed app checks GitHub Releases when the tray starts and every 24 hours. When a new version is out
+you get a notification and an **Update to vX.Y.Z** tray item; clicking it downloads the installer for your
+system, checks its SHA-256 (from the GitHub API `digest`, or the release's `SHA256SUMS.txt`; an unverifiable
+file is refused), installs it and restarts the app. Windows runs the Inno Setup installer silently; macOS
+swaps the `.app` from the `.dmg` after the app quits; an AppImage is replaced in place; a `.deb` is installed
+with `pkexec apt install` only after you confirm. pip/pipx installs are never touched: run
+`pipx upgrade project-away`.
+
+```yaml
+updates:
+  check: true          # false = never contact GitHub
+  auto_install: false  # true = install silently when gestures are paused or idle (never for .deb)
+  channel: stable      # beta = also offer pre-releases
+```
+
+The only network request is an anonymous `GET` to the public GitHub Releases API; nothing about you is sent.
+Same options under **Settings → Voice & input**; from a terminal: `away update --check` / `away update --yes`.
+
 ## Verified vs untested
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 496 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 661 tests pass (1 skipped where libtk is missing); ruff + mypy clean |
 | Multi-camera geometry | Synthetic: two virtual cameras with known extrinsics. Pose from noisy (0.5 px) hand landmarks within 1.5°, palm-scaled baseline within 10%, exact noise-free triangulation, checkerboard stereo calibration under 0.5 px |
 | Multi-camera fusion | Synthetic: best-view and weighted selection, timestamp pairing and dropout, occlusion handover with no jump, push gesture, 3D pinch rejecting an edge-on false pinch, Cameras-tab model |
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
@@ -321,6 +343,7 @@ Each view runs its own MediaPipe instance in sequence, so two cameras cost about
 | Installer one-click flow (non-interactive `setup --yes` with no stdin, windowed-exe streams, first-launch download, Inno options) | Logic unit-tested (`tests/test_installer.py`) |
 | Frozen bundle with every feature (`away selftest`: torch, onnx, onnxruntime, MediaPipe, OpenCV, faster-whisper + Silero VAD, PortAudio, tkinter, pynput, pystray) | All 13 checks pass in the dev venv (Linux aarch64). The frozen build with the new bundle was **not completed in the sandbox** (too slow on its filesystem). Windows/macOS/Linux x86_64: **CI-verified on tag only** (the release workflow fails if any check fails) |
 | Windows `.exe` installer, macOS `.dmg` | **CI-built and smoke-tested on tag only; untested on real hardware** |
+| Auto-update (`away update`, tray item) | Version compare, asset choice, SHA-256 verify, command lines and AppImage replace unit-tested with no network (`tests/test_updater.py`); real installs on each OS **untested** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

@@ -275,7 +275,12 @@ def test_release_workflow_smoke_and_strict():
     assert yml.count("selftest --json") + yml.count('"selftest", "--json"') + yml.count("'selftest','--json'") >= 5
     assert 'AWAY_SPEC_STRICT: "1"' in yml and yml.count("scripts/check_selftest.py") >= 8
     assert "download.pytorch.org/whl/cpu" in yml and ".[all,train]" in yml
-    assert "draft: true" in yml
+    # published (not a draft) so the in-app updater sees it, but only after every platform job passed
+    assert "draft: false" in yml and "draft: true" not in yml
+    publish = yml.split("\n  publish:")[1]
+    assert "needs: [python-dist, linux, windows, macos]" in publish
+    assert "sha256sum" in publish and "SHA256SUMS.txt" in publish
+    assert publish.index("SHA256SUMS.txt") < publish.index("softprops/action-gh-release")
     # PyPI via trusted publishing: OIDC only, in its own job so it can't block the installers
     assert "pypa/gh-action-pypi-publish" in yml and "id-token: write" in yml and "PYPI_API_TOKEN" not in yml
 

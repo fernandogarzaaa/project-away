@@ -185,6 +185,18 @@ class AppSection:
     toggle_hotkey: str = "f9"  # global on/off for gesture control ("" = off)
 
 
+UPDATE_CHANNELS = ("stable", "beta")
+
+
+@dataclass
+class UpdatesConfig:
+    # The only network call is an anonymous GET to the public GitHub Releases API; nothing is sent about you.
+    check: bool = True  # check when the tray app starts and every 24 h (background thread)
+    auto_install: bool = False  # False: notify + tray item "Update to vX.Y.Z"; True: install when idle/paused
+    channel: str = "stable"  # stable | beta (beta also offers GitHub pre-releases)
+    allow_unverified: bool = False  # install a download that has no published SHA-256 (not recommended)
+
+
 @dataclass
 class AppConfig:
     app: AppSection = field(default_factory=AppSection)
@@ -192,6 +204,7 @@ class AppConfig:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     face: FaceConfig = field(default_factory=FaceConfig)
     wifi: WifiConfig = field(default_factory=WifiConfig)
+    updates: UpdatesConfig = field(default_factory=UpdatesConfig)
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -257,6 +270,8 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError(f"voice.ptt_mode must be toggle|hold, got {cfg.voice.ptt_mode!r}")
     if cfg.voice.asr_backend not in ("faster-whisper", "parakeet"):
         raise ValueError(f"voice.asr_backend must be faster-whisper|parakeet, got {cfg.voice.asr_backend!r}")
+    if cfg.updates.channel not in UPDATE_CHANNELS:
+        raise ValueError(f"updates.channel must be {'|'.join(UPDATE_CHANNELS)}, got {cfg.updates.channel!r}")
     if cfg.wifi.source not in ("rssi", "picoscenes", "iax", "synthetic"):
         raise ValueError(f"wifi.source invalid: {cfg.wifi.source!r}")
     c = cfg.hands.cursor

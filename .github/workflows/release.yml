@@ -218,7 +218,18 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: SHA256SUMS.txt for every asset (the in-app updater verifies downloads against it)
+        run: |
+          set -e
+          cd out
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true  # review, then publish the release by hand
+          # Published (not a draft) so `away update` and the tray updater see it. Safe because this job only
+          # runs after python-dist, linux, windows and macos all passed (needs:), including the installer smoke tests.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # v1.2.0-rc.1 -> pre-release (beta channel only)
           files: out/*
