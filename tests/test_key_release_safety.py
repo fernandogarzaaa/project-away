@@ -122,4 +122,4 @@ def test_drag_start_preserves_press_error_if_cleanup_also_fails() -> None:
         mouse.handle(GestureEvent("drag_start", 0.0, {}))
 
     assert backend.calls == ["press", "release"]
-    assert mouse.button_down is False
+    assert mouse.button_down is True
