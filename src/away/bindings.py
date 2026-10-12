@@ -23,7 +23,8 @@ Actions (what happens) are written ``kind:argument``::
     mic:toggle | on | off     mute/unmute the microphone
     voice:command_mode | dictation_mode | toggle_mode
     pause:toggle | on | off   pause/resume gesture control
-    hands:right | left | any  which hand drives the cursor (hands.prefer, until the app restarts)
+    hands:auto | right | left | any
+                              which hand is the pointer (hands.roles.mode, until the app restarts)
     cursor:next_monitor | prev_monitor | primary_monitor | monitor 2
                               jump the cursor to the centre of a monitor (numbers from `away monitors`)
 
@@ -60,6 +61,7 @@ GESTURE_TRIGGERS = (
     "dwell",
     "clap",
     "double_clap",
+    "palm_tap",
 )
 FACE_TRIGGERS = ("brow_raise", "mouth_open", "wink_left", "wink_right")
 HOTKEY_SLOTS = ("ptt", "mute")
@@ -94,7 +96,7 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "mic": ("toggle", "on", "off"),
     "voice": ("command_mode", "dictation_mode", "toggle_mode"),
     "pause": ("toggle", "on", "off"),
-    "hands": ("right", "left", "any"),
+    "hands": ("auto", "right", "left", "any"),
     "cursor": CURSOR_ARGS,
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
@@ -246,6 +248,7 @@ def default_profile() -> Profile:
             "dwell": a("mouse:click"),  # only detected when hands.dwell.enabled
             "clap": a("pause:off"),  # microphone, voice.clap_enabled: one clap resumes gesture control
             "double_clap": a("pause:on"),  # two claps within voice.clap_double_window pause it
+            "palm_tap": NONE,  # tap the helper hand's palm with the pointer's fingertip (hands.palm_scroll)
         },
         voice={
             "click": a("mouse:click"),
@@ -269,7 +272,7 @@ def default_profile() -> Profile:
             "monitor three": a("cursor:monitor 3"),
             "use left hand": a("hands:left"),
             "use right hand": a("hands:right"),
-            "use either hand": a("hands:any"),
+            "use either hand": a("hands:auto"),
         },
         face={
             "brow_raise": a("dictation:toggle"),

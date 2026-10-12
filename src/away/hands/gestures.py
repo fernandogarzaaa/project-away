@@ -21,6 +21,11 @@ event                   trigger
 ``hand_lost``           hand left the frame (ends any drag)
 ======================  ====================================================
 
+``update(..., suppress=True)`` (palm-glide scroll engaged, :mod:`away.hands.palmscroll`): the hand is seen but
+produces nothing: no cursor movement, click, scroll, swipe, auto-scroll or clutch (a running drag or
+auto-scroll ends). :meth:`GestureStateMachine.block_clutch` keeps a hand that was the helper (flat palm) from
+pausing when it becomes the pointer, until it shows another pose.
+
 Low-latency continuous control (move/drag/scroll) is rule-based; the learned
 temporal classifier can veto or confirm discrete gestures through
 :mod:`away.fusion`.
@@ -89,6 +94,12 @@ class GestureStateMachine:
         self._last_swipe_t = -1e9
         self._scroll_prev_y: float | None = None
         self._thumb_folded = False
+        self.clutch_blocked = False
+
+    def block_clutch(self) -> None:
+        """Ignore the open-palm clutch until the hand shows a pose other than the open palm."""
+        self.clutch_blocked = True
+        self._palm_t0 = None
 
     # ---------------------------------------------------------------- helpers
     def _update_pinch(self, ratio: float) -> bool:
@@ -128,10 +139,13 @@ class GestureStateMachine:
         return [GestureEvent("autoscroll_stop", t, {"reason": reason})] if self.autoscroll.stop() else []
 
     # ------------------------------------------------------------------- step
-    def update(self, t: float, landmarks: object | None, pinch: float | None = None) -> list[GestureEvent]:
+    def update(
+        self, t: float, landmarks: object | None, pinch: float | None = None, suppress: bool = False
+    ) -> list[GestureEvent]:
         """Feed one frame (``None`` = no hand). Returns the events it produced.
 
-        ``pinch`` overrides the 2D thumb-index ratio (multi-camera fusion passes a 3D one).
+        ``pinch`` overrides the 2D thumb-index ratio (multi-camera fusion passes a 3D one). ``suppress``: the
+        hand is busy with palm-glide scroll (see the module docstring).
         """
         events: list[GestureEvent] = []
         if landmarks is None:
@@ -151,12 +165,23 @@ class GestureStateMachine:
 
         lm = as_array(landmarks)
         self.hand_present = True
+        if suppress:
+            if self.dragging:
+                events.append(GestureEvent("drag_end", t, {"reason": "palm_scroll"}))
+            self.pinched = self.dragging = False
+            self._palm_t0 = None
+            self._clutch_latched = False
+            self._wrist_hist.clear()
+            self._scroll_prev_y = None
+            return events + self.stop_autoscroll(t, "palm_scroll")
         wx, wy = float(lm[WRIST, 0]), float(lm[WRIST, 1])
         pose = self.pose_of(lm)
         ratio = pinch_ratio(lm) if pinch is None else float(pinch)
 
         # --- clutch (open palm held still) works even while paused
-        if pose == "palm" and not self.pinched:
+        if pose != "palm":
+            self.clutch_blocked = False
+        if pose == "palm" and not self.pinched and not self.clutch_blocked:
             if self._palm_t0 is None:
                 self._palm_t0, self._palm_pos = t, (wx, wy)
             drift = float(np.hypot(wx - self._palm_pos[0], wy - self._palm_pos[1]))

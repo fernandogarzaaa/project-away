@@ -41,6 +41,7 @@ EVENT_TRIGGER = {
     "dwell": "dwell",  # cursor rested in place (hands.dwell)
     "clap": "clap",  # one clap (microphone, voice.clap_enabled)
     "double_clap": "double_clap",
+    "palm_tap": "palm_tap",  # fingertip tapped on the helper hand's palm (hands.palm_scroll)
 }
 PINCH_CLICK_EVENTS = ("click", "double_click", "drag_start")
 SCROLL_STEP = 3.0  # wheel notches for mouse:scroll_up / scroll_down

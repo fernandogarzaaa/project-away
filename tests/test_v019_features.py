@@ -369,16 +369,18 @@ def test_max_hands_one_uses_a_single_landmarker():
 
 
 def test_hand_preference_config_and_old_config_migration(tmp_path):
-    assert AppConfig().hands.prefer == "any" and AppConfig().hands.max_hands == 2
+    # v0.1.14: hands.prefer became hands.roles.mode (see tests/test_v0114_roles_palm.py)
+    assert AppConfig().hands.roles.mode == "auto" and AppConfig().hands.max_hands == 2
     with pytest.raises(ValueError):
         C.from_dict({"hands": {"prefer": "both"}})
     cfg, _ = C.from_dict({"config_version": 2, "hands": {"max_hands": 1}})
     assert cfg.hands.max_hands == 2 and any("max_hands" in n for n in cfg.migrations)
     cfg3, _ = C.from_dict({"config_version": 3, "hands": {"max_hands": 1}})
-    assert cfg3.hands.max_hands == 1 and cfg3.migrations == []  # chosen in v0.1.9: kept
+    assert cfg3.hands.max_hands == 1  # chosen in v0.1.9: kept
+    assert not any("max_hands" in n for n in cfg3.migrations)
     m = SettingsModel(AppConfig(), tmp_path / "c.yaml")
-    assert m.set_voice("hands.prefer", "left") is None and m.cfg.hands.prefer == "left"
-    assert m.set_voice("hands.prefer", "both") is not None
+    assert m.set_voice("hands.roles.mode", "left") is None and m.cfg.hands.roles.mode == "left"
+    assert m.set_voice("hands.roles.mode", "both") is not None
 
 
 def test_voice_command_switches_the_hand():
@@ -386,9 +388,9 @@ def test_voice_command_switches_the_hand():
     assert p.fire("voice", "use left hand") == Action("hands", "left")
     assert p.hand_prefer == "left"
     p.fire("voice", "Use either hand!")
-    assert p.hand_prefer == "any"
+    assert p.hand_prefer == "auto"
     new = AppConfig()
-    new.hands.prefer = "right"
+    new.hands.roles.mode = "right"
     p.apply_config(new)  # a Settings change wins
     assert p.hand_prefer == "right"
 

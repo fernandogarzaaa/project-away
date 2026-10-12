@@ -15,19 +15,26 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from away.hands.select import HandObs, HandSelector
+from away.hands.roles import HandRoles
+from away.hands.select import HandObs
 
 
 @dataclass
 class HandFrame:
     t: float
-    landmarks: NDArray[np.float64] | None  # (21, 3) image coords of the selected hand (hands.prefer)
+    landmarks: NDArray[np.float64] | None  # (21, 3) image coords of the pointer hand (hands.roles)
     handedness: str  # MediaPipe's label for this image (see away.hands.select for what it means)
     image: Any = None
     score: float = 1.0  # MediaPipe handedness confidence (used by multi-camera fusion)
-    hand: str = ""  # the user's real hand: right | left ("" = no hand)
-    n_hands: int = 0  # hands MediaPipe saw in this frame (the other one is ignored)
+    hand: str = ""  # the pointer's real hand (smoothed): right | left ("" = no pointer)
+    n_hands: int = 0  # hands MediaPipe saw in this frame
     hands_gap: float | None = None  # with 2+ hands: closest distance between palm centres (image units)
+    helper: NDArray[np.float64] | None = None  # (21, 3) the helper hand (palm-glide scroll), None if not seen
+    helper_handedness: str = "Right"
+    helper_score: float = 1.0
+    pointer_id: int | None = None  # track ids (stable while a hand stays in view)
+    helper_id: int | None = None
+    promoted: bool = False  # the pointer was the helper until this frame
 
 
 # Two hands cost more: with num_hands=2 and only one hand in view, MediaPipe re-runs palm detection on every
@@ -64,13 +71,17 @@ class HandTracker:
         max_hands: int = 1,
         min_conf: float = 0.5,
         *,
-        prefer: str | Callable[[], str] = "any",
+        prefer: str | Callable[[], str] = "auto",
         mirrored: bool = True,
+        release_s: float | Callable[[], float] = 1.0,
         factory: Callable[[int], Any] | None = None,
         image_fn: Callable[[Any], Any] | None = None,
         probe_every: int = PROBE_EVERY,
     ) -> None:
-        """``factory(num_hands)`` builds a landmarker with ``detect_for_video(image, ms)`` (tests inject fakes)."""
+        """``factory(num_hands)`` builds a landmarker with ``detect_for_video(image, ms)`` (tests inject fakes).
+
+        ``prefer`` is the hand-roles mode (``hands.roles.mode``: auto | right | left | any), a value or a callable
+        read every frame (voice commands change it)."""
         if factory is None:  # pragma: no cover - real MediaPipe
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions, vision
@@ -91,7 +102,7 @@ class HandTracker:
 
         self._image = image_fn or (lambda rgb: rgb)
         self.max_hands = max(1, int(max_hands))
-        self.selector = HandSelector(prefer, mirrored)
+        self.roles = HandRoles(prefer, mirrored, release_s, max_tracks=self.max_hands)
         self.probe_every = max(1, int(probe_every))
         self._one = factory(1)
         self._multi = factory(self.max_hands) if self.max_hands > 1 else None
@@ -136,18 +147,23 @@ class HandTracker:
     def process(self, rgb: NDArray[np.uint8], t: float) -> HandFrame:
         hands = self.detect(rgb, t)
         gap = hands_gap(hands)
-        self._wrong = self.selector.wrong_side(hands)
-        pick = self.selector.select(t, hands)
-        if pick is None:
-            return HandFrame(t, None, "Right", n_hands=len(hands), hands_gap=gap)
+        res = self.roles.update(t, hands)
+        self._wrong = self.roles.wants_more(hands)
+        pick, help_ = res.pointer, res.helper
         return HandFrame(
             t,
-            pick.landmarks,
-            pick.label,
-            score=pick.score,
-            hand=self.selector.side(pick),
+            pick.landmarks if pick is not None else None,
+            pick.label if pick is not None else "Right",
+            score=pick.score if pick is not None else 1.0,
+            hand=res.pointer_side,
             n_hands=len(hands),
             hands_gap=gap,
+            helper=help_.landmarks if help_ is not None else None,
+            helper_handedness=help_.label if help_ is not None else "Right",
+            helper_score=help_.score if help_ is not None else 1.0,
+            pointer_id=res.pointer_id,
+            helper_id=res.helper_id,
+            promoted=res.promoted,
         )
 
     def close(self) -> None:

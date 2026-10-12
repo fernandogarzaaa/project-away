@@ -1,4 +1,7 @@
-"""Which of the detected hands drives the cursor (``hands.prefer``). Pure logic, no devices.
+"""Hand observations, MediaPipe handedness vs the user's real hand, and the v0.1.9 selector. Pure logic.
+
+Since v0.1.14 the tracker assigns roles with :class:`away.hands.roles.HandRoles` (pointer + helper, tracked by
+position instead of label); :class:`HandSelector` (the old ``hands.prefer`` logic) is kept for reference.
 
 Handedness and mirroring
 ------------------------

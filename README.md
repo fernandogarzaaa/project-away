@@ -39,6 +39,7 @@ Hold up one hand, palm toward the screen, and point.
 | **Four fingers up, thumb tucked in**, then move your hand up or down | **Auto-scroll**: keeps scrolling on its own, faster the further you move from where you started. Make a **fist** to stop |
 | **Open palm** (thumb out too), held still for a moment | Pause / resume gestures |
 | **Swipe** left or right | Left / right arrow key (previous / next slide or photo) |
+| **Palm glide** — hold one hand flat, slide the other hand's index fingertip along it | Scroll, like a trackpad (two fingers slide sideways = scroll sideways) |
 | **Clap once** | Turn gestures on (resume) |
 | **Clap twice** quickly | Pause gestures |
 
@@ -60,10 +61,25 @@ room. It shrinks back to your normal size whenever gestures pause, so the size a
 are on. Choose the size (or 0 for off) in **Settings → Voice & input → Cursor size while gestures are active**.
 On Mac and Linux the pointer itself isn't changed; the cursor ring grows instead.
 
-**Holding something in the other hand?** Pick **Settings → Voice & input → Which hand controls the cursor**:
-*right* or *left* ignores the other hand completely (handy when you hold your phone), *any* sticks with whichever
-hand it is already following. You can also say **"use left hand"**, **"use right hand"** or **"use either
-hand"**.
+**Palm-glide scroll (v0.1.14), step by step:** hold one hand up flat, palm toward the screen, fingers
+together — that hand is your "trackpad". Touch the middle of that palm with the index fingertip of your other
+hand and hold it there for a moment (about a sixth of a second; the cursor ring, if you turned it on, goes
+cyan). Now slide the fingertip along the palm: **toward the fingers scrolls up, toward the wrist scrolls down**.
+Put your **index and middle finger** on the palm together and slide **sideways** to scroll left or right. Flick
+and lift, and the page keeps going for a moment and slows down, like on a phone; touch the palm again or make
+any other gesture to stop it. A quick **tap** on the palm (touch and lift, without sliding) can be given an
+action in **Settings → Bindings → gesture:palm_tap** (it does nothing until you do). While your fingertip is on
+the palm the cursor holds still and nothing clicks, and the flat hand never pauses gestures. Speed, the dead
+zone, the momentum and the rest are in **Settings → Tuning → Palm scroll**.
+
+**Which hand is which (hand roles, v0.1.14):** Away works out by itself which hand is the *pointer* (moves the
+cursor, clicks and does every one-hand gesture) and which is the *helper* (the flat "trackpad" hand). The first
+hand that **points** gets the pointer (or simply the only hand in view), and it keeps it — even if the camera
+mixes up left and right, or the hand disappears for up to a second. Raised your flat "trackpad" hand first?
+That's fine: as soon as the other hand points, it becomes the pointer. Holding your phone in the other hand?
+Pick **Settings → Voice & input → Hand roles → Right** or **Left** to use only that hand as the pointer;
+**Auto** is the default. You can also say **"use left hand"**, **"use right hand"**, or **"use either hand"**
+(back to Auto).
 
 Tips for smooth control:
 - **Small movements go a long way.** The cursor speeds up when you move fast and slows for precise work, so slow down near small buttons.
@@ -171,6 +187,7 @@ Every control is a **trigger → action** binding you can change without touchin
 | `gesture:clap` / `double_clap` (microphone; `voice.clap_enabled`) | `pause:off` / `pause:on` |
 | `gesture:open_palm` (hold) | `pause:toggle` (pause/resume gestures) |
 | `gesture:swipe_left` / `swipe_right` | `key:left` / `key:right` |
+| `gesture:palm_tap` (fingertip tapped on the helper hand's palm; `hands.palm_scroll`) | `none` (bind it to anything) |
 | `face:brow_raise` (needs `face.brow_raise_toggle: true`) | `dictation:toggle` |
 | `face:mouth_open` (needs `face.mouth_open_trigger: true`) | `none` |
 | `face:wink_left` / `wink_right` (needs `face.wink_trigger: true`) | `mouse:click` / `mouse:right_click` |
@@ -186,7 +203,7 @@ Every control is a **trigger → action** binding you can change without touchin
 | `voice:"pause gestures"` / `"resume gestures"` | `pause:on` / `pause:off` |
 | `voice:"next monitor"` / `"previous monitor"` | `cursor:next_monitor` / `cursor:prev_monitor` |
 | `voice:"monitor one"` / `"monitor two"` / `"monitor three"` | `cursor:monitor 1` / `2` / `3` |
-| `voice:"use left hand"` / `"use right hand"` / `"use either hand"` | `hands:left` / `hands:right` / `hands:any` |
+| `voice:"use left hand"` / `"use right hand"` / `"use either hand"` | `hands:left` / `hands:right` / `hands:auto` |
 
 **Triggers:** the gestures above plus your own (record with `away record --custom --label wave`, then
 `away calibrate`), any spoken phrase (matched ignoring case and punctuation), `face:brow_raise`,
@@ -201,7 +218,7 @@ two_finger_scroll / four_finger_scroll) ·
 `shell:command` (**off unless** `bindings.allow_shell: true`) · `dictation:toggle|start|stop` ·
 `mic:toggle|on|off` · `voice:command_mode|dictation_mode|toggle_mode` · `pause:toggle|on|off` ·
 `cursor:next_monitor|prev_monitor|primary_monitor|monitor N` (jump to the centre of a monitor) ·
-`hands:right|left|any` (which hand drives the cursor until the app restarts).
+`hands:auto|right|left|any` (which hand is the pointer until the app restarts).
 
 ### Multiple monitors
 
@@ -281,10 +298,11 @@ v0.1.9 additions:
   control is active and put back on pause, auto-pause, clutch, F9, double clap, disable and quit (at most one
   change per 300 ms so auto-pause flapping does not thrash it). Your original size is saved to
   `big_cursor.json` in the data folder first; if Away crashes while the cursor is big, the next start restores it.
-- **Hand choice** (`hands.prefer: any | right | left`, `hands.max_hands: 2`): MediaPipe looks for two hands;
-  `right`/`left` uses only that hand (MediaPipe's handedness is corrected for the mirrored camera image),
-  `any` locks onto the hand it is following. Two-hand detection is only run every few frames until a second
-  hand actually appears, so one hand costs about the same CPU as before. `max_hands: 1` turns it off.
+- **Hand choice** (`hands.max_hands: 2`): MediaPipe looks for two hands. Two-hand detection is only run every
+  few frames until a second hand actually appears, so one hand costs about the same CPU as before.
+  `max_hands: 1` turns it off (and palm-glide scroll with it). v0.1.9's `hands.prefer` is replaced by
+  `hands.roles` (below) in v0.1.14; an old `prefer: right|left` becomes `roles.mode: right|left` and
+  `prefer: any` becomes `roles.mode: auto` automatically.
 - **Auto-scroll** (`hands.gestures.autoscroll_*`): `autoscroll_enabled`, `autoscroll_hold` (0.2 s before it
   starts), `autoscroll_dead_zone` (0.25 palm lengths), `autoscroll_gain` (12), `autoscroll_max_speed`
   (30 notches/s), `autoscroll_stop_hold` (fist, 0.2 s), `autoscroll_horizontal`. Offsets are measured in palm
@@ -294,6 +312,33 @@ v0.1.9 additions:
   microphone: a sharp, short (under ~50 ms), broadband transient that is far louder than the moment before it.
   Two hands close together on camera lower the bar; with no camera frames it is stricter. Ignored while you are
   mid-utterance and while the mic is muted. The Settings **Test gesture** tab shows claps as well as gestures.
+
+v0.1.14 additions:
+
+- **Hand roles** (`hands.roles`): `mode: auto` (default; the first hand that points, or the only hand in view, is
+  the pointer) `| right | left` (that real hand, MediaPipe's label corrected for the mirrored image) `| any` (the
+  first hand seen, whatever its pose; config only). `release_s: 1.0`: the pointer keeps its role while it is out
+  of view this long (it is released sooner when it was last seen at the image border). Hands are told apart
+  frame to frame by palm-centre position and size (a minimum-cost assignment), not by MediaPipe's handedness
+  label, which flips; the label is only a weak, smoothed prior (and what `right`/`left` read, with hysteresis).
+  A lone hand that has only held a flat palm hands the role to the first hand that points. Only the pointer
+  drives the cursor, clicks and gestures; the helper feeds palm-glide scroll. A helper that becomes the pointer
+  (the other hand left) cannot pause with its open palm until it has shown another pose; when the role moves to
+  the other hand, a running drag ends and the cursor re-anchors without a jump.
+- **Palm-glide scroll** (`hands.palm_scroll`): `enabled: true`, `engage_s: 0.15` (fingertip on the palm this
+  long before it scrolls), `depth_threshold: 0.6` (fingertip at most this far off the palm plane, in palm
+  lengths; 0 = no depth check), `margin: 0.25` (palm outline padding, palm lengths), `gain: 12` (wheel notches
+  per palm length of glide), `dead_zone: 0.05` (palm lengths; also the most a tap may move), `invert: false`,
+  `horizontal: true` (index + middle = sideways), `momentum: true`, `friction: 4.0` (1/s; speed ×
+  e^(−friction·t) after the lift). It engages when the helper is flat (four fingers out), the pointer's index
+  fingertip falls inside the palm outline (wrist, thumb base, the four knuckles) and is near the palm plane. The
+  glide is measured in the palm's own frame (wrist → middle knuckle = up), so a rotated or tilted palm scrolls
+  the same way. With one camera, depth comes from MediaPipe's relative z and the hands' apparent sizes (both
+  palms are assumed to be the same size); with two calibrated cameras the triangulated 3D points of both hands
+  are used. If the helper's landmarks drop out or jump while the fingertip covers it, the last good palm is used
+  for 0.3 s. The fingertip is smoothed with the One Euro filter. A tap (touch and lift within 0.25 s) fires
+  `gesture:palm_tap`. While engaged, the pointer's cursor movement, clicks, four-finger auto-scroll and
+  open-palm pause are suppressed.
 
 Pointer accuracy:
 
@@ -594,7 +639,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1107 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1198 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -614,6 +659,8 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Settings window layout (v0.1.10) | DPI awareness before Tk, `tk scaling` from the real DPI, 10 pt fonts, button padding, scrollable tabs with a pinned bottom bar and a separate wrapped status row; size/scale/wheel/status helpers unit-tested, window rendered and wheel-scrolled under Xvfb at 96 and 144 dpi on a 1366x768 screen; **untested on a real Windows desktop at 125 %/150 % and across mixed-DPI monitors** (Tk 8.6 does not rescale when the window moves to a monitor with a different DPI) |
 | Big cursor (v0.1.9) | Controller, crash marker, debounce and pause wiring unit-tested with a fake backend; **the Windows registry + `SystemParametersInfo` resize is untested on a real Windows desktop** |
 | Hand choice (v0.1.9) | Selection, mirroring and two-hand probing unit-tested with fake landmarkers; the handedness convention was checked on real photos (raw vs flipped) with MediaPipe 0.10.18; **untested with a live webcam and two real hands** |
+| Hand roles (v0.1.14) | Track identity by position and size, stickiness, label flips (both hands, every frame), hands with the same label, release after loss and at the frame border, promotion of the helper, the flat-hand-first handover, right/left hysteresis, mode changes, voice commands and the `hands.prefer` migration unit-tested with synthetic hands and fake landmarkers; **untested with a live webcam and two real hands** (MediaPipe's real two-hand tracking, hands overlapping); with two cameras each camera assigns roles on its own (not cross-checked between views) |
+| Palm-glide scroll (v0.1.14) | Engage/disengage geometry on upright, rolled, sideways, upside-down, tilted and turned palms, local-frame direction, horizontal two-finger scroll, gain and dead zone, momentum decay and its interruption, tap timing, occlusion hold and jump rejection, the 3D path, and suppression of cursor/clicks/clutch/auto-scroll unit-tested with synthetic hands projected through a pinhole; Settings fields checked headless and the window rendered under Xvfb; **untested on real hardware**: MediaPipe's z on a fingertip touching the other hand, landmark quality while one hand covers the other, and the feel of the default depth threshold, gain and friction are not measured |
 | Four-finger auto-scroll (v0.1.9) | State machine and thumb-fold split unit-tested with synthetic hands; the thumb-fold measure checked on 11 real photos (folded 0.2-0.4, open palm 1.3-1.5); **untested live** |
 | Clap control (v0.1.9) | Detector tested on synthetic claps vs vowels, plosives, beeps and noise, plus timing and dictation gating; **untested with a real microphone and room** |
 | faster-whisper `hotwords` | Parameter verified on the installed faster-whisper 1.2.1 by signature; **not run on real speech** |

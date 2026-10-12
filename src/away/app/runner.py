@@ -35,6 +35,7 @@ from away.hands.cursor import CursorMapper, Screen
 from away.hands.filters import OneEuro2D
 from away.hands.gestures import GestureEvent, GestureStateMachine
 from away.hands.landmarks import as_array, pinch_ratio
+from away.hands.palmscroll import PalmScroller
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
 from away.voice.always_on import GateHint
@@ -72,6 +73,10 @@ class Pipeline:
         self.cfg = cfg
         self.bus = bus or EventBus()
         self.gestures = GestureStateMachine(cfg.hands.gestures)
+        self.palm = PalmScroller(cfg.hands.palm_scroll)  # palm-glide scroll (pointer fingertip on the helper palm)
+        self._pointer_id: int | None = None
+        prim = next((c for c in cfg.hands.cameras if c.role == "primary"), None)
+        self.palm.mirrored = bool(prim.mirror if prim is not None else cfg.hands.mirror)
         c = cfg.hands.cursor
         stab = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
         self.mouse = MouseController(backend or RecordingBackend(), CursorMapper(screen, c), stabilizer=stab)
@@ -102,7 +107,7 @@ class Pipeline:
         self.mic_energy = 0.0  # updated by the mic thread
         self._enroll_pending = True
         # detection (state machine) -> mapping (bindings) -> execution (backend / hooks)
-        self.hand_prefer = cfg.hands.prefer  # hands:right|left|any (voice) changes it until the next restart
+        self.hand_mode = cfg.hands.roles.mode  # hands:auto|right|left|any (voice) changes it until the next restart
         self.executor = ActionExecutor(
             self.mouse, cfg.bindings.allow_shell, hooks={"pause": self._pause_hook, "hands": self._hands_hook}
         )
@@ -111,6 +116,15 @@ class Pipeline:
         )
         self.dispatcher.on_fire = self._on_fire
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
+
+    @property
+    def hand_prefer(self) -> str:
+        """The hand-roles mode (kept under its v0.1.9 name for callers that read it)."""
+        return self.hand_mode
+
+    @hand_prefer.setter
+    def hand_prefer(self, value: str) -> None:
+        self.hand_mode = value
 
     def _on_fire(self, trig: str, act: Action) -> None:
         self.bus.publish("action.fired", {"trigger": trig, "action": str(act)})
@@ -128,6 +142,7 @@ class Pipeline:
         if auto:
             self.mouse._release_if_down()
             self.gestures.autoscroll.stop()
+            self.palm.stop_momentum()
         else:
             self.mouse.mapper.reset()  # resume from wherever the real mouse left the cursor, no jump
         self.bus.publish("app.auto_paused", {"paused": auto}, t)
@@ -147,6 +162,8 @@ class Pipeline:
             state = "paused"
         elif not self.gestures.hand_present:
             state = "hand_lost"
+        elif self.palm.engaged or self.palm.momentum:
+            state = "palmscroll"
         elif self.gestures.autoscroll.active:
             state = "autoscroll"
         elif self.gestures.dragging:
@@ -165,7 +182,7 @@ class Pipeline:
             "pinch": pinch_progress(self.last_ratio, g.pinch_on, g.pinch_off) if self.gestures.hand_present else 0.0,
             "dwell": self.dwell.progress if self.cfg.hands.dwell.enabled else 0.0,
             "frozen": bool(self.mouse.stabilizer is not None and self.mouse.stabilizer.frozen),
-            "direction": self.gestures.autoscroll.direction,
+            "direction": self.palm.direction if state == "palmscroll" else self.gestures.autoscroll.direction,
             "size": int(self.cfg.hands.cursor.big_cursor_size),
         }
 
@@ -176,6 +193,7 @@ class Pipeline:
         if paused:
             self.mouse._release_if_down()
             self.gestures.autoscroll.stop()
+            self.palm.stop_momentum()
 
     def _pause_hook(self, arg: str, data: dict[str, Any]) -> None:
         if arg == "toggle" and "paused" in data:  # open palm: the detector already flipped its own state
@@ -185,11 +203,11 @@ class Pipeline:
         self.bus.publish("app.paused", {"paused": self.paused})
 
     def _hands_hook(self, arg: str, _data: dict[str, Any]) -> None:
-        """hands:right | left | any (e.g. the voice command "use left hand"): which hand drives the cursor."""
-        if arg not in ("right", "left", "any"):
+        """hands:auto | right | left | any (voice: "use left hand", "use either hand" = auto): the pointer hand."""
+        if arg not in ("auto", "right", "left", "any"):
             return
-        self.hand_prefer = arg
-        self.bus.publish("hands.prefer", {"prefer": arg})
+        self.hand_mode = arg
+        self.bus.publish("hands.roles", {"mode": arg})
 
     # live reload of bindings + tunables (settings GUI / CLI edits) ------------
     def apply_config(self, cfg: AppConfig) -> None:
@@ -208,9 +226,11 @@ class Pipeline:
         self.brow = BrowRaiseToggle(f.brow_threshold, f.brow_hold)
         self.mouth = MouthOpenTrigger(f.mouth_threshold, f.mouth_hold)
         self.wink = WinkTrigger(f.wink_threshold, f.wink_open_max, f.wink_hold)
-        if cfg.hands.prefer != self.cfg.hands.prefer:  # a Settings change wins over an earlier voice command
-            self.hand_prefer = cfg.hands.prefer
-        self.cfg.hands.prefer = cfg.hands.prefer
+        if cfg.hands.roles.mode != self.cfg.hands.roles.mode:  # a Settings change wins over an earlier voice command
+            self.hand_mode = cfg.hands.roles.mode
+        for src, dst in ((cfg.hands.roles, self.cfg.hands.roles), (cfg.hands.palm_scroll, self.cfg.hands.palm_scroll)):  # type: ignore[assignment]
+            for k, v in vars(src).items():
+                setattr(dst, k, v)
         self.cfg.hands.enabled = cfg.hands.enabled
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
@@ -224,12 +244,27 @@ class Pipeline:
         return self.dispatcher.trigger(category, name, data)
 
     # hands -------------------------------------------------------------------
-    def on_fused(self, fused: FusedHand | None, t: float | None = None) -> list[str]:
-        """Feed a multi-camera fused hand (``None`` = no camera sees a hand)."""
+    def on_fused(
+        self, fused: FusedHand | None, t: float | None = None, helper: FusedHand | None = None, **ids: Any
+    ) -> list[str]:
+        """Feed a multi-camera fused pointer hand (``None`` = no camera sees it) and the fused helper hand.
+        ``ids``: ``pointer_id`` / ``helper_id`` / ``promoted`` from the primary camera's roles."""
         self.last_fused = fused
+        h_lm = helper.landmarks if helper is not None else None
+        h_3d = helper.points3d if helper is not None else None
         if fused is None:
-            return self.on_hand(t if t is not None else 0.0, None)
-        return self.on_hand(fused.t, fused.landmarks, fused.handedness, pinch=fused.pinch, depth=fused.depth)
+            return self.on_hand(t if t is not None else 0.0, None, helper=h_lm, **ids)
+        return self.on_hand(
+            fused.t,
+            fused.landmarks,
+            fused.handedness,
+            pinch=fused.pinch,
+            depth=fused.depth,
+            helper=h_lm,
+            points3d=fused.points3d,
+            helper_points3d=h_3d,
+            **ids,
+        )
 
     def on_hand(
         self,
@@ -239,9 +274,39 @@ class Pipeline:
         *,
         pinch: float | None = None,
         depth: float | None = None,
+        helper: Any = None,
+        points3d: Any = None,
+        helper_points3d: Any = None,
+        pointer_id: int | None = None,
+        helper_id: int | None = None,
+        promoted: bool = False,
     ) -> list[str]:
+        """One frame: the pointer hand (``landmarks``, drives everything) and the helper hand (``helper``, only
+        palm-glide scroll). ``promoted``: the pointer was the helper until now (its flat palm must not pause)."""
         accepted = []
         self._check_auto_pause(t)
+        if pointer_id is not None and self._pointer_id is not None and pointer_id != self._pointer_id:
+            # the pointer role moved to the other hand: end the old hand's drag/scroll and re-anchor the cursor
+            # on the new one (no jump)
+            for ev in self.gestures.update(t, None):
+                self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), t)
+                self.dispatcher.on_gesture(ev)
+                accepted.append(ev.kind)
+        if pointer_id is not None or landmarks is None:
+            self._pointer_id = pointer_id
+        if promoted:
+            self.gestures.block_clutch()
+        palm_events: list[GestureEvent] = []
+        if self.cfg.hands.enabled:
+            palm_events = self.palm.update(
+                t,
+                landmarks,
+                helper,
+                points3d,
+                helper_points3d,
+                self.cfg.hands.multicam.palm_length_m,
+            )
+        suppress = self.palm.active
         ratio = None
         if landmarks is not None:
             ratio = pinch if pinch is not None else pinch_ratio(as_array(landmarks))
@@ -251,12 +316,14 @@ class Pipeline:
         if self.temporal is not None and landmarks is not None:
             probs = self.temporal.push(landmarks, handedness)
             self.fusion.update_model(probs)
-            for name in self.custom.update(t, probs):
+            for name in self.custom.update(t, probs) if not suppress else []:
                 self.bus.publish("gesture.custom", {"name": name}, t)
                 self.dispatcher.on_gesture(GestureEvent("custom", t, {"name": name}))
                 accepted.append(f"custom:{name}")
         pointed = False
-        for ev in self.gestures.update(t, landmarks, pinch=pinch):
+        for ev in self.gestures.update(t, landmarks, pinch=pinch, suppress=suppress):
+            if ev.kind not in ("move", "hand_lost", "drag_end", "autoscroll", "autoscroll_stop"):
+                self.palm.stop_momentum()  # a pointer gesture ends the palm-scroll coast
             if not self.fusion.accept(ev):
                 self.bus.publish("gesture.rejected", {"kind": ev.kind}, t)
                 continue
@@ -271,12 +338,31 @@ class Pipeline:
             pos = self.mouse.mapper.pos if pointed and active and not self.gestures.pinched else None
             if self.dwell.update(t, pos):
                 accepted += self._synthetic_gesture(GestureEvent("dwell", t, {"x": pos[0], "y": pos[1]} if pos else {}))
-        if landmarks is not None and depth is not None and active and not self.gestures.pinched:
+        if landmarks is not None and depth is not None and active and not self.gestures.pinched and not suppress:
             if self.push.update(t, depth):
                 accepted += self._synthetic_gesture(GestureEvent("push", t, {"depth": depth}))
-        elif landmarks is None or depth is None:
+        elif landmarks is None or depth is None or suppress:
             self.push.reset()
+        accepted += self._palm_events(palm_events)
         return accepted
+
+    def _palm_events(self, events: list[GestureEvent]) -> list[str]:
+        """Palm-glide scroll output: scrolling goes straight to the wheel (not while paused); the tap goes
+        through the bindings (``gesture:palm_tap``, so a pause action still works while paused)."""
+        out = []
+        for ev in events:
+            if ev.kind == "palm_tap":
+                self.bus.publish("gesture.palm_tap", dict(ev.data), ev.t)
+                self.dispatcher.on_gesture(ev)
+            elif self.output_paused():
+                self.palm.stop_momentum()
+                continue
+            else:
+                self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), ev.t)
+                if ev.kind == "palm_scroll":
+                    self.mouse.handle(ev)
+            out.append(ev.kind)
+        return out
 
     # claps (microphone) ---------------------------------------------------------
     def note_hands(self, t: float, n_hands: int, gap: float | None) -> None:
@@ -535,7 +621,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         return self.voice.dictation if self.voice is not None else None
 
     def _log(self, ev: Any) -> None:
-        if ev.topic not in ("gesture.move", "gesture.scroll", "gesture.autoscroll", "wifi.state", "app.auto_paused"):
+        if ev.topic not in (
+            "gesture.move",
+            "gesture.scroll",
+            "gesture.autoscroll",
+            "gesture.palm_scroll",
+            "wifi.state",
+            "app.auto_paused",
+        ):
             print(f"[{ev.topic}] {ev.data}", flush=True)
 
     # public controls used by the tray --------------------------------------
@@ -882,8 +975,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             HandTracker(
                 hand_model,
                 self.cfg.hands.max_hands,
-                prefer=lambda: self.pipeline.hand_prefer,
+                prefer=lambda: self.pipeline.hand_mode,
                 mirrored=self.cfg.hands.mirror,
+                release_s=lambda: self.cfg.hands.roles.release_s,
             )
             if self.cfg.hands.enabled
             else None
@@ -899,7 +993,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
                 self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
-                self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
+                self.pipeline.on_hand(
+                    t,
+                    fr.landmarks,
+                    fr.handedness,
+                    helper=getattr(fr, "helper", None),
+                    pointer_id=getattr(fr, "pointer_id", None),
+                    helper_id=getattr(fr, "helper_id", None),
+                    promoted=bool(getattr(fr, "promoted", False)),
+                )
             if faces is not None and n % max(1, prof.face_every) == 0:
                 obs = faces.process(rgb, t)
                 self.pipeline.on_faces(
@@ -1080,15 +1182,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             from away.hands.tracker import HandTracker
 
             model = self.models_dir / "hand_landmarker.task"
-            first_tracker.selector.mirrored = cams[0].mirror  # each camera's own frame orientation
+            first_tracker.roles.mirrored = cams[0].mirror  # each camera's own frame orientation
             trackers = [first_tracker] + [
                 HandTracker(
-                    model, self.cfg.hands.max_hands, prefer=lambda: self.pipeline.hand_prefer, mirrored=c.mirror
+                    model,
+                    self.cfg.hands.max_hands,
+                    prefer=lambda: self.pipeline.hand_mode,
+                    mirrored=c.mirror,
+                    release_s=lambda: self.cfg.hands.roles.release_s,
                 )
                 for c in cams[1:]
             ]
         ex = load_extrinsics()
         fuser = MultiViewFuser(cams, mc, ex)
+        helper_fuser = MultiViewFuser(cams, mc, ex)  # the helper hand (palm-glide scroll), fused the same way
         share = self.camera_share
         timeout = self._probe_timeout(len(cams), probe_s)
         degraded = False
@@ -1168,26 +1275,52 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                 dropped.discard(i)
                                 self.bus.publish("cameras.recovered", {"camera": i})
                         views: list[Any] = []
+                        helpers: list[Any] = []
+                        prim_ids: dict[str, Any] = {}
                         try:
                             for i, item in enumerate(frames):
                                 if item is None:
                                     views.append(None)
+                                    helpers.append(None)
                                     continue
                                 t_i, rgb = item
                                 fr = trackers[i].process(rgb, t_i)
                                 note = getattr(self.pipeline, "note_hands", None)
                                 if i == primary and note is not None:
                                     note(t_i, getattr(fr, "n_hands", 1), getattr(fr, "hands_gap", None))
+                                h, w = rgb.shape[:2]
+                                hlm = getattr(fr, "helper", None)
+                                helpers.append(
+                                    None
+                                    if hlm is None
+                                    else ViewObs(
+                                        i,
+                                        t_i,
+                                        hlm,
+                                        getattr(fr, "helper_handedness", "Right"),
+                                        getattr(fr, "helper_score", 1.0),
+                                        (w, h),
+                                    )
+                                )
+                                if i == primary:
+                                    prim_ids = {
+                                        "pointer_id": getattr(fr, "pointer_id", None),
+                                        "helper_id": getattr(fr, "helper_id", None),
+                                        "promoted": bool(getattr(fr, "promoted", False)),
+                                    }
                                 if fr.landmarks is None:
                                     views.append(None)
                                     continue
-                                h, w = rgb.shape[:2]
                                 crop = hand_crop(rgb, fr.landmarks)
                                 sharp = sharpness_score(crop.mean(axis=2)) if crop.size else None
                                 views.append(ViewObs(i, t_i, fr.landmarks, fr.handedness, fr.score, (w, h), sharp))
                             fused = fuser.update(t_ref, views)
                             self.camera_confidences = dict(fuser.last_confidences)
-                            self.pipeline.on_fused(fused, t_ref)
+                            fused_helper = helper_fuser.update(t_ref, helpers)
+                            extra = {k: v for k, v in prim_ids.items() if v not in (None, False)}
+                            if fused_helper is not None:
+                                extra["helper"] = fused_helper
+                            self.pipeline.on_fused(fused, t_ref, **extra)
                             prim_frame = frames[primary]
                             if faces is not None and prim_frame is not None:
                                 t_p, rgb_p = prim_frame

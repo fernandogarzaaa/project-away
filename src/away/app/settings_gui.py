@@ -33,7 +33,7 @@ from away.bindings import (
     parse_action,
     split_trigger,
 )
-from away.config import HAND_PREFERENCES, PERFORMANCE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
+from away.config import PERFORMANCE_MODES, ROLE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
 from away.hands.gestures import GestureEvent
 
 TUNABLE_LABELS = {
@@ -86,7 +86,24 @@ TUNABLE_LABELS = {
     "voice.numbers_min_value": "Numbers as digits from",
     "voice.clap_sensitivity": "Clap sensitivity (higher = softer claps count)",
     "voice.clap_double_window": "Double-clap window (s)",
+    "hands.roles.release_s": "Hand roles: pointer kept while out of view (s)",
+    "hands.palm_scroll.engage_s": "Palm scroll: touch time before it scrolls (s)",
+    "hands.palm_scroll.depth_threshold": "Palm scroll: fingertip distance from the palm (palm lengths, 0 = any)",
+    "hands.palm_scroll.margin": "Palm scroll: palm outline padding (palm lengths)",
+    "hands.palm_scroll.gain": "Palm scroll: speed (notches per palm length)",
+    "hands.palm_scroll.dead_zone": "Palm scroll: dead zone / tap movement (palm lengths)",
+    "hands.palm_scroll.friction": "Palm scroll: momentum friction (higher = stops sooner)",
 }
+# Settings > Tuning check boxes for palm-glide scroll
+PALM_SCROLL_SWITCHES = (
+    ("hands.palm_scroll.enabled", "Palm scroll: glide a fingertip along the other, flat hand"),
+    ("hands.palm_scroll.invert", "Palm scroll: invert (toward the fingers scrolls down)"),
+    ("hands.palm_scroll.horizontal", "Palm scroll: two fingers scroll sideways"),
+    ("hands.palm_scroll.momentum", "Palm scroll: momentum after the fingertip lifts"),
+)
+# Settings > Voice & input "Hand roles" dropdown (hands.roles.mode; "any" is config-only)
+ROLE_LABELS = {"auto": "Auto", "right": "Right", "left": "Left", "any": "Any (first hand seen)"}
+ROLE_CHOICES = ("auto", "right", "left")
 INT_TUNABLES = {
     "hands.cursor.big_cursor_size",
     "voice.end_silence_ms",
@@ -96,7 +113,7 @@ INT_TUNABLES = {
     "voice.numbers_min_value",
 }
 VOICE_FIELDS = {
-    "hands.prefer": HAND_PREFERENCES,
+    "hands.roles.mode": ROLE_MODES,
     "hands.cursor.curve": ("sigmoid", "power"),
     "hands.multicam.fusion": ("weighted", "best_view"),
     "voice.mode": VOICE_MODES,
@@ -332,7 +349,11 @@ class SettingsModel:
             "updates.channel",
             "performance.mode",
             "face.gate_dictation",
-            "hands.prefer",
+            "hands.roles.mode",
+            "hands.palm_scroll.enabled",
+            "hands.palm_scroll.invert",
+            "hands.palm_scroll.horizontal",
+            "hands.palm_scroll.momentum",
             "hands.gestures.autoscroll_enabled",
             "hands.gestures.autoscroll_horizontal",
             "voice.clap_enabled",
@@ -357,6 +378,21 @@ class SettingsModel:
             # no face gate and no wake word must still type (commands_only would silently drop dictation)
             self.cfg.voice.ambient_fallback = "type"
         return None
+
+    # ------------------------------------------------------------ hand roles
+    @staticmethod
+    def role_choices() -> list[str]:
+        """The Hand roles dropdown: Auto / Right / Left."""
+        return [ROLE_LABELS[m] for m in ROLE_CHOICES]
+
+    def role_label(self) -> str:
+        return ROLE_LABELS.get(self.cfg.hands.roles.mode, str(self.cfg.hands.roles.mode))
+
+    def set_role_label(self, label: str) -> str | None:
+        mode = next((k for k, v in ROLE_LABELS.items() if v.lower() == str(label).strip().lower()), None)
+        if mode is None:
+            mode = str(label).strip().lower()
+        return self.set_voice("hands.roles.mode", mode)
 
     # ------------------------------------------------------------ file ops
     def save(self) -> Path:
@@ -804,7 +840,11 @@ def gesture_test_worker(
 
             mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
             return HandTracker(
-                mdir / "hand_landmarker.task", cfg.hands.max_hands, prefer=cfg.hands.prefer, mirrored=cfg.hands.mirror
+                mdir / "hand_landmarker.task",
+                cfg.hands.max_hands,
+                prefer=cfg.hands.roles.mode,
+                mirrored=cfg.hands.mirror,
+                release_s=cfg.hands.roles.release_s,
             )
 
     lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-test")
@@ -1261,6 +1301,15 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             )
             sc.grid(row=i, column=1, sticky="we")
             self.scales[t.path] = (var, sc)
+        self.tvars: dict[str, Any] = {}
+        r = len(self.scales)
+        for path, label in PALM_SCROLL_SWITCHES:
+            bvar = tk.BooleanVar(value=bool(self.m.voice_value(path)))
+            ttk.Checkbutton(
+                f, text=label, variable=bvar, command=lambda p=path, v=bvar: self._report(self.m.set_voice(p, v.get()))
+            ).grid(row=r, column=0, columnspan=2, sticky="w", padx=4)
+            self.tvars[path] = bvar
+            r += 1
 
     def _on_scale(self, path: str, value: float) -> None:
         cur = float(self.m.voice_value(path))
@@ -1273,8 +1322,15 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         f = self._scroll_tab(nb, "Voice & input")
         self.vvars: dict[str, Any] = {}
         r = 0
+        ttk.Label(f, text="Hand roles (which hand is the pointer)").grid(row=r, column=0, sticky="w", pady=3)
+        self.roles_var = tk.StringVar()
+        rcb = ttk.Combobox(
+            f, textvariable=self.roles_var, values=[ROLE_LABELS[m] for m in ROLE_CHOICES], state="readonly", width=16
+        )
+        rcb.grid(row=r, column=1, sticky="w")
+        rcb.bind("<<ComboboxSelected>>", lambda _e: self._report(self.m.set_role_label(self.roles_var.get())))
+        r += 1
         for path, label in (
-            ("hands.prefer", "Which hand controls the cursor"),
             ("hands.cursor.curve", "Cursor acceleration curve"),
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
@@ -1706,6 +1762,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             var.set(m.voice_value(path.split("#")[0]))
         for path, var in self.vvars.items():
             var.set(m.voice_value(path))
+        for path, var in getattr(self, "tvars", {}).items():
+            var.set(bool(m.voice_value(path)))
+        if hasattr(self, "roles_var"):
+            self.roles_var.set(m.role_label())
         self.shell_var.set(m.bindings.allow_shell)
         self._cam_refresh()
         self._report(None)

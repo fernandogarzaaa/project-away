@@ -1,4 +1,4 @@
-"""At-cursor feedback ring (tkinter): pinch progress, drag, paused, dwell, hand lost, auto-scroll.
+"""At-cursor feedback ring (tkinter): pinch progress, drag, paused, dwell, hand lost, auto-scroll, palm scroll.
 
 :func:`ring_spec` is pure (tested). :func:`run_cursor_overlay` polls a state
 function (``Pipeline.cursor_state``) about 30 times a second and draws a small
@@ -24,6 +24,7 @@ COLORS = {
     "hand_lost": "#9E9E9E",
     "click": "#FFFFFF",
     "autoscroll": "#FF8A65",
+    "palmscroll": "#4DD0E1",
 }
 SIZE = 34  # window size in px
 OFFSET = (18, 18)  # from the cursor hotspot (keeps the ring out from under the pointer)
@@ -70,6 +71,17 @@ def ring_spec(state: dict[str, Any]) -> dict[str, Any]:
             "filled": False,
             "visible": True,
             "width": 3,
+            "arrow": arrow,
+        }
+    if s == "palmscroll":  # palm-glide scroll: a small cyan ring, arrow = the last scroll direction
+        arrow = state.get("direction")
+        arrow = arrow if arrow in ("up", "down", "left", "right") else None
+        return {
+            "color": COLORS["palmscroll"],
+            "extent": 360.0,
+            "filled": False,
+            "visible": True,
+            "width": 2,
             "arrow": arrow,
         }
     if s == "drag":

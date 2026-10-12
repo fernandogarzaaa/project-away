@@ -117,6 +117,35 @@ class MultiCamConfig:
     palm_length_m: float = 0.09  # wrist -> middle MCP, used to give hand-motion calibration a metric scale
 
 
+ROLE_MODES = ("auto", "right", "left", "any")
+
+
+@dataclass
+class RolesConfig:
+    """Which visible hand is the pointer (cursor, clicks, gestures) and which is the helper (v0.1.14)."""
+
+    # auto: the first hand that points (or the only hand in view) | right / left: that real hand | any: the first
+    # hand seen, whatever its pose. Hands are told apart by position and size, not MediaPipe's flipping label.
+    mode: str = "auto"
+    release_s: float = 1.0  # the pointer keeps its role until it has been gone this long (or left the frame)
+
+
+@dataclass
+class PalmScrollConfig:
+    """Palm-glide scroll (v0.1.14): glide the pointer's index fingertip along the helper's flat palm."""
+
+    enabled: bool = True
+    engage_s: float = 0.15  # fingertip on the palm this long before scrolling starts
+    depth_threshold: float = 0.6  # fingertip at most this far off the palm plane (palm lengths; 0 = no depth check)
+    margin: float = 0.25  # the palm outline is padded by this much (palm lengths)
+    gain: float = 12.0  # wheel notches per palm length of glide
+    dead_zone: float = 0.05  # glide below this (palm lengths) does nothing; also the most a tap may move
+    invert: bool = False  # True: glide toward the fingers scrolls down
+    horizontal: bool = True  # index + middle finger on the palm scroll sideways
+    momentum: bool = True  # keep scrolling after the fingertip lifts, slowing down
+    friction: float = 4.0  # momentum decay rate (1/s): speed * exp(-friction * t)
+
+
 @dataclass
 class HandsConfig:
     enabled: bool = True
@@ -127,8 +156,10 @@ class HandsConfig:
     # a physical camera that is busy (NVIDIA Broadcast keeps its source camera open) is replaced by the one
     # NVIDIA Broadcast virtual camera when exactly one is listed and free; logged when it happens
     virtual_fallback: bool = True
-    max_hands: int = 2  # hands MediaPipe looks for; 2 lets `prefer` ignore the other hand (1 = lighter on CPU)
-    prefer: str = "any"  # which hand drives the cursor: right | left | any (any = keep the hand being tracked)
+    max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
+    # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
+    roles: RolesConfig = field(default_factory=RolesConfig)
+    palm_scroll: PalmScrollConfig = field(default_factory=PalmScrollConfig)
     mirror: bool = True
     cursor: CursorConfig = field(default_factory=lambda: CursorConfig(curve="sigmoid"))
     gestures: GestureConfig = field(default_factory=GestureConfig)
@@ -249,7 +280,7 @@ class UpdatesConfig:
     allow_unverified: bool = False  # install a download that has no published SHA-256 (not recommended)
 
 
-CONFIG_VERSION = 3  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9
+CONFIG_VERSION = 4  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9..v0.1.13; 4 = v0.1.14
 
 
 @dataclass
@@ -274,7 +305,8 @@ class AppConfig:
 # Values older versions wrote into every config file as plain defaults (setup/Settings save the whole
 # config), so finding them there says nothing about the user's choice.
 OLD_WRITTEN_DEFAULTS = {("voice", "asr_model"): ("large-v3-turbo",)}  # v0.1.0-v0.1.4 default
-HAND_PREFERENCES = ("any", "right", "left")
+HAND_PREFERENCES = ("any", "right", "left")  # the old hands.prefer values (read only by the migration)
+PREFER_TO_MODE = {"right": "right", "left": "left", "any": "auto"}
 
 
 def migrate(data: dict[str, Any]) -> list[str]:
@@ -302,8 +334,35 @@ def migrate(data: dict[str, Any]) -> list[str]:
             # cursor hand from the other one (hands.prefer)
             notes.append("hands.max_hands: 1 (old default written by setup) -> 2")
             hands["max_hands"] = 2
+    hands = data.get("hands")
+    if isinstance(hands, dict) and "prefer" in hands:
+        # v0.1.9..v0.1.13 hands.prefer -> v0.1.14 hands.roles.mode (any -> auto: the new pose-based roles)
+        old = hands.pop("prefer")
+        if old not in PREFER_TO_MODE:
+            raise ValueError(f"hands.prefer must be {'|'.join(HAND_PREFERENCES)}, got {old!r}")
+        roles = hands.get("roles")
+        roles = dict(roles) if isinstance(roles, dict) else {}
+        if "mode" not in roles:
+            roles["mode"] = PREFER_TO_MODE[old]
+            notes.append(f"hands.prefer: {old} -> hands.roles.mode: {roles['mode']}")
+        hands["roles"] = roles
+    if ver < 4:
+        # the default voice command "use either hand" was hands:any up to v0.1.13 (saved in every file); it now
+        # restores automatic roles
+        voice = _get_path(data, ("bindings", "profiles", "default", "voice"))
+        if isinstance(voice, dict) and str(voice.get("use either hand", "")).strip().lower() == "hands:any":
+            voice["use either hand"] = "hands:auto"
+            notes.append("bindings voice 'use either hand': hands:any -> hands:auto")
     data["config_version"] = CONFIG_VERSION
     return notes
+
+
+def _get_path(data: Any, keys: tuple[str, ...]) -> Any:
+    for k in keys:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(k)
+    return data
 
 
 def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> Any:
@@ -351,6 +410,9 @@ def from_dict(data: dict[str, Any] | None) -> tuple[AppConfig, list[str]]:
         for sec in ("voice", "hands"):
             if isinstance(data.get(sec), dict):
                 data[sec] = dict(data[sec])
+        data["bindings"] = _copy_voice_bindings(data.get("bindings"))
+        if data["bindings"] is None:
+            data.pop("bindings")
         notes = migrate(data)
         data.pop("migrations", None)
         _merge(cfg, data, "", unknown)
@@ -360,6 +422,24 @@ def from_dict(data: dict[str, Any] | None) -> tuple[AppConfig, list[str]]:
             cfg.voice.mode = "push_to_talk"  # legacy configs
     validate(cfg)
     return cfg, unknown
+
+
+def _copy_voice_bindings(b: Any) -> Any:
+    """Copy the path the migration may edit (bindings.profiles.default.voice) so the caller's dict is untouched."""
+    if not isinstance(b, dict):
+        return b
+    b = dict(b)
+    profs = b.get("profiles")
+    if isinstance(profs, dict):
+        profs = dict(profs)
+        d = profs.get("default")
+        if isinstance(d, dict):
+            d = dict(d)
+            if isinstance(d.get("voice"), dict):
+                d["voice"] = dict(d["voice"])
+            profs["default"] = d
+        b["profiles"] = profs
+    return b
 
 
 def validate(cfg: AppConfig) -> None:
@@ -405,8 +485,12 @@ def validate(cfg: AppConfig) -> None:
     r = c.monitor_refresh_s
     if isinstance(r, bool) or not isinstance(r, (int, float)) or not 0 <= float(r) <= 300:
         raise ValueError(f"hands.cursor.monitor_refresh_s must be seconds in [0, 300] (0 = off), got {r!r}")
-    if cfg.hands.prefer not in HAND_PREFERENCES:
-        raise ValueError(f"hands.prefer must be {'|'.join(HAND_PREFERENCES)}, got {cfg.hands.prefer!r}")
+    if cfg.hands.roles.mode not in ROLE_MODES:
+        raise ValueError(f"hands.roles.mode must be {'|'.join(ROLE_MODES)}, got {cfg.hands.roles.mode!r}")
+    ps = cfg.hands.palm_scroll
+    for name in ("enabled", "invert", "horizontal", "momentum"):
+        if not isinstance(getattr(ps, name), bool):
+            raise ValueError(f"hands.palm_scroll.{name} must be true or false, got {getattr(ps, name)!r}")
     mh = cfg.hands.max_hands
     if isinstance(mh, bool) or not isinstance(mh, int) or not 1 <= mh <= 4:
         raise ValueError(f"hands.max_hands must be an integer in [1, 4], got {mh!r}")
@@ -553,6 +637,13 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("voice.numbers_min_value", cfg.voice.numbers_min_value, 0, 1000000),
         ("voice.clap_sensitivity", cfg.voice.clap_sensitivity, 0.0, 1.0),
         ("voice.clap_double_window", cfg.voice.clap_double_window, 0.2, 1.5),
+        ("hands.roles.release_s", cfg.hands.roles.release_s, 0.1, 5.0),
+        ("hands.palm_scroll.engage_s", cfg.hands.palm_scroll.engage_s, 0.0, 1.0),
+        ("hands.palm_scroll.depth_threshold", cfg.hands.palm_scroll.depth_threshold, 0.0, 3.0),
+        ("hands.palm_scroll.margin", cfg.hands.palm_scroll.margin, 0.0, 1.0),
+        ("hands.palm_scroll.gain", cfg.hands.palm_scroll.gain, 0.5, 100.0),
+        ("hands.palm_scroll.dead_zone", cfg.hands.palm_scroll.dead_zone, 0.0, 0.5),
+        ("hands.palm_scroll.friction", cfg.hands.palm_scroll.friction, 0.5, 20.0),
     ]
 
 

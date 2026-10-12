@@ -227,7 +227,7 @@ class MouseController:
             self._release_if_down()
         elif ev.kind == "scroll":
             self.backend.scroll(float(ev.data["dy"]))
-        elif ev.kind == "autoscroll":
+        elif ev.kind in ("autoscroll", "palm_scroll"):
             dy, dx = float(ev.data.get("dy", 0.0)), float(ev.data.get("dx", 0.0))
             if dy:
                 self.backend.scroll(dy)
