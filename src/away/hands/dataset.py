@@ -152,14 +152,30 @@ def load_hagrid_dir(
     return np.stack(X), np.array(y, dtype=np.int64), users
 
 
-def load_recordings(folder: Path) -> tuple[list[NDArray[np.float64]], list[str], list[str]]:
-    """Load ``away record`` clips: returns (sequences, labels, handedness)."""
-    seqs, labels, hands = [], [], []
+def load_recordings_with_groups(
+    folder: Path,
+) -> tuple[list[NDArray[np.float64]], list[str], list[str], list[str]]:
+    """Load clips and optional session/subject grouping metadata for evaluation."""
+    seqs, labels, hands, groups = [], [], [], []
     for p in sorted(Path(folder).glob("**/*.npz")):
-        d = np.load(p, allow_pickle=False)
-        seqs.append(np.asarray(d["X"], dtype=np.float64))
-        labels.append(str(d["label"]))
-        hands.append(str(d["handedness"]) if "handedness" in d.files else "Right")
+        with np.load(p, allow_pickle=False) as d:
+            seqs.append(np.asarray(d["X"], dtype=np.float64))
+            labels.append(str(d["label"]))
+            hands.append(str(d["handedness"]) if "handedness" in d.files else "Right")
+            if "session_id" in d.files:
+                group = str(d["session_id"].item())
+            elif "subject_id" in d.files:
+                group = str(d["subject_id"].item())
+            else:
+                # File-level grouping is a fallback, not proof of subject independence.
+                group = str(p.relative_to(folder))
+            groups.append(group)
+    return seqs, labels, hands, groups
+
+
+def load_recordings(folder: Path) -> tuple[list[NDArray[np.float64]], list[str], list[str]]:
+    """Backward-compatible loader returning (sequences, labels, handedness)."""
+    seqs, labels, hands, _groups = load_recordings_with_groups(folder)
     return seqs, labels, hands
 
 
