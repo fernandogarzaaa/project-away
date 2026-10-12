@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from away.hands.dataset import fixed_length, load_hagrid_dir, load_recordings, subject_split
+from away.hands.dataset import fixed_length, load_hagrid_dir, load_recordings_with_groups, subject_split
 from away.hands.landmarks import sequence_features
 from away.hands.model import (
     SEQ_FEATURES,
@@ -134,6 +134,52 @@ def seqs_to_features(
     return np.stack([sequence_features(fixed_length(s, frames), h) for s, h in zip(seqs, hands)])
 
 
+def temporal_split(
+    source: NDArray[np.str_],
+    groups: list[str],
+    rng: np.random.Generator,
+    test_frac: float = 0.2,
+    val_frac: float = 0.1,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.bool_]]:
+    """Split by sample for synthetic data and by recording/session group for real clips."""
+    train = np.zeros(len(source), dtype=bool)
+    val = np.zeros(len(source), dtype=bool)
+    test = np.zeros(len(source), dtype=bool)
+    synthetic_idx = np.flatnonzero(source == "synthetic")
+    if len(synthetic_idx):
+        shuffled = rng.permutation(synthetic_idx)
+        n_test = round(len(shuffled) * test_frac)
+        n_val = round(len(shuffled) * val_frac)
+        if len(shuffled) >= 3:
+            n_test, n_val = max(1, n_test), max(1, n_val)
+        n_test = min(n_test, max(0, len(shuffled) - 1))
+        n_val = min(n_val, max(0, len(shuffled) - n_test - 1))
+        test[shuffled[:n_test]] = True
+        val[shuffled[n_test : n_test + n_val]] = True
+        train[shuffled[n_test + n_val :]] = True
+    recorded_idx = np.flatnonzero(source == "recorded")
+    if len(recorded_idx):
+        group_to_indices: dict[str, list[int]] = {}
+        for idx in recorded_idx:
+            group_to_indices.setdefault(groups[int(idx)], []).append(int(idx))
+        unique_groups = np.array(sorted(group_to_indices), dtype=object)
+        # Fewer than three groups cannot support distinct train/validation/test partitions.
+        if len(unique_groups) >= 3:
+            shuffled_groups = rng.permutation(unique_groups).tolist()
+            n_test = max(1, round(len(shuffled_groups) * test_frac))
+            n_test = min(n_test, len(shuffled_groups) - 2)
+            n_val = max(1, round(len(shuffled_groups) * val_frac))
+            n_val = min(n_val, len(shuffled_groups) - n_test - 1)
+            test_groups = set(shuffled_groups[:n_test])
+            val_groups = set(shuffled_groups[n_test : n_test + n_val])
+            for group, indices in group_to_indices.items():
+                mask = test if group in test_groups else val if group in val_groups else train
+                mask[indices] = True
+        else:
+            train[recorded_idx] = True
+    return train, val, test
+
+
 def train_temporal(
     out_dir: Path,
     recordings: Path | None = None,
@@ -145,16 +191,19 @@ def train_temporal(
 ) -> dict[str, Any]:
     """Train (or fine-tune) the temporal TCN.
 
-    Data = synthetic sequences (+ your ``away record`` clips if given). Reported
-    accuracy is split by source: ``synthetic_holdout_accuracy`` is NOT a
-    real-world number; ``recorded_holdout_accuracy`` is, when recordings exist.
+    Data = synthetic sequences (+ your recorded clips if given). Validation selects
+    the checkpoint; the final test partition is evaluated once after training. Synthetic
+    accuracy is procedural-data fit, not a real-world number. Recorded test scores are
+    group-disjoint only when recording metadata identifies independent sessions/subjects.
     """
     import torch
 
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     _, GestureTCN = build_torch_models()
-    rec_data = load_recordings(Path(recordings)) if recordings is not None and Path(recordings).exists() else None
+    rec_data = (
+        load_recordings_with_groups(Path(recordings)) if recordings is not None and Path(recordings).exists() else None
+    )
     classes = temporal_classes(rec_data[1] if rec_data else [])
     model = GestureTCN(SEQ_FEATURES, len(classes))
     if init_from is not None and init_from.exists():
@@ -165,35 +214,66 @@ def train_temporal(
     Xs: list[NDArray[np.float64]] = []
     ys: list[int] = []
     src: list[str] = []
+    groups: list[str] = []
     if n_synthetic:
         S, Sy, Sh = make_dataset(n_synthetic, SEQ_FRAMES, seed)
         Xs.extend(seqs_to_features(list(S), Sh))
         ys.extend(int(v) for v in Sy)
         src.extend(["synthetic"] * len(Sy))
+        groups.extend(f"synthetic-{i}" for i in range(len(Sy)))
     if rec_data is not None:
-        R, Rl, Rh = rec_data
+        R, Rl, Rh, Rg = rec_data
         keep = [i for i, lab in enumerate(Rl) if lab in classes]
         if keep:
             Xs.extend(seqs_to_features([R[i] for i in keep], [Rh[i] for i in keep]))
             ys.extend(classes.index(Rl[i]) for i in keep)
             src.extend(["recorded"] * len(keep))
+            groups.extend(Rg[i] for i in keep)
     if not Xs:
         raise ValueError("no training data")
     X = np.stack(Xs)
     y = np.array(ys, dtype=np.int64)
     source = np.array(src)
-    test = rng.random(len(y)) < 0.2
+    train_mask, val_mask, test_mask = temporal_split(source, groups, rng)
     t = lambda a, dt=torch.float32: torch.tensor(a, dtype=dt)  # noqa: E731
-    model = _fit(model, t(X[~test]), t(y[~test], torch.long), t(X[test]), t(y[test], torch.long), epochs, lr, bs=64)
+    model = _fit(
+        model,
+        t(X[train_mask]),
+        t(y[train_mask], torch.long),
+        t(X[val_mask]),
+        t(y[val_mask], torch.long),
+        epochs,
+        lr,
+        bs=64,
+    )
+    # Test data is evaluated only after validation has selected the model checkpoint.
     with torch.no_grad():
-        pred = model(t(X[test])).argmax(1).numpy() if test.any() else np.array([], dtype=np.int64)
-    metrics: dict[str, Any] = {"model": "gesture_tcn", "classes": list(classes), "frames": SEQ_FRAMES}
+        pred = model(t(X[test_mask])).argmax(1).numpy() if test_mask.any() else np.array([], dtype=np.int64)
+    metrics: dict[str, Any] = {
+        "model": "gesture_tcn",
+        "classes": list(classes),
+        "frames": SEQ_FRAMES,
+        "split_counts": {
+            "train": int(train_mask.sum()),
+            "validation": int(val_mask.sum()),
+            "test": int(test_mask.sum()),
+        },
+        "recorded_groups": len({groups[i] for i in range(len(groups)) if source[i] == "recorded"}),
+    }
     for name in ("synthetic", "recorded"):
-        m = test & (source == name)
+        m = test_mask & (source == name)
         if m.any():
-            metrics[f"{name}_holdout_accuracy"] = float((pred[m[test]] == y[m]).mean())
+            metrics[f"{name}_holdout_accuracy"] = float((pred[m[test_mask]] == y[m]).mean())
             metrics[f"{name}_holdout_n"] = int(m.sum())
-    metrics["note"] = "synthetic_* numbers measure fit to procedural data only, not real-world accuracy"
+    if np.any(source == "recorded") and not np.any(test_mask & (source == "recorded")):
+        metrics["recorded_holdout_warning"] = (
+            "No recorded holdout score: at least three distinct recording/session groups are required. "
+            "Record more independent sessions and set session_id or subject_id in recording metadata."
+        )
+    metrics["note"] = (
+        "Synthetic holdout measures procedural-data fit, not real-world accuracy. Recorded holdout is group-disjoint "
+        "only to the extent that recording session/subject metadata correctly identifies independent groups."
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), out_dir / "gesture_tcn.pt")
     export_onnx(
