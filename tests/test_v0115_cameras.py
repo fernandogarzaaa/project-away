@@ -389,7 +389,8 @@ def test_all_three_call_sites_use_the_shared_startup(monkeypatch: pytest.MonkeyP
     stop3 = threading.Event()
     ths3 = cli.open_calibration_cameras(_specs(), FramePairer(2), stop3, virtual_fallback=True, wait_s=2.0)
     capture.stop_camera_threads(stop3, ths3)
-    assert len(calls) == 3 and calls[2][1] == {"virtual_fallback": True}
+    # v0.1.16: the calibration start-up also passes the minimum frame rate (None here: the default)
+    assert len(calls) == 3 and calls[2][1] == {"virtual_fallback": True, "min_fps": None}
 
     # (4) away cameras test
     camtest.stream_cameras(_specs(), 0.1)

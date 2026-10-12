@@ -54,10 +54,12 @@ TUNABLE_LABELS = {
     "hands.gestures.clutch_hold": "Open-palm hold to pause (s)",
     "hands.cursor.big_cursor_size": "Cursor size while gestures are active (0 = off)",
     "hands.gestures.autoscroll_hold": "Auto-scroll: four-finger hold before it starts (s)",
+    "hands.gestures.autoscroll_thumb_fold": "Auto-scroll: thumb-fold threshold (higher = easier to trigger)",
     "hands.gestures.autoscroll_dead_zone": "Auto-scroll: dead zone (palm lengths)",
     "hands.gestures.autoscroll_gain": "Auto-scroll: speed (gain)",
     "hands.gestures.autoscroll_max_speed": "Auto-scroll: max speed (notches/s)",
     "hands.gestures.autoscroll_stop_hold": "Auto-scroll: fist hold to stop (s)",
+    "hands.min_camera_fps": "Cameras: minimum usable frame rate (fps)",
     "voice.vad_sensitivity": "Voice sensitivity (always-on)",
     "voice.end_silence_ms": "End of utterance silence (ms)",
     "voice.min_utterance_ms": "Shortest utterance (ms)",
@@ -939,16 +941,38 @@ def short_camera_error(err: str) -> str:
     return "error: " + (err if len(err) <= 32 else err[:31] + "\u2026")
 
 
-def live_cells(threads: list[Any], confs: list[float | None] | None = None) -> list[str]:
+def thread_too_slow(th: Any, min_fps: float) -> float | None:
+    """The measured fps when camera thread ``th`` is below ``min_fps`` (v0.1.16), else None."""
+    check = getattr(th, "too_slow", None)
+    if min_fps <= 0 or not callable(check):
+        return None
+    try:
+        if not check(min_fps):
+            return None
+    except Exception:
+        return None
+    fps = getattr(th, "fps", None)
+    live = fps() if callable(fps) else 0.0
+    measured = getattr(th, "measured_fps", None)
+    if not live and isinstance(measured, (int, float)):
+        live = float(measured)
+    return float(live)
+
+
+def live_cells(threads: list[Any], confs: list[float | None] | None = None, min_fps: float = 0.0) -> list[str]:
     """The Confidence column during Live confidence: ``opening\u2026`` until the camera opened, its hand
-    confidence once frames arrive, ``no frames`` when it opened but nothing comes, or a short error."""
+    confidence once frames arrive, ``no frames`` when it opened but nothing comes, ``too slow: 1.0 fps`` below
+    ``min_fps``, or a short error."""
     out: list[str] = []
     for i, th in enumerate(threads):
         conf = confs[i] if confs is not None and i < len(confs) else None
         err = getattr(th, "error", None)
         state = getattr(th, "state", "")
+        slow = thread_too_slow(th, min_fps)
         if err:
             out.append(short_camera_error(str(err)))
+        elif slow is not None:
+            out.append(f"FAILED: too slow ({slow:.1f} fps)")
         elif conf is not None:
             out.append(conf_bar(conf))
         elif state in ("waiting", "opening"):
@@ -962,15 +986,23 @@ def live_cells(threads: list[Any], confs: list[float | None] | None = None) -> l
     return out
 
 
-def live_status_line(threads: list[Any]) -> str:
-    """``live: JoyCam 640x480@30 MJPG (DirectShow) | HD User Facing 320x240@15 MJPG (DirectShow)``."""
+def live_status_line(threads: list[Any], min_fps: float = 0.0) -> str:
+    """``live: JoyCam 640x480@30 MJPG (DirectShow) | HD User Facing 320x240@15 MJPG (DirectShow)``; a camera
+    below ``min_fps`` says ``FAILED - too slow: 1.0 fps (minimum 10)``, one NVIDIA Broadcast replaced says so."""
     parts = []
     for th in threads:
         dev = str(getattr(getattr(th, "spec", None), "device", "?"))
         describe = getattr(th, "describe_mode", None)
         mode = describe() if callable(describe) else ""
         err = getattr(th, "error", None)
-        parts.append(f"{dev} {mode}" if mode else f"{dev} {'failed' if err else 'opening...'}")
+        slow = thread_too_slow(th, min_fps)
+        via = getattr(th, "opened_name", "")
+        if isinstance(via, str) and via and getattr(th, "fallback", ""):
+            dev = f"{dev} (via {via}: {th.fallback})"
+        if slow is not None and not err:
+            parts.append(f"{dev} FAILED - too slow: {slow:.1f} fps (minimum {min_fps:g})")
+        else:
+            parts.append(f"{dev} {mode}" if mode else f"{dev} {'failed' if err else 'opening...'}")
     return "live: " + " | ".join(parts)
 
 
@@ -1065,6 +1097,7 @@ def camera_confidence_worker(
 
     sleep = sleep or _time.sleep
     cams = model.cfg.hands.cameras
+    floor = float(getattr(model.cfg.hands, "min_camera_fps", 0.0) or 0.0)
     primary = next((i for i, c in enumerate(cams) if c.role == "primary"), 0)
     pairer = FramePairer(len(cams), primary, model.cfg.hands.multicam.pair_tolerance_ms / 1000.0, 0.5)
     leases = leases or SharedLease()
@@ -1081,8 +1114,10 @@ def camera_confidence_worker(
         from away.multicam.fusion import ViewObs, view_confidence
 
         if start is None:  # pragma: no cover - real cameras
+            import functools
+
             capture.use_mode_store(capture.default_mode_file())
-            start = start_camera_threads
+            start = functools.partial(start_camera_threads, min_fps=floor)
         threads = start(list(cams), pairer, cam_stop, virtual_fallback=bool(model.cfg.hands.virtual_fallback))
         confs: list[float | None] = [None] * len(cams)
         last = -1.0
@@ -1108,7 +1143,7 @@ def camera_confidence_worker(
                 for i, th in enumerate(threads):
                     if getattr(th, "error", None) or not th.is_alive():
                         confs[i] = None
-                out.put({"cells": live_cells(threads, confs), "status": live_status_line(threads)})
+                out.put({"cells": live_cells(threads, confs, floor), "status": live_status_line(threads, floor)})
             if st is None:
                 sleep(0.005)
     except Exception as exc:
@@ -1117,7 +1152,9 @@ def camera_confidence_worker(
         stop.set()
         stop_camera_threads(cam_stop, threads)  # the devices are free before the lease hands them back
         if threads:
-            out.put({"cells": live_cells(threads, None), "status": live_status_line(threads), "final": True})
+            out.put(
+                {"cells": live_cells(threads, None, floor), "status": live_status_line(threads, floor), "final": True}
+            )
         leases.release()
 
 
@@ -1131,18 +1168,25 @@ def camera_test_worker(
 ) -> None:
     """Settings > Cameras > Test both cameras: the same test as ``away cameras test``. Puts progress
     strings and finally ``{"report": TestReport}`` (or ``{"error": str}``) on ``out``."""
-    from away.app.camera_share import SharedLease
+    from away.app.camera_share import SharedLease, confirm_handover
     from away.multicam import camtest, capture
 
     leases = leases or SharedLease()
     lease = leases.acquire("settings-camera-test")
     try:
+        confirm_handover(lease, say=lambda m: out.put(str(m)))  # never open what the app is still releasing
         if lease.app_running and not lease.handed_over:
             out.put({"error": "Project Away is using the cameras and did not hand them over in time - pause it"})
             return
         if tester is None:  # pragma: no cover - real cameras
+            import functools
+
             capture.use_mode_store(capture.default_mode_file())
-            tester = camtest.run_camera_test
+            tester = functools.partial(
+                camtest.run_camera_test,
+                min_fps=float(model.cfg.hands.min_camera_fps),
+                virtual_fallback=bool(model.cfg.hands.virtual_fallback),
+            )
         report = tester(list(model.cfg.hands.cameras), seconds, progress=lambda m: out.put(str(m)))
         out.put({"report": report})
     except Exception as exc:
@@ -1268,6 +1312,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.m = model
         self.capture = ComboCapture()
         self._capture_target: Any = None
+        from away.app.uiqueue import UiQueue
+
+        self._ui = UiQueue()  # worker threads post Tk work here; only the Tk thread touches widgets (v0.1.16)
         self._test_q: queue.Queue[str] = queue.Queue()
         self._test_stop = threading.Event()
         root.title("Project Away settings")
@@ -1330,6 +1377,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
+        self._ui.pump(root)
+        from away.app import crashlog
+
+        note = crashlog.last_crash_note() or crashlog.recent_note()
+        if note:
+            self._report(None, f"{note} ({crashlog.crash_log_path()})")
 
     # ---------------------------------------------------------------- layout
     def _apply_style(self) -> float:
@@ -1902,7 +1955,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             elif isinstance(msg, dict) and "report" in msg:
                 rep = msg["report"]
                 self.cam_test_var.set("\n".join(rep.lines()))
-                self._cam_combo = rep.save_offer(list(self.m.cfg.hands.cameras))
+                self._cam_tested = list(self.m.cfg.hands.cameras)
+                self._cam_combo = rep.save_offer(self._cam_tested)
                 if self._cam_combo is not None:
                     self.cam_save_combo_btn.configure(state="normal")
         if running:
@@ -1916,7 +1970,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         if not self._cam_combo:
             return
-        changed = camtest.save_combination(self.m.cfg, self._cam_combo)
+        changed = camtest.save_combination(self.m.cfg, self._cam_combo, getattr(self, "_cam_tested", None))
         self._on_save()
         self._cam_combo = None
         self.cam_save_combo_btn.configure(state="disabled")
@@ -1982,7 +2036,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                 self._report(err, "GPU pack installed: speech recognition uses the GPU from the next start")
                 self._perf_refresh()
 
-            self.root.after(0, done)
+            self._ui.post(done)  # never touch Tk from this worker thread
 
         threading.Thread(target=run, daemon=True, name="gpu-pack").start()
 
@@ -2224,6 +2278,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
 
 def main(config_path: Path | None = None, argv: list[str] | None = None) -> int:
+    from away.app import crashlog
+
+    crashlog.install("settings")  # crash.log: faulthandler + uncaught exceptions (v0.1.16); idempotent
     if getattr(sys, "frozen", False):  # pragma: no cover - installed app
         from away.app.frozen import setup_logging
 

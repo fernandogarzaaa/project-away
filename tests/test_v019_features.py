@@ -413,11 +413,12 @@ def kinds(events):
 
 
 def test_thumb_fold_tells_four_fingers_from_the_open_palm():
-    assert thumb_fold_ratio(pose("palm")) > 1.0 > 0.75 > thumb_fold_ratio(four())
+    # v0.1.16: the band is hands.gestures.autoscroll_thumb_fold (0.95) .. +0.1 (it was a fixed 0.75 .. 0.95)
+    assert thumb_fold_ratio(pose("palm")) > 1.05 > 0.95 > thumb_fold_ratio(four())
     sm = GestureStateMachine()
     assert sm.pose_of(four(rotation=0.3)) == "four" and sm.pose_of(pose("palm")) == "palm"
-    half = pose("palm", thumb_fold=0.45)  # in the hysteresis band: keeps the previous answer
-    assert 0.75 <= thumb_fold_ratio(half) <= 0.95
+    half = pose("palm", thumb_fold=0.2)  # in the hysteresis band: keeps the previous answer
+    assert 0.95 <= thumb_fold_ratio(half) <= 1.05
     sm.pose_of(four())
     assert sm.pose_of(half) == "four"
     sm.pose_of(pose("palm"))

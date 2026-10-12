@@ -1,8 +1,10 @@
 """Four-finger auto-scroll (joystick / middle-click-autoscroll style). Pure logic, no devices.
 
-Hold up four fingers (index..pinky extended, thumb folded) for ``autoscroll_hold`` seconds: the hand's position
-at that moment becomes the anchor. Moving the hand above or below the anchor scrolls up or down, faster the
-further it is (dead zone, power curve, max speed), and it keeps scrolling while the hand holds still. With
+Hold up four fingers (index..pinky extended, thumb folded) for ``autoscroll_hold`` seconds: where the hand is
+right then becomes the neutral point (v0.1.16: the average of the positions seen while the pose was held, so the
+wobble of folding the thumb does not offset it, and nothing has to move away from the start first). Moving the
+hand above or below the neutral point scrolls up or down at a speed proportional to the distance beyond a small
+dead zone (capped at the max speed), and it keeps scrolling while the hand holds still. With
 ``autoscroll_horizontal`` the hand left/right of the anchor scrolls sideways; the axis with the larger offset
 wins, so a vertical scroll never drifts sideways.
 
@@ -27,7 +29,8 @@ from away.config import GestureConfig
 
 OTHER_STOP_S = 0.35  # another pose held this long ends auto-scroll (short flickers while moving do not)
 LOST_STOP_S = 0.5  # hand gone longer than this ends auto-scroll
-CURVE_EXPONENT = 1.5  # speed = gain * excess ** exponent (gentle near the dead zone, quick further out)
+CURVE_EXPONENT = 1.0  # speed = gain * excess ** exponent; v0.1.16: proportional (was 1.5, too slow near neutral)
+HOLD_SAMPLES = 8  # the neutral point is the mean of at most this many positions from the end of the hold
 MAX_FRAME_DT = 0.1  # a stalled frame never produces a burst of scrolling
 
 
@@ -65,6 +68,7 @@ class AutoScroller:
         self.vx = 0.0
         self.vy = 0.0
         self._four_t0: float | None = None
+        self._hold_pos: list[tuple[float, float]] = []
         self._fist_t0: float | None = None
         self._other_t0: float | None = None
         self._lost_t0: float | None = None
@@ -81,12 +85,14 @@ class AutoScroller:
         self.anchor = None
         self.vx = self.vy = 0.0
         self._four_t0 = self._fist_t0 = self._other_t0 = self._lost_t0 = None
+        self._hold_pos = []
         self._last_t = None
         return was
 
     def lost(self, t: float) -> dict[str, Any] | None:
         """No hand this frame. Returns the stop event data once the hand has been gone > LOST_STOP_S."""
         self._four_t0 = self._fist_t0 = self._other_t0 = None
+        self._hold_pos = []
         if not self.active:
             return None
         if self._lost_t0 is None:
@@ -111,16 +117,22 @@ class AutoScroller:
         if not self.active:
             if not cfg.autoscroll_enabled or pose != "four" or pinched:
                 self._four_t0 = None
+                self._hold_pos = []
                 return None
             if self._four_t0 is None:
                 self._four_t0 = t
+            self._hold_pos = [*self._hold_pos[-(HOLD_SAMPLES - 1) :], (float(pos[0]), float(pos[1]))]
             if t - self._four_t0 < cfg.autoscroll_hold:
                 return None
+            n = len(self._hold_pos)
+            neutral = (sum(p[0] for p in self._hold_pos) / n, sum(p[1] for p in self._hold_pos) / n)
+            self._hold_pos = []
             self.active = True
-            self.anchor = pos
+            self.anchor = neutral
+            self.vx = self.vy = 0.0
             self._last_t = t
             self._fist_t0 = self._other_t0 = None
-            return "autoscroll_start", {"x": pos[0], "y": pos[1]}
+            return "autoscroll_start", {"x": neutral[0], "y": neutral[1]}
 
         # running: stop on a held fist or a held other gesture
         if pose == "fist":

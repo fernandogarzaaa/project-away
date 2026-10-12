@@ -9,6 +9,7 @@ def isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("AWAY_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.delenv("AWAY_CONFIG", raising=False)
     monkeypatch.delenv("AWAY_LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("AWAY_NO_CRASHLOG", "1")  # cli.main must not replace pytest's fault handler / excepthooks
     yield
 
 
@@ -47,6 +48,16 @@ def no_real_camera_listing(monkeypatch):
     monkeypatch.setattr(capture, "windows_dshow_cameras", lambda category=capture.CLSID_VideoInputDeviceCategory: [])
     monkeypatch.setattr(AwayApp, "_camera_list", lambda self, log=False: None)
     capture._last_logged = None
+    yield
+
+
+@pytest.fixture(autouse=True)
+def unmeasured_camera_modes(monkeypatch):
+    """v0.1.16 measures every camera mode for 1.5 s (capture.MEASURE_S). Tests with fake cameras that are not
+    about the frame rate accept the first frame unmeasured; frame-rate tests pass ``measure_s`` and a fake clock."""
+    from away.multicam import capture
+
+    monkeypatch.setattr(capture, "MEASURE_S", 0.0)
     yield
 
 

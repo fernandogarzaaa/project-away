@@ -60,6 +60,7 @@ class TrayController:
         self.app = app
         self.paused = False
         self.last_activity = float("-inf")
+        self.crash_note: str | None = None  # "the app crashed last time; details in crash.log" (v0.1.16)
 
     def toggle_pause(self) -> bool:
         self.paused = not self.paused
@@ -107,7 +108,8 @@ class TrayController:
             "idle": "push-to-talk ready",
             "off": "voice off",
         }.get(state, state)
-        return f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
+        text = f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
+        return text + (" - crashed last time, see crash.log" if self.crash_note else "")
 
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
@@ -214,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.app.updater import UpdateManager, exit_after_update
 
     setup_logging()  # away.* INFO -> away.log (windowed app) or the terminal
+    from away.app import crashlog
+
+    crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
     ctl = TrayController(app)
@@ -358,6 +363,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
                 "Project Away: faster speech available", f"{gpu_offer['text']}. Use the tray menu: Install GPU pack."
             )
     ctl.mark_activity()  # the idle clock starts at launch
+    if crash_note:
+        ctl.crash_note = f"{crash_note} ({crashlog.crash_log_path()})"
+        notify("Project Away", ctl.crash_note)
 
     def _sync(ic: Any) -> None:
         ctl.paused = bool(app.pipeline.paused)

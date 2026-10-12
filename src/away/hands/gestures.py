@@ -64,9 +64,19 @@ SWIPE_COOLDOWN = 0.5
 CLUTCH_MAX_DRIFT = 0.05
 SCROLL_MIN_DELTA = 0.002
 # thumb_fold_ratio hysteresis that splits "four fingers up" into the open palm (thumb out, clutch/swipe) and the
-# four-finger auto-scroll pose (thumb folded). Real photos: open palms 1.3-1.5, thumb folded 0.2-0.4.
-THUMB_FOLD_ON = 0.75
-THUMB_FOLD_OFF = 0.95
+# four-finger auto-scroll pose (thumb folded). Real photos: open palms 1.3-1.5, a thumb tucked across the palm
+# 0.2-0.4, but a thumb merely held against the side of the index finger reads 0.8-0.95 on a real hand. v0.1.16:
+# the "on" threshold is hands.gestures.autoscroll_thumb_fold (default 0.95; it was a fixed 0.75, so the real
+# four-finger pose read as the open palm and toggled pause); "off" is THUMB_FOLD_HYSTERESIS above it.
+THUMB_FOLD_ON = 0.95  # the default of GestureConfig.autoscroll_thumb_fold
+THUMB_FOLD_HYSTERESIS = 0.1
+THUMB_FOLD_OFF = THUMB_FOLD_ON + THUMB_FOLD_HYSTERESIS
+
+
+def thumb_fold_thresholds(cfg: GestureConfig) -> tuple[float, float]:
+    """``(on, off)``: the thumb counts as folded below ``on`` and stays folded until above ``off``."""
+    on = float(getattr(cfg, "autoscroll_thumb_fold", THUMB_FOLD_ON))
+    return on, on + THUMB_FOLD_HYSTERESIS
 
 
 class GestureStateMachine:
@@ -94,6 +104,7 @@ class GestureStateMachine:
         self._last_swipe_t = -1e9
         self._scroll_prev_y: float | None = None
         self._thumb_folded = False
+        self._thumb_out = False
         self.clutch_blocked = False
 
     def block_clutch(self) -> None:
@@ -130,9 +141,14 @@ class GestureStateMachine:
         pose = classify_pose(lm)
         if pose != "palm":
             self._thumb_folded = False
+            self._thumb_out = False
             return pose
         r = thumb_fold_ratio(lm)
-        self._thumb_folded = r < (THUMB_FOLD_OFF if self._thumb_folded else THUMB_FOLD_ON)
+        on, off = thumb_fold_thresholds(self.cfg)
+        self._thumb_folded = r < (off if self._thumb_folded else on)
+        # the open palm (clutch / swipe) needs the thumb clearly out: in the hysteresis band a hand that is not
+        # (yet) "four" is still a palm, but it never pauses (v0.1.16: four fingers win over the clutch)
+        self._thumb_out = r >= off
         return "four" if self._thumb_folded and self.cfg.autoscroll_enabled else "palm"
 
     def stop_autoscroll(self, t: float, reason: str) -> list[GestureEvent]:
@@ -181,7 +197,8 @@ class GestureStateMachine:
         # --- clutch (open palm held still) works even while paused
         if pose != "palm":
             self.clutch_blocked = False
-        if pose == "palm" and not self.pinched and not self.clutch_blocked:
+        thumb_ok = self._thumb_out or not self.cfg.autoscroll_enabled  # see pose_of: four fingers win
+        if pose == "palm" and thumb_ok and not self.pinched and not self.clutch_blocked:
             if self._palm_t0 is None:
                 self._palm_t0, self._palm_pos = t, (wx, wy)
             drift = float(np.hypot(wx - self._palm_pos[0], wy - self._palm_pos[1]))

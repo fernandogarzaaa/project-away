@@ -70,8 +70,12 @@ class GestureConfig:
     # faster the further it is, and keeps scrolling while the hand holds still; a fist stops it
     autoscroll_enabled: bool = True
     autoscroll_hold: float = 0.2  # four-finger pose held this long before auto-scroll starts
-    autoscroll_dead_zone: float = 0.25  # offset from the start position (palm lengths) that does not scroll
-    autoscroll_gain: float = 12.0  # wheel notches/s per palm length beyond the dead zone (before the curve)
+    # thumb_fold_ratio below this = thumb folded (four-finger auto-scroll, not the open palm); released again
+    # above it + 0.1 (hysteresis). v0.1.16: 0.95 (was a fixed 0.75, too strict for a real hand: it read as the
+    # open palm and toggled pause). Open palms measure about 1.1-1.5.
+    autoscroll_thumb_fold: float = 0.95
+    autoscroll_dead_zone: float = 0.15  # offset from the neutral point (palm lengths) that does not scroll
+    autoscroll_gain: float = 20.0  # wheel notches/s per palm length beyond the dead zone (proportional)
     autoscroll_max_speed: float = 30.0  # wheel notches per second
     autoscroll_stop_hold: float = 0.2  # fist held this long stops auto-scroll
     autoscroll_horizontal: bool = True  # hand left/right of the start scrolls sideways (the larger offset wins)
@@ -156,6 +160,10 @@ class HandsConfig:
     # a physical camera that is busy (NVIDIA Broadcast keeps its source camera open) is replaced by the one
     # NVIDIA Broadcast virtual camera when exactly one is listed and free; logged when it happens
     virtual_fallback: bool = True
+    # v0.1.16: a camera measured below this frame rate is FAILED ("too slow"), not ok, in `away cameras test`,
+    # Settings and the app log; calibration refuses to run with it; a too-slow camera is replaced by a free
+    # NVIDIA Broadcast camera (when virtual_fallback is on and Broadcast itself reaches this rate)
+    min_camera_fps: float = 10.0
     max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
     # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
     roles: RolesConfig = field(default_factory=RolesConfig)
@@ -603,6 +611,7 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.gestures.clutch_hold", g.clutch_hold, 0.1, 3.0),
         ("hands.cursor.big_cursor_size", c.big_cursor_size, 0, 5),
         ("hands.gestures.autoscroll_hold", g.autoscroll_hold, 0.05, 1.0),
+        ("hands.gestures.autoscroll_thumb_fold", g.autoscroll_thumb_fold, 0.3, 1.4),
         ("hands.gestures.autoscroll_dead_zone", g.autoscroll_dead_zone, 0.0, 2.0),
         ("hands.gestures.autoscroll_gain", g.autoscroll_gain, 0.5, 100.0),
         ("hands.gestures.autoscroll_max_speed", g.autoscroll_max_speed, 1.0, 200.0),
@@ -644,6 +653,7 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.palm_scroll.gain", cfg.hands.palm_scroll.gain, 0.5, 100.0),
         ("hands.palm_scroll.dead_zone", cfg.hands.palm_scroll.dead_zone, 0.0, 0.5),
         ("hands.palm_scroll.friction", cfg.hands.palm_scroll.friction, 0.5, 20.0),
+        ("hands.min_camera_fps", cfg.hands.min_camera_fps, 1.0, 60.0),
     ]
 
 

@@ -37,6 +37,9 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
         ["tests/test_face.py"],
     ),
     "fusion_events": (["src/away/fusion.py", "src/away/events.py"], ["tests/test_fusion_events.py"]),
+    # v0.1.16
+    "autoscroll": (["src/away/hands/autoscroll.py"], ["tests/test_v0116_fixes.py", "tests/test_v019_features.py"]),
+    "crashlog": (["src/away/app/crashlog.py", "src/away/app/uiqueue.py"], ["tests/test_v0116_fixes.py"]),
 }
 
 

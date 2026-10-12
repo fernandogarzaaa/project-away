@@ -568,6 +568,8 @@ def cmd_cameras(args: argparse.Namespace) -> int:
 
 def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester: Any = None, save: Any = None) -> int:
     """``away cameras test [--seconds 10] [--save]``: can the configured cameras stream at the same time?"""
+    import functools
+
     from away.app.camera_share import borrowed_cameras
     from away.multicam import camtest, capture
 
@@ -577,21 +579,30 @@ def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester
     if not cams:
         return _fail("no cameras in hands.cameras; add them with `away cameras add NAME` (two for multi-camera)")
     borrow = lease_factory or (lambda: borrowed_cameras(timeout=CALIBRATE_LEASE_S, who="camera-test"))
+    from away.app.camera_share import confirm_handover
+
     with borrow() as lease:
+        confirm_handover(lease, say=lambda m: print(m, flush=True))  # never open what the app still releases
         if lease.app_running and not lease.handed_over:
             return _fail("Project Away is using the cameras and did not hand them over in time - pause or quit it")
         if lease.handed_over:
             print("Project Away released the cameras for the test; they are handed back afterwards.")
         if tester is None:
             capture.use_mode_store(capture.default_mode_file())
-        run = tester or camtest.run_camera_test
+            run: Any = functools.partial(
+                camtest.run_camera_test,
+                min_fps=float(cfg.hands.min_camera_fps),
+                virtual_fallback=bool(cfg.hands.virtual_fallback),
+            )
+        else:
+            run = tester
         report = run(cams, float(args.seconds), progress=lambda m: print(m, flush=True))
     for line in report.lines():
         print(line)
     offer = report.save_offer(cams)
     if offer is not None:
         if args.save:
-            changed = camtest.save_combination(cfg, offer)
+            changed = camtest.save_combination(cfg, offer, cams)
             try:
                 (save or cfgmod.save)(cfg, path)
             except ValueError as exc:
@@ -737,6 +748,7 @@ def open_calibration_cameras(
     clock: Any = None,
     sleep: Any = None,
     say: Any = None,
+    min_fps: float | None = None,
 ) -> list[Any]:
     """Start the calibration cameras with the shared sequential start-up (primary first, one after another,
     the same opener and fallbacks as the app). A secondary that still fails is retried once, after the
@@ -746,7 +758,10 @@ def open_calibration_cameras(
 
     from away.multicam import capture
 
-    start = start or capture.start_camera_threads
+    if start is None:
+        import functools
+
+        start = functools.partial(capture.start_camera_threads, min_fps=min_fps)
     clock = clock or time.monotonic
     sleep = sleep or time.sleep
     say = say or (lambda m: print(m, flush=True))
@@ -766,11 +781,58 @@ def open_calibration_cameras(
         say(f"camera {cams[i].device!r} did not start ({th.error or 'no frames'}); retrying it at 320x240 MJPG...")
         spec = copy.copy(cams[i])
         spec.width, spec.height, spec.fps, spec.fourcc = 320, 240, 15, "MJPG"
-        opener = retry_opener or capture.camera_opener(virtual_fallback, low_res=True)
+        opener = retry_opener or capture.camera_opener(virtual_fallback, low_res=True, min_fps=min_fps)
         again = capture.CameraThread(i, spec, pairer, stop, opener=opener)
         again.start()
         threads[i] = again
     return threads
+
+
+CALIBRATION_SPEED_S = 3.0  # streaming this long before calibration measures each camera's frame rate
+
+
+def calibration_speed_check(
+    cams: list[Any],
+    threads: list[Any],
+    min_fps: float,
+    *,
+    settle_s: float = CALIBRATION_SPEED_S,
+    clock: Any = None,
+    sleep: Any = None,
+    stop: Any = None,
+) -> str | None:
+    """Calibration needs every camera at ``min_fps`` (v0.1.16): stream ``settle_s``, then return why it cannot
+    run (a camera too slow, or not streaming), or None when every camera is fast enough. On the user's laptop a
+    camera at 1 fps made hand-motion calibration fail with only "no secondary camera could be calibrated"."""
+    import time
+
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    end = clock() + settle_s
+    while clock() < end and not (stop is not None and stop.is_set()):
+        sleep(0.05)
+    problems = []
+    for spec, th in zip(cams, threads):
+        if getattr(th, "error", None):
+            problems.append(f"camera {spec.device!r} does not work: {th.error}")
+            continue
+        if getattr(th, "frames", 0) == 0:
+            problems.append(f"camera {spec.device!r} sent no frames")
+            continue
+        check = getattr(th, "too_slow", None)
+        if min_fps > 0 and callable(check) and check(min_fps, window_s=min(2.0, settle_s * 0.6)):
+            fps = th.fps() if callable(getattr(th, "fps", None)) else 0.0
+            problems.append(
+                f"camera {spec.device!r} is too slow for calibration: {fps:.1f} fps (minimum {min_fps:g}, "
+                "hands.min_camera_fps)"
+            )
+    if not problems:
+        return None
+    return (
+        "calibration cannot run: "
+        + "; ".join(problems)
+        + ". Run Settings > Cameras > Test both cameras (or `away cameras test`) to find a mode that works."
+    )
 
 
 def write_calibration_status(path: str | None, **data: Any) -> None:
@@ -807,7 +869,19 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
     pairer = FramePairer(len(cams), primary, cfg.hands.multicam.pair_tolerance_ms / 1000, 0.5)
     stop = threading.Event()
     capture.use_mode_store(capture.default_mode_file())
-    threads = open_calibration_cameras(cams, pairer, stop, virtual_fallback=bool(cfg.hands.virtual_fallback))
+    threads = open_calibration_cameras(
+        cams,
+        pairer,
+        stop,
+        virtual_fallback=bool(cfg.hands.virtual_fallback),
+        min_fps=float(cfg.hands.min_camera_fps),
+    )
+    write_calibration_status(status, state="running", progress=0, message="cameras open; checking their speed...")
+    slow = calibration_speed_check(cams, threads, float(cfg.hands.min_camera_fps), stop=stop)
+    if slow is not None:
+        capture.stop_camera_threads(stop, threads)
+        write_calibration_status(status, state="failed", message=slow)
+        return _fail(slow)
     write_calibration_status(status, state="running", progress=0, message="cameras open; starting...")
     board = args.checkerboard if args.method == "checkerboard" else None
     try:
@@ -1156,6 +1230,12 @@ def main(argv: list[str] | None = None) -> int:
 
     enable_dpi_awareness()
     args = build_parser().parse_args(argv)
+    # crash.log for every entry point (v0.1.16): faulthandler dumps all threads on a fatal error, uncaught
+    # exceptions go to away.log and crash.log; idempotent (the frozen exe and the tray app call it too)
+    from away.app import crashlog
+
+    cmd = str(getattr(args, "command", "") or getattr(getattr(args, "fn", None), "__name__", "cli"))
+    crashlog.install({"cmd_settings": "settings", "cmd_tray": "tray"}.get(cmd, f"cli {cmd}".strip()))
     return int(args.fn(args))
 
 

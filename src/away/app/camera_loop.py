@@ -45,6 +45,7 @@ class CameraLoop:
         owner_s: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
         until: Callable[[], bool] | None = None,
+        wait_free: Callable[[], bool] | None = None,
     ) -> None:
         self.open_frames = open_frames
         self.process = process
@@ -58,6 +59,9 @@ class CameraLoop:
         self.owner_s = owner_s
         self.clock = clock
         self.until = until  # optional: end the loop (camera closed) once this returns True
+        # v0.1.16: before telling the borrower the cameras are free, wait until this process really holds and
+        # opens none (a background probe may still be opening one); see capture.wait_devices_free
+        self.wait_free = wait_free
         self.handovers = 0
         self.open_failures = 0
         self._last_error: str | None = None
@@ -143,11 +147,15 @@ class CameraLoop:
         if self.on_release is not None:
             with contextlib.suppress(Exception):
                 self.on_release()  # e.g. "hand lost": releases a held drag
+        if self.wait_free is not None:
+            with contextlib.suppress(Exception):
+                self.wait_free()
         self.share.clear_owner()
         self.share.ack_released(self.cameras)
         self.publish("camera.handover", {"released": True, "cameras": self.cameras})
         while self._requested() and not self.stop.is_set():
             self.stop.wait(self.check_s)
+            self.share.ack_released(self.cameras)  # keep the acknowledgement fresh (it goes stale after 5 s)
         self.share.clear_released()
         self.publish("camera.handover", {"released": False, "cameras": self.cameras})
 
@@ -244,3 +252,36 @@ def degrade_plan(
         "Fix or remove it in Settings > Cameras."
     )
     return "single", devices[pick], msg
+
+
+def camera_speed_lines(threads: Sequence[Any], min_fps: float) -> list[tuple[bool, str]]:
+    """One away.log line per camera once it has streamed a while (v0.1.16): ``(failed, text)``. A camera below
+    ``min_fps`` is FAILED (too slow), not ok; one that NVIDIA Broadcast's camera replaced says so."""
+    out: list[tuple[bool, str]] = []
+    for th in threads:
+        dev = getattr(getattr(th, "spec", None), "device", "?")
+        fps_fn = getattr(th, "fps", None)
+        fps = float(fps_fn()) if callable(fps_fn) else 0.0
+        describe = getattr(th, "describe_mode", None)
+        mode = describe() if callable(describe) else ""
+        via = getattr(th, "opened_name", "")
+        why = getattr(th, "fallback", "")
+        name = f"{dev!r}" + (f" (via {via}: {why})" if isinstance(via, str) and via and why else "")
+        err = getattr(th, "error", None)
+        if err:
+            out.append((True, f"camera {name}: FAILED - {err}"))
+            continue
+        check = getattr(th, "too_slow", None)
+        slow = bool(check(min_fps)) if callable(check) and min_fps > 0 else False
+        if slow:
+            out.append(
+                (
+                    True,
+                    f"camera {name}: FAILED - too slow: {fps:.1f} fps (minimum {min_fps:g}, hands.min_camera_fps)"
+                    + (f", {mode}" if mode else "")
+                    + "; it adds nothing to hand tracking",
+                )
+            )
+        else:
+            out.append((False, f"camera {name}: ok - {mode or 'streaming'}, {fps:.1f} fps measured"))
+    return out

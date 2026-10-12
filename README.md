@@ -43,8 +43,9 @@ Hold up one hand, palm toward the screen, and point.
 | **Clap once** | Turn gestures on (resume) |
 | **Clap twice** quickly | Pause gestures |
 
-**Auto-scroll, step by step:** hold up four fingers with your thumb folded across your palm for a moment (the
-cursor ring, if you turned it on, goes orange). Where your hand is at that moment is the "middle". Move your hand
+**Auto-scroll, step by step:** hold up four fingers with your thumb folded across your palm (or just held
+against the side of your index finger) for a moment (the cursor ring, if you turned it on, goes orange). Where
+your hand is at that moment is the "middle": you do not have to move away from it first. Move your hand
 a little above it to scroll up, below it to scroll down; the further away, the faster. Hold your hand still and
 it keeps scrolling at that speed, so you can read a long page without moving. Moving left or right scrolls
 sideways. Close your hand into a **fist** to stop (it also stops if your hand leaves the camera for more than
@@ -107,6 +108,11 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Cursor doesn't move:** check another app isn't using the camera (Zoom, Teams, the Camera app), then restart Project Away from the tray.
 - **Voice is slow or lagging:** install the GPU pack (Settings → Performance, NVIDIA cards only).
 - **Want to change a gesture or phrase?** Tray → **Settings…** → Bindings.
+- **A camera is "too slow":** Settings → Cameras → **Test both cameras** reports any camera below 10 frames per
+  second as FAILED. Project Away has already tried every format and size on it; if NVIDIA Broadcast is
+  installed it can use Broadcast's camera instead (and says so). Otherwise use the other camera alone.
+- **"The app crashed last time":** the details are in `crash.log` in the logs folder
+  (`%LOCALAPPDATA%\ProjectAway\logs\crash.log` on Windows, next to `away.log`). Please attach it to a bug report.
 
 ## Architecture
 
@@ -304,9 +310,16 @@ v0.1.9 additions:
   `hands.roles` (below) in v0.1.14; an old `prefer: right|left` becomes `roles.mode: right|left` and
   `prefer: any` becomes `roles.mode: auto` automatically.
 - **Auto-scroll** (`hands.gestures.autoscroll_*`): `autoscroll_enabled`, `autoscroll_hold` (0.2 s before it
-  starts), `autoscroll_dead_zone` (0.25 palm lengths), `autoscroll_gain` (12), `autoscroll_max_speed`
-  (30 notches/s), `autoscroll_stop_hold` (fist, 0.2 s), `autoscroll_horizontal`. Offsets are measured in palm
-  lengths, so it feels the same near or far from the camera.
+  starts), `autoscroll_thumb_fold` (0.95, v0.1.16: the thumb counts as folded below this thumb-fold ratio and
+  stays folded until 0.1 above it; it was a fixed 0.75, which a real hand rarely reached, so the pose read as
+  the open palm and paused gestures instead; raise it if auto-scroll is still hard to start, lower it if an open
+  palm starts it), `autoscroll_dead_zone` (0.15 palm lengths, was 0.25), `autoscroll_gain` (20 notches/s per palm
+  length beyond the dead zone, was 12 on a power curve; speed is now proportional to the distance from the
+  neutral point), `autoscroll_max_speed` (30 notches/s), `autoscroll_stop_hold` (fist, 0.2 s),
+  `autoscroll_horizontal`. The neutral point is where the hand is while the pose is held (the average over the
+  hold), so scrolling starts from there. Four fingers with the thumb folded always win over the open-palm pause:
+  a hand whose thumb is neither clearly folded nor clearly out never toggles pause. Offsets are measured in palm
+  lengths, so it feels the same near or far from the camera. `autoscroll_thumb_fold` is in Settings → Tuning.
 - **Claps** (`voice.clap_*`): `clap_enabled`, `clap_sensitivity` (0.5), `clap_double_window` (0.6 s),
   `clap_require_hands` (only when the camera sees both hands close together). Detection uses the voice
   microphone: a sharp, short (under ~50 ms), broadband transient that is far louder than the moment before it.
@@ -486,6 +499,38 @@ in that mode right away at the next start. *Test both cameras* / `away cameras t
 ~10 s and reports backend, mode, measured fps, frames and errors; if they do not all stream at the configured
 size it tries the secondary at 320x240 MJPG @ 15 and offers to save what works. While the app is still
 probing a slow camera it now says it holds the cameras and lets go as soon as Settings or calibration asks.
+
+**Slow cameras, honest verdicts and the NVIDIA Broadcast fallback (v0.1.16).** On the reported laptop the
+built-in camera "worked" at 1.0 fps (10 frames in 10 s, the same at 320x240, so not USB bandwidth) and the test
+still said both cameras stream together. Now:
+
+- `hands.min_camera_fps` (default **10**): a camera measured below it is **FAILED (too slow: X fps)**, never
+  "ok", in `away cameras test` / *Test both cameras*, in *Live confidence* and in `away.log` (each camera's
+  measured rate is logged once it has streamed 5 s). Calibration measures every camera first and refuses with a
+  clear message when one is too slow (instead of "no secondary camera could be calibrated").
+- Every mode tried is measured for ~1.5 s (not just one frame), and the fastest wins: a mode at or above the
+  minimum is used at once; otherwise every FOURCC (MJPG, YUY2, NV12, the driver's format) is tried with
+  `CAP_PROP_FPS` set, on DirectShow and then on Media Foundation (at its own index), at the configured size,
+  640x480 and 320x240 (at most ~60 s, once). Each attempt is one line in `away.log`: backend, the FOURCC, size
+  and fps the driver reports back, exposure / auto-exposure (logged only; auto-exposure is never changed) and
+  the measured fps. The best mode is remembered per camera name in `camera-modes.json` with its measured rate;
+  a camera that stayed too slow is checked in that one mode at the next start instead of being searched again.
+- If a camera stays below the minimum in every mode and a free `Camera (NVIDIA Broadcast)` is listed, it is
+  used instead when `hands.virtual_fallback: true` (default), but only if Broadcast itself reaches the minimum.
+  The slow camera is closed first and not kept open (Broadcast usually shows that same camera). The test,
+  *Live confidence* and the log say "using Camera (NVIDIA Broadcast) instead (HD User Facing is too slow ...)";
+  `away cameras test --save` / *Save* writes Broadcast's camera into `hands.cameras`. With
+  `virtual_fallback: false` the test only offers it.
+
+**Crash capture (v0.1.16).** The tray app, the Settings window, the CLI and the installed exe all write
+`crash.log` in the logs folder next to `away.log` (`%LOCALAPPDATA%\ProjectAway\logs\crash.log` on Windows;
+`data_dir()/logs` elsewhere): a timestamped line when each process starts, a dump of every thread on a fatal
+error (Python `faulthandler`), and any uncaught exception (main thread or worker thread, also in `away.log`).
+At the next start a crash found there is logged and shown in the tray tooltip and a notification, and in the
+Settings status line: "the app crashed last time; details in crash.log". The camera hand-over was hardened at the
+same time: the app now acknowledges a hand-over only once none of its cameras is open or still opening (an open
+in progress gives up), the camera test waits for that confirmation before it opens anything, and no worker thread
+touches Tk any more (Settings and the cursor overlay marshal every update to the Tk thread).
 In YAML:
 
 ```yaml
@@ -680,7 +725,9 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Hand choice (v0.1.9) | Selection, mirroring and two-hand probing unit-tested with fake landmarkers; the handedness convention was checked on real photos (raw vs flipped) with MediaPipe 0.10.18; **untested with a live webcam and two real hands** |
 | Hand roles (v0.1.14) | Track identity by position and size, stickiness, label flips (both hands, every frame), hands with the same label, release after loss and at the frame border, promotion of the helper, the flat-hand-first handover, right/left hysteresis, mode changes, voice commands and the `hands.prefer` migration unit-tested with synthetic hands and fake landmarkers; **untested with a live webcam and two real hands** (MediaPipe's real two-hand tracking, hands overlapping); with two cameras each camera assigns roles on its own (not cross-checked between views) |
 | Palm-glide scroll (v0.1.14) | Engage/disengage geometry on upright, rolled, sideways, upside-down, tilted and turned palms, local-frame direction, horizontal two-finger scroll, gain and dead zone, momentum decay and its interruption, tap timing, occlusion hold and jump rejection, the 3D path, and suppression of cursor/clicks/clutch/auto-scroll unit-tested with synthetic hands projected through a pinhole; Settings fields checked headless and the window rendered under Xvfb; **untested on real hardware**: MediaPipe's z on a fingertip touching the other hand, landmark quality while one hand covers the other, and the feel of the default depth threshold, gain and friction are not measured |
-| Four-finger auto-scroll (v0.1.9) | State machine and thumb-fold split unit-tested with synthetic hands; the thumb-fold measure checked on 11 real photos (folded 0.2-0.4, open palm 1.3-1.5); **untested live** |
+| Four-finger auto-scroll (v0.1.9; v0.1.16 threshold, neutral point, proportional speed) | State machine, the configurable thumb-fold threshold with hysteresis, four-fingers-beat-the-clutch, the neutral point (mean of the hold) and the proportional speed unit-tested with synthetic hands; the thumb-fold measure checked on 11 real photos (folded 0.2-0.4, open palm 1.3-1.5); **the new 0.95 default is a judgment call, untested on the user's real hand** (only a live try shows whether it now triggers reliably without catching open palms) |
+| Slow-camera handling, `hands.min_camera_fps`, NVIDIA Broadcast fallback (v0.1.16) | Per-mode fps measurement, the fastest-mode choice, the DirectShow → Media Foundation sweep (a fake 1-fps camera that reaches 30 fps only in MJPG on Media Foundation), remembered modes, an always-slow camera replaced by Broadcast (closed first; Broadcast must reach the minimum), the FAILED verdicts in the test / Live confidence / log, saving Broadcast, and calibration refusing a slow camera unit-tested with a fake OpenCV on a fake clock; **untested on the real laptop**: why HD User Facing runs at 1 fps (driver, low-light exposure, Broadcast holding it) and whether any mode or Broadcast fixes it can only be shown there (`away.log` now lists every attempt) |
+| Crash capture (v0.1.16) | `faulthandler` set-up, the uncaught-exception hooks, the next-start report (once, and shared with Settings), rotation and the C++-exception noise filter unit-tested with simulated crashes; the hand-over wait and the Tk-thread queue unit-tested; **not yet exercised by a real native crash**, and the cause of the first-run Test crash is not proven (crash.log will show it if it happens again) |
 | Clap control (v0.1.9) | Detector tested on synthetic claps vs vowels, plosives, beeps and noise, plus timing and dictation gating; **untested with a real microphone and room** |
 | faster-whisper `hotwords` | Parameter verified on the installed faster-whisper 1.2.1 by signature; **not run on real speech** |
 | Cursor ring window, pynput auto-pause listeners, F9 / edit hotkeys, clipboard edit flow | **Untested** on real desktops |

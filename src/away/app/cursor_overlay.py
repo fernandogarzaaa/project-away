@@ -130,7 +130,17 @@ def run_cursor_overlay(state_fn: Callable[[], dict[str, Any]], status_bus: Any =
         top.geometry("+20+20")
         label = tk.Label(top, text="Project Away", bg="#111", fg="#7CFC9A", padx=10, pady=4)
         label.pack()
-        status_bus.subscribe("*", lambda ev: (s := status_text(ev)) and label.after(0, label.config, {"text": s}))
+        from away.app.uiqueue import UiQueue
+
+        ui = UiQueue()  # bus events arrive on app threads: never call Tk (not even after()) from them (v0.1.16)
+
+        def on_status(ev: Any) -> None:
+            s = status_text(ev)
+            if s:
+                ui.post(label.config, {"text": s})
+
+        status_bus.subscribe("*", on_status)
+        ui.pump(root)
 
     def tick() -> None:
         try:

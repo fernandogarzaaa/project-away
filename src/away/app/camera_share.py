@@ -207,6 +207,38 @@ class CameraLease:
         self.close()
 
 
+HANDOVER_WAIT_S = 20.0  # a camera test waits this long in total for the app to confirm the hand-over
+
+
+def confirm_handover(
+    lease: Any,
+    timeout: float = HANDOVER_WAIT_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+    say: Callable[[str], Any] | None = None,
+) -> bool:
+    """v0.1.16: before a camera test opens anything, the running app must have *confirmed* that it let go of
+    the cameras (it now only does so once none of its cameras is open or still opening, which can take longer
+    than the lease's first wait). True when no app held them or it confirmed within ``timeout``; the lease's
+    ``handed_over`` is updated. The first Test both cameras run crashed the app; opening devices it was still
+    releasing is a likely cause."""
+    if not getattr(lease, "app_running", False) or getattr(lease, "handed_over", False):
+        return True
+    share = getattr(lease, "share", None)
+    if share is None:
+        return False
+    if say is not None:
+        say("waiting for Project Away to release the cameras...")
+    deadline = clock() + timeout
+    while clock() < deadline:
+        if share.released():
+            lease.handed_over = True
+            return True
+        share.request(getattr(lease, "who", "settings"))
+        sleep(0.1)
+    return bool(share.released())
+
+
 def camera_error_message(exc: BaseException, device: Any, app_running: bool, handed_over: bool) -> str:
     """What to tell the user when a camera would not open (instead of a bare 'permission denied')."""
     text = str(exc)

@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -488,6 +488,17 @@ LOW_RES = (320, 240)
 LOW_RES_FPS = 15
 FIRST_FRAME_S = 4.0  # the first capture mode may take a while to deliver (Windows webcams are slow to start)
 RETRY_FRAME_S = 1.5  # every further mode (the multi-camera probe waits MULTICAM_PROBE_S = 20 s)
+# v0.1.16 (the same laptop): the built-in camera "worked" at 1.0 fps (10 frames in 10 s) in every mode, even at
+# 320x240, so USB bandwidth was ruled out, yet it was reported ok. Every attempted mode is now measured for
+# MEASURE_S (not just one first frame), a camera below the minimum frame rate (hands.min_camera_fps) is too slow,
+# the fastest mode wins, and a camera that stays slow in every mode on both backends is replaced by a free NVIDIA
+# Broadcast camera when that reaches the minimum itself.
+MIN_CAMERA_FPS = 10.0  # the default of hands.min_camera_fps
+MEASURE_S = 1.5  # frames are counted this long in every attempted mode (0 = accept the first frame unmeasured)
+SWEEP_FOURCCS = ("MJPG", "YUY2", "NV12", "")  # "" = the driver's default format
+SWEEP_SIZES = ((640, 480), (320, 240))  # after the configured size
+SWEEP_FPS = 30  # CAP_PROP_FPS requested in the sweep when the configuration asks for none
+SWEEP_BUDGET_S = 60.0  # the slow-camera sweep stops trying further modes after this long
 BANDWIDTH_HINT = "two USB cameras may exceed the USB bandwidth; try another USB port, or the other camera alone"
 _BROADCAST_RE = re.compile(r"nvidia broadcast", re.IGNORECASE)
 
@@ -582,6 +593,48 @@ def session_mode(key: str) -> tuple[str, CaptureMode] | None:
 def reset_session_modes() -> None:
     with _lock:
         _session_modes.clear()
+        _slow_known.clear()
+
+
+_slow_known: dict[str, float] = {}  # camera -> best fps of a full sweep that stayed below the minimum
+_opening = 0  # opens in progress in this process (a device may be held before HeldCapture exists)
+_abort_opens = threading.Event()  # set while handing the cameras over: every open in progress gives up
+
+
+def opens_in_progress() -> int:
+    with _lock:
+        return _opening
+
+
+def wait_devices_free(
+    timeout: float = 15.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+    step: float = 0.05,
+) -> bool:
+    """Hand-over guard (v0.1.16): abort every open in progress in this process and wait until no camera is
+    held or being opened, so another process (Settings > Test both cameras, calibration) never opens a device
+    this process is still opening or releasing. True when free within ``timeout``."""
+    _abort_opens.set()
+    try:
+        deadline = clock() + timeout
+        while held_cameras() or opens_in_progress():
+            if clock() >= deadline:
+                log.warning(
+                    "cameras still busy after %.0f s (held: %s, opening: %d)",
+                    timeout,
+                    ", ".join(sorted(held_cameras())) or "-",
+                    opens_in_progress(),
+                )
+                return False
+            sleep(step)
+        return True
+    finally:
+        _abort_opens.clear()
+
+
+class OpenCancelled(RuntimeError):
+    """An open was abandoned because the cameras are being handed over to another process."""
 
 
 def held_cameras() -> set[str]:
@@ -635,6 +688,9 @@ class OpenedCamera:
     name: str
     fallback: str = ""  # why another camera was opened instead, '' when it was not
     backend: str = ""  # "DirectShow", "Media Foundation", "default" (the backend that worked)
+    fps: float | None = None  # frame rate measured while choosing the mode (None: not measured)
+    slow: bool = False  # below the minimum frame rate in every mode tried (opened anyway: the best one)
+    hints: list[str] = field(default_factory=list)  # what to tell the user (Broadcast offer, too slow)
 
 
 def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
@@ -678,6 +734,218 @@ class _Attempt:
     modes: list[CaptureMode]
 
 
+def decode_fourcc(value: Any) -> str:
+    """``CAP_PROP_FOURCC`` read back (a float holding four packed characters) -> ``"MJPG"``; ``""`` for 0 or
+    nothing; ``0x...`` when it is not printable."""
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if code <= 0:
+        return ""
+    text = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
+    return text.strip() if text.isascii() and text.isprintable() else f"0x{code:08x}"
+
+
+def read_back(cap: Any, cv2: Any) -> dict[str, Any]:
+    """What the driver reports after a mode was applied: ``fourcc``, ``width``, ``height``, ``fps`` and the
+    ``exposure`` / ``auto_exposure`` values (logged only: auto-exposure is never changed, but a webcam that
+    throttles its frame rate in low light is one explanation for a slow camera)."""
+    out: dict[str, Any] = {}
+
+    def get(name: str, default: int) -> Any:
+        try:
+            return cap.get(getattr(cv2, name, default))
+        except Exception:
+            return None
+
+    out["fourcc"] = decode_fourcc(get("CAP_PROP_FOURCC", 6))
+    for key, prop, default in (
+        ("width", "CAP_PROP_FRAME_WIDTH", 3),
+        ("height", "CAP_PROP_FRAME_HEIGHT", 4),
+        ("fps", "CAP_PROP_FPS", 5),
+        ("exposure", "CAP_PROP_EXPOSURE", 15),
+        ("auto_exposure", "CAP_PROP_AUTO_EXPOSURE", 21),
+    ):
+        v = get(prop, default)
+        out[key] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return out
+
+
+def _num(v: Any, fmt: str = "{:g}") -> str:
+    return "?" if v is None else fmt.format(v)
+
+
+def attempt_line(
+    label: str, backend: str, src: Any, mode: CaptureMode, rb: dict[str, Any] | None, fps: float | None, result: str
+) -> str:
+    """One away.log line per attempted mode (v0.1.16): what was asked, what the driver reports back
+    (FOURCC, size, fps, exposure) and the measured frame rate, so the cause of a slow camera shows in the log."""
+    if rb is None:
+        got = "no read-back"
+    else:
+        size = f"{_num(rb.get('width'), '{:.0f}')}x{_num(rb.get('height'), '{:.0f}')}"
+        got = (
+            f"fourcc {rb.get('fourcc') or '?'}, {size}, driver fps {_num(rb.get('fps'))}, exposure "
+            f"{_num(rb.get('exposure'))}, auto-exposure {_num(rb.get('auto_exposure'))}"
+        )
+    measured = "not measured" if fps is None else f"{fps:.1f} fps measured"
+    return f"camera {label}: attempt {backend} index {src}, asked {mode.describe()} -> {got}; {measured}; {result}"
+
+
+def measure_fps(
+    cap: Any,
+    frame: Any,
+    seconds: float,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[float | None, Any]:
+    """Count the frames ``cap`` delivers for ``seconds`` after the first one; ``(fps, latest frame)``.
+    ``(None, frame)`` when ``seconds`` <= 0 (not measured)."""
+    if seconds <= 0:
+        return None, frame
+    t0 = clock()
+    n = 0
+    last = frame
+    while clock() - t0 < seconds:
+        if cancelled is not None and cancelled():
+            break
+        try:
+            ok, f = cap.read()
+        except Exception:
+            ok, f = False, None
+        if ok and f is not None:
+            n += 1
+            last = f
+        else:
+            sleep(0.01)
+    elapsed = clock() - t0
+    return (n / elapsed if elapsed > 0 else 0.0), last
+
+
+@dataclass
+class _Candidate:
+    backend: str
+    api: Any
+    src: int | str
+    mode: CaptureMode
+    fps: float | None  # None: not measured
+
+
+class _Search:
+    """Try modes one after another, measuring each (v0.1.16). A mode that reaches ``min_fps`` (or that is not
+    measured: ``measure_s`` 0) ends the search; a slower one is released and remembered, and the fastest of
+    those is reopened when nothing is fast enough. Every attempt is logged (:func:`attempt_line`)."""
+
+    def __init__(
+        self,
+        label: str,
+        cv2: Any,
+        first_frame_s: float,
+        retry_frame_s: float,
+        clock: Callable[[], float],
+        sleep: Callable[[float], Any],
+        min_fps: float,
+        measure_s: float,
+    ) -> None:
+        self.label, self.cv2 = label, cv2
+        self.first_frame_s, self.retry_frame_s = first_frame_s, retry_frame_s
+        self.clock, self.sleep = clock, sleep
+        self.min_fps, self.measure_s = float(min_fps), float(measure_s)
+        self.tried: list[str] = []
+        self.opened = False
+        self.first = True
+        self.best: _Candidate | None = None  # fastest mode below min_fps
+        self.done: set[tuple[str, Any, CaptureMode]] = set()
+
+    @staticmethod
+    def cancelled() -> bool:
+        return _abort_opens.is_set()
+
+    def _check(self) -> None:
+        if self.cancelled():
+            raise OpenCancelled(f"camera {self.label}: open cancelled (the cameras are being handed over)")
+
+    def run(self, at: _Attempt, deadline: float | None = None) -> tuple[Any, Any, _Candidate] | None:
+        """``(cap, frame, candidate)`` for the first mode of ``at`` fast enough, else None. A backend whose
+        device does not open is left at its first mode (another mode cannot help)."""
+        cv2 = self.cv2
+        for mode in at.modes:
+            if deadline is not None and self.clock() >= deadline:
+                log.warning("camera %s: stopping the mode search (it took too long)", self.label)
+                return None
+            k = (at.backend, at.src, mode)
+            if k in self.done:
+                continue
+            self._check()
+            self.done.add(k)
+            log.info("camera %s: trying %s index %s, mode %s", self.label, at.backend, at.src, mode.describe())
+            cap = cv2.VideoCapture(at.src) if at.api is None else cv2.VideoCapture(at.src, at.api)
+            if not cap.isOpened():
+                with contextlib.suppress(Exception):
+                    cap.release()
+                self.tried.append(f"{at.backend} {at.src}: did not open")
+                log.warning("camera %s: %s could not open index %s", self.label, at.backend, at.src)
+                return None
+            self.opened = True
+            apply_mode(cap, mode, cv2)
+            frame = read_first(cap, self.first_frame_s if self.first else self.retry_frame_s, self.clock, self.sleep)
+            self.first = False
+            if frame is None:
+                self.tried.append(f"{at.backend} {mode.describe()}: no frames")
+                log.info(
+                    "%s", attempt_line(self.label, at.backend, at.src, mode, read_back(cap, cv2), 0.0, "no frames")
+                )
+                log.warning(
+                    "camera %s: %s opened index %s but sent no frame in mode %s",
+                    self.label,
+                    at.backend,
+                    at.src,
+                    mode.describe(),
+                )
+                with contextlib.suppress(Exception):
+                    cap.release()
+                continue
+            fps, frame = measure_fps(cap, frame, self.measure_s, self.clock, self.sleep, self.cancelled)
+            rb = read_back(cap, cv2)
+            cand = _Candidate(at.backend, at.api, at.src, mode, fps)
+            if fps is None or fps >= self.min_fps:
+                log.info("%s", attempt_line(self.label, at.backend, at.src, mode, rb, fps, "ok"))
+                log.info(
+                    "camera %s: %s index %s delivers frames in mode %s", self.label, at.backend, at.src, mode.describe()
+                )
+                return cap, frame, cand
+            log.info(
+                "%s",
+                attempt_line(self.label, at.backend, at.src, mode, rb, fps, f"too slow (minimum {self.min_fps:g})"),
+            )
+            self.tried.append(f"{at.backend} {mode.describe()}: too slow ({fps:.1f} fps)")
+            with contextlib.suppress(Exception):
+                cap.release()
+            if self.best is None or (self.best.fps or 0.0) < fps:
+                self.best = cand
+            self._check()
+        return None
+
+    def reopen(self, cand: _Candidate) -> tuple[Any, Any] | None:
+        """Open ``cand`` again (the fastest of the slow modes); ``(cap, frame)`` or None."""
+        self._check()
+        cv2 = self.cv2
+        cap = cv2.VideoCapture(cand.src) if cand.api is None else cv2.VideoCapture(cand.src, cand.api)
+        if not cap.isOpened():
+            with contextlib.suppress(Exception):
+                cap.release()
+            return None
+        apply_mode(cap, cand.mode, cv2)
+        frame = read_first(cap, max(self.retry_frame_s, 2.0), self.clock, self.sleep)
+        if frame is None:
+            with contextlib.suppress(Exception):
+                cap.release()
+            return None
+        return cap, frame
+
+
 def _try_open(
     attempts: list[_Attempt],
     label: str,
@@ -686,39 +954,18 @@ def _try_open(
     retry_frame_s: float,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
+    min_fps: float = 0.0,
+    measure_s: float = 0.0,
 ) -> tuple[Any, Any, CaptureMode | None, str, list[str], bool]:
-    """Try every backend and mode in order; every attempt is logged. Returns ``(cap, frame, mode, backend,
-    tried, opened_any)``: ``cap`` None when nothing delivered a frame. A backend whose device does not open is
-    left at its first mode (another mode cannot help)."""
-    opened_any = False
-    tried: list[str] = []
-    first = True
+    """Try every backend and mode in order (see :class:`_Search`); ``(cap, frame, mode, backend, tried,
+    opened_any)``, ``cap`` None when nothing delivered frames fast enough."""
+    search = _Search(label, cv2, first_frame_s, retry_frame_s, clock, sleep, min_fps, measure_s)
     for at in attempts:
-        for mode in at.modes:
-            log.info("camera %s: trying %s index %s, mode %s", label, at.backend, at.src, mode.describe())
-            cap = cv2.VideoCapture(at.src) if at.api is None else cv2.VideoCapture(at.src, at.api)
-            if not cap.isOpened():
-                with contextlib.suppress(Exception):
-                    cap.release()
-                tried.append(f"{at.backend} {at.src}: did not open")
-                log.warning("camera %s: %s could not open index %s", label, at.backend, at.src)
-                break
-            opened_any = True
-            apply_mode(cap, mode, cv2)
-            frame = read_first(cap, first_frame_s if first else retry_frame_s, clock, sleep)
-            first = False
-            if frame is not None:
-                log.info(
-                    "camera %s: %s index %s delivers frames in mode %s", label, at.backend, at.src, mode.describe()
-                )
-                return cap, frame, mode, at.backend, tried, True
-            tried.append(f"{at.backend} {mode.describe()}: no frames")
-            log.warning(
-                "camera %s: %s opened index %s but sent no frame in mode %s", label, at.backend, at.src, mode.describe()
-            )
-            with contextlib.suppress(Exception):
-                cap.release()
-    return None, None, None, "", tried, opened_any
+        got = search.run(at)
+        if got is not None:
+            cap, frame, cand = got
+            return cap, frame, cand.mode, cand.backend, search.tried, True
+    return None, None, None, "", search.tried, search.opened
 
 
 # Media Foundation COM identifiers (mfidl.h)
@@ -874,6 +1121,41 @@ def msmf_index(
     return None
 
 
+def sweep_modes(width: int, height: int, fps: int, virtual: bool = False) -> list[CaptureMode]:
+    """The slow-camera sweep (v0.1.16): MJPG, YUY2, NV12 and the driver's format at the configured size, then
+    640x480, then 320x240, each asking for ``fps`` (or SWEEP_FPS) with ``CAP_PROP_FPS``. A virtual camera only
+    in its own format."""
+    f = int(fps or 0) or SWEEP_FPS
+    sizes: list[tuple[int, int]] = []
+    for size in ((int(width), int(height)), *SWEEP_SIZES):
+        if size[0] and size[1] and size not in sizes:
+            sizes.append(size)
+    out: list[CaptureMode] = []
+    for w, h in sizes:
+        for fcc in ("",) if virtual else SWEEP_FOURCCS:
+            m = CaptureMode(w, h, f, fcc)
+            if m not in out:
+                out.append(m)
+    return out
+
+
+def free_broadcast(devs: list[CameraDevice], src: int | str) -> CameraDevice | None:
+    """The one NVIDIA Broadcast virtual camera that is listed, is not ``src`` and that nobody (this process or
+    the running app) holds; None when there is none or more than one."""
+    held = held_cameras()
+    free = [
+        d
+        for d in devs
+        if d.virtual
+        and is_broadcast_camera(d.name)
+        and d.index is not None
+        and d.index != src
+        and not d.in_use
+        and str(d.index) not in held
+    ]
+    return free[0] if len(free) == 1 else None
+
+
 def open_camera(
     src: int | str,
     width: int = 640,
@@ -891,25 +1173,85 @@ def open_camera(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = time.sleep,
     msmf_lister: Callable[[], list[tuple[str, str]] | None] | None = None,
+    min_fps: float | None = None,
+    measure_s: float | None = None,
+    sweep_budget_s: float | None = None,
 ) -> OpenedCamera:
-    """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works by reading a frame.
+    """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works: read a frame, then
+    measure the frame rate for ``measure_s`` (default MEASURE_S; 0 = do not measure).
 
-    On Windows (an integer index), in order, every attempt logged:
+    On Windows (an integer index), in order, every attempt logged (one :func:`attempt_line` each):
 
     1. DirectShow at that index (:func:`capture_modes`): the configured FOURCC (MJPG) at the configured size,
        YUY2 and NV12 at that size, no FOURCC, then nothing forced at all; with ``low_res`` (default: when this
        process already holds another camera) 320x240 and 320x240 at 15 fps;
     2. Media Foundation at the index *its own* list gives this camera (:func:`msmf_index`): the configured
        size, then nothing forced;
-    3. ``virtual_fallback``: exactly one free NVIDIA Broadcast virtual camera, which shows the same picture
-       when the built-in camera is its source.
+    3. only when every mode so far delivered frames but below ``min_fps`` (default MIN_CAMERA_FPS): the sweep
+       (:func:`sweep_modes`) on DirectShow, then on Media Foundation, for at most ``sweep_budget_s``; the
+       fastest mode wins and is remembered in camera-modes.json (with its fps);
+    4. ``virtual_fallback``: exactly one free NVIDIA Broadcast virtual camera when the camera did not open,
+       sent no frames, or stayed below ``min_fps`` in every mode (Broadcast must reach ``min_fps`` itself;
+       the slow camera is closed first and not kept open: Broadcast usually shows that same camera).
 
-    The backend and mode that worked are kept and tried first on later opens in this session. Virtual cameras
-    are opened in their own format (no FOURCC). Raises :class:`CameraOpenError` saying whether the camera did
-    not open or opened without frames, with hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
+    A mode that reaches ``min_fps`` is used at once. A camera that stays too slow is opened anyway in its
+    fastest mode with ``slow=True`` and hints (callers report it as FAILED: too slow). The backend and mode that
+    worked are kept and tried first on later opens in this session. Virtual cameras are opened in their own
+    format (no FOURCC). Raises :class:`CameraOpenError` saying whether the camera did not open or opened without
+    frames, with hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
     """
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
+    global _opening
+    with _lock:
+        _opening += 1
+    try:
+        return _open_camera(
+            src,
+            width,
+            height,
+            fps,
+            fourcc,
+            cv2=cv2,
+            devices=devices,
+            label=label,
+            low_res=low_res,
+            virtual_fallback=virtual_fallback,
+            first_frame_s=first_frame_s,
+            retry_frame_s=retry_frame_s,
+            clock=clock,
+            sleep=sleep,
+            msmf_lister=msmf_lister,
+            min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
+            measure_s=MEASURE_S if measure_s is None else float(measure_s),
+            sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
+        )
+    finally:
+        with _lock:
+            _opening -= 1
+
+
+def _open_camera(
+    src: int | str,
+    width: int,
+    height: int,
+    fps: int,
+    fourcc: str,
+    *,
+    cv2: Any,
+    devices: list[CameraDevice] | None,
+    label: str | None,
+    low_res: bool | None,
+    virtual_fallback: bool,
+    first_frame_s: float,
+    retry_frame_s: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Any],
+    msmf_lister: Callable[[], list[tuple[str, str]] | None] | None,
+    min_fps: float,
+    measure_s: float,
+    sweep_budget_s: float,
+) -> OpenedCamera:
     devs = list(devices or [])
     me = next((d for d in devs if (d.index if d.index is not None else d.path) == src), None)
     name = me.name if me is not None else str(label if label is not None else src)
@@ -922,24 +1264,55 @@ def open_camera(
         width, height, fps, "" if virtual else fourcc, bool(low_res) and not virtual, other_fourccs=not virtual
     )
     kept = session_mode(key)
+    with _lock:
+        known_slow = _slow_known.get(key)
     windows = _windows() and isinstance(src, int)
-    tried: list[str] = []
-    opened = False
+    search = _Search(repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep, min_fps, measure_s)
+    mf_index: list[int | None] = []  # computed once, when Media Foundation is first needed
 
-    def attempt(at: _Attempt) -> OpenedCamera | None:
-        nonlocal opened
-        if kept is not None and kept[0] == at.backend and kept[1] in at.modes:
-            at.modes.remove(kept[1])
+    def mf() -> int | None:
+        if not mf_index:
+            log.warning("camera %r: trying Media Foundation at its own index for this camera", name)
+            assert isinstance(src, int)
+            mf_index.append(msmf_index(src, me, devs, repr(name), msmf_lister))
+        return mf_index[0]
+
+    def found(got: tuple[Any, Any, _Candidate], first: tuple[str, CaptureMode]) -> OpenedCamera:
+        cap, frame, cand = got
+        _remember(key, name, cand.backend, cand.mode, first, cand.fps, min_fps)
+        return OpenedCamera(HeldCapture(cap, str(src)), frame, cand.mode, src, name, backend=cand.backend, fps=cand.fps)
+
+    def attempt(at: _Attempt, deadline: float | None = None) -> OpenedCamera | None:
+        if kept is not None and kept[0] == at.backend:  # the mode that worked last (also one the sweep found)
+            if kept[1] in at.modes:
+                at.modes.remove(kept[1])
             at.modes.insert(0, kept[1])
-        cap, frame, mode, backend, t, op = _try_open([at], repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep)
-        tried.extend(t)
-        opened = opened or op
-        if cap is None or mode is None:
-            return None
-        _remember(key, name, backend, mode, (at.backend, modes[0]))
-        return OpenedCamera(HeldCapture(cap, str(src)), frame, mode, src, name, backend=backend)
+        got = search.run(at, deadline)
+        # "first" = the configured way (DirectShow on Windows): anything else is remembered for the next start
+        return None if got is None else found(got, ("DirectShow" if windows else "default", modes[0]))
 
-    if not windows:
+    if known_slow is not None and kept is not None:
+        # a full sweep already found nothing fast enough: check the remembered (fastest) mode again only; still
+        # slow -> straight to the fallback, without another long sweep at every start
+        b, m = kept
+        at: _Attempt | None
+        if not windows:
+            at = _Attempt("default", None, src, [m])
+        elif b == "Media Foundation":
+            mfi = mf()
+            at = None if mfi is None else _Attempt("Media Foundation", cv2.CAP_MSMF, mfi, [m])
+        else:
+            at = _Attempt("DirectShow", cv2.CAP_DSHOW, src, [m])
+        got = None if at is None else attempt(at)
+        if got is not None:
+            return got
+        if search.best is None:  # it did not even stream any more: search the usual way
+            known_slow = None
+            with _lock:
+                _slow_known.pop(key, None)
+    if known_slow is not None:
+        pass
+    elif not windows:
         got = attempt(_Attempt("default", None, src, list(modes)))
         if got is not None:
             return got
@@ -953,64 +1326,170 @@ def open_camera(
             if backend == "DirectShow":
                 got = attempt(_Attempt("DirectShow", cv2.CAP_DSHOW, src, list(modes)))
             else:
-                log.warning("camera %r: trying Media Foundation at its own index for this camera", name)
-                mfi = msmf_index(src, me, devs, repr(name), msmf_lister)
+                mfi = mf()
                 got = None if mfi is None else attempt(_Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(mf_modes)))
             if got is not None:
                 return got
+
+    # every mode so far either failed or was too slow
+    if search.best is not None and known_slow is None:
+        log.warning(
+            "camera %r: below %g fps in every usual mode (best %.1f fps, %s %s); trying every format and size",
+            name,
+            min_fps,
+            search.best.fps or 0.0,
+            search.best.backend,
+            search.best.mode.describe(),
+        )
+        deadline = clock() + sweep_budget_s
+        sweep = sweep_modes(width, height, fps, virtual)
+        sizes = list(dict.fromkeys((m.width, m.height) for m in sweep))
+        got = None
+        for size in sizes:  # per size: DirectShow's formats, then Media Foundation's (its own device list)
+            group = [m for m in sweep if (m.width, m.height) == size]
+            if clock() >= deadline:
+                break
+            if windows:
+                assert isinstance(src, int)
+                got = attempt(_Attempt("DirectShow", cv2.CAP_DSHOW, src, list(group)), deadline)
+                if got is None and clock() < deadline:
+                    mfi = mf()
+                    if mfi is not None:
+                        got = attempt(_Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(group)), deadline)
+            else:
+                got = attempt(_Attempt("default", None, src, list(group)), deadline)
+            if got is not None:
+                return got
+
     hints: list[str] = []
     broadcast = [d for d in devs if d.virtual and is_broadcast_camera(d.name) and d.index is not None]
+    alt = free_broadcast(devs, src) if not virtual and isinstance(src, int) else None
+
+    if search.best is not None:  # it streams, but too slowly in every mode
+        best = search.best
+        why = f"{name} is too slow: {best.fps or 0.0:.1f} fps at best (minimum {min_fps:g})"
+        log.warning(
+            "camera %r: too slow in every mode: best %.1f fps (%s %s), minimum %g (hands.min_camera_fps)",
+            name,
+            best.fps or 0.0,
+            best.backend,
+            best.mode.describe(),
+            min_fps,
+        )
+        remember_mode(key, best.backend, best.mode, fps=best.fps, slow=True)
+        with _lock:
+            _slow_known[key] = float(best.fps or 0.0)
+        if alt is not None and virtual_fallback:
+            got_alt = _open_broadcast(alt, name, why, width, height, fps, cv2, search, min_fps, measure_s)
+            if got_alt is not None:
+                return got_alt
+            hints.append(f"NVIDIA Broadcast's camera did not reach {min_fps:g} fps either")
+        elif alt is not None:
+            hints.append(
+                f"{alt.name} is free and may stream faster; turn on hands.virtual_fallback (Settings > Cameras) "
+                "to use it instead"
+            )
+        reopened = search.reopen(best)
+        if reopened is None:
+            raise CameraOpenError(f"camera {name!r}: {why}, and it could not be opened again", opened=True, hints=hints)
+        cap, frame = reopened
+        for h in hints:
+            log.warning("camera %r: %s", name, h)
+        return OpenedCamera(
+            HeldCapture(cap, str(src)),
+            frame,
+            best.mode,
+            src,
+            name,
+            backend=best.backend,
+            fps=best.fps,
+            slow=True,
+            hints=[why, *hints],
+        )
+
     if not virtual and broadcast:
         hints.append(broadcast_hint(name))
     if others or low_res:
         hints.append(BANDWIDTH_HINT)
     for h in hints:
         log.warning("camera %r: %s", name, h)
-    detail = "; ".join(tried) if tried else "nothing to try"
+    detail = "; ".join(search.tried) if search.tried else "nothing to try"
+    opened = search.opened
     if opened:
         msg = f"camera {name!r} opened but sent no frames (tried {detail})"
     else:
         msg = f"cannot open camera {name!r} (busy, no device, or permission denied; tried {detail})"
-    if virtual_fallback and not virtual and isinstance(src, int):
-        held = held_cameras()
-        free = [d for d in broadcast if d.index != src and not d.in_use and str(d.index) not in held]
-        alt_index = free[0].index if len(free) == 1 else None
-        if alt_index is not None:
-            alt = free[0]
-            why = f"{name} could not be opened directly ({'no frames' if opened else 'open failed'})"
-            log.warning(
-                "camera %r: %s; opening the virtual camera %r instead (hands.virtual_fallback); NVIDIA "
-                "Broadcast's camera shows the same picture",
-                name,
-                why,
-                alt.name,
-            )
-            alt_modes = capture_modes(width, height, fps, "", False, other_fourccs=False)
-            api = cv2.CAP_DSHOW if _windows() else None
-            acap, aframe, amode, _b, atried, _o = _try_open(
-                [_Attempt("DirectShow" if api is not None else "default", api, alt_index, alt_modes)],
-                repr(alt.name),
-                cv2,
-                first_frame_s,
-                retry_frame_s,
-                clock,
-                sleep,
-            )
-            if acap is not None and amode is not None:
-                log.info("camera %r: using %r (virtual fallback), mode %s", name, alt.name, amode.describe())
-                return OpenedCamera(
-                    HeldCapture(acap, str(alt_index)), aframe, amode, alt_index, alt.name, why, backend=_b
-                )
-            log.warning(
-                "camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, "; ".join(atried)
-            )
+    if virtual_fallback and alt is not None:
+        why = f"{name} could not be opened directly ({'no frames' if opened else 'open failed'})"
+        got_alt = _open_broadcast(alt, name, why, width, height, fps, cv2, search, min_fps, measure_s)
+        if got_alt is not None:
+            return got_alt
     raise CameraOpenError(msg + (". " + "; ".join(hints) if hints else ""), opened=opened, hints=hints)
 
 
-def _remember(key: str, name: str, backend: str, mode: CaptureMode, first: tuple[str, CaptureMode]) -> None:
+def _open_broadcast(
+    alt: CameraDevice,
+    name: str,
+    why: str,
+    width: int,
+    height: int,
+    fps: int,
+    cv2: Any,
+    parent: _Search,
+    min_fps: float,
+    measure_s: float,
+) -> OpenedCamera | None:
+    """Open NVIDIA Broadcast's camera instead of ``name`` (in its own format); it must reach ``min_fps``."""
+    assert alt.index is not None
+    log.warning(
+        "camera %r: %s; opening the virtual camera %r instead (hands.virtual_fallback); NVIDIA "
+        "Broadcast's camera shows the same picture",
+        name,
+        why,
+        alt.name,
+    )
+    alt_modes = capture_modes(width, height, fps, "", False, other_fourccs=False)
+    api = cv2.CAP_DSHOW if _windows() else None
+    search = _Search(
+        repr(alt.name), cv2, parent.first_frame_s, parent.retry_frame_s, parent.clock, parent.sleep, min_fps, measure_s
+    )
+    got = search.run(_Attempt("DirectShow" if api is not None else "default", api, alt.index, alt_modes))
+    if got is not None:
+        acap, aframe, cand = got
+        log.info(
+            "camera %r: using %r (virtual fallback), mode %s%s",
+            name,
+            alt.name,
+            cand.mode.describe(),
+            "" if cand.fps is None else f", {cand.fps:.1f} fps measured",
+        )
+        return OpenedCamera(
+            HeldCapture(acap, str(alt.index)),
+            aframe,
+            cand.mode,
+            alt.index,
+            alt.name,
+            why,
+            backend=cand.backend,
+            fps=cand.fps,
+        )
+    log.warning("camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, "; ".join(search.tried))
+    return None
+
+
+def _remember(
+    key: str,
+    name: str,
+    backend: str,
+    mode: CaptureMode,
+    first: tuple[str, CaptureMode],
+    fps: float | None = None,
+    min_fps: float = 0.0,
+) -> None:
     with _lock:
         before = _session_modes.get(key)
         _session_modes[key] = (backend, mode)
+        _slow_known.pop(key, None)  # fast enough now
     if (backend, mode) != first or (before is not None and before != (backend, mode)):
         log.warning(
             "camera %r: works with %s in mode %s, not %s %s; keeping that for this session",
@@ -1023,7 +1502,7 @@ def _remember(key: str, name: str, backend: str, mode: CaptureMode, first: tuple
     elif before is None:
         log.info("camera %r: opened with %s in mode %s", name, backend, mode.describe())
     if (backend, mode) != first:
-        remember_mode(key, backend, mode)  # only works in a fallback mode: open it that way at the next start
+        remember_mode(key, backend, mode, fps=fps)  # only works in a fallback mode: open it that way next start
     elif key in saved_modes():
         forget_mode(key)  # the configured mode works again
 
@@ -1052,6 +1531,10 @@ def use_mode_store(path: Path | None) -> None:
     for key, (backend, mode) in saved_modes().items():
         with _lock:
             _session_modes.setdefault(key, (backend, mode))
+    for key, info in saved_mode_info().items():
+        if info.get("slow"):
+            with _lock:
+                _slow_known.setdefault(key, float(info.get("fps") or 0.0))
 
 
 def mode_store() -> Path | None:
@@ -1080,15 +1563,45 @@ def saved_modes() -> dict[str, tuple[str, CaptureMode]]:
     return out
 
 
-def _write_modes(modes: dict[str, tuple[str, CaptureMode]]) -> None:
+def saved_mode_info() -> dict[str, dict[str, Any]]:
+    """``{camera name: {"measured_fps": float | None, "slow": bool}}`` from the mode file (v0.1.16)."""
+    if _mode_file is None:
+        return {}
+    import json
+
+    try:
+        data = json.loads(_mode_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(data, dict):
+        return out
+    for key, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        mf = v.get("measured_fps")
+        out[str(key)] = {
+            "fps": float(mf) if isinstance(mf, (int, float)) and not isinstance(mf, bool) else None,
+            "slow": v.get("slow") is True,
+        }
+    return out
+
+
+def _write_modes(modes: dict[str, tuple[str, CaptureMode]], info: dict[str, dict[str, Any]] | None = None) -> None:
     if _mode_file is None:
         return
     import json
 
-    data = {
-        k: {"backend": b, "width": m.width, "height": m.height, "fps": m.fps, "fourcc": m.fourcc}
-        for k, (b, m) in sorted(modes.items())
-    }
+    info = info if info is not None else saved_mode_info()
+    data: dict[str, dict[str, Any]] = {}
+    for k, (b, m) in sorted(modes.items()):
+        row: dict[str, Any] = {"backend": b, "width": m.width, "height": m.height, "fps": m.fps, "fourcc": m.fourcc}
+        extra = info.get(k, {})
+        if extra.get("fps") is not None:
+            row["measured_fps"] = round(float(extra["fps"]), 2)
+        if extra.get("slow"):
+            row["slow"] = True
+        data[k] = row
     with contextlib.suppress(OSError):
         _mode_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = _mode_file.with_suffix(".tmp")
@@ -1096,24 +1609,41 @@ def _write_modes(modes: dict[str, tuple[str, CaptureMode]]) -> None:
         os.replace(tmp, _mode_file)
 
 
-def remember_mode(key: str, backend: str, mode: CaptureMode) -> None:
-    """Save the mode a camera works in (when the store is on) and use it for the rest of this session."""
+def remember_mode(key: str, backend: str, mode: CaptureMode, fps: float | None = None, slow: bool = False) -> None:
+    """Save the mode a camera works in (when the store is on) and use it for the rest of this session. ``fps``:
+    the frame rate measured in it; ``slow``: it is the fastest mode of a full search and still below the
+    minimum (the next start checks only this mode before falling back)."""
     with _lock:
         _session_modes[key] = (backend, mode)
     if _mode_file is None:
         return
     modes = saved_modes()
-    if modes.get(key) != (backend, mode):
+    info = saved_mode_info()
+    new_info = {"fps": fps, "slow": bool(slow)}
+    old_info = info.get(key, {"fps": None, "slow": False})
+    if modes.get(key) != (backend, mode) or old_info != new_info:
         modes[key] = (backend, mode)
-        _write_modes(modes)
-        log.info("camera %r: remembered %s %s for the next start", key, backend, mode.describe())
+        info[key] = new_info
+        _write_modes(modes, info)
+        log.info(
+            "camera %r: remembered %s %s for the next start%s%s",
+            key,
+            backend,
+            mode.describe(),
+            "" if fps is None else f" ({fps:.1f} fps measured)",
+            " - still too slow" if slow else "",
+        )
 
 
 def forget_mode(key: str) -> None:
     modes = saved_modes()
     if key in modes:
         del modes[key]
-        _write_modes(modes)
+        info = saved_mode_info()
+        info.pop(key, None)
+        _write_modes(modes, info)
+    with _lock:
+        _slow_known.pop(key, None)
 
 
 def camera_devices() -> list[CameraDevice]:
@@ -1375,10 +1905,16 @@ class FramePairer:
             return t_ref, out
 
 
-def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = None, low_res: bool | None = None) -> Any:
+def open_capture(
+    spec: CameraSpec,
+    virtual_fallback: bool = True,
+    cv2: Any = None,
+    low_res: bool | None = None,
+    min_fps: float | None = None,
+) -> Any:
     """Open one camera of a multi-camera set (see :func:`open_camera`); returns a reader whose first ``read()``
     gives the frame that proved the mode works. A secondary camera may fall back to 320x240 (``low_res``
-    overrides that: True also for the primary, False never)."""
+    overrides that: True also for the primary, False never). ``min_fps``: hands.min_camera_fps."""
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
     devs = camera_devices()
@@ -1395,8 +1931,14 @@ def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = Non
         label=str(spec.device),
         low_res=low,
         virtual_fallback=virtual_fallback,
+        min_fps=min_fps,
     )
-    return FirstFrameCapture(got.cap, got.frame, got.mode, got.backend, got.name)
+    fc = FirstFrameCapture(got.cap, got.frame, got.mode, got.backend, got.name)
+    fc.measured_fps, fc.slow, fc.hints = got.fps, got.slow, list(got.hints)
+    if got.fallback:
+        fc.fallback = got.fallback
+        fc.opened_index = got.src if isinstance(got.src, int) else None
+    return fc
 
 
 class FirstFrameCapture:
@@ -1411,6 +1953,11 @@ class FirstFrameCapture:
         self.mode = mode
         self.backend = backend
         self.name = name
+        self.measured_fps: float | None = None  # while choosing the mode
+        self.slow = False  # below the minimum in every mode (the fastest one is open)
+        self.fallback = ""  # why another camera (NVIDIA Broadcast) streams instead of the configured one
+        self.opened_index: int | None = None
+        self.hints: list[str] = []
 
     def read(self) -> tuple[bool, Any]:
         if self._first is not None:
@@ -1480,6 +2027,21 @@ class CameraThread(threading.Thread):
         self.backend = ""
         self.first_t: float | None = None
         self.last_t: float | None = None
+        self.measured_fps: float | None = None  # measured by the opener while choosing the mode
+        self.slow = False  # the opener found it below the minimum in every mode
+        self.fallback = ""  # why another camera streams in its place ("" = the configured camera itself)
+        self.opened_name = ""  # that other camera (NVIDIA Broadcast)
+        self.opened_index: int | None = None
+        self.hints: list[str] = []
+
+    def too_slow(self, min_fps: float, window_s: float = 2.0) -> bool:
+        """Below ``min_fps``: the opener said so, or the rate measured over at least ``window_s`` of streaming
+        is lower (v0.1.16)."""
+        if min_fps <= 0 or self.error:
+            return False
+        if self.first_t is not None and self.last_t is not None and self.last_t - self.first_t >= window_s:
+            return self.fps() < min_fps
+        return bool(self.slow)
 
     def fps(self) -> float:
         """Measured frame rate since the first frame (0.0 before two frames)."""
@@ -1545,6 +2107,18 @@ class CameraThread(threading.Thread):
         self.mode = mode if isinstance(mode, CaptureMode) else None
         backend = getattr(cap, "backend", "")
         self.backend = backend if isinstance(backend, str) else ""
+        mf = getattr(cap, "measured_fps", None)
+        self.measured_fps = float(mf) if isinstance(mf, (int, float)) and not isinstance(mf, bool) else None
+        self.slow = getattr(cap, "slow", False) is True
+        fb = getattr(cap, "fallback", "")
+        if isinstance(fb, str) and fb:
+            self.fallback = fb
+            nm = getattr(cap, "name", "")
+            self.opened_name = nm if isinstance(nm, str) else ""
+            oi = getattr(cap, "opened_index", None)
+            self.opened_index = oi if isinstance(oi, int) else None
+        hints = getattr(cap, "hints", None)
+        self.hints = [str(h) for h in hints] if isinstance(hints, list) else []
         self.state = "open"
         self.opened.set()
         try:
@@ -1584,15 +2158,20 @@ def primary_index(specs: list[CameraSpec]) -> int:
     return next((i for i, c in enumerate(specs) if getattr(c, "role", "") == "primary"), 0)
 
 
-def camera_opener(virtual_fallback: bool = True, low_res: bool | None = None) -> Callable[[CameraSpec], Any]:
+def camera_opener(
+    virtual_fallback: bool = True, low_res: bool | None = None, min_fps: float | None = None
+) -> Callable[[CameraSpec], Any]:
     """The opener every multi-camera user shares: :func:`open_capture` with the NVIDIA Broadcast fallback
-    setting, a secondary allowed down to 320x240, and the backend/mode kept for the session (and across
-    starts with :func:`use_mode_store`)."""
+    setting, a secondary allowed down to 320x240, the minimum frame rate, and the backend/mode kept for the
+    session (and across starts with :func:`use_mode_store`)."""
     import functools
 
-    if low_res is None:
-        return functools.partial(open_capture, virtual_fallback=virtual_fallback)
-    return functools.partial(open_capture, virtual_fallback=virtual_fallback, low_res=low_res)
+    kw: dict[str, Any] = {"virtual_fallback": virtual_fallback}
+    if low_res is not None:
+        kw["low_res"] = low_res
+    if min_fps is not None:
+        kw["min_fps"] = min_fps
+    return functools.partial(open_capture, **kw)
 
 
 def start_camera_threads(
@@ -1607,6 +2186,7 @@ def start_camera_threads(
     settle_s: float = PRIMARY_SETTLE_S,
     thread_factory: Callable[..., Any] = CameraThread,
     start: bool = True,
+    min_fps: float | None = None,
 ) -> list[Any]:
     """Start one capture thread per camera, the same way everywhere (the app, Settings > Live confidence and
     Test both cameras, ``away calibrate-cameras`` and ``away cameras test``; v0.1.15):
@@ -1619,7 +2199,7 @@ def start_camera_threads(
     """
     if open_lock is None and (_windows() if serial is None else serial):
         open_lock = threading.Lock()
-    op = opener or camera_opener(virtual_fallback)
+    op = opener or camera_opener(virtual_fallback, min_fps=min_fps)
     first = primary_index(specs)
     threads: list[Any] = [None] * len(specs)
     threads[first] = thread_factory(first, specs[first], pairer, stop, open_lock=open_lock, opener=op)

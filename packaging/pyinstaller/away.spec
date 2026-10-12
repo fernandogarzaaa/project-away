@@ -150,7 +150,7 @@ if sys.platform == "darwin":
         bundle_identifier="com.fernandogarzaaa.projectaway",
         info_plist={
             "CFBundleDisplayName": "Project Away",
-            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.15"),
+            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.16"),
             "LSUIElement": True,  # menu-bar (tray) app, no Dock icon
             "NSCameraUsageDescription": "Project Away tracks your hands and face locally to control the pointer.",
             "NSMicrophoneUsageDescription": "Project Away transcribes push-to-talk dictation locally.",

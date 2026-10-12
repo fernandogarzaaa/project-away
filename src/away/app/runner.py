@@ -45,7 +45,11 @@ from away.wifi.features import window_features
 
 # Multi-camera start-up. Windows MSMF/DirectShow can take several seconds to open a USB webcam (more when
 # two open at once), so a camera only counts as failed when it errors or sends nothing for MULTICAM_PROBE_S.
-MULTICAM_PROBE_S = 20.0  # v0.1.13: room for every DirectShow mode plus Media Foundation
+# v0.1.13: room for every DirectShow mode plus Media Foundation; v0.1.16: every mode is measured for 1.5 s and a
+# too-slow camera sweeps every format and size once (capture.SWEEP_BUDGET_S), so more room
+MULTICAM_PROBE_S = 45.0
+HANDOVER_FREE_S = 15.0  # a hand-over waits at most this long for this process's cameras to be closed
+SPEED_CHECK_S = 5.0  # after this long streaming, each camera's measured frame rate is logged (ok / too slow)
 MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones this often
 MULTICAM_RETRY_MAX_S = 600.0  # back-off ceiling when the full set keeps failing right after a good probe
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
@@ -1034,6 +1038,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 publish=self._publish_quiet,
                 on_release=self._release_hand,
                 until=until,
+                wait_free=self._wait_devices_free,
             ).run()
 
         self._camera_list(log=True)  # the enumerated cameras (source, index, name, virtual) -> away.log
@@ -1088,6 +1093,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             open_lock=open_lock,
             serial=open_lock is not None,
             virtual_fallback=bool(self.cfg.hands.virtual_fallback),
+            min_fps=float(self.cfg.hands.min_camera_fps),
         )
 
     def _use_mode_store(self) -> None:
@@ -1163,14 +1169,53 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         finally:
             done.set()
 
+    def _log_camera_speed(self, threads: list[Any]) -> list[tuple[bool, str]]:
+        """away.log: each camera ok or FAILED (too slow) with its measured rate (v0.1.16); a too-slow camera is
+        also shown to the user once."""
+        from away.app.camera_loop import camera_speed_lines
+
+        lines = camera_speed_lines(threads, float(self.cfg.hands.min_camera_fps))
+        lg = logging.getLogger("away.cameras")
+        for failed, text in lines:
+            (lg.warning if failed else lg.info)("%s", text)
+        slow = [text for failed, text in lines if failed and "too slow" in text]
+        if slow:
+            self.bus.publish("cameras.slow", {"message": "; ".join(slow)})
+            self.bus.publish(
+                "app.notice",
+                {
+                    "title": "Project Away: camera too slow",
+                    "message": slow[0].split(";")[0] + ". Settings > Cameras > Test both cameras tells you more.",
+                },
+            )
+        return lines
+
+    @staticmethod
+    def _wait_devices_free(timeout: float = HANDOVER_FREE_S) -> bool:
+        """v0.1.16: hand the cameras over only once no camera of this process is open or still opening (a
+        capture thread that was in the middle of opening, or a background re-probe, is told to give up); the
+        borrower would otherwise open a device this process still holds. Overridden in tests."""
+        from away.multicam import capture
+
+        free = capture.wait_devices_free(timeout)
+        if not free:
+            logging.getLogger("away.cameras").warning(
+                "handing the cameras over although this process may still hold one: %s",
+                ", ".join(sorted(capture.held_cameras())) or "a camera is still opening",
+            )
+        return free
+
     def _wait_handover(self, devices: list[Any]) -> None:
-        """The cameras are closed: tell the borrower (Settings, calibration) and wait until it is done."""
+        """The cameras are closed: make sure none is still held or opening, tell the borrower (Settings,
+        calibration) and wait until it is done."""
         share = self.camera_share
+        self._wait_devices_free()
         share.clear_owner()
         share.ack_released(devices)
         self.bus.publish("camera.handover", {"released": True, "cameras": devices})
         while share.requested() and not self.stop_event.is_set():
             self.stop_event.wait(0.5)
+            share.ack_released(devices)  # keep the acknowledgement fresh (it goes stale after 5 s)
         share.clear_released()
         self.bus.publish("camera.handover", {"released": False, "cameras": devices})
 
@@ -1286,11 +1331,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 dropped: set[int] = set()
                 next_check = 0.0
                 handover = False
+                speed_at = time.monotonic() + SPEED_CHECK_S  # log each camera's measured rate once per session
                 try:
                     while not self.stop_event.is_set():
                         now = time.monotonic()
                         if now >= next_check:
                             next_check = now + 1.0
+                            if speed_at and now >= speed_at:
+                                speed_at = 0.0
+                                self._log_camera_speed(threads)
                             share.publish_owner(devices)
                             if share.requested():
                                 handover = True

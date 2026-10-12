@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the PyInstaller onedir (dist/ProjectAway) as an AppImage. Needs appimagetool (downloaded if absent).
 set -euo pipefail
-VERSION="${1:-0.1.15}"
+VERSION="${1:-0.1.16}"
 ARCH="$(uname -m)"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="$ROOT/dist/ProjectAway"
