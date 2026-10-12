@@ -809,6 +809,34 @@ def test_camera_test_waits_for_the_handover_to_be_confirmed() -> None:
     assert not CS.confirm_handover(types.SimpleNamespace(app_running=True, handed_over=False))
 
 
+def test_camera_share_survives_windows_sharing_violations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    share = CS.CameraShare(tmp_path, pid=1)
+    other = CS.CameraShare(tmp_path, pid=2)
+    share.publish_owner([JOYCAM])
+    real = Path.read_text
+    fails = {"n": 3}
+
+    def flaky(self: Path, *a: Any, **k: Any) -> str:
+        if self.name == CS.OWNER_FILE and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError(32, "being used by another process")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert other.owner() is not None and fails["n"] == 0  # not mistaken for "no app holds the cameras"
+    fails["n"] = 99
+    assert other.owner() is None  # a file that stays locked is still treated as unreadable, not an error
+    calls = {"n": 0}
+
+    def flaky_replace() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(5, "denied")
+        return "ok"
+
+    assert CS._retry_sharing(flaky_replace) == "ok" and calls["n"] == 3
+
+
 def test_ui_queue_runs_worker_posts_only_on_the_tk_thread() -> None:
     ui = UiQueue()
     ran: list[tuple[int, int]] = []

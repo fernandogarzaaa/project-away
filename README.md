@@ -529,8 +529,9 @@ error (Python `faulthandler`), and any uncaught exception (main thread or worker
 At the next start a crash found there is logged and shown in the tray tooltip and a notification, and in the
 Settings status line: "the app crashed last time; details in crash.log". The camera hand-over was hardened at the
 same time: the app now acknowledges a hand-over only once none of its cameras is open or still opening (an open
-in progress gives up), the camera test waits for that confirmation before it opens anything, and no worker thread
-touches Tk any more (Settings and the cursor overlay marshal every update to the Tk thread).
+in progress gives up), the camera test waits for that confirmation before it opens anything, reading the hand-over files
+retries through Windows' brief sharing violations (one could make Settings think the app held no camera), and no
+worker thread touches Tk any more (Settings and the cursor overlay marshal every update to the Tk thread).
 In YAML:
 
 ```yaml

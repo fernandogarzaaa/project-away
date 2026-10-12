@@ -32,6 +32,21 @@ IN_USE_MESSAGE = (
 )
 
 
+def _retry_sharing(fn: Callable[[], Any], tries: int = 10, delay: float = 0.01) -> Any:
+    """v0.1.16: on Windows, reading a file while another process ``os.replace``-s it (or replacing one that is
+    being read) fails with a sharing violation (PermissionError) for a moment. Before, a reader then saw "no
+    app owns the cameras" and a borrower could open devices the app still held (seen on the Windows CI
+    runner; a suspect for the first Test both cameras crash). Retry briefly instead."""
+    for i in range(tries):
+        try:
+            return fn()
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay)
+    return None  # pragma: no cover - the loop returns or raises
+
+
 class CameraShare:
     def __init__(
         self,
@@ -59,12 +74,12 @@ class CameraShare:
             p = self._path(name)
             tmp = p.with_suffix(f".{self.pid}.tmp")
             tmp.write_text(json.dumps({**data, "pid": self.pid, "t": self.clock()}), encoding="utf-8")
-            os.replace(tmp, p)
+            _retry_sharing(lambda: os.replace(tmp, p))
 
     def _read(self, name: str) -> dict[str, Any] | None:
         """The file's content when it exists and its heartbeat is fresh, else None."""
         try:
-            data = json.loads(self._path(name).read_text(encoding="utf-8"))
+            data = json.loads(_retry_sharing(lambda: self._path(name).read_text(encoding="utf-8")))
         except (OSError, ValueError):
             return None
         if not isinstance(data, dict):
