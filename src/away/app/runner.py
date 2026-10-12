@@ -44,7 +44,7 @@ from away.wifi.features import window_features
 
 # Multi-camera start-up. Windows MSMF/DirectShow can take several seconds to open a USB webcam (more when
 # two open at once), so a camera only counts as failed when it errors or sends nothing for MULTICAM_PROBE_S.
-MULTICAM_PROBE_S = 12.0
+MULTICAM_PROBE_S = 20.0  # v0.1.13: room for every DirectShow mode plus Media Foundation
 MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones this often
 MULTICAM_RETRY_MAX_S = 600.0  # back-off ceiling when the full set keeps failing right after a good probe
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
@@ -488,10 +488,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def _on_camera_error(self, ev: Any) -> None:
         """Single-camera mode: a camera that will not open is retried quietly, but the NVIDIA Broadcast hint
-        (Broadcast holds the physical camera as its source) is worth a notification, once."""
+        (the camera could not be opened directly but Broadcast's virtual camera shows it) is worth a
+        notification, once."""
         msg = str(ev.data.get("error") or "")
-        if "NVIDIA Broadcast is probably using" in msg:
-            self.notice("Project Away: camera busy", msg, key=f"camera-broadcast:{self._camera_episode}")
+        if "NVIDIA Broadcast's camera shows the same picture" in msg:
+            self.notice("Project Away: camera could not be opened", msg, key=f"camera-broadcast:{self._camera_episode}")
 
     def _on_cameras_restored(self, ev: Any) -> None:
         msg = str(ev.data.get("message") or "all cameras are working again")

@@ -458,10 +458,15 @@ uncompressed YUY2) and counts as open only once a frame arrives; a camera that s
 retried in its default format. A second camera that will not stream while another one is open is retried
 at 320x240, then 320x240 at 15 fps (two USB 2.0 webcams can exceed the bus); the mode that worked is logged
 and reused for the rest of the session. Errors now say whether a camera *did not open* or *opened but sent
-no frames*. **NVIDIA Broadcast** keeps its source camera open even with its window closed, so desktop apps
-cannot open that camera (the Windows Camera app still can). When a physical camera is busy and
-`Camera (NVIDIA Broadcast)` is listed, the log and a notification say so; with `hands.virtual_fallback:
-true` (default) Project Away then opens the one free Broadcast camera instead (same picture) and logs it.
+no frames*. **Media Foundation (v0.1.13):** when DirectShow cannot use a camera, it is opened with Media
+Foundation at the index *Media Foundation's own list* gives it (matched by device path, else by name);
+v0.1.12 and older reused the DirectShow index, but Media Foundation numbers cameras differently (it does
+not list DirectShow-only virtual cameras such as NVIDIA Broadcast), so the fallback hit the wrong camera.
+DirectShow is tried in MJPG, YUY2 and NV12 at the configured size, without a format, and with nothing
+forced; every attempt is logged. **NVIDIA Broadcast:** when a physical camera still cannot be opened and
+`Camera (NVIDIA Broadcast)` is listed, the log and a notification say "<camera> could not be opened directly;
+NVIDIA Broadcast's camera shows the same picture." With `hands.virtual_fallback: true` (default) Project
+Away then opens the one free Broadcast camera instead and logs it.
 Choosing `Camera (NVIDIA Broadcast)` by name works for the single camera and in a multi-camera set.
 
 How it works:
@@ -589,7 +594,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1101 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow COM test runs only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1107 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -602,7 +607,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
 | Windows camera enumeration and naming (v0.1.11) | DirectShow list parsing/order, virtual-camera flags, name/DevicePath/`#k` resolution across hot-plug, legacy-index remap (NVIDIA Broadcast at 0, built-in at 1, USB at 2), DirectShow-first opening with logged MSMF fallback, Settings role/gating and retry labels unit-tested with a fake enumerator and fake OpenCV; the ctypes COM enumeration runs on the Windows CI runner against the DirectShow filter category (no camera there); **untested on a real PC with cameras (the reported Acer Predator with NVIDIA Broadcast)** |
-| Camera opening modes and NVIDIA Broadcast fallback (v0.1.12) | MJPG-before-size, frame-verified opens, no-FOURCC retry, 320x240 / 15 fps fallback for a second camera with the mode kept per session, open-failed vs no-frames errors, bandwidth and Broadcast hints, the automatic Broadcast fallback and explicit Broadcast choice unit-tested with a fake OpenCV; **untested on the real Acer Predator (JoyCam + HD User Facing + NVIDIA Broadcast)** |
+| Camera opening modes, Media Foundation index mapping and NVIDIA Broadcast fallback (v0.1.12/v0.1.13) | MJPG-before-size, frame-verified opens, MJPG/YUY2/NV12/no-FOURCC/device-default retries, Media Foundation opened at its own index (fake MF enumerator ordered differently from DirectShow; the ctypes `MFEnumDeviceSources` enumeration itself has not run on Windows), 320x240 / 15 fps fallback for a second camera with the mode kept per session, open-failed vs no-frames errors, bandwidth and Broadcast hints, the automatic Broadcast fallback and explicit Broadcast choice unit-tested with a fake OpenCV; **untested on the real Acer Predator (JoyCam + HD User Facing + NVIDIA Broadcast)** |
 | Face gate leniency (v0.1.12) | Adaptive mouth threshold and the frontal-presence rule replayed against the gate numbers in the user's v0.1.11 log, plus no-face / other-speaker negatives; head-pose (frontal) estimate from the face mesh unit-tested on synthetic points; **not measured on a real webcam** |
 | Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; v0.1.12 retry/relaunch/exit-code logic checked by text tests and a small interpreter of the relaunch block; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |
 | Steady click, sigmoid curve, dwell, wink, auto-pause guard, cursor ring states, numbers to digits, edit-selection rules | Logic unit-tested with synthetic input |

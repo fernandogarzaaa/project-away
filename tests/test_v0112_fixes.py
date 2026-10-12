@@ -1,4 +1,4 @@
-"""v0.1.12: four bugs from the user's real Acer Predator session (away.log, v0.1.11).
+"""v0.1.12/v0.1.13: four bugs from the user's real Acer Predator session (away.log, v0.1.11).
 
 1. ``HD User Facing`` never opened: DirectShow negotiated uncompressed YUY2 (no FOURCC was set) and NVIDIA
    Broadcast keeps its source camera open, so desktop opens fail. -> MJPG, frame-verified opens, a 320x240
@@ -46,10 +46,13 @@ class FakeCam:
         self.frames = frames
 
 
+DEAD = {700: False, 1400: False}
+
+
 class FakeCap:
     def __init__(self, cv2: FakeCV2, src: Any, api: Any) -> None:
         self.cv2, self.src, self.api = cv2, src, api
-        cam = cv2.cams.get(src, FakeCam())
+        cam = cv2.cams.get((src, api)) or cv2.cams.get(src) or FakeCam()  # (index, backend) first: MSMF numbering
         self.cam = cam
         self.ok = cam.opens.get(api, True)
         self.props: dict[int, Any] = {}
@@ -108,14 +111,26 @@ def _devs() -> list[CameraDevice]:
     return capture.dshow_devices(PREDATOR)
 
 
+# Media Foundation's own list on the same PC: no virtual camera, and the built-in camera comes first, so its
+# MSMF index (0) differs from its DirectShow index (1); MSMF index 1 is JoyCam
+MF_LIST = [(BUILTIN, PREDATOR[1][1].upper()), (JOYCAM, PREDATOR[0][1])]
+MF_BUILTIN, MF_JOYCAM = 0, 1
+
+
 def _quick(**kw: Any) -> dict[str, Any]:
     return {"first_frame_s": 0.0, "retry_frame_s": 0.0, "sleep": lambda _s: None, **kw}
+
+
+def _builtin_dead() -> dict[Any, FakeCam]:
+    """The reported failure: the built-in camera opens neither with DirectShow nor with Media Foundation."""
+    return {1: FakeCam(opens=DEAD), (MF_BUILTIN, 1400): FakeCam(opens=DEAD)}
 
 
 @pytest.fixture(autouse=True)
 def _windows_and_clean(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(capture, "_windows", lambda: True)
     monkeypatch.setattr(capture, "list_cameras", lambda **kw: _devs())
+    monkeypatch.setattr(capture, "windows_msmf_cameras", lambda: list(MF_LIST))
     capture.reset_session_modes()
     capture._open_now.clear()
     yield
@@ -138,24 +153,42 @@ def test_mjpg_is_set_before_size_and_fps_and_a_frame_is_verified() -> None:
     assert capture.held_cameras() == set()
 
 
-def test_mjpg_without_frames_retries_without_fourcc_and_keeps_that_mode(caplog: Any) -> None:
+def test_every_reported_fourcc_then_no_fourcc_and_the_mode_is_kept(caplog: Any) -> None:
     cam = FakeCam(works=lambda fcc, w, h, fps: fcc == 0)  # a camera that only streams its default format
     cv2 = FakeCV2({1: cam})
     with caplog.at_level(logging.INFO, logger="away.cameras"):
         got = capture.open_camera(1, 640, 480, 0, cv2=cv2, devices=_devs(), **_quick())
     assert got.mode == CaptureMode(640, 480, 0, "")
-    assert len(cv2.caps) == 2 and cv2.caps[0].released and FOURCC_PROP not in cv2.caps[1].props
-    assert "keeping that mode for this session" in caplog.text and "640x480 driver format" in caplog.text
+    assert [c.props.get(FOURCC_PROP, 0) for c in cv2.caps] == [
+        MJPG,
+        capture.fourcc_code("YUY2"),
+        capture.fourcc_code("NV12"),
+        0,
+    ]
+    assert all(c.released for c in cv2.caps[:3])
+    for m in ("640x480 MJPG", "640x480 YUY2", "640x480 NV12", "640x480 driver format"):
+        assert f"trying DirectShow index 1, mode {m}" in caplog.text  # every attempt is logged
+    assert "keeping that for this session" in caplog.text
     got.cap.release()
     cv2.caps.clear()
     again = capture.open_camera(1, 640, 480, 0, cv2=cv2, devices=_devs(), **_quick())  # a later retry
     assert len(cv2.caps) == 1 and again.mode.fourcc == ""  # the mode that worked is tried first
 
 
+def test_device_default_mode_forces_nothing() -> None:
+    cam = FakeCam(works=lambda fcc, w, h, fps: w is None and h is None and fcc == 0)
+    cv2 = FakeCV2({1: cam})
+    got = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), **_quick())
+    assert got.mode == capture.DEVICE_DEFAULT and got.mode.describe().startswith("device default")
+    assert cv2.caps[-1].sets == [(BUF_PROP, 1)]  # no FOURCC, no size, no fps
+    got.cap.release()
+
+
 def test_empty_fourcc_config_never_sets_one() -> None:
     cv2 = FakeCV2()
     capture.open_camera(1, 640, 480, 0, "", cv2=cv2, devices=_devs(), **_quick()).cap.release()
     assert FOURCC_PROP not in cv2.caps[0].props
+    assert capture.capture_modes(640, 480, 0, "", False) == [CaptureMode(640, 480, 0, ""), capture.DEVICE_DEFAULT]
 
 
 def test_second_camera_falls_back_to_320x240_then_15fps_and_logs_it(caplog: Any) -> None:
@@ -170,40 +203,53 @@ def test_second_camera_falls_back_to_320x240_then_15fps_and_logs_it(caplog: Any)
         second = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), **_quick())
     assert second.mode == CaptureMode(320, 240, 15, "MJPG")
     tried = [(c.props.get(W_PROP), c.props.get(FPS_PROP), c.props.get(FOURCC_PROP, 0)) for c in cv2.caps[1:]]
-    assert tried == [(640, 30, MJPG), (640, 30, 0), (320, 30, MJPG), (320, 15, MJPG)]
-    assert "320x240@15 MJPG" in caplog.text and "keeping that mode" in caplog.text
+    y, n = capture.fourcc_code("YUY2"), capture.fourcc_code("NV12")
+    assert tried == [
+        (640, 30, MJPG),
+        (640, 30, y),
+        (640, 30, n),
+        (640, 30, 0),
+        (None, None, 0),
+        (320, 30, MJPG),
+        (320, 15, MJPG),
+    ]
+    assert "320x240@15 MJPG" in caplog.text and "keeping that for this session" in caplog.text
     second.cap.release()
-    n = len(cv2.caps)
+    n_caps = len(cv2.caps)
     capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), **_quick()).cap.release()
-    assert len(cv2.caps) == n + 1  # retry 45 s later: the low-res mode works at once
+    assert len(cv2.caps) == n_caps + 1  # retry 45 s later: the low-res mode works at once
     first.cap.release()
 
 
 def test_alone_a_camera_does_not_drop_to_low_res() -> None:
-    cv2 = FakeCV2({1: FakeCam(works=lambda fcc, w, h, fps: False)})
+    silent = FakeCam(works=lambda fcc, w, h, fps: False)
+    cv2 = FakeCV2({1: silent, (MF_BUILTIN, 1400): silent})
     with pytest.raises(CameraOpenError) as err:
-        capture.open_camera(1, cv2=cv2, devices=[], **_quick())
-    assert len(cv2.caps) == 2  # MJPG, then the driver format; no 320x240 (nothing else is open)
+        capture.open_camera(1, cv2=cv2, devices=_devs(), **_quick())
+    ds = [c for c in cv2.caps if c.api == 700]
+    assert len(ds) == 5 and all(c.props.get(W_PROP) in (640, None) for c in ds)  # no 320x240 when alone
     assert err.value.opened and "opened but sent no frames" in str(err.value)
     assert capture.BANDWIDTH_HINT not in str(err.value)
 
 
 def test_open_failed_and_no_frames_are_different_errors_with_bandwidth_hint(caplog: Any) -> None:
-    cv2 = FakeCV2({0: FakeCam(), 1: FakeCam(opens={700: False, 1400: False})})
-    first = capture.open_camera(0, cv2=cv2, devices=[], **_quick())
-    with caplog.at_level(logging.WARNING, logger="away.cameras"), pytest.raises(CameraOpenError) as err:
-        capture.open_camera(1, cv2=cv2, devices=[], label=BUILTIN, **_quick())
+    cv2 = FakeCV2({0: FakeCam(), **_builtin_dead()})
+    first = capture.open_camera(0, cv2=cv2, devices=_devs(), **_quick())
+    with caplog.at_level(logging.INFO, logger="away.cameras"), pytest.raises(CameraOpenError) as err:
+        capture.open_camera(1, cv2=cv2, devices=_devs(), virtual_fallback=False, **_quick())
     e = err.value
     assert not e.opened and str(e).startswith("cannot open camera") and "busy" in str(e)
+    assert "DirectShow 1: did not open" in str(e) and "Media Foundation 0: did not open" in str(e)
     assert capture.BANDWIDTH_HINT in str(e) and capture.BANDWIDTH_HINT in caplog.text
-    assert "DirectShow could not open it; trying Media Foundation" in caplog.text
-    assert [api for src, api in cv2.opened if src == 1] == [700, 1400]  # one open per backend, not per mode
+    assert "DirectShow could not open index 1" in caplog.text
+    assert cv2.opened[1:] == [(1, 700), (MF_BUILTIN, 1400)]  # one open per backend, never per mode
     first.cap.release()
-    cv2 = FakeCV2({1: FakeCam(works=lambda *a: False)})
+    cv2 = FakeCV2({1: FakeCam(works=lambda *a: False), (MF_BUILTIN, 1400): FakeCam(works=lambda *a: False)})
     with pytest.raises(CameraOpenError) as err2:
-        capture.open_camera(1, cv2=cv2, devices=[], low_res=True, **_quick())
-    assert err2.value.opened and "opened but sent no frames (tried 640x480 MJPG" in str(err2.value)
-    assert all(api == 700 for _s, api in cv2.opened)  # opened but silent: Media Foundation is not tried
+        capture.open_camera(1, cv2=cv2, devices=_devs(), low_res=True, **_quick())
+    assert err2.value.opened and "opened but sent no frames (tried DirectShow 640x480 MJPG: no frames" in str(
+        err2.value
+    )
 
 
 def test_camera_frames_yields_the_verified_frame_first() -> None:
@@ -214,7 +260,7 @@ def test_camera_frames_yields_the_verified_frame_first() -> None:
     assert len(frames) == 3 and cv2.opened == [(1, 700)] and cv2.caps[0].sets[0] == (FOURCC_PROP, MJPG)
     assert capture.held_cameras() == set()  # released when the generator ends
     assert probe_camera(BUILTIN, cv2=FakeCV2()) == (True, f"camera {BUILTIN} OK")
-    ok, msg = probe_camera(BUILTIN, cv2=FakeCV2({1: FakeCam(opens={700: False, 1400: False})}))
+    ok, msg = probe_camera(BUILTIN, cv2=FakeCV2(_builtin_dead()))
     assert not ok and "cannot open camera" in msg
 
 
@@ -228,29 +274,77 @@ def test_open_capture_uses_the_spec_fourcc_and_low_res_for_a_secondary() -> None
     cap.release()
 
 
+# ====================================================================== v0.1.13: Media Foundation numbering
+def test_media_foundation_is_opened_at_its_own_index_not_the_directshow_one(caplog: Any) -> None:
+    """DirectShow: 0 JoyCam, 1 HD User Facing, 2 NVIDIA Broadcast. Media Foundation: 0 HD User Facing, 1 JoyCam.
+    The old fallback opened MSMF index 1, which is JoyCam (already in use), so the built-in never opened."""
+    cv2 = FakeCV2({1: FakeCam(opens={700: False}), (MF_JOYCAM, 1400): FakeCam(opens=DEAD)})
+    with caplog.at_level(logging.INFO, logger="away.cameras"):
+        got = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
+    assert cv2.opened == [(1, 700), (MF_BUILTIN, 1400)]  # never (1, 1400)
+    assert got.src == 1 and got.name == BUILTIN and not got.fallback  # no NVIDIA Broadcast needed
+    assert got.mode == CaptureMode(640, 480, 30, "")
+    assert "DirectShow index 1 is Media Foundation index 0 (by device path)" in caplog.text
+    assert "cameras (msmf): 0: HD User Facing; 1: JoyCam" in caplog.text
+    assert "trying Media Foundation index 0, mode 640x480@30 driver format" in caplog.text
+    assert capture.held_cameras() == {"1"}  # held under its DirectShow index (the camera's identity)
+    got.cap.release()
+    cv2.caps.clear()
+    capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), **_quick()).cap.release()
+    assert cv2.opened == [(MF_BUILTIN, 1400)]  # later retries go straight to what worked
+
+
+def test_msmf_index_matching_by_name_occurrence_and_fallbacks(caplog: Any) -> None:
+    twins = [("USB Camera", ""), ("USB Camera", ""), (BROADCAST, "")]
+    devs = capture.dshow_devices(twins)
+    mf = [("USB Camera", "a"), ("Other", "b"), ("USB Camera", "c")]
+    assert capture.msmf_index(1, devs[1], devs, "'USB Camera'", lambda: mf) == 2  # the 2nd of the same name
+    assert capture.msmf_index(0, devs[0], devs, "'USB Camera'", lambda: mf) == 0
+    with caplog.at_level(logging.WARNING, logger="away.cameras"):
+        assert capture.msmf_index(2, devs[2], devs, f"'{BROADCAST}'", lambda: mf) is None  # DirectShow-only
+        assert "not in Media Foundation's camera list" in caplog.text
+        assert capture.msmf_index(1, devs[1], devs, "'USB Camera'", lambda: None) == 1  # list unavailable
+        assert "Media Foundation list unavailable" in caplog.text
+    assert capture.msmf_index(1, None, [], f"'{BUILTIN}'", lambda: list(MF_LIST)) == MF_BUILTIN  # by name only
+
+
+def test_media_foundation_is_tried_before_the_virtual_fallback() -> None:
+    cv2 = FakeCV2(_builtin_dead())
+    got = capture.open_camera(1, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
+    assert [o for o in cv2.opened] == [(1, 700), (MF_BUILTIN, 1400), (2, 700)]  # DirectShow, MSMF, Broadcast
+    assert got.src == 2 and got.name == BROADCAST
+    got.cap.release()
+
+
+def test_camera_missing_from_media_foundation_skips_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(capture, "windows_msmf_cameras", lambda: [(JOYCAM, "")])
+    cv2 = FakeCV2({1: FakeCam(opens=DEAD)})
+    with pytest.raises(CameraOpenError) as err:
+        capture.open_camera(1, cv2=cv2, devices=_devs(), **_quick())
+    assert cv2.opened == [(1, 700)] and "Media Foundation" not in str(err.value)
+
+
 # ====================================================================== bug 1: NVIDIA Broadcast
-def test_broadcast_hint_when_a_physical_camera_is_busy(caplog: Any) -> None:
-    cv2 = FakeCV2({1: FakeCam(opens={700: False, 1400: False})})
+def test_broadcast_hint_when_a_physical_camera_cannot_be_opened(caplog: Any) -> None:
+    cv2 = FakeCV2(_builtin_dead())
     with caplog.at_level(logging.WARNING, logger="away.cameras"), pytest.raises(CameraOpenError) as err:
         capture.open_camera(1, cv2=cv2, devices=_devs(), virtual_fallback=False, **_quick())
-    hint = (
-        f"NVIDIA Broadcast is probably using {BUILTIN}. Pick '{BROADCAST}' in Settings > Cameras (same picture), "
-        "or change Broadcast's camera source."
-    )
+    hint = f"{BUILTIN} could not be opened directly; NVIDIA Broadcast's camera shows the same picture."
     assert hint in str(err.value) and hint in caplog.text
-    assert [s for s, _a in cv2.opened] == [1, 1]  # no fallback when it is turned off
+    assert "probably using" not in str(err.value)  # Broadcast is not holding it (the user checked)
+    assert [s for s, _a in cv2.opened] == [1, MF_BUILTIN]  # no fallback when it is turned off
 
 
 def test_no_broadcast_hint_without_a_broadcast_camera() -> None:
-    cv2 = FakeCV2({1: FakeCam(opens={700: False, 1400: False})})
+    cv2 = FakeCV2(_builtin_dead())
     devs = [d for d in _devs() if d.name != BROADCAST]
     with pytest.raises(CameraOpenError) as err:
         capture.open_camera(1, cv2=cv2, devices=devs, virtual_fallback=True, **_quick())
     assert "NVIDIA Broadcast" not in str(err.value)
 
 
-def test_busy_camera_falls_back_to_the_one_free_broadcast_camera(caplog: Any) -> None:
-    cv2 = FakeCV2({1: FakeCam(opens={700: False, 1400: False})})
+def test_unopenable_camera_falls_back_to_the_one_free_broadcast_camera(caplog: Any) -> None:
+    cv2 = FakeCV2(_builtin_dead())
     with caplog.at_level(logging.INFO, logger="away.cameras"):
         got = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
     assert got.src == 2 and got.name == BROADCAST and got.fallback
@@ -262,8 +356,7 @@ def test_busy_camera_falls_back_to_the_one_free_broadcast_camera(caplog: Any) ->
 
 
 def test_no_fallback_when_broadcast_is_in_use_or_ambiguous_or_the_failing_camera_is_virtual() -> None:
-    busy = FakeCam(opens={700: False, 1400: False})
-    cv2 = FakeCV2({0: FakeCam(), 1: busy, 2: FakeCam()})
+    cv2 = FakeCV2({0: FakeCam(), 2: FakeCam(), **_builtin_dead()})
     held = capture.open_camera(2, cv2=cv2, devices=_devs(), **_quick())  # Broadcast already open (camera 0 of set)
     with pytest.raises(CameraOpenError):
         capture.open_camera(1, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
@@ -275,10 +368,10 @@ def test_no_fallback_when_broadcast_is_in_use_or_ambiguous_or_the_failing_camera
     in_use[2].in_use = True
     with pytest.raises(CameraOpenError):
         capture.open_camera(1, cv2=cv2, devices=in_use, virtual_fallback=True, **_quick())
-    cv2 = FakeCV2({2: FakeCam(opens={700: False, 1400: False})})
+    cv2 = FakeCV2({2: FakeCam(opens=DEAD)})
     with pytest.raises(CameraOpenError) as err:
         capture.open_camera(2, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
-    assert "NVIDIA Broadcast is probably using" not in str(err.value)
+    assert "could not be opened directly" not in str(err.value)
 
 
 def test_choosing_the_broadcast_camera_explicitly_works_single_and_secondary() -> None:
@@ -320,7 +413,10 @@ def test_virtual_fallback_and_fourcc_config() -> None:
         C.from_dict({"hands": {"cameras": [{"device": 0, "fourcc": "MJ"}, {"device": 1}]}})
     assert capture.capture_modes(640, 480, 30, "MJPG", True) == [
         CaptureMode(640, 480, 30, "MJPG"),
+        CaptureMode(640, 480, 30, "YUY2"),
+        CaptureMode(640, 480, 30, "NV12"),
         CaptureMode(640, 480, 30, ""),
+        capture.DEVICE_DEFAULT,
         CaptureMode(320, 240, 30, "MJPG"),
         CaptureMode(320, 240, 15, "MJPG"),
     ]
@@ -343,7 +439,8 @@ def test_runner_notifies_the_broadcast_hint_once() -> None:
     ev = types.SimpleNamespace(data={"error": capture.broadcast_hint(BUILTIN)})
     App._on_camera_error(fake, ev)  # type: ignore[arg-type]
     App._on_camera_error(fake, types.SimpleNamespace(data={"error": "cannot open camera 'x'"}))  # type: ignore[arg-type]
-    assert len(notes) == 1 and notes[0][0] == "Project Away: camera busy" and BROADCAST in notes[0][1]
+    assert len(notes) == 1 and notes[0][0] == "Project Away: camera could not be opened"
+    assert "shows the same picture" in notes[0][1]
 
 
 # ====================================================================== bug 2: updater
@@ -683,11 +780,37 @@ def test_gate_hint_fires_less_often() -> None:
     assert h.threshold == 10 and fired.index(True) == 9 and fired.count(True) == 1
 
 
-def test_version_is_0_1_12() -> None:
+def test_version_is_0_1_13() -> None:
     from away import __version__
 
-    assert __version__ == "0.1.12"
+    assert __version__ == "0.1.13"
     root = Path(__file__).parents[1]
-    assert 'version = "0.1.12"' in (root / "pyproject.toml").read_text()
-    assert '#define AppVersion "0.1.12"' in (root / "packaging" / "windows" / "away.iss").read_text()
+    assert 'version = "0.1.13"' in (root / "pyproject.toml").read_text()
+    assert '#define AppVersion "0.1.13"' in (root / "packaging" / "windows" / "away.iss").read_text()
     assert os.path.exists(root / "src" / "away" / "__init__.py")
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="real Media Foundation enumeration needs Windows")
+def test_real_media_foundation_enumeration_runs_on_windows() -> None:
+    """On the Windows CI runner (no camera): the ctypes MFEnumDeviceSources path returns a list (empty there)
+    without raising or hanging; a server image without Media Foundation (no mf.dll) is tolerated."""
+    import threading
+
+    out: list[Any] = []
+
+    def work() -> None:
+        try:
+            out.append(capture._msmf_enumerate())
+        except OSError as exc:  # mf.dll / mfplat.dll missing on the server image
+            out.append(("no-mf", str(exc)))
+
+    th = threading.Thread(target=work)
+    th.start()
+    th.join(10)
+    assert out, "Media Foundation enumeration hung"
+    res = out[0]
+    if isinstance(res, tuple):
+        pytest.skip(f"Media Foundation not installed on this runner: {res[1]}")
+    if res is None:
+        pytest.skip("Media Foundation did not start on this runner (MFStartup / MFEnumDeviceSources failed)")
+    assert all(isinstance(n, str) and isinstance(link, str) for n, link in res)

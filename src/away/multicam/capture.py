@@ -477,13 +477,17 @@ def open_video(src: int | str, cv2: Any = None) -> Any:
 
 # ------------------------------------------------------------------------------ opening with a capture mode
 # v0.1.12 (Acer Predator: JoyCam + HD User Facing + NVIDIA Broadcast): no pixel format was ever requested, so
-# DirectShow negotiated uncompressed YUY2 (two USB 2.0 webcams at 640x480 YUY2 can exceed the bus), and a
-# camera NVIDIA Broadcast holds as its source cannot be opened by desktop apps at all.
+# DirectShow negotiated uncompressed YUY2 (two USB 2.0 webcams at 640x480 YUY2 can exceed the bus).
+# v0.1.13: the built-in camera failed even alone, with NVIDIA Broadcast not running, while Broadcast's virtual
+# camera showed its picture. The Media Foundation fallback reused the DirectShow index, but Media Foundation
+# numbers cameras its own way (it does not list DirectShow-only virtual cameras), so it opened the wrong device
+# or none. Media Foundation is now opened at the index its own list gives the camera.
 DEFAULT_FOURCC = "MJPG"
+DSHOW_FOURCCS = ("MJPG", "YUY2", "NV12")  # the formats UVC webcams report; each is tried before giving up
 LOW_RES = (320, 240)
 LOW_RES_FPS = 15
-FIRST_FRAME_S = 5.0  # the first capture mode may take a while to deliver (Windows webcams are slow to start)
-RETRY_FRAME_S = 2.0  # every further mode (worst case 5 + 3 x 2 s fits the 12 s background re-probe)
+FIRST_FRAME_S = 4.0  # the first capture mode may take a while to deliver (Windows webcams are slow to start)
+RETRY_FRAME_S = 1.5  # every further mode (the multi-camera probe waits MULTICAM_PROBE_S = 20 s)
 BANDWIDTH_HINT = "two USB cameras may exceed the USB bandwidth; try another USB port, or the other camera alone"
 _BROADCAST_RE = re.compile(r"nvidia broadcast", re.IGNORECASE)
 
@@ -494,10 +498,7 @@ def is_broadcast_camera(name: str) -> bool:
 
 
 def broadcast_hint(name: str) -> str:
-    return (
-        f"NVIDIA Broadcast is probably using {name}. Pick '{_broadcast_name()}' in Settings > Cameras (same "
-        "picture), or change Broadcast's camera source."
-    )
+    return f"{name} could not be opened directly; NVIDIA Broadcast's camera shows the same picture."
 
 
 def _broadcast_name() -> str:
@@ -512,6 +513,8 @@ class CaptureMode:
     fourcc: str  # "" = do not set (the driver's default format)
 
     def describe(self) -> str:
+        if not self.width or not self.height:
+            return "device default (nothing forced)" + (f" {self.fourcc}" if self.fourcc else "")
         return (
             f"{self.width}x{self.height}"
             + (f"@{self.fps}" if self.fps else "")
@@ -537,16 +540,27 @@ def normalize_fourcc(value: Any) -> str:
     return s.upper()
 
 
-def capture_modes(width: int, height: int, fps: int, fourcc: str, low_res: bool) -> list[CaptureMode]:
-    """The modes to try, in order: as configured; the same without a FOURCC (a camera that rejects MJPG);
-    with ``low_res`` (a second camera on a busy USB bus) 320x240, then 320x240 at 15 fps."""
+DEVICE_DEFAULT = CaptureMode(0, 0, 0, "")  # set nothing: the camera's own default size and format
+
+
+def capture_modes(
+    width: int, height: int, fps: int, fourcc: str, low_res: bool, other_fourccs: bool = True
+) -> list[CaptureMode]:
+    """The modes to try, in order: as configured; the same size in every other format webcams report
+    (``DSHOW_FOURCCS``: MJPG, YUY2, NV12; only when a FOURCC is configured and ``other_fourccs``); the same size
+    without a FOURCC; nothing forced at all (the device default); with ``low_res`` (a second camera on a busy
+    USB bus) 320x240, then 320x240 at 15 fps."""
     fcc = normalize_fourcc(fourcc)
-    modes = [CaptureMode(int(width), int(height), int(fps or 0), fcc)]
+    w, h, f = int(width), int(height), int(fps or 0)
+    modes = [CaptureMode(w, h, f, fcc)]
+    if fcc and other_fourccs:
+        modes += [CaptureMode(w, h, f, x) for x in DSHOW_FOURCCS if x != fcc]
     if fcc:
-        modes.append(CaptureMode(int(width), int(height), int(fps or 0), ""))
+        modes.append(CaptureMode(w, h, f, ""))
+    modes.append(DEVICE_DEFAULT)
     if low_res:
         lw, lh = LOW_RES
-        modes.append(CaptureMode(lw, lh, int(fps or 0), fcc))
+        modes.append(CaptureMode(lw, lh, f, fcc))
         modes.append(CaptureMode(lw, lh, LOW_RES_FPS, fcc))
     out: list[CaptureMode] = []
     for m in modes:
@@ -556,11 +570,11 @@ def capture_modes(width: int, height: int, fps: int, fourcc: str, low_res: bool)
 
 
 _lock = threading.Lock()
-_session_modes: dict[str, CaptureMode] = {}  # camera -> the mode that worked (kept for later retries)
+_session_modes: dict[str, tuple[str, CaptureMode]] = {}  # camera -> (backend, mode) that worked (kept)
 _open_now: dict[str, int] = {}  # cameras this process has open right now (index or path -> count)
 
 
-def session_mode(key: str) -> CaptureMode | None:
+def session_mode(key: str) -> tuple[str, CaptureMode] | None:
     with _lock:
         return _session_modes.get(key)
 
@@ -627,9 +641,10 @@ def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
     if mode.fourcc:
         with contextlib.suppress(Exception):
             cap.set(getattr(cv2, "CAP_PROP_FOURCC", 6), fourcc_code(mode.fourcc))
-    with contextlib.suppress(Exception):
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
+    if mode.width and mode.height:
+        with contextlib.suppress(Exception):
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
     if mode.fps:
         with contextlib.suppress(Exception):
             cap.set(cv2.CAP_PROP_FPS, mode.fps)
@@ -654,49 +669,208 @@ def read_first(
         sleep(0.05)
 
 
-def _backends(src: int | str, cv2: Any) -> list[tuple[str, Any]]:
-    if _windows() and isinstance(src, int):
-        return [("DirectShow", cv2.CAP_DSHOW), ("Media Foundation", cv2.CAP_MSMF)]
-    return [("default", None)]
+@dataclass
+class _Attempt:
+    backend: str  # DirectShow | Media Foundation | default
+    api: Any  # cv2.CAP_* (None = OpenCV's default backend)
+    src: int | str  # the index in *that* backend's numbering
+    modes: list[CaptureMode]
 
 
 def _try_open(
-    src: int | str,
+    attempts: list[_Attempt],
     label: str,
-    modes: list[CaptureMode],
     cv2: Any,
     first_frame_s: float,
     retry_frame_s: float,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
-) -> tuple[Any, Any, CaptureMode, str] | tuple[None, None, None, str]:
-    """``(cap, frame, mode, backend)`` for the first mode that delivers a frame, else ``(None, None, None,
-    state)`` with state ``open-failed`` or ``no-frames``. Media Foundation is tried only when DirectShow cannot
-    open the device at all (a camera that opens but sends nothing is a format/bandwidth problem, not a
-    backend one)."""
+) -> tuple[Any, Any, CaptureMode | None, str, list[str], bool]:
+    """Try every backend and mode in order; every attempt is logged. Returns ``(cap, frame, mode, backend,
+    tried, opened_any)``: ``cap`` None when nothing delivered a frame. A backend whose device does not open is
+    left at its first mode (another mode cannot help)."""
     opened_any = False
     tried: list[str] = []
-    for bi, (backend, api) in enumerate(_backends(src, cv2)):
-        if bi > 0:
-            if opened_any:
-                break
-            log.warning("camera %s: DirectShow could not open it; trying %s (its numbering may differ)", label, backend)
-        for k, mode in enumerate(modes):
-            cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+    first = True
+    for at in attempts:
+        for mode in at.modes:
+            log.info("camera %s: trying %s index %s, mode %s", label, at.backend, at.src, mode.describe())
+            cap = cv2.VideoCapture(at.src) if at.api is None else cv2.VideoCapture(at.src, at.api)
             if not cap.isOpened():
                 with contextlib.suppress(Exception):
                     cap.release()
-                break  # the device itself did not open: another mode will not help; next backend
+                tried.append(f"{at.backend} {at.src}: did not open")
+                log.warning("camera %s: %s could not open index %s", label, at.backend, at.src)
+                break
             opened_any = True
             apply_mode(cap, mode, cv2)
-            frame = read_first(cap, first_frame_s if k == 0 else retry_frame_s, clock, sleep)
+            frame = read_first(cap, first_frame_s if first else retry_frame_s, clock, sleep)
+            first = False
             if frame is not None:
-                return cap, frame, mode, backend
-            tried.append(mode.describe())
-            log.warning("camera %s: opened with %s but no frame in mode %s", label, backend, mode.describe())
+                log.info(
+                    "camera %s: %s index %s delivers frames in mode %s", label, at.backend, at.src, mode.describe()
+                )
+                return cap, frame, mode, at.backend, tried, True
+            tried.append(f"{at.backend} {mode.describe()}: no frames")
+            log.warning(
+                "camera %s: %s opened index %s but sent no frame in mode %s", label, at.backend, at.src, mode.describe()
+            )
             with contextlib.suppress(Exception):
                 cap.release()
-    return None, None, None, ("no-frames: " + ", ".join(tried)) if opened_any else "open-failed"
+    return None, None, None, "", tried, opened_any
+
+
+# Media Foundation COM identifiers (mfidl.h)
+MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE = "{c60ac5fe-252a-478f-a0ef-bc8fa5f7cad3}"
+MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID = "{8ac3587a-4ae7-42d8-99e0-0a6013eef90f}"
+MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME = "{60d0e559-52f8-4fa2-bbce-acdb34a8ec01}"
+MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK = "{58f0aad8-22bf-4f8a-bb3d-d2c4978c6e2f}"
+
+
+def windows_msmf_cameras() -> list[tuple[str, str]] | None:
+    """``[(FriendlyName, SymbolicLink), ...]`` of Media Foundation's video capture sources in
+    ``MFEnumDeviceSources`` order, the order OpenCV's ``CAP_MSMF`` backend numbers cameras in. ``None`` when the
+    enumeration failed (not Windows, COM error). Runs on its own thread (own COM apartment)."""
+    result: list[Any] = [None]
+
+    def work() -> None:
+        try:
+            result[0] = _msmf_enumerate()
+        except Exception as exc:  # pragma: no cover - Windows only
+            log.warning("Media Foundation camera enumeration failed: %s", exc)
+            result[0] = None
+
+    th = threading.Thread(target=work, name="msmf-enum", daemon=True)
+    th.start()
+    th.join(timeout=10.0)
+    return result[0] if not th.is_alive() else None
+
+
+def _msmf_enumerate() -> list[tuple[str, str]] | None:  # pragma: no cover - Windows only
+    """Pure ctypes MFCreateAttributes -> SetGUID(source type = video capture) -> MFEnumDeviceSources ->
+    IMFActivate::GetAllocatedString(friendly name, symbolic link)."""
+    import ctypes
+    import uuid
+
+    if not hasattr(ctypes, "WINFUNCTYPE") or not hasattr(ctypes, "windll"):
+        return None
+    from ctypes import POINTER, byref, c_long, c_uint32, c_ulong, c_void_p, c_wchar_p
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("data", ctypes.c_ubyte * 16)]
+
+    def guid(text: str) -> GUID:
+        return GUID.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+    hresult = c_long
+    windll: Any = getattr(ctypes, "windll")  # noqa: B009 - Windows-only attribute (mypy on Linux)
+    winfunctype: Any = getattr(ctypes, "WINFUNCTYPE")  # noqa: B009
+    ole32 = windll.ole32
+    mfplat = windll.mfplat
+    mf = windll.mf
+    ole32.CoInitializeEx.argtypes = [c_void_p, c_ulong]
+    ole32.CoInitializeEx.restype = hresult
+    ole32.CoTaskMemFree.argtypes = [c_void_p]
+    mfplat.MFStartup.argtypes = [c_ulong, c_ulong]
+    mfplat.MFStartup.restype = hresult
+    mfplat.MFShutdown.restype = hresult
+    mfplat.MFCreateAttributes.argtypes = [POINTER(c_void_p), c_uint32]
+    mfplat.MFCreateAttributes.restype = hresult
+    mf.MFEnumDeviceSources.argtypes = [c_void_p, POINTER(POINTER(c_void_p)), POINTER(c_uint32)]
+    mf.MFEnumDeviceSources.restype = hresult
+
+    def method(obj: Any, index: int, *argtypes: Any) -> Any:
+        vtbl = ctypes.cast(obj, POINTER(POINTER(c_void_p))).contents
+        return winfunctype(hresult, c_void_p, *argtypes)(vtbl[index])
+
+    def release(obj: Any) -> None:
+        if obj:
+            method(obj, 2)(obj)
+
+    hr = ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED, on this private thread
+    initialised = hr in (0, 1)
+    started = mfplat.MFStartup(0x00020070, 0) == 0  # MF_VERSION, MFSTARTUP_FULL
+    attrs = c_void_p()
+    devices = POINTER(c_void_p)()
+    count = c_uint32(0)
+    out: list[tuple[str, str]] = []
+    try:
+        if not started:
+            log.warning("Media Foundation: MFStartup failed")
+            return None
+        if mfplat.MFCreateAttributes(byref(attrs), 1) != 0 or not attrs.value:
+            return None
+        # IMFAttributes::SetGUID(REFGUID key, REFGUID value) = vtable slot 24
+        hr = method(attrs, 24, POINTER(GUID), POINTER(GUID))(
+            attrs,
+            byref(guid(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE)),
+            byref(guid(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)),
+        )
+        if hr != 0:
+            return None
+        hr = mf.MFEnumDeviceSources(attrs, byref(devices), byref(count))
+        if hr != 0:
+            log.warning("Media Foundation: MFEnumDeviceSources failed (0x%08X)", hr & 0xFFFFFFFF)
+            return None
+        # IMFActivate inherits IMFAttributes: GetAllocatedString(REFGUID, LPWSTR*, UINT32*) = vtable slot 13
+        for i in range(count.value):
+            act = devices[i]
+            values: list[str] = []
+            for key in (MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK):
+                text, length = c_wchar_p(), c_uint32(0)
+                ok = method(act, 13, POINTER(GUID), POINTER(c_wchar_p), POINTER(c_uint32))(
+                    act, byref(guid(key)), byref(text), byref(length)
+                )
+                values.append((text.value or "") if ok == 0 else "")
+                if ok == 0 and text:
+                    ole32.CoTaskMemFree(ctypes.cast(text, c_void_p))
+            out.append((values[0], values[1]))
+            release(act)
+        return out
+    finally:
+        if devices:
+            ole32.CoTaskMemFree(ctypes.cast(devices, c_void_p))
+        release(attrs)
+        if started:
+            mfplat.MFShutdown()
+        if initialised:
+            ole32.CoUninitialize()
+
+
+def msmf_index(
+    src: int,
+    me: CameraDevice | None,
+    devices: list[CameraDevice],
+    label: str,
+    lister: Callable[[], list[tuple[str, str]] | None] | None = None,
+) -> int | None:
+    """The index OpenCV's ``CAP_MSMF`` uses for the DirectShow camera ``src``: matched by symbolic link
+    (= DirectShow DevicePath), else by name and occurrence (the 2nd "USB Camera" is the 2nd one in both lists).
+    None when Media Foundation does not list it; ``src`` itself (logged) when the list is unavailable."""
+    entries = (lister or windows_msmf_cameras)()
+    if entries is None:
+        log.warning(
+            "camera %s: Media Foundation list unavailable; trying index %d (its numbering may differ)", label, src
+        )
+        return src
+    listed = "; ".join(f"{i}: {n}" for i, (n, _l) in enumerate(entries)) or "none"
+    log.info("cameras (msmf): %s", listed)
+    if me is not None and me.device_path:
+        dp = me.device_path.lower()
+        for i, (_n, link) in enumerate(entries):
+            if link and link.lower() == dp:
+                log.info("camera %s: DirectShow index %d is Media Foundation index %d (by device path)", label, src, i)
+                return i
+    name = me.name if me is not None else label.strip("'\"")
+    same_ds = [d for d in devices if d.name.lower() == name.lower()]
+    k = next((j for j, d in enumerate(same_ds) if d is me), 0)
+    same_mf = [i for i, (n, _l) in enumerate(entries) if n.lower() == name.lower()]
+    if k < len(same_mf):
+        i = same_mf[k]
+        log.info("camera %s: DirectShow index %d is Media Foundation index %d (by name)", label, src, i)
+        return i
+    log.warning("camera %s: not in Media Foundation's camera list (%s); skipping Media Foundation", label, listed)
+    return None
 
 
 def open_camera(
@@ -715,17 +889,23 @@ def open_camera(
     retry_frame_s: float = RETRY_FRAME_S,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = time.sleep,
+    msmf_lister: Callable[[], list[tuple[str, str]] | None] | None = None,
 ) -> OpenedCamera:
     """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works by reading a frame.
 
-    * Modes (:func:`capture_modes`): MJPG at the configured size (DirectShow otherwise negotiates uncompressed
-      YUY2), then without a FOURCC; with ``low_res`` (default: when this process already holds another camera)
-      320x240 MJPG, then 320x240 at 15 fps. The mode that worked is logged and tried first on later opens of
-      the same camera in this session. Virtual cameras are opened in their own format (no FOURCC).
-    * ``virtual_fallback``: when a physical camera cannot be used and exactly one NVIDIA Broadcast virtual
-      camera is listed and not in use, that one is opened instead (Broadcast keeps its source camera open).
-    * Raises :class:`CameraOpenError` saying whether the camera did not open or opened without frames, with
-      hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
+    On Windows (an integer index), in order, every attempt logged:
+
+    1. DirectShow at that index (:func:`capture_modes`): the configured FOURCC (MJPG) at the configured size,
+       YUY2 and NV12 at that size, no FOURCC, then nothing forced at all; with ``low_res`` (default: when this
+       process already holds another camera) 320x240 and 320x240 at 15 fps;
+    2. Media Foundation at the index *its own* list gives this camera (:func:`msmf_index`): the configured
+       size, then nothing forced;
+    3. ``virtual_fallback``: exactly one free NVIDIA Broadcast virtual camera, which shows the same picture
+       when the built-in camera is its source.
+
+    The backend and mode that worked are kept and tried first on later opens in this session. Virtual cameras
+    are opened in their own format (no FOURCC). Raises :class:`CameraOpenError` saying whether the camera did
+    not open or opened without frames, with hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
     """
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
@@ -737,16 +917,46 @@ def open_camera(
     others = held_cameras() - {str(src)}
     if low_res is None:
         low_res = bool(others)
-    modes = capture_modes(width, height, fps, "" if virtual else fourcc, bool(low_res) and not virtual)
+    modes = capture_modes(
+        width, height, fps, "" if virtual else fourcc, bool(low_res) and not virtual, other_fourccs=not virtual
+    )
     kept = session_mode(key)
-    if kept is not None and kept in modes:
-        modes.remove(kept)
-        modes.insert(0, kept)
-    cap, frame, mode, state = _try_open(src, repr(name), modes, cv2, first_frame_s, retry_frame_s, clock, sleep)
-    if cap is not None and mode is not None:
-        _remember(key, name, mode, state, modes[0])
+    windows = _windows() and isinstance(src, int)
+    tried: list[str] = []
+    opened = False
+
+    def attempt(at: _Attempt) -> OpenedCamera | None:
+        nonlocal opened
+        if kept is not None and kept[0] == at.backend and kept[1] in at.modes:
+            at.modes.remove(kept[1])
+            at.modes.insert(0, kept[1])
+        cap, frame, mode, backend, t, op = _try_open([at], repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep)
+        tried.extend(t)
+        opened = opened or op
+        if cap is None or mode is None:
+            return None
+        _remember(key, name, backend, mode, (at.backend, modes[0]))
         return OpenedCamera(HeldCapture(cap, str(src)), frame, mode, src, name)
-    opened = state.startswith("no-frames")
+
+    if not windows:
+        got = attempt(_Attempt("default", None, src, list(modes)))
+        if got is not None:
+            return got
+    else:
+        assert isinstance(src, int)
+        mf_modes = [CaptureMode(int(width), int(height), int(fps or 0), ""), DEVICE_DEFAULT]
+        order = ["DirectShow", "Media Foundation"]
+        if kept is not None and kept[0] == "Media Foundation":
+            order.reverse()
+        for backend in order:
+            if backend == "DirectShow":
+                got = attempt(_Attempt("DirectShow", cv2.CAP_DSHOW, src, list(modes)))
+            else:
+                log.warning("camera %r: trying Media Foundation at its own index for this camera", name)
+                mfi = msmf_index(src, me, devs, repr(name), msmf_lister)
+                got = None if mfi is None else attempt(_Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(mf_modes)))
+            if got is not None:
+                return got
     hints: list[str] = []
     broadcast = [d for d in devs if d.virtual and is_broadcast_camera(d.name) and d.index is not None]
     if not virtual and broadcast:
@@ -755,50 +965,60 @@ def open_camera(
         hints.append(BANDWIDTH_HINT)
     for h in hints:
         log.warning("camera %r: %s", name, h)
+    detail = "; ".join(tried) if tried else "nothing to try"
     if opened:
-        msg = f"camera {name!r} opened but sent no frames (tried {state.split(': ', 1)[1]})"
+        msg = f"camera {name!r} opened but sent no frames (tried {detail})"
     else:
-        msg = f"cannot open camera {name!r} (busy, no device, or permission denied)"
+        msg = f"cannot open camera {name!r} (busy, no device, or permission denied; tried {detail})"
     if virtual_fallback and not virtual and isinstance(src, int):
         held = held_cameras()
         free = [d for d in broadcast if d.index != src and not d.in_use and str(d.index) not in held]
         alt_index = free[0].index if len(free) == 1 else None
         if alt_index is not None:
             alt = free[0]
-            why = f"{name} is busy or sends no frames ({'no frames' if opened else 'open failed'})"
+            why = f"{name} could not be opened directly ({'no frames' if opened else 'open failed'})"
             log.warning(
-                "camera %r: %s; opening the virtual camera %r instead (hands.virtual_fallback: it shows the same "
-                "picture when NVIDIA Broadcast uses %s as its source)",
+                "camera %r: %s; opening the virtual camera %r instead (hands.virtual_fallback); NVIDIA "
+                "Broadcast's camera shows the same picture",
                 name,
                 why,
                 alt.name,
-                name,
             )
-            alt_modes = capture_modes(width, height, fps, "", False)
-            acap, aframe, amode, astate = _try_open(
-                alt_index, repr(alt.name), alt_modes, cv2, first_frame_s, retry_frame_s, clock, sleep
+            alt_modes = capture_modes(width, height, fps, "", False, other_fourccs=False)
+            api = cv2.CAP_DSHOW if _windows() else None
+            acap, aframe, amode, _b, atried, _o = _try_open(
+                [_Attempt("DirectShow" if api is not None else "default", api, alt_index, alt_modes)],
+                repr(alt.name),
+                cv2,
+                first_frame_s,
+                retry_frame_s,
+                clock,
+                sleep,
             )
             if acap is not None and amode is not None:
                 log.info("camera %r: using %r (virtual fallback), mode %s", name, alt.name, amode.describe())
                 return OpenedCamera(HeldCapture(acap, str(alt_index)), aframe, amode, alt_index, alt.name, why)
-            log.warning("camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, astate)
+            log.warning(
+                "camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, "; ".join(atried)
+            )
     raise CameraOpenError(msg + (". " + "; ".join(hints) if hints else ""), opened=opened, hints=hints)
 
 
-def _remember(key: str, name: str, mode: CaptureMode, backend: str, first: CaptureMode) -> None:
+def _remember(key: str, name: str, backend: str, mode: CaptureMode, first: tuple[str, CaptureMode]) -> None:
     with _lock:
         before = _session_modes.get(key)
-        _session_modes[key] = mode
-    if mode != first or (before is not None and before != mode):
+        _session_modes[key] = (backend, mode)
+    if (backend, mode) != first or (before is not None and before != (backend, mode)):
         log.warning(
-            "camera %r: works in mode %s (%s), not %s; keeping that mode for this session",
+            "camera %r: works with %s in mode %s, not %s %s; keeping that for this session",
             name,
-            mode.describe(),
             backend,
-            first.describe(),
+            mode.describe(),
+            first[0],
+            first[1].describe(),
         )
     elif before is None:
-        log.info("camera %r: opened in mode %s (%s)", name, mode.describe(), backend)
+        log.info("camera %r: opened with %s in mode %s", name, backend, mode.describe())
 
 
 def camera_devices() -> list[CameraDevice]:
