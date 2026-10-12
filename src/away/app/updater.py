@@ -536,6 +536,9 @@ HELPER_DONE = "update helper finished"  # the helper's last log line
 HELPER_STARTED = "update helper started"
 
 
+HELPER_RELAUNCH_WAIT_S = 10  # after the installer: how long to watch for Inno's own [Run] relaunch first
+
+
 def windows_helper_batch(
     pid: int,
     argv: Sequence[str],
@@ -543,22 +546,39 @@ def windows_helper_batch(
     exit_file: PurePath,
     helper_log: PurePath,
     wait_s: int = 60,
+    relaunch_wait_s: int = HELPER_RELAUNCH_WAIT_S,
+    relaunch: bool | None = None,
 ) -> str:
     """The plain batch file that installs the update once this app has quit (CRLF line endings added by
-    :func:`write_helper_batch`). In order: log that it started (first action), wait up to ``wait_s`` for
-    ``pid`` to exit, force-close any ``ProjectAway.exe`` still running, run the installer with
-    ``start "" /wait`` and write its exit code to ``exit_file`` (``launch-failed`` if the file is missing).
+    :func:`write_helper_batch`). In order:
+
+    1. log that it started (first action) and drop the PyInstaller variables inherited from the frozen app
+       (``_PYI_*``, ``_MEIPASS2``; ``PYINSTALLER_RESET_ENVIRONMENT=1``) so the installer's relaunch and ours
+       start a clean bootloader;
+    2. wait up to ``wait_s`` for ``pid`` to exit, then force-close ``ProjectAway.exe`` and its child
+       processes (``taskkill /F /IM ProjectAway.exe /T``);
+    3. run the installer with ``start "" /wait``; when it fails (any code but 0, and 8 = restart needed),
+       wait 5 s, kill leftovers again and run it once more (v0.1.12: Inno code 5 on a locked file);
+    4. write the final exit code to ``exit_file`` (``launch-failed`` if the installer file is missing);
+    5. whatever the code (when ``relaunch``, by default when ``/AUTOUPDATE=1`` is passed), relaunch
+       ``<app dir>\\ProjectAway.exe tray`` unless it is already running: it first watches ``tasklist`` for
+       up to ``relaunch_wait_s`` seconds, so Inno's own ``[Run]`` relaunch (after a good install) is never
+       doubled.
 
     ``ping -n 2 127.0.0.1`` is the one-second sleep: ``timeout /t 1`` exits at once with "Input redirection
     is not supported" when stdin is not a console, which it never is here."""
     installer = str(argv[0])
     image = PureWindowsPath(str(app_exe)).name if app_exe else "ProjectAway.exe"
+    if relaunch is None:  # the installer is asked to relaunch the app: the helper backs that up
+        relaunch = any(str(a).upper() == "/AUTOUPDATE=1" for a in argv[1:])
+    app_dir = str(PureWindowsPath(str(app_exe)).parent) if app_exe and relaunch else ""
     line = 'start "" /wait ' + " ".join(cmd_arg(str(a)) for a in [installer, *argv[1:]])
-    texts = [str(x) for x in (*argv, exit_file, helper_log, image)]
+    texts = [str(x) for x in (*argv, exit_file, helper_log, image, app_dir)]
     lines = [
         "@echo off",
-        "rem Project Away update helper. Waits for Project Away to quit, runs the installer silently and",
-        "rem records its exit code for the next start. Written by the app before each update; safe to delete.",
+        "rem Project Away update helper. Waits for Project Away to quit, runs the installer silently,",
+        "rem records its exit code for the next start and restarts Project Away. Written by the app before",
+        "rem each update; safe to delete.",
     ]
     if not all(t.isascii() for t in texts):
         lines.append("chcp 65001 >nul 2>&1")  # this file is UTF-8 and a path is not ASCII
@@ -566,9 +586,15 @@ def windows_helper_batch(
         "setlocal",
         cmd_set("LOG", helper_log),
         f'>>"%LOG%" echo %DATE% %TIME% {HELPER_STARTED}: waiting for Project Away (pid {int(pid)}) to exit',
+        "rem the frozen app's PyInstaller variables must not leak into the installer or the relaunched app",
+        'for /f "delims==" %%V in (\'set _PYI_ 2^>nul\') do set "%%V="',
+        'set "_MEIPASS2="',
+        'set "PYINSTALLER_RESET_ENVIRONMENT=1"',
+        '>>"%LOG%" echo %DATE% %TIME% cleared inherited PyInstaller variables (_PYI_*, _MEIPASS2)',
         cmd_set("SETUP", installer),
         cmd_set("EXITFILE", exit_file),
         cmd_set("APPEXE", image),
+        cmd_set("APPDIR", app_dir),
         "set /a WAITED=0",
         ":wait_app",
         f'tasklist /FI "PID eq {int(pid)}" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul',
@@ -583,21 +609,54 @@ def windows_helper_batch(
         '>>"%LOG%" echo %DATE% %TIME% Project Away has exited (waited about %WAITED% s)',
         'tasklist /FI "IMAGENAME eq %APPEXE%" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul',
         "if errorlevel 1 goto run_setup",
-        '>>"%LOG%" echo %DATE% %TIME% closing %APPEXE% processes that are still running',
-        'taskkill /F /IM "%APPEXE%" >>"%LOG%" 2>&1',
+        '>>"%LOG%" echo %DATE% %TIME% closing %APPEXE% processes (and their children) that are still running',
+        'taskkill /F /IM "%APPEXE%" /T >>"%LOG%" 2>&1',
         "ping -n 3 127.0.0.1 >nul",
         ":run_setup",
         'if exist "%SETUP%" goto setup_found',
         '>>"%LOG%" echo %DATE% %TIME% installer file not found: ' + cmd_echo_text(installer),
         '>"%EXITFILE%" echo launch-failed',
-        f'>>"%LOG%" echo %DATE% %TIME% {HELPER_DONE}',
-        "exit /b 1",
+        "goto relaunch",
         ":setup_found",
         '>>"%LOG%" echo %DATE% %TIME% starting installer: ' + cmd_echo_text(" ".join(win_arg(str(a)) for a in argv)),
         line,
         'set "RC=%ERRORLEVEL%"',
-        '>"%EXITFILE%" echo %RC%',
         '>>"%LOG%" echo %DATE% %TIME% installer exit code %RC%',
+        'if "%RC%"=="0" goto setup_done',
+        'if "%RC%"=="8" goto setup_done',
+        '>>"%LOG%" echo %DATE% %TIME% installer failed with code %RC%; retrying once in 5 s',
+        "ping -n 6 127.0.0.1 >nul",
+        '>>"%LOG%" echo %DATE% %TIME% closing any %APPEXE% still running before the retry',
+        'taskkill /F /IM "%APPEXE%" /T >>"%LOG%" 2>&1',
+        "ping -n 3 127.0.0.1 >nul",
+        '>>"%LOG%" echo %DATE% %TIME% starting installer again (retry)',
+        line,
+        'set "RC=%ERRORLEVEL%"',
+        '>>"%LOG%" echo %DATE% %TIME% installer exit code %RC% (retry)',
+        ":setup_done",
+        '>"%EXITFILE%" echo %RC%',
+        ":relaunch",
+        'if "%APPDIR%"=="" goto finish',
+        "set /a RWAIT=0",
+        ":wait_relaunch",
+        'tasklist /FI "IMAGENAME eq %APPEXE%" /FO CSV /NH 2>nul | find /I "%APPEXE%" >nul',
+        "if not errorlevel 1 goto already_running",
+        f"if %RWAIT% GEQ {int(relaunch_wait_s)} goto do_relaunch",
+        "ping -n 2 127.0.0.1 >nul",
+        "set /a RWAIT+=1",
+        "goto wait_relaunch",
+        ":already_running",
+        '>>"%LOG%" echo %DATE% %TIME% %APPEXE% is already running (relaunched by the installer); not starting '
+        "another copy",
+        "goto finish",
+        ":do_relaunch",
+        'if exist "%APPDIR%\\%APPEXE%" goto relaunch_found',
+        '>>"%LOG%" echo %DATE% %TIME% cannot relaunch: ' + cmd_echo_text(app_dir + "\\" + image) + " not found",
+        "goto finish",
+        ":relaunch_found",
+        '>>"%LOG%" echo %DATE% %TIME% relaunching Project Away: ' + cmd_echo_text(app_dir + "\\" + image) + " tray",
+        'start "" "%APPDIR%\\%APPEXE%" tray',
+        ":finish",
         f'>>"%LOG%" echo %DATE% %TIME% {HELPER_DONE}',
         "exit /b 0",
     ]
@@ -872,16 +931,36 @@ def _data_dir() -> Path:
 
 # ------------------------------------------------------------------------------------ install state
 INNO_EXIT_CODES = {
-    "1": "the installer failed to start",
-    "2": "the installer was cancelled",
-    "3": "the installer hit a fatal error while preparing",
-    "4": "the installer hit a fatal error while installing",
-    "5": "the installer was stopped at 'Preparing to install' (the app could not be closed)",
-    "6": "the installer was killed",
-    "7": "the installer could not proceed (files in use?)",
-    "8": "Windows needs a restart to finish the update",
+    "1": "setup failed to initialize (exit code 1)",
+    "2": "setup was cancelled before the installation started (exit code 2)",
+    "3": "setup hit a fatal error while preparing to install (exit code 3)",
+    "4": "setup hit a fatal error during the installation (exit code 4); some files may not have been replaced",
+    "5": "setup was aborted during the installation (exit code 5: a file was locked or a prompt was answered "
+    "with Abort); some files may not have been replaced",
+    "6": "setup was killed (exit code 6)",
+    "7": "the 'Preparing to install' step decided setup cannot proceed (exit code 7; files in use?)",
+    "8": "Windows needs a restart to finish the update (exit code 8)",
     "launch-failed": "the installer could not be started",
 }
+
+
+def inno_exit_text(code: str) -> str:
+    """Plain words for the installer exit code the helper recorded (``"5"`` -> what Inno Setup code 5 means)."""
+    c = str(code).strip()
+    return INNO_EXIT_CODES.get(c, f"the installer exited with code {c}")
+
+
+def read_exit_code(data_dir: Path) -> str:
+    """The exit code the Windows helper wrote to ``update-exit-code.txt`` ('' when there is none)."""
+    with contextlib.suppress(OSError):
+        return (
+            (Path(data_dir) / EXIT_CODE_FILE)
+            .read_text(encoding="utf-8", errors="replace")
+            .strip()
+            .lstrip("\ufeff")
+            .strip()
+        )
+    return ""
 
 
 def write_state(data_dir: Path, current: str, latest: str, asset: str, installer: Path | None = None) -> Path:
@@ -917,7 +996,7 @@ def last_log_line(path: Path) -> str:
 class PreviousInstall:
     """How the install recorded by :func:`write_state` went, as seen on the next launch."""
 
-    status: str  # ok | failed | installing
+    status: str  # ok | failed | partial | installing
     version: str
     message: str
     installer: Path | None = None  # kept installer, for "Run update installer" (failed only, when it exists)
@@ -961,9 +1040,7 @@ def previous_install(
     logs = data_dir / "logs"
     exit_file = data_dir / EXIT_CODE_FILE
     helper_log = logs / HELPER_LOG
-    code = ""
-    with contextlib.suppress(OSError):
-        code = exit_file.read_text(encoding="utf-8", errors="replace").strip().lstrip("\ufeff").strip()
+    code = read_exit_code(data_dir)
     helper_line = last_log_line(helper_log)
     installer = Path(str(data["installer"])) if data.get("installer") else None
 
@@ -973,6 +1050,17 @@ def previous_install(
             exit_file.unlink(missing_ok=True)
 
     pv, pc = parse_version(to), parse_version(current)
+    if pv is not None and pc is not None and pc >= pv and code not in ("", "0"):
+        # v0.1.12: the version matches but the installer reported a failure (Inno Setup exit code 5 on the
+        # user's machine: aborted on a locked file after copying the main exe). Some files may be old.
+        done()
+        kept = installer if installer is not None and installer.is_file() else None
+        parts = [f"The update to v{to} may not have installed completely: {inno_exit_text(code)}."]
+        if helper_line:
+            parts.append(f"Last step: {helper_line}.")
+        parts.append(remedy_text(kept))
+        parts.append(f"Details: {logs / INSTALL_LOG}")
+        return PreviousInstall("partial", to, " ".join(parts), kept, helper_line)
     if pv is not None and pc is not None and pc >= pv:
         done()
         if clear:
@@ -992,7 +1080,7 @@ def previous_install(
 
     done()
     if code:
-        why = INNO_EXIT_CODES.get(code, f"the installer exited with code {code}")
+        why = inno_exit_text(code)
     elif helper_line:
         why = "the update helper stopped before the installer finished"
     elif str(data.get("method", "")).startswith("installer direct"):
@@ -1254,12 +1342,23 @@ class UpdateManager:
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("update: could not read the previous install state: %s", exc)
             return None
-        status = {"ok": "succeeded", "failed": "FAILED", "installing": "is STILL INSTALLING"}[out.status]
+        status = {
+            "ok": "succeeded",
+            "failed": "FAILED",
+            "partial": "FAILED (version matches, installer reported an error)",
+            "installing": "is STILL INSTALLING",
+        }[out.status]
         log.info("update: previous install of v%s %s: %s", out.version, status, out.message)
         if out.helper_line:
             log.info("update: last update-helper.log line: %s", out.helper_line)
         if out.status == "ok":
             self.notify("Project Away updated", out.message)
+        elif out.status == "partial":
+            self.failed_version = out.version
+            self.failed_installer = out.installer  # "Run update installer" for this session
+            self.last_error = out.message
+            self.notify("Project Away update incomplete", out.message)
+            self.on_change()
         elif out.status == "installing":
             self.failed_version = out.version  # never start a second installer over a running one
             self.notify("Project Away update still installing", out.message)

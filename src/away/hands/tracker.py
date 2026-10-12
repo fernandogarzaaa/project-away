@@ -164,40 +164,50 @@ def camera_frames(
     fps: int = 0,
     hint: int | None = None,
     cv2: Any = None,
+    fourcc: str = "MJPG",
+    virtual_fallback: bool = True,
 ) -> Iterator[tuple[float, Any]]:
     """Yield (monotonic time, RGB frame). Mirrored by default so motion matches the screen.
 
     ``index`` is a camera name or an index, resolved to the camera's current index when the generator starts
     (so every retry re-resolves it and a hot-plugged camera cannot redirect it). On Windows the camera is
-    opened with DirectShow, the numbering ``away cameras list`` shows (see :func:`open_video`)."""
-    from away.multicam.capture import load_cv2, open_video, resolve_device
+    opened with DirectShow, the numbering ``away cameras list`` shows, in MJPG unless ``fourcc`` says
+    otherwise (see :func:`away.multicam.capture.open_camera`: a frame is read before it counts as open, and a
+    camera NVIDIA Broadcast holds falls back to Broadcast's virtual camera when ``virtual_fallback``)."""
+    from away.multicam.capture import camera_devices, load_cv2, open_camera, resolve_device
 
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
 
-    src = resolve_device(index, hint=hint)
-    cap = open_video(src, cv2)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    if fps > 0:
-        cap.set(cv2.CAP_PROP_FPS, fps)
-    if not cap.isOpened():
-        cap.release()
-        raise RuntimeError(f"cannot open camera {index} (in use by another app, no device, or permission denied)")
+    devs = camera_devices()
+    src = resolve_device(index, devs if devs else None, hint=hint)
+    got = open_camera(
+        src,
+        width,
+        height,
+        fps,
+        fourcc,
+        cv2=cv2,
+        devices=devs,
+        label=str(index),
+        virtual_fallback=virtual_fallback,
+    )
+    cap = got.cap
     try:
+        frame = got.frame
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
             if mirror:
                 frame = cv2.flip(frame, 1)
             yield time.monotonic(), cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
     finally:
         cap.release()
 
 
 def probe_camera(index: int | str = 0, hint: int | None = None, cv2: Any = None) -> tuple[bool, str]:
-    from away.multicam.capture import load_cv2, open_video, resolve_device
+    from away.multicam.capture import CameraOpenError, camera_devices, load_cv2, open_camera, resolve_device
 
     if cv2 is None:  # pragma: no cover - real OpenCV
         try:
@@ -205,15 +215,14 @@ def probe_camera(index: int | str = 0, hint: int | None = None, cv2: Any = None)
         except ImportError:
             return False, "opencv not installed (pip install 'project-away[hands]')"
 
+    devs = camera_devices()
     try:
-        src = resolve_device(index, hint=hint)
+        src = resolve_device(index, devs if devs else None, hint=hint)
     except ValueError as exc:
         return False, str(exc)
-    cap = open_video(src, cv2)
     try:
-        if not cap.isOpened():
-            return False, f"camera {index} could not be opened (no device or permission denied)"
-        ok, _ = cap.read()
-        return (True, f"camera {index} OK") if ok else (False, f"camera {index} opened but returned no frame")
-    finally:
-        cap.release()
+        got = open_camera(src, cv2=cv2, devices=devs, label=str(index), first_frame_s=3.0, retry_frame_s=2.0)
+    except CameraOpenError as exc:
+        return False, str(exc)
+    got.cap.release()
+    return True, f"camera {index} OK"

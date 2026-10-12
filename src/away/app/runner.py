@@ -300,7 +300,11 @@ class Pipeline:
 
     # face --------------------------------------------------------------------
     def on_faces(
-        self, t: float, boxes: list[tuple[float, float, float]], blendshapes: list[dict[str, float]]
+        self,
+        t: float,
+        boxes: list[tuple[float, float, float]],
+        blendshapes: list[dict[str, float]],
+        frontal: list[bool | None] | None = None,
     ) -> int | None:
         ids = self.faces.update(boxes)
         if self._enroll_pending and ids:
@@ -317,7 +321,15 @@ class Pipeline:
         user_score = (
             scores.get(self.gate.primary) if self.gate.primary in scores else max(scores.values(), default=None)
         )
-        self.gate.observe(t, active, len(ids), user_score)
+        user = self.gate.primary if self.gate.primary in ids else None
+        user_frontal: bool | None = None
+        if frontal is not None and ids:
+            k = ids.index(user) if user is not None else 0
+            if self.gate.primary is None and scores:  # not enrolled: the face the score came from
+                k = ids.index(max(scores, key=lambda f: scores[f]))
+            user_frontal = frontal[k] if k < len(frontal) else None
+        present = (user is not None) if self.gate.primary is not None else bool(ids)
+        self.gate.observe(t, active, len(ids), user_score, user_frontal, present)
         if self.cfg.face.brow_raise_toggle and self.gate.primary in ids:
             bs = blendshapes[ids.index(self.gate.primary)]  # type: ignore[arg-type]
             if self.brow.update(t, bs):
@@ -403,7 +415,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._listeners: list[Any] = []
         self.asr_model = ""
         self._notices: set[str] = set()
-        self.gate_hint = GateHint(5)
+        self.gate_hint = GateHint()
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
         from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
@@ -423,6 +435,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._camera_episode = 0  # bumps when the cameras recover, so a new failure is notified again
         self.bus.subscribe("cameras.degraded", self._on_cameras_degraded)
         self.bus.subscribe("cameras.restored", self._on_cameras_restored)
+        self.bus.subscribe("camera.error", self._on_camera_error)
         self._save_migrations()
         self.bus.publish(
             "monitors.detected", {"layout": self.monitor_layout.summary(), "note": self.monitor_layout.note}
@@ -472,6 +485,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         # once per problem: a retry that fails the same way stays quiet until the cameras come back
         self.notice(title, msg, key=f"cameras-degraded:{self._camera_episode}:{mode}:{failed}")
         self._camera_degraded_shown = True
+
+    def _on_camera_error(self, ev: Any) -> None:
+        """Single-camera mode: a camera that will not open is retried quietly, but the NVIDIA Broadcast hint
+        (Broadcast holds the physical camera as its source) is worth a notification, once."""
+        msg = str(ev.data.get("error") or "")
+        if "NVIDIA Broadcast is probably using" in msg:
+            self.notice("Project Away: camera busy", msg, key=f"camera-broadcast:{self._camera_episode}")
 
     def _on_cameras_restored(self, ev: Any) -> None:
         msg = str(ev.data.get("message") or "all cameras are working again")
@@ -881,7 +901,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.pipeline.on_hand(t, fr.landmarks, fr.handedness)
             if faces is not None and n % max(1, prof.face_every) == 0:
                 obs = faces.process(rgb, t)
-                self.pipeline.on_faces(t, [o.box for o in obs], [o.blendshapes for o in obs])
+                self.pipeline.on_faces(
+                    t, [o.box for o in obs], [o.blendshapes for o in obs], [getattr(o, "frontal", None) for o in obs]
+                )
 
         def run_single(idx: Any, until: Any = None) -> None:
             """Track on one camera (retried while it will not open) until ``until()`` or stop. ``idx`` is a camera
@@ -890,7 +912,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             def open_frames() -> Any:
                 return camera_frames(
-                    idx, self.cfg.hands.mirror, prof.camera_width, prof.camera_height, prof.camera_fps, hint=hint
+                    idx,
+                    self.cfg.hands.mirror,
+                    prof.camera_width,
+                    prof.camera_height,
+                    prof.camera_fps,
+                    hint=hint,
+                    fourcc=self._fourcc_for(idx),
+                    virtual_fallback=bool(self.cfg.hands.virtual_fallback),
                 )
 
             CameraLoop(
@@ -918,6 +947,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     with contextlib.suppress(Exception):
                         close()
 
+    def _fourcc_for(self, device: Any) -> str:
+        """The pixel format to request for a camera: its own ``fourcc`` in a multi-camera set (also when it
+        tracks alone after the others failed), else ``hands.camera_fourcc``."""
+        h = self.cfg.hands
+        spec = next((c for c in h.cameras if c.device == device), None)
+        return str(spec.fourcc if spec is not None else h.camera_fourcc)
+
     def _hint_for(self, device: Any) -> int | None:
         """The index saved alongside a camera name (used only when no camera list is available)."""
         h = self.cfg.hands
@@ -939,9 +975,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
     # ------------------------------------------------------------------------------ multi-camera
     def _start_cameras(self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any) -> list[Any]:
         """Start one capture thread per camera (overridden in tests with simulated cameras)."""
-        from away.multicam.capture import CameraThread
+        import functools
 
-        threads = [CameraThread(i, c, pairer, session, open_lock=open_lock) for i, c in enumerate(specs)]
+        from away.multicam.capture import CameraThread, open_capture
+
+        opener = functools.partial(open_capture, virtual_fallback=bool(self.cfg.hands.virtual_fallback))
+        threads = [CameraThread(i, c, pairer, session, open_lock=open_lock, opener=opener) for i, c in enumerate(specs)]
         for th in threads:
             th.start()
         return threads
@@ -1152,7 +1191,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                             if faces is not None and prim_frame is not None:
                                 t_p, rgb_p = prim_frame
                                 obs = faces.process(rgb_p, t_p)
-                                self.pipeline.on_faces(t_p, [o.box for o in obs], [o.blendshapes for o in obs])
+                                self.pipeline.on_faces(
+                                    t_p,
+                                    [o.box for o in obs],
+                                    [o.blendshapes for o in obs],
+                                    [getattr(o, "frontal", None) for o in obs],
+                                )
                         except Exception as exc:
                             if self.stop_event.is_set() or is_shutdown_error(exc):
                                 self.stop_event.set()

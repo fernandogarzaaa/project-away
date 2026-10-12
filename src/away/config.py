@@ -97,6 +97,9 @@ class CameraSpec:
     hfov_deg: float = 70.0  # horizontal field of view, used to approximate intrinsics before calibration
     mirror: bool = True
     index_hint: int | None = None  # index the named camera had when it was chosen (used only with no camera list)
+    # pixel format requested before the size (v0.1.12): MJPG keeps two USB webcams within the USB bandwidth;
+    # "" = do not set one (the driver's default, usually uncompressed YUY2). Virtual cameras ignore it.
+    fourcc: str = "MJPG"
 
 
 @dataclass
@@ -120,6 +123,10 @@ class HandsConfig:
     # single-camera mode (used when `cameras` is empty): a camera name (stable; what Settings saves) or an index
     camera_index: int | str = 0
     camera_hint: int | None = None  # index the named camera had when it was chosen (used only with no camera list)
+    camera_fourcc: str = "MJPG"  # single-camera mode pixel format (see CameraSpec.fourcc); "" = do not set
+    # a physical camera that is busy (NVIDIA Broadcast keeps its source camera open) is replaced by the one
+    # NVIDIA Broadcast virtual camera when exactly one is listed and free; logged when it happens
+    virtual_fallback: bool = True
     max_hands: int = 2  # hands MediaPipe looks for; 2 lets `prefer` ignore the other hand (1 = lighter on CPU)
     prefer: str = "any"  # which hand drives the cursor: right | left | any (any = keep the hand being tracked)
     mirror: bool = True
@@ -409,6 +416,9 @@ def validate(cfg: AppConfig) -> None:
     validate_camera_device("hands.camera_index", cfg.hands.camera_index)
     validate_hint("hands.camera_hint", cfg.hands.camera_hint)
     validate_cameras(cfg.hands.cameras)
+    cfg.hands.camera_fourcc = validate_fourcc("hands.camera_fourcc", cfg.hands.camera_fourcc)
+    if not isinstance(cfg.hands.virtual_fallback, bool):
+        raise ValueError(f"hands.virtual_fallback must be true or false, got {cfg.hands.virtual_fallback!r}")
     if cfg.hands.multicam.fusion not in ("weighted", "best_view"):
         raise ValueError(f"hands.multicam.fusion must be weighted|best_view, got {cfg.hands.multicam.fusion!r}")
     for name, combo in (("app.toggle_hotkey", cfg.app.toggle_hotkey), ("voice.edit_hotkey", cfg.voice.edit_hotkey)):
@@ -456,9 +466,22 @@ def validate_hint(path: str, hint: Any) -> None:
         raise ValueError(f"{path} must be a camera index (0, 1, ...) or empty, got {hint!r}")
 
 
+def validate_fourcc(path: str, value: Any) -> str:
+    """A FOURCC is ``""`` (do not set) or 4 printable ASCII characters (``MJPG``, ``YUY2``); returned upper-cased."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{path} must be a 4-character pixel format such as MJPG, or empty, got {value!r}")
+    v = value.strip()
+    if v and (len(v) != 4 or not v.isascii() or not v.isprintable()):
+        raise ValueError(f"{path} must be a 4-character pixel format such as MJPG, or empty, got {value!r}")
+    return v.upper()
+
+
 def validate_cameras(cams: list[CameraSpec]) -> None:
     for i, cam in enumerate(cams):
         p = f"hands.cameras[{i}]"
+        cam.fourcc = validate_fourcc(f"{p}.fourcc", cam.fourcc)
         if cam.role not in CAMERA_ROLES:
             raise ValueError(f"{p}.role must be primary|secondary, got {cam.role!r}")
         validate_camera_device(f"{p}.device", cam.device)

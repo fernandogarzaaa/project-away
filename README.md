@@ -342,9 +342,12 @@ Always-on listens continuously, cuts speech into utterances with an energy VAD (
 - **Wake word off:** text is typed only when the face gate agrees that you are at the screen and your
   mouth is moving (active-speaker detection), so TV or background talk is ignored. A visible face whose
   mouth moves counts even when the head is turned (off-axis webcam), and a short gap in face tracking
-  while the CPU is busy is tolerated. Each `voice.utterance` log line carries the gate's evidence (face
-  frames, speaking fraction, mouth score). After 5 rejections in a row the tray suggests turning the gate
-  off (tray menu **Face gate**, or Settings). With the face gate off (`face.gate_dictation: false`), speech
+  while the CPU is busy is tolerated. Since v0.1.12 "mouth moving" is judged against your own resting
+  mouth level (a webcam at arm's length and off-angle sees small movements), and when your enrolled face
+  is at the screen and facing the camera in at least 60% of an utterance's frames it is typed even with
+  weak mouth motion, unless another face is clearly the speaker. Each `voice.utterance` log line carries
+  the gate's evidence (face frames, frontal fraction, speaking fraction, mouth score and threshold). After
+  10 rejections in a row the tray suggests turning the gate off (tray menu **Face gate**, or Settings). With the face gate off (`face.gate_dictation: false`), speech
   is typed without a wake word. With no camera, `voice.ambient_fallback: commands_only` (default) runs
   bound phrases but types nothing.
 - If speech recognition cannot keep up (e.g. a big model on the CPU), a short backlog is kept, the oldest
@@ -448,6 +451,18 @@ single or multi, is opened with DirectShow (Media Foundation only as a logged fa
 `(virtual)` and never picked automatically: an old integer index that now lands on one (NVIDIA Broadcast is
 often DirectShow camera 0) is moved to the first real camera, with a line in `away.log`. Choose one by name
 to use it anyway. The camera list (source, index, name, virtual) is logged at start-up and when it changes.
+
+**Pixel format and busy cameras (v0.1.12).** Every camera is opened in MJPG (`hands.camera_fourcc` for a
+single camera, `fourcc:` per entry in `hands.cameras`; `""` = let the driver choose, which is usually
+uncompressed YUY2) and counts as open only once a frame arrives; a camera that sends nothing in MJPG is
+retried in its default format. A second camera that will not stream while another one is open is retried
+at 320x240, then 320x240 at 15 fps (two USB 2.0 webcams can exceed the bus); the mode that worked is logged
+and reused for the rest of the session. Errors now say whether a camera *did not open* or *opened but sent
+no frames*. **NVIDIA Broadcast** keeps its source camera open even with its window closed, so desktop apps
+cannot open that camera (the Windows Camera app still can). When a physical camera is busy and
+`Camera (NVIDIA Broadcast)` is listed, the log and a notification say so; with `hands.virtual_fallback:
+true` (default) Project Away then opens the one free Broadcast camera instead (same picture) and logs it.
+Choosing `Camera (NVIDIA Broadcast)` by name works for the single camera and in a multi-camera set.
 
 How it works:
 
@@ -563,11 +578,18 @@ Away first). Updates after that use the new helper.
 The v0.1.10 → v0.1.11 update is the first one installed by the batch helper on a real PC. If it does not
 take, use **Run update installer** in the tray, or run `ProjectAway-0.1.11-windows-x64-setup.exe` by hand.
 
+**v0.1.12 helper:** the installer's exit code decides the outcome, not just the version number: a non-zero
+code (e.g. Inno Setup 5, aborted on a locked file) is reported as an incomplete update with the **Run update
+installer** item, even when the version already matches. The helper force-closes `ProjectAway.exe` and its
+child processes, retries a failed installer once after 5 s, clears the PyInstaller variables it inherited,
+and restarts Project Away itself after the installer finishes unless the installer's own relaunch already
+did (it watches for the app for up to 10 s first, so there is never a second copy).
+
 ## Verified vs untested
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1055 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow COM test runs only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1101 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow COM test runs only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -580,7 +602,9 @@ take, use **Run update installer** in the tray, or run `ProjectAway-0.1.11-windo
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
 | Windows camera enumeration and naming (v0.1.11) | DirectShow list parsing/order, virtual-camera flags, name/DevicePath/`#k` resolution across hot-plug, legacy-index remap (NVIDIA Broadcast at 0, built-in at 1, USB at 2), DirectShow-first opening with logged MSMF fallback, Settings role/gating and retry labels unit-tested with a fake enumerator and fake OpenCV; the ctypes COM enumeration runs on the Windows CI runner against the DirectShow filter category (no camera there); **untested on a real PC with cameras (the reported Acer Predator with NVIDIA Broadcast)** |
-| Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |
+| Camera opening modes and NVIDIA Broadcast fallback (v0.1.12) | MJPG-before-size, frame-verified opens, no-FOURCC retry, 320x240 / 15 fps fallback for a second camera with the mode kept per session, open-failed vs no-frames errors, bandwidth and Broadcast hints, the automatic Broadcast fallback and explicit Broadcast choice unit-tested with a fake OpenCV; **untested on the real Acer Predator (JoyCam + HD User Facing + NVIDIA Broadcast)** |
+| Face gate leniency (v0.1.12) | Adaptive mouth threshold and the frontal-presence rule replayed against the gate numbers in the user's v0.1.11 log, plus no-face / other-speaker negatives; head-pose (frontal) estimate from the face mesh unit-tested on synthetic points; **not measured on a real webcam** |
+| Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; v0.1.12 retry/relaunch/exit-code logic checked by text tests and a small interpreter of the relaunch block; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |
 | Steady click, sigmoid curve, dwell, wink, auto-pause guard, cursor ring states, numbers to digits, edit-selection rules | Logic unit-tested with synthetic input |
 | Settings window layout (v0.1.10) | DPI awareness before Tk, `tk scaling` from the real DPI, 10 pt fonts, button padding, scrollable tabs with a pinned bottom bar and a separate wrapped status row; size/scale/wheel/status helpers unit-tested, window rendered and wheel-scrolled under Xvfb at 96 and 144 dpi on a 1366x768 screen; **untested on a real Windows desktop at 125 %/150 % and across mixed-DPI monitors** (Tk 8.6 does not rescale when the window moves to a monitor with a different DPI) |
 | Big cursor (v0.1.9) | Controller, crash marker, debounce and pause wiring unit-tested with a fake backend; **the Windows registry + `SystemParametersInfo` resize is untested on a real Windows desktop** |

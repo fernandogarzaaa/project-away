@@ -582,7 +582,7 @@ class GateHint:
     """Counts consecutive utterances the face gate rejected; after ``threshold`` of them, fires once per
     session (the tray then suggests turning the face gate off)."""
 
-    def __init__(self, threshold: int = 5) -> None:
+    def __init__(self, threshold: int = 10) -> None:  # v0.1.12: 10 (was 5), now that the gate is looser
         self.threshold = threshold
         self.count = 0
         self.fired = False

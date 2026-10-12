@@ -568,7 +568,9 @@ class SettingsModel:
         h = self.cfg.hands
         new = [copy.copy(c) for c in h.cameras]
         if not new:  # leaving single-camera mode: the current camera becomes the primary
-            new.append(CameraSpec(h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror))
+            new.append(
+                CameraSpec(h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror, fourcc=h.camera_fourcc)
+            )
             if role == "primary":
                 new[0].role = "secondary"
         new.append(CameraSpec(device, role, index_hint=self._hint(device), mirror=h.mirror))
@@ -581,6 +583,7 @@ class SettingsModel:
         if len(new) == 1:  # back to single-camera mode
             self.cfg.hands.camera_index = new[0].device
             self.cfg.hands.camera_hint = new[0].index_hint
+            self.cfg.hands.camera_fourcc = new[0].fourcc
             new = []
         return self._cams_try(new)
 
@@ -964,21 +967,35 @@ def min_window_size(screen_w: int, screen_h: int, scale: float = 1.0) -> tuple[i
     return min(int(MIN_SIZE[0] * scale), w), min(int(MIN_SIZE[1] * scale), h)
 
 
-def wheel_steps(delta: int = 0, num: int = 0, platform: str | None = None) -> int:
+def _wheel_int(value: Any) -> int:
+    """A Tk event field as an int; Tk fills fields an event does not carry with ``'??'`` (v0.1.12)."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def wheel_steps(delta: Any = 0, num: Any = 0, platform: str | None = None) -> int:
     """Scroll units for a mouse-wheel event (negative = up). Windows: ``delta`` in multiples of 120 (a
     high-resolution wheel sends smaller values: still one step); macOS: ``delta`` is already in steps;
-    X11: Button-4 = up, Button-5 = down."""
+    X11: Button-4 = up, Button-5 = down. A field Tk could not fill (``'??'``) counts as 0, never an error."""
     plat = platform or sys.platform
-    if num == 4:
+    n = _wheel_int(num)
+    if n == 4:
         return -1
-    if num == 5:
+    if n == 5:
         return 1
-    if not delta:
+    d = _wheel_int(delta)
+    if not d:
         return 0
     if plat == "darwin":
-        return -int(delta)
-    steps = int(-delta / 120)
-    return steps if steps else (-1 if delta > 0 else 1)
+        return -d
+    steps = int(-d / 120)
+    return steps if steps else (-1 if d > 0 else 1)
 
 
 def short_path(path: Path | str, max_len: int = 48) -> str:
@@ -1160,7 +1177,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                     if root.winfo_containing(e.x_root, e.y_root).winfo_class() in ("Treeview", "Listbox", "Text"):
                         return None
             canvas = canvas_under(e)
-            steps = wheel_steps(getattr(e, "delta", 0) or 0, int(getattr(e, "num", 0) or 0))
+            steps = wheel_steps(getattr(e, "delta", 0), getattr(e, "num", 0))
             if canvas is not None and steps and canvas.yview() != (0.0, 1.0):
                 canvas.yview_scroll(steps, "units")
             return None

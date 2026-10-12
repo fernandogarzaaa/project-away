@@ -530,7 +530,7 @@ def test_previous_outcome_reports_success_and_failure_once(tmp_path):
     U.write_state(tmp_path, "0.1.7", "0.1.8", SETUP)
     (tmp_path / U.EXIT_CODE_FILE).write_text("\ufeff5\r\n", encoding="utf-8")
     ok, ver, msg = U.previous_outcome(tmp_path, "0.1.7")  # type: ignore[misc]
-    assert not ok and ver == "0.1.8" and "still v0.1.7" in msg and "could not be closed" in msg
+    assert not ok and ver == "0.1.8" and "still v0.1.7" in msg and "exit code 5" in msg
     assert U.INSTALL_LOG in msg and not (tmp_path / U.EXIT_CODE_FILE).exists()
 
     U.write_state(tmp_path, "0.1.7", "0.1.8", SETUP)

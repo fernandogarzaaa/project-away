@@ -611,7 +611,11 @@ def cmd_cameras_edit(args: argparse.Namespace) -> int:
             h.camera_index, h.camera_hint = dev, hint
         else:
             if not cams:  # going multi-camera: the current single camera becomes the primary
-                cams.append(CameraSpec(h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror))
+                cams.append(
+                    CameraSpec(
+                        h.camera_index, "primary", index_hint=h.camera_hint, mirror=h.mirror, fourcc=h.camera_fourcc
+                    )
+                )
             cams.append(CameraSpec(dev, args.role or "secondary", index_hint=hint, mirror=h.mirror))
             if args.role == "primary":
                 for c in cams[:-1]:

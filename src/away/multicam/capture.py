@@ -475,6 +475,343 @@ def open_video(src: int | str, cv2: Any = None) -> Any:
     return cap
 
 
+# ------------------------------------------------------------------------------ opening with a capture mode
+# v0.1.12 (Acer Predator: JoyCam + HD User Facing + NVIDIA Broadcast): no pixel format was ever requested, so
+# DirectShow negotiated uncompressed YUY2 (two USB 2.0 webcams at 640x480 YUY2 can exceed the bus), and a
+# camera NVIDIA Broadcast holds as its source cannot be opened by desktop apps at all.
+DEFAULT_FOURCC = "MJPG"
+LOW_RES = (320, 240)
+LOW_RES_FPS = 15
+FIRST_FRAME_S = 5.0  # the first capture mode may take a while to deliver (Windows webcams are slow to start)
+RETRY_FRAME_S = 2.0  # every further mode (worst case 5 + 3 x 2 s fits the 12 s background re-probe)
+BANDWIDTH_HINT = "two USB cameras may exceed the USB bandwidth; try another USB port, or the other camera alone"
+_BROADCAST_RE = re.compile(r"nvidia broadcast", re.IGNORECASE)
+
+
+def is_broadcast_camera(name: str) -> bool:
+    """NVIDIA Broadcast's virtual camera (``Camera (NVIDIA Broadcast)``)."""
+    return bool(_BROADCAST_RE.search(name or ""))
+
+
+def broadcast_hint(name: str) -> str:
+    return (
+        f"NVIDIA Broadcast is probably using {name}. Pick '{_broadcast_name()}' in Settings > Cameras (same "
+        "picture), or change Broadcast's camera source."
+    )
+
+
+def _broadcast_name() -> str:
+    return "Camera (NVIDIA Broadcast)"
+
+
+@dataclass(frozen=True)
+class CaptureMode:
+    width: int
+    height: int
+    fps: int  # 0 = do not set
+    fourcc: str  # "" = do not set (the driver's default format)
+
+    def describe(self) -> str:
+        return (
+            f"{self.width}x{self.height}"
+            + (f"@{self.fps}" if self.fps else "")
+            + (f" {self.fourcc}" if self.fourcc else " driver format")
+        )
+
+
+def fourcc_code(text: str) -> int:
+    """``cv2.VideoWriter_fourcc(*text)`` without needing it: four characters packed little-endian."""
+    t = (str(text) + "    ")[:4]
+    return ord(t[0]) | (ord(t[1]) << 8) | (ord(t[2]) << 16) | (ord(t[3]) << 24)
+
+
+def normalize_fourcc(value: Any) -> str:
+    """A configured FOURCC: ``""`` (do not set) or four printable ASCII characters, upper-cased."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if s == "":
+        return ""
+    if len(s) != 4 or not s.isascii() or not s.isprintable():
+        raise ValueError(f"a FOURCC is 4 characters such as MJPG or YUY2 (or empty), got {value!r}")
+    return s.upper()
+
+
+def capture_modes(width: int, height: int, fps: int, fourcc: str, low_res: bool) -> list[CaptureMode]:
+    """The modes to try, in order: as configured; the same without a FOURCC (a camera that rejects MJPG);
+    with ``low_res`` (a second camera on a busy USB bus) 320x240, then 320x240 at 15 fps."""
+    fcc = normalize_fourcc(fourcc)
+    modes = [CaptureMode(int(width), int(height), int(fps or 0), fcc)]
+    if fcc:
+        modes.append(CaptureMode(int(width), int(height), int(fps or 0), ""))
+    if low_res:
+        lw, lh = LOW_RES
+        modes.append(CaptureMode(lw, lh, int(fps or 0), fcc))
+        modes.append(CaptureMode(lw, lh, LOW_RES_FPS, fcc))
+    out: list[CaptureMode] = []
+    for m in modes:
+        if m not in out:
+            out.append(m)
+    return out
+
+
+_lock = threading.Lock()
+_session_modes: dict[str, CaptureMode] = {}  # camera -> the mode that worked (kept for later retries)
+_open_now: dict[str, int] = {}  # cameras this process has open right now (index or path -> count)
+
+
+def session_mode(key: str) -> CaptureMode | None:
+    with _lock:
+        return _session_modes.get(key)
+
+
+def reset_session_modes() -> None:
+    with _lock:
+        _session_modes.clear()
+
+
+def held_cameras() -> set[str]:
+    """Keys (``"0"``, ``"/dev/video0"``) of the cameras this process holds open."""
+    with _lock:
+        return {k for k, n in _open_now.items() if n > 0}
+
+
+def _hold(key: str, delta: int) -> None:
+    with _lock:
+        _open_now[key] = max(0, _open_now.get(key, 0) + delta)
+        if not _open_now[key]:
+            del _open_now[key]
+
+
+class HeldCapture:
+    """A ``cv2.VideoCapture`` that counts as held by this process until :meth:`release` (so a second camera
+    knows another one is open, and the NVIDIA Broadcast fallback never takes a camera already in use)."""
+
+    def __init__(self, cap: Any, key: str) -> None:
+        self._cap = cap
+        self._key = key
+        self._released = False
+        _hold(key, 1)
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            _hold(self._key, -1)
+        self._cap.release()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cap, name)
+
+
+class CameraOpenError(RuntimeError):
+    """A camera could not be used. ``opened``: the device opened but delivered no frame in any mode."""
+
+    def __init__(self, message: str, opened: bool = False, hints: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.opened = opened
+        self.hints = list(hints or [])
+
+
+@dataclass
+class OpenedCamera:
+    cap: Any  # a HeldCapture
+    frame: Any  # the first frame (already read to prove the mode works)
+    mode: CaptureMode
+    src: int | str  # what was opened (differs from the request after the NVIDIA Broadcast fallback)
+    name: str
+    fallback: str = ""  # why another camera was opened instead, '' when it was not
+
+
+def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
+    """FOURCC first (DirectShow picks the media type when the size is set), then size and frame rate."""
+    if mode.fourcc:
+        with contextlib.suppress(Exception):
+            cap.set(getattr(cv2, "CAP_PROP_FOURCC", 6), fourcc_code(mode.fourcc))
+    with contextlib.suppress(Exception):
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
+    if mode.fps:
+        with contextlib.suppress(Exception):
+            cap.set(cv2.CAP_PROP_FPS, mode.fps)
+    with contextlib.suppress(Exception):
+        cap.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)  # low latency; not every backend honours it
+
+
+def read_first(
+    cap: Any, timeout_s: float, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], Any] = time.sleep
+) -> Any:
+    """The first frame ``cap`` delivers within ``timeout_s``, or None."""
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            ok, frame = cap.read()
+        except Exception:
+            ok, frame = False, None
+        if ok and frame is not None:
+            return frame
+        if clock() >= deadline:
+            return None
+        sleep(0.05)
+
+
+def _backends(src: int | str, cv2: Any) -> list[tuple[str, Any]]:
+    if _windows() and isinstance(src, int):
+        return [("DirectShow", cv2.CAP_DSHOW), ("Media Foundation", cv2.CAP_MSMF)]
+    return [("default", None)]
+
+
+def _try_open(
+    src: int | str,
+    label: str,
+    modes: list[CaptureMode],
+    cv2: Any,
+    first_frame_s: float,
+    retry_frame_s: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Any],
+) -> tuple[Any, Any, CaptureMode, str] | tuple[None, None, None, str]:
+    """``(cap, frame, mode, backend)`` for the first mode that delivers a frame, else ``(None, None, None,
+    state)`` with state ``open-failed`` or ``no-frames``. Media Foundation is tried only when DirectShow cannot
+    open the device at all (a camera that opens but sends nothing is a format/bandwidth problem, not a
+    backend one)."""
+    opened_any = False
+    tried: list[str] = []
+    for bi, (backend, api) in enumerate(_backends(src, cv2)):
+        if bi > 0:
+            if opened_any:
+                break
+            log.warning("camera %s: DirectShow could not open it; trying %s (its numbering may differ)", label, backend)
+        for k, mode in enumerate(modes):
+            cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+            if not cap.isOpened():
+                with contextlib.suppress(Exception):
+                    cap.release()
+                break  # the device itself did not open: another mode will not help; next backend
+            opened_any = True
+            apply_mode(cap, mode, cv2)
+            frame = read_first(cap, first_frame_s if k == 0 else retry_frame_s, clock, sleep)
+            if frame is not None:
+                return cap, frame, mode, backend
+            tried.append(mode.describe())
+            log.warning("camera %s: opened with %s but no frame in mode %s", label, backend, mode.describe())
+            with contextlib.suppress(Exception):
+                cap.release()
+    return None, None, None, ("no-frames: " + ", ".join(tried)) if opened_any else "open-failed"
+
+
+def open_camera(
+    src: int | str,
+    width: int = 640,
+    height: int = 480,
+    fps: int = 0,
+    fourcc: str = DEFAULT_FOURCC,
+    *,
+    cv2: Any = None,
+    devices: list[CameraDevice] | None = None,
+    label: str | None = None,
+    low_res: bool | None = None,
+    virtual_fallback: bool = False,
+    first_frame_s: float = FIRST_FRAME_S,
+    retry_frame_s: float = RETRY_FRAME_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> OpenedCamera:
+    """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works by reading a frame.
+
+    * Modes (:func:`capture_modes`): MJPG at the configured size (DirectShow otherwise negotiates uncompressed
+      YUY2), then without a FOURCC; with ``low_res`` (default: when this process already holds another camera)
+      320x240 MJPG, then 320x240 at 15 fps. The mode that worked is logged and tried first on later opens of
+      the same camera in this session. Virtual cameras are opened in their own format (no FOURCC).
+    * ``virtual_fallback``: when a physical camera cannot be used and exactly one NVIDIA Broadcast virtual
+      camera is listed and not in use, that one is opened instead (Broadcast keeps its source camera open).
+    * Raises :class:`CameraOpenError` saying whether the camera did not open or opened without frames, with
+      hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
+    """
+    if cv2 is None:  # pragma: no cover - real OpenCV
+        cv2 = load_cv2()
+    devs = list(devices or [])
+    me = next((d for d in devs if (d.index if d.index is not None else d.path) == src), None)
+    name = me.name if me is not None else str(label if label is not None else src)
+    key = me.name if me is not None else str(src)
+    virtual = bool(me.virtual) if me is not None else is_virtual_camera(str(label or ""))
+    others = held_cameras() - {str(src)}
+    if low_res is None:
+        low_res = bool(others)
+    modes = capture_modes(width, height, fps, "" if virtual else fourcc, bool(low_res) and not virtual)
+    kept = session_mode(key)
+    if kept is not None and kept in modes:
+        modes.remove(kept)
+        modes.insert(0, kept)
+    cap, frame, mode, state = _try_open(src, repr(name), modes, cv2, first_frame_s, retry_frame_s, clock, sleep)
+    if cap is not None and mode is not None:
+        _remember(key, name, mode, state, modes[0])
+        return OpenedCamera(HeldCapture(cap, str(src)), frame, mode, src, name)
+    opened = state.startswith("no-frames")
+    hints: list[str] = []
+    broadcast = [d for d in devs if d.virtual and is_broadcast_camera(d.name) and d.index is not None]
+    if not virtual and broadcast:
+        hints.append(broadcast_hint(name))
+    if others or low_res:
+        hints.append(BANDWIDTH_HINT)
+    for h in hints:
+        log.warning("camera %r: %s", name, h)
+    if opened:
+        msg = f"camera {name!r} opened but sent no frames (tried {state.split(': ', 1)[1]})"
+    else:
+        msg = f"cannot open camera {name!r} (busy, no device, or permission denied)"
+    if virtual_fallback and not virtual and isinstance(src, int):
+        held = held_cameras()
+        free = [d for d in broadcast if d.index != src and not d.in_use and str(d.index) not in held]
+        alt_index = free[0].index if len(free) == 1 else None
+        if alt_index is not None:
+            alt = free[0]
+            why = f"{name} is busy or sends no frames ({'no frames' if opened else 'open failed'})"
+            log.warning(
+                "camera %r: %s; opening the virtual camera %r instead (hands.virtual_fallback: it shows the same "
+                "picture when NVIDIA Broadcast uses %s as its source)",
+                name,
+                why,
+                alt.name,
+                name,
+            )
+            alt_modes = capture_modes(width, height, fps, "", False)
+            acap, aframe, amode, astate = _try_open(
+                alt_index, repr(alt.name), alt_modes, cv2, first_frame_s, retry_frame_s, clock, sleep
+            )
+            if acap is not None and amode is not None:
+                log.info("camera %r: using %r (virtual fallback), mode %s", name, alt.name, amode.describe())
+                return OpenedCamera(HeldCapture(acap, str(alt_index)), aframe, amode, alt_index, alt.name, why)
+            log.warning("camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, astate)
+    raise CameraOpenError(msg + (". " + "; ".join(hints) if hints else ""), opened=opened, hints=hints)
+
+
+def _remember(key: str, name: str, mode: CaptureMode, backend: str, first: CaptureMode) -> None:
+    with _lock:
+        before = _session_modes.get(key)
+        _session_modes[key] = mode
+    if mode != first or (before is not None and before != mode):
+        log.warning(
+            "camera %r: works in mode %s (%s), not %s; keeping that mode for this session",
+            name,
+            mode.describe(),
+            backend,
+            first.describe(),
+        )
+    elif before is None:
+        log.info("camera %r: opened in mode %s (%s)", name, mode.describe(), backend)
+
+
+def camera_devices() -> list[CameraDevice]:
+    """The listed cameras for :func:`open_camera` (Windows only; elsewhere an empty list). Never raises."""
+    if not _windows():
+        return []
+    try:
+        return list_cameras()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("camera listing failed: %s", exc)
+        return []
+
+
 def _probe(c: CameraDevice) -> CameraDevice:  # pragma: no cover - opens a device
     os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")  # missing indices are expected while probing
     os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "0")
@@ -723,18 +1060,50 @@ class FramePairer:
             return t_ref, out
 
 
-def open_capture(spec: CameraSpec) -> Any:  # pragma: no cover - opens a device
-    import cv2
+def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = None) -> Any:
+    """Open one camera of a multi-camera set (see :func:`open_camera`); returns a reader whose first ``read()``
+    gives the frame that proved the mode works. A secondary camera may fall back to 320x240."""
+    if cv2 is None:  # pragma: no cover - real OpenCV
+        cv2 = load_cv2()
+    devs = camera_devices()
+    src = resolve_device(spec.device, devs if devs else None, hint=spec.index_hint)  # by name, at every open
+    low = True if spec.role != "primary" else None
+    got = open_camera(
+        src,
+        spec.width,
+        spec.height,
+        spec.fps,
+        getattr(spec, "fourcc", DEFAULT_FOURCC),
+        cv2=cv2,
+        devices=devs,
+        label=str(spec.device),
+        low_res=low,
+        virtual_fallback=virtual_fallback,
+    )
+    return FirstFrameCapture(got.cap, got.frame)
 
-    src = resolve_device(spec.device, hint=spec.index_hint)  # by name, at every open (hot-plug safe)
-    cap = open_video(src, cv2)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, spec.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, spec.height)
-    cap.set(cv2.CAP_PROP_FPS, spec.fps)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # keep latency low; not every backend honours it
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open camera {spec.device!r} (no device, busy, or permission denied)")
-    return cap
+
+class FirstFrameCapture:
+    """A capture whose first ``read()`` returns a frame that was already read (while proving the mode)."""
+
+    def __init__(self, cap: Any, frame: Any) -> None:
+        self._cap = cap
+        self._first = frame
+
+    def read(self) -> tuple[bool, Any]:
+        if self._first is not None:
+            f, self._first = self._first, None
+            return True, f
+        return self._cap.read()  # type: ignore[no-any-return]
+
+    def isOpened(self) -> bool:
+        return bool(self._cap.isOpened())
+
+    def release(self) -> None:
+        self._cap.release()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cap, name)
 
 
 class CameraThread(threading.Thread):

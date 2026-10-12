@@ -960,7 +960,7 @@ def test_version_parsing_orders_0_1_10_after_0_1_9() -> None:
     assert U.is_newer("0.1.10", "0.1.9") and not U.is_newer("0.1.9", "0.1.10")
     assert U.parse_version("v0.1.10") > U.parse_version("0.1.9") > U.parse_version("0.1.8")  # type: ignore[operator]
     assert max(["0.1.8", "0.1.10", "0.1.9"], key=lambda v: U.parse_version(v) or ()) == "0.1.10"
-    assert __version__ == "0.1.11"
+    assert __version__ == "0.1.12"
 
 
 def test_batch_helper_with_the_users_real_paths() -> None:
@@ -1170,7 +1170,7 @@ def test_report_stale_or_finished_helper_log_is_a_failure_with_last_line(tmp_pat
     assert "Last step: x starting installer: s.exe." in out.message
     _failed_state(tmp_path, helper=f"x installer exit code 5\nx {U.HELPER_DONE}\n", code="5")
     out = U.previous_install(tmp_path, "0.1.9")
-    assert out is not None and out.status == "failed" and "could not be closed" in out.message
+    assert out is not None and out.status == "failed" and "aborted during the installation (exit code 5" in out.message
     assert f"Last step: x {U.HELPER_DONE}." in out.message
     (tmp_path / "updates" / G_SETUP).unlink()
     (tmp_path / "logs" / U.HELPER_LOG).unlink()
