@@ -123,7 +123,11 @@ class CameraShare:
         return self._read(RELEASED_FILE) is not None
 
     def wait_released(
-        self, timeout: float = 4.0, sleep: Callable[[float], Any] = time.sleep, step: float = 0.1
+        self,
+        timeout: float = 4.0,
+        sleep: Callable[[float], Any] = time.sleep,
+        step: float = 0.1,
+        who: str = "settings",
     ) -> bool:
         """After :meth:`request`: True once the app has closed its cameras (False on timeout)."""
         deadline = self.clock() + timeout
@@ -132,7 +136,7 @@ class CameraShare:
                 return True
             if self.clock() >= deadline:
                 return False
-            self.request()  # keep the heartbeat fresh while waiting
+            self.request(who)  # keep the heartbeat fresh while waiting
             sleep(step)
 
 
@@ -159,18 +163,30 @@ class CameraLease:
         self.sleep = sleep
         self.app_running = False
         self.handed_over = False
+        self.nested = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def open(self) -> CameraLease:
+        """Ask for the cameras. The request is kept fresh for the whole lease even when no app holds them
+        now (v0.1.15), so an app that starts, or retries its cameras, meanwhile leaves them alone."""
         self.app_running = self.share.owner() is not None
-        if not self.app_running:
+        if not self.app_running and self.share.requested():
+            # another live process already holds the cameras for us (Settings runs `away calibrate-cameras`
+            # while holding its own lease): leave its request alone, so closing ours cannot drop it
+            self.nested = True
             return self
         self.share.request(self.who)
         self._thread = threading.Thread(target=self._beat, daemon=True, name="camera-lease")
         self._thread.start()
-        self.handed_over = self.share.wait_released(self.timeout, self.sleep)
+        if self.app_running:
+            self.handed_over = self.share.wait_released(self.timeout, self.sleep, who=self.who)
         return self
+
+    @property
+    def blocked(self) -> bool:
+        """The app holds the cameras and did not let go in time: opening them will fail."""
+        return self.app_running and not self.handed_over
 
     def _beat(self) -> None:
         while not self._stop.wait(self.heartbeat_s):
@@ -181,7 +197,7 @@ class CameraLease:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
-        if self.app_running:
+        if not self.nested:
             self.share.release()
 
     def __enter__(self) -> CameraLease:
@@ -210,8 +226,41 @@ def camera_error_message(exc: BaseException, device: Any, app_running: bool, han
 def borrowed_cameras(
     share: CameraShare | None = None, timeout: float = 4.0, who: str = "settings"
 ) -> Iterator[CameraLease]:
+    """``with borrowed_cameras(who="calibrate") as lease:`` - a :class:`CameraLease` for a block."""
     lease = CameraLease(share, timeout, who)
     try:
         yield lease.open()
     finally:
         lease.close()
+
+
+class SharedLease:
+    """One :class:`CameraLease` shared by several users in one process (Settings: Live confidence, Test both
+    cameras and Calibrate). The first :meth:`acquire` opens it, the last :meth:`release` closes it, so handing
+    the cameras from one tool to the next never lets the app grab them in between."""
+
+    def __init__(self, factory: Callable[[str], CameraLease] | None = None) -> None:
+        self._factory = factory or (lambda who: CameraLease(who=who))
+        self._lock = threading.Lock()
+        self._lease: CameraLease | None = None
+        self._users = 0
+
+    def acquire(self, who: str = "settings") -> CameraLease:
+        with self._lock:
+            if self._lease is None:
+                self._lease = self._factory(who).open()
+            self._users += 1
+            return self._lease
+
+    def release(self) -> None:
+        with self._lock:
+            if self._users <= 0:
+                return
+            self._users -= 1
+            if self._users == 0 and self._lease is not None:
+                self._lease.close()
+                self._lease = None
+
+    @property
+    def held(self) -> bool:
+        return self._lease is not None

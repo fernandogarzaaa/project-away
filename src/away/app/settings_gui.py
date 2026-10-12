@@ -16,9 +16,10 @@ import os
 import queue
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from away import config as cfgmod
 from away.actions import event_trigger
@@ -920,54 +921,234 @@ def start_clap_test(model: SettingsModel, out: Any, views: Any, mic: Any = None)
         return None
 
 
-def camera_confidence_worker(
-    model: SettingsModel, out: queue.Queue[Any], stop: threading.Event
-) -> None:  # pragma: no cover
-    """Live per-camera hand confidence for the Cameras tab (no actions are executed)."""
-    from away import paths
-    from away.hands.tracker import HandTracker
-    from away.multicam.capture import CameraThread, FramePairer
-    from away.multicam.fusion import ViewObs, view_confidence
+def conf_bar(conf: float) -> str:
+    return ("#" * round(conf * 10)).ljust(10, ".") + f" {conf:.2f}"
 
+
+def short_camera_error(err: str) -> str:
+    """A camera thread's error, short enough for the Confidence column."""
+    low = err.lower()
+    if "did not hand" in low:
+        return "error: app kept it"
+    if "cannot open" in low or "did not open" in low:
+        return "error: busy / did not open"
+    if "no frame" in low or "sent no frames" in low:
+        return "no frames"
+    if "stopped delivering" in low:
+        return "error: stopped"
+    return "error: " + (err if len(err) <= 32 else err[:31] + "\u2026")
+
+
+def live_cells(threads: list[Any], confs: list[float | None] | None = None) -> list[str]:
+    """The Confidence column during Live confidence: ``opening\u2026`` until the camera opened, its hand
+    confidence once frames arrive, ``no frames`` when it opened but nothing comes, or a short error."""
+    out: list[str] = []
+    for i, th in enumerate(threads):
+        conf = confs[i] if confs is not None and i < len(confs) else None
+        err = getattr(th, "error", None)
+        state = getattr(th, "state", "")
+        if err:
+            out.append(short_camera_error(str(err)))
+        elif conf is not None:
+            out.append(conf_bar(conf))
+        elif state in ("waiting", "opening"):
+            out.append("opening\u2026")
+        elif getattr(th, "frames", 0) > 0:
+            out.append("streaming")
+        elif state == "open":
+            out.append("no frames")
+        else:
+            out.append(state or "-")
+    return out
+
+
+def live_status_line(threads: list[Any]) -> str:
+    """``live: JoyCam 640x480@30 MJPG (DirectShow) | HD User Facing 320x240@15 MJPG (DirectShow)``."""
+    parts = []
+    for th in threads:
+        dev = str(getattr(getattr(th, "spec", None), "device", "?"))
+        describe = getattr(th, "describe_mode", None)
+        mode = describe() if callable(describe) else ""
+        err = getattr(th, "error", None)
+        parts.append(f"{dev} {mode}" if mode else f"{dev} {'failed' if err else 'opening...'}")
+    return "live: " + " | ".join(parts)
+
+
+class CameraTools:
+    """Which camera tool of the Cameras tab is running: ``live`` (Live confidence), ``test`` (Test both
+    cameras) or ``calibrate``. Only one at a time: they would fight over the same devices (v0.1.15)."""
+
+    LABELS: ClassVar[dict[str, str]] = {
+        "live": "Live confidence",
+        "test": "the camera test",
+        "calibrate": "calibration",
+    }
+
+    def __init__(self) -> None:
+        self.busy: str | None = None
+        self._lock = threading.Lock()
+
+    def begin(self, kind: str) -> str | None:
+        """Start ``kind``: None, or why it cannot start now. Calibrate may take over from Live confidence
+        (it stops it first); nothing else may take over."""
+        with self._lock:
+            if self.busy is None or self.busy == kind or (kind == "calibrate" and self.busy == "live"):
+                self.busy = kind
+                return None
+            return f"{self.LABELS[self.busy]} is running; wait for it to finish (or stop it) first"
+
+    def end(self, kind: str) -> None:
+        with self._lock:
+            if self.busy == kind:
+                self.busy = None
+
+    def states(self, multi_ok: bool) -> dict[str, str]:
+        """Button states: ``normal`` or ``disabled`` for ``calibrate``, ``live``, ``test``."""
+        b = self.busy
+        return {
+            "calibrate": "normal" if multi_ok and b in (None, "live") else "disabled",
+            "live": "normal" if (multi_ok and b is None) or b == "live" else "disabled",
+            "test": "normal" if b is None else "disabled",
+        }
+
+
+def stop_live_view(stop: threading.Event, worker: threading.Thread | None, timeout: float = 6.0) -> bool:
+    """Stop Live confidence and wait until its camera threads have let go of the devices (the worker joins
+    them before it ends). True when it ended in time."""
+    stop.set()
+    if worker is None:
+        return True
+    worker.join(timeout)
+    return not worker.is_alive()
+
+
+def calibration_flow(
+    leases: Any,
+    stop_live: Callable[[], bool],
+    spawn: Callable[[], dict[str, Any]],
+    who: str = "settings-calibrate",
+) -> dict[str, Any]:
+    """Calibrate from Settings: hold the cameras (``leases``: a :class:`~away.app.camera_share.SharedLease`,
+    so the app cannot grab them between Live confidence and calibration), stop Live confidence and wait until
+    its devices are free, then run the calibration subprocess; give the cameras back afterwards."""
+    leases.acquire(who)
+    try:
+        if not stop_live():
+            return {"rc": -1, "err": "Live confidence did not release the cameras in time; try again in a moment"}
+        return spawn()
+    finally:
+        leases.release()
+
+
+def camera_confidence_worker(
+    model: SettingsModel,
+    out: queue.Queue[Any],
+    stop: threading.Event,
+    *,
+    leases: Any = None,
+    start: Callable[..., list[Any]] | None = None,
+    trackers: list[Any] | None = None,
+    sleep: Callable[[float], Any] | None = None,
+    report_s: float = 0.25,
+) -> None:
+    """Live per-camera hand confidence for the Cameras tab (no actions are executed).
+
+    Puts ``{"cells": [...], "status": "live: ..."}`` on ``out`` (each camera: opening / confidence /
+    no frames / error, and the mode that worked), or a string on a fatal error. The cameras are borrowed from
+    the running app and opened the same way the app opens them (:func:`start_camera_threads`); when the
+    worker ends, its camera threads have released their devices."""
+    import time as _time
+
+    from away.app.camera_share import SharedLease, camera_error_message
+    from away.multicam import capture
+    from away.multicam.capture import FramePairer, start_camera_threads, stop_camera_threads
+
+    sleep = sleep or _time.sleep
     cams = model.cfg.hands.cameras
-    mdir = Path(model.cfg.models_dir) if model.cfg.models_dir else paths.models_dir()
     primary = next((i for i, c in enumerate(cams) if c.role == "primary"), 0)
     pairer = FramePairer(len(cams), primary, model.cfg.hands.multicam.pair_tolerance_ms / 1000.0, 0.5)
-    threads = [CameraThread(i, c, pairer, stop) for i, c in enumerate(cams)]
-    from away.app.camera_share import CameraLease
-
-    lease = CameraLease(who="settings-confidence").open()  # borrow the cameras from the running app
+    leases = leases or SharedLease()
+    lease = leases.acquire("settings-confidence")  # borrow the cameras from the running app
+    cam_stop = threading.Event()
+    threads: list[Any] = []
     try:
-        trackers = [HandTracker(mdir / "hand_landmarker.task", 1) for _ in cams]
-        for th in threads:
-            th.start()
-        import time as _time
+        if trackers is None:  # pragma: no cover - real models
+            from away import paths
+            from away.hands.tracker import HandTracker
 
+            mdir = Path(model.cfg.models_dir) if model.cfg.models_dir else paths.models_dir()
+            trackers = [HandTracker(mdir / "hand_landmarker.task", 1) for _ in cams]
+        from away.multicam.fusion import ViewObs, view_confidence
+
+        if start is None:  # pragma: no cover - real cameras
+            capture.use_mode_store(capture.default_mode_file())
+            start = start_camera_threads
+        threads = start(list(cams), pairer, cam_stop, virtual_fallback=bool(model.cfg.hands.virtual_fallback))
+        confs: list[float | None] = [None] * len(cams)
+        last = -1.0
         while not stop.is_set():
             st = pairer.pop_set()
+            if st is not None:
+                alive = pairer.alive()
+                for i, item in enumerate(st[1]):
+                    if item is None:
+                        if not alive[i]:
+                            confs[i] = None
+                        continue
+                    fr = trackers[i].process(item[1], item[0])
+                    h, w = item[1].shape[:2]
+                    confs[i] = (
+                        0.0
+                        if fr.landmarks is None
+                        else view_confidence(ViewObs(i, item[0], fr.landmarks, fr.handedness, fr.score, (w, h)))
+                    )
+            now = _time.monotonic()
+            if now - last >= report_s:
+                last = now
+                for i, th in enumerate(threads):
+                    if getattr(th, "error", None) or not th.is_alive():
+                        confs[i] = None
+                out.put({"cells": live_cells(threads, confs), "status": live_status_line(threads)})
             if st is None:
-                _time.sleep(0.005)
-                continue
-            confs: list[float | None] = []
-            for i, item in enumerate(st[1]):
-                if item is None:
-                    confs.append(None)
-                    continue
-                fr = trackers[i].process(item[1], item[0])
-                h, w = item[1].shape[:2]
-                confs.append(
-                    0.0
-                    if fr.landmarks is None
-                    else view_confidence(ViewObs(i, item[0], fr.landmarks, fr.handedness, fr.score, (w, h)))
-                )
-            out.put(confs)
+                sleep(0.005)
     except Exception as exc:
-        from away.app.camera_share import camera_error_message
-
         out.put(camera_error_message(exc, "", lease.app_running, lease.handed_over))
     finally:
         stop.set()
-        lease.close()
+        stop_camera_threads(cam_stop, threads)  # the devices are free before the lease hands them back
+        if threads:
+            out.put({"cells": live_cells(threads, None), "status": live_status_line(threads), "final": True})
+        leases.release()
+
+
+def camera_test_worker(
+    model: SettingsModel,
+    out: queue.Queue[Any],
+    *,
+    leases: Any = None,
+    tester: Callable[..., Any] | None = None,
+    seconds: float = 10.0,
+) -> None:
+    """Settings > Cameras > Test both cameras: the same test as ``away cameras test``. Puts progress
+    strings and finally ``{"report": TestReport}`` (or ``{"error": str}``) on ``out``."""
+    from away.app.camera_share import SharedLease
+    from away.multicam import camtest, capture
+
+    leases = leases or SharedLease()
+    lease = leases.acquire("settings-camera-test")
+    try:
+        if lease.app_running and not lease.handed_over:
+            out.put({"error": "Project Away is using the cameras and did not hand them over in time - pause it"})
+            return
+        if tester is None:  # pragma: no cover - real cameras
+            capture.use_mode_store(capture.default_mode_file())
+            tester = camtest.run_camera_test
+        report = tester(list(model.cfg.hands.cameras), seconds, progress=lambda m: out.put(str(m)))
+        out.put({"report": report})
+    except Exception as exc:
+        out.put({"error": f"camera test failed: {exc}"})
+    finally:
+        leases.release()
 
 
 # ---------------------------------------------------------------------------------- layout helpers
@@ -1479,6 +1660,11 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_calib_btn.pack(side="left", padx=8)
         self.cam_live_btn = ttk.Button(btns, text="Live confidence", command=self._cam_live)
         self.cam_live_btn.pack(side="left", padx=2)
+        self.cam_test_btn = ttk.Button(btns, text="Test both cameras", command=self._cam_test)
+        self.cam_test_btn.pack(side="left", padx=2)
+        self.cam_save_combo_btn = ttk.Button(btns, text="Save working combination", command=self._cam_save_combo)
+        self.cam_save_combo_btn.pack(side="left", padx=2)
+        self.cam_save_combo_btn.configure(state="disabled")
         self.cam_multi_hint = tk.StringVar()
         ttk.Label(f, textvariable=self.cam_multi_hint, foreground="#555").grid(
             row=9, column=0, columnspan=6, sticky="w", pady=(2, 0)
@@ -1504,10 +1690,21 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             "The primary camera is the cursor's frame of reference.",
             foreground="#555",
         ).grid(row=8, column=0, columnspan=6, sticky="w")
+        self.cam_test_var = tk.StringVar()
+        ttk.Label(f, textvariable=self.cam_test_var, foreground="#333", justify="left").grid(
+            row=10, column=0, columnspan=6, sticky="w", pady=(4, 0)
+        )
         self._cam_q: queue.Queue[Any] = queue.Queue()
         self._cam_stop = threading.Event()
         self._cam_thread: threading.Thread | None = None
-        self._cam_confs: list[Any] = []
+        self._cam_cells: list[str] = []
+        self._cam_tools = CameraTools()
+        from away.app.camera_share import SharedLease
+
+        self._cam_leases = SharedLease()
+        self._cam_test_q: queue.Queue[Any] = queue.Queue()
+        self._cam_test_thread: threading.Thread | None = None
+        self._cam_combo: list[Any] | None = None
         self._cam_refresh_devices()
 
     def _cam_refresh_devices(self) -> None:
@@ -1522,8 +1719,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_mode.set(self.m.camera_mode())
         self.cam_tree.delete(*self.cam_tree.get_children())
         for i, r in enumerate(self.m.camera_rows()):
-            conf = self._cam_confs[i] if i < len(self._cam_confs) else None
-            bar = "-" if conf is None else ("#" * round(conf * 10)).ljust(10, ".") + f" {conf:.2f}"
+            bar = self._cam_cells[i] if i < len(self._cam_cells) else "-"
             dev = str(r.get("label") or r["device"]) + (" (in use by Project Away)" if r.get("in_use") else "")
             role = r["role"] + (" (default)" if r.get("implicit") else "")
             self.cam_tree.insert(
@@ -1531,9 +1727,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             )
         self.cam_calib.set(self.m.calibration_status())
         ok, hint = self.m.multi_tools()
-        live = self._cam_thread is not None and self._cam_thread.is_alive()
-        self.cam_calib_btn.configure(state="normal" if ok else "disabled")
-        self.cam_live_btn.configure(state="normal" if ok or live else "disabled")
+        st = self._cam_tools.states(ok)
+        self.cam_calib_btn.configure(state=st["calibrate"])
+        self.cam_live_btn.configure(state=st["live"])
+        self.cam_test_btn.configure(state=st["test"] if self.m.cfg.hands.cameras else "disabled")
         self.cam_multi_hint.set(hint)
         if self._cam_selected() is None:
             self.cam_role.set(self.m.role_default())
@@ -1573,15 +1770,22 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         if not ok:
             self._report(hint)
             return
+        err = self._cam_tools.begin("calibrate")  # Live confidence is stopped below; the test blocks this
+        if err:
+            self._report(err)
+            return
         if self.m.dirty:
             self._on_save()
         status_file = self.m.calibration_status_file()
         with contextlib.suppress(OSError):
             status_file.unlink()
+        live = self._cam_thread
         self._report(None, "calibrating: move your open hand through both cameras' view for ~20 s...")
+        self.cam_live_btn.configure(text="Live confidence")
+        self._cam_refresh()
         result: dict[str, Any] = {}
 
-        def run() -> None:
+        def spawn() -> dict[str, Any]:
             try:
                 r = subprocess.run(
                     self.m.calibration_command(status_file),
@@ -1590,7 +1794,6 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                     env={**os.environ, "AWAY_NO_CONSOLE": "1"},
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-                result["rc"], result["err"] = r.returncode, (r.stderr or "")
                 # keep the full output next to the status file for troubleshooting (GUI exe: no console)
                 with contextlib.suppress(OSError):
                     status_file.with_name("calibration.log").write_text(
@@ -1598,8 +1801,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                         f"--- stdout ---\n{r.stdout or ''}\n--- stderr ---\n{r.stderr or ''}",
                         encoding="utf-8",
                     )
+                return {"rc": r.returncode, "err": r.stderr or ""}
             except Exception as exc:
-                result["rc"], result["err"] = -1, str(exc)
+                return {"rc": -1, "err": str(exc)}
+
+        def run() -> None:
+            result.update(calibration_flow(self._cam_leases, lambda: stop_live_view(self._cam_stop, live), spawn))
 
         th = threading.Thread(target=run, daemon=True, name="calibrate")
         th.start()
@@ -1611,6 +1818,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                     self._report(None, str(st["message"]))
                 self.root.after(500, poll)
                 return
+            self._cam_tools.end("calibrate")
             self._report(*calibration_outcome(st, result.get("rc", -1), str(result.get("err", ""))))
             self._cam_refresh()
 
@@ -1625,25 +1833,95 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         if not ok:
             self._report(hint)
             return
+        err = self._cam_tools.begin("live")
+        if err:
+            self._report(err)
+            return
         self._cam_stop.clear()
+        self._cam_cells = ["opening\u2026"] * len(self.m.cfg.hands.cameras)
+        self._report(None, "live confidence: opening the cameras one after another...")  # clears an old error
         self._cam_thread = threading.Thread(
-            target=camera_confidence_worker, args=(self.m, self._cam_q, self._cam_stop), daemon=True
+            target=camera_confidence_worker,
+            args=(self.m, self._cam_q, self._cam_stop),
+            kwargs={"leases": self._cam_leases},
+            daemon=True,
         )
         self._cam_thread.start()
         self.cam_live_btn.configure(text="Stop live view")
+        self._cam_refresh()
         self.root.after(150, self._cam_poll)
 
     def _cam_poll(self) -> None:
+        running = self._cam_thread is not None and self._cam_thread.is_alive()  # before draining
         latest = None
         while not self._cam_q.empty():
             latest = self._cam_q.get_nowait()
         if isinstance(latest, str):
             self._report(latest)
-        elif latest is not None:
-            self._cam_confs = latest
+        elif isinstance(latest, dict):
+            self._cam_cells = list(latest.get("cells", []))
+            if self._cam_tools.busy == "live":
+                self._report(None, str(latest.get("status", "")))
             self._cam_refresh()
-        if self._cam_thread is not None and self._cam_thread.is_alive():
+        if running:
             self.root.after(150, self._cam_poll)
+            return
+        self._cam_tools.end("live")
+        self.cam_live_btn.configure(text="Live confidence")
+        self._cam_refresh()
+
+    def _cam_test(self) -> None:
+        err = self._cam_tools.begin("test")
+        if err:
+            self._report(err)
+            return
+        if self.m.dirty:
+            self._on_save()
+        self._cam_combo = None
+        self.cam_save_combo_btn.configure(state="disabled")
+        self.cam_test_var.set("testing: opening every camera one after another, then streaming ~10 s...")
+        self._cam_refresh()
+        self._cam_test_thread = threading.Thread(
+            target=camera_test_worker,
+            args=(self.m, self._cam_test_q),
+            kwargs={"leases": self._cam_leases},
+            daemon=True,
+            name="camera-test",
+        )
+        self._cam_test_thread.start()
+        self.root.after(200, self._cam_test_poll)
+
+    def _cam_test_poll(self) -> None:
+        running = self._cam_test_thread is not None and self._cam_test_thread.is_alive()  # before draining
+        while not self._cam_test_q.empty():
+            msg = self._cam_test_q.get_nowait()
+            if isinstance(msg, str):
+                self.cam_test_var.set(msg)
+            elif isinstance(msg, dict) and "error" in msg:
+                self.cam_test_var.set(f"error: {msg['error']}")
+            elif isinstance(msg, dict) and "report" in msg:
+                rep = msg["report"]
+                self.cam_test_var.set("\n".join(rep.lines()))
+                self._cam_combo = rep.save_offer(list(self.m.cfg.hands.cameras))
+                if self._cam_combo is not None:
+                    self.cam_save_combo_btn.configure(state="normal")
+        if running:
+            self.root.after(200, self._cam_test_poll)
+            return
+        self._cam_tools.end("test")
+        self._cam_refresh()
+
+    def _cam_save_combo(self) -> None:
+        from away.multicam import camtest
+
+        if not self._cam_combo:
+            return
+        changed = camtest.save_combination(self.m.cfg, self._cam_combo)
+        self._on_save()
+        self._cam_combo = None
+        self.cam_save_combo_btn.configure(state="disabled")
+        self._report(None, "saved camera settings: " + ("; ".join(changed) or "no change"))
+        self._cam_refresh()
 
     def _build_performance(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
@@ -1937,7 +2215,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         self._test_stop.set()
         self._cam_stop.set()
-        for th in (self._test_thread, self._cam_thread):  # give the camera back to the app before exiting
+        for th in (self._test_thread, self._cam_thread, self._cam_test_thread):  # give the cameras back first
             if th is not None and th.is_alive():
                 th.join(timeout=1.5)
         if self.m.dirty and messagebox.askyesno("Unsaved changes", "Save changes before closing?"):

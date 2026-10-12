@@ -634,6 +634,7 @@ class OpenedCamera:
     src: int | str  # what was opened (differs from the request after the NVIDIA Broadcast fallback)
     name: str
     fallback: str = ""  # why another camera was opened instead, '' when it was not
+    backend: str = ""  # "DirectShow", "Media Foundation", "default" (the backend that worked)
 
 
 def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
@@ -936,7 +937,7 @@ def open_camera(
         if cap is None or mode is None:
             return None
         _remember(key, name, backend, mode, (at.backend, modes[0]))
-        return OpenedCamera(HeldCapture(cap, str(src)), frame, mode, src, name)
+        return OpenedCamera(HeldCapture(cap, str(src)), frame, mode, src, name, backend=backend)
 
     if not windows:
         got = attempt(_Attempt("default", None, src, list(modes)))
@@ -997,7 +998,9 @@ def open_camera(
             )
             if acap is not None and amode is not None:
                 log.info("camera %r: using %r (virtual fallback), mode %s", name, alt.name, amode.describe())
-                return OpenedCamera(HeldCapture(acap, str(alt_index)), aframe, amode, alt_index, alt.name, why)
+                return OpenedCamera(
+                    HeldCapture(acap, str(alt_index)), aframe, amode, alt_index, alt.name, why, backend=_b
+                )
             log.warning(
                 "camera %r: the virtual fallback %r did not work either (%s)", name, alt.name, "; ".join(atried)
             )
@@ -1019,6 +1022,98 @@ def _remember(key: str, name: str, backend: str, mode: CaptureMode, first: tuple
         )
     elif before is None:
         log.info("camera %r: opened with %s in mode %s", name, backend, mode.describe())
+    if (backend, mode) != first:
+        remember_mode(key, backend, mode)  # only works in a fallback mode: open it that way at the next start
+    elif key in saved_modes():
+        forget_mode(key)  # the configured mode works again
+
+
+# ------------------------------------------------------------------------------ modes kept across starts
+# v0.1.15: a camera that only works in a fallback mode (typically the second webcam at 320x240 or MJPG on a busy
+# USB bus) is remembered by name in camera-modes.json, so the next start opens it in that mode right away
+# instead of spending ~10 s trying the configured mode first. Enabled by the app, Settings and the CLI with
+# :func:`use_mode_store`; tests leave it off unless they turn it on.
+MODES_FILE = "camera-modes.json"
+_mode_file: Path | None = None
+
+
+def default_mode_file() -> Path:
+    from away import paths
+
+    return Path(paths.data_dir()) / MODES_FILE
+
+
+def use_mode_store(path: Path | None) -> None:
+    """Keep fallback modes in ``path`` (None: off). Modes saved there are tried first in this session."""
+    global _mode_file
+    _mode_file = Path(path) if path is not None else None
+    if _mode_file is None:
+        return
+    for key, (backend, mode) in saved_modes().items():
+        with _lock:
+            _session_modes.setdefault(key, (backend, mode))
+
+
+def mode_store() -> Path | None:
+    return _mode_file
+
+
+def saved_modes() -> dict[str, tuple[str, CaptureMode]]:
+    """``{camera name: (backend, mode)}`` from the mode file; ``{}`` when off, missing or unreadable."""
+    if _mode_file is None:
+        return {}
+    import json
+
+    try:
+        data = json.loads(_mode_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, tuple[str, CaptureMode]] = {}
+    if not isinstance(data, dict):
+        return out
+    for key, v in data.items():
+        try:
+            m = CaptureMode(int(v["width"]), int(v["height"]), int(v["fps"]), normalize_fourcc(v["fourcc"]))
+            out[str(key)] = (str(v["backend"]), m)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _write_modes(modes: dict[str, tuple[str, CaptureMode]]) -> None:
+    if _mode_file is None:
+        return
+    import json
+
+    data = {
+        k: {"backend": b, "width": m.width, "height": m.height, "fps": m.fps, "fourcc": m.fourcc}
+        for k, (b, m) in sorted(modes.items())
+    }
+    with contextlib.suppress(OSError):
+        _mode_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _mode_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, _mode_file)
+
+
+def remember_mode(key: str, backend: str, mode: CaptureMode) -> None:
+    """Save the mode a camera works in (when the store is on) and use it for the rest of this session."""
+    with _lock:
+        _session_modes[key] = (backend, mode)
+    if _mode_file is None:
+        return
+    modes = saved_modes()
+    if modes.get(key) != (backend, mode):
+        modes[key] = (backend, mode)
+        _write_modes(modes)
+        log.info("camera %r: remembered %s %s for the next start", key, backend, mode.describe())
+
+
+def forget_mode(key: str) -> None:
+    modes = saved_modes()
+    if key in modes:
+        del modes[key]
+        _write_modes(modes)
 
 
 def camera_devices() -> list[CameraDevice]:
@@ -1280,14 +1375,15 @@ class FramePairer:
             return t_ref, out
 
 
-def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = None) -> Any:
+def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = None, low_res: bool | None = None) -> Any:
     """Open one camera of a multi-camera set (see :func:`open_camera`); returns a reader whose first ``read()``
-    gives the frame that proved the mode works. A secondary camera may fall back to 320x240."""
+    gives the frame that proved the mode works. A secondary camera may fall back to 320x240 (``low_res``
+    overrides that: True also for the primary, False never)."""
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
     devs = camera_devices()
     src = resolve_device(spec.device, devs if devs else None, hint=spec.index_hint)  # by name, at every open
-    low = True if spec.role != "primary" else None
+    low = low_res if low_res is not None else (True if spec.role != "primary" else None)
     got = open_camera(
         src,
         spec.width,
@@ -1300,15 +1396,21 @@ def open_capture(spec: CameraSpec, virtual_fallback: bool = True, cv2: Any = Non
         low_res=low,
         virtual_fallback=virtual_fallback,
     )
-    return FirstFrameCapture(got.cap, got.frame)
+    return FirstFrameCapture(got.cap, got.frame, got.mode, got.backend, got.name)
 
 
 class FirstFrameCapture:
-    """A capture whose first ``read()`` returns a frame that was already read (while proving the mode)."""
+    """A capture whose first ``read()`` returns a frame that was already read (while proving the mode).
+    ``mode`` / ``backend`` / ``name`` say how it was opened (shown in Settings and ``away cameras test``)."""
 
-    def __init__(self, cap: Any, frame: Any) -> None:
+    def __init__(
+        self, cap: Any, frame: Any, mode: CaptureMode | None = None, backend: str = "", name: str = ""
+    ) -> None:
         self._cap = cap
         self._first = frame
+        self.mode = mode
+        self.backend = backend
+        self.name = name
 
     def read(self) -> tuple[bool, Any]:
         if self._first is not None:
@@ -1326,16 +1428,23 @@ class FirstFrameCapture:
         return getattr(self._cap, name)
 
 
+PRIMARY_SETTLE_S = 8.0  # a secondary camera waits at most this long for the primary's first frame
+
+
 class CameraThread(threading.Thread):
     """Reads one camera as fast as it delivers, stamping each frame with ``time.monotonic()`` on arrival.
 
     * ``open_lock``: when given, the device is opened while holding it, so several cameras open one after
       another instead of all at once (Windows MSMF/DirectShow is slow and flaky opening two USB webcams
       at the same moment). Reading still runs in parallel once a camera is open.
+    * ``after``: an event to wait for (at most ``after_s``) before opening: a secondary camera waits for the
+      primary's first frame (its ``ready``), so the primary always opens first.
     * A freshly opened camera may return empty reads for a while before its first frame (Windows webcams
       can take seconds); that is tolerated for ``first_frame_s``. After the first frame, 30 failed reads
       in a row mean the camera is gone.
-    * ``error`` is set when the thread ends because of a problem; ``opened`` once the device opened.
+    * ``error`` is set when the thread ends because of a problem; ``opened`` once the device opened;
+      ``ready`` once it delivered its first frame or gave up; ``state`` is ``waiting`` / ``opening`` /
+      ``open`` / ``streaming`` / ``failed`` / ``stopped``; ``mode`` / ``backend`` say how it was opened.
     """
 
     def __init__(
@@ -1349,6 +1458,8 @@ class CameraThread(threading.Thread):
         opener: Callable[[CameraSpec], Any] | None = None,
         convert: Callable[[Any, bool], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        after: threading.Event | None = None,
+        after_s: float = PRIMARY_SETTLE_S,
     ) -> None:
         super().__init__(daemon=True, name=f"camera-{cam}")
         self.cam, self.spec, self.pairer, self.stop = cam, spec, pairer, stop
@@ -1357,30 +1468,84 @@ class CameraThread(threading.Thread):
         self.opener = opener or open_capture
         self.convert = convert or _bgr_to_rgb
         self.clock = clock
+        self.after = after
+        self.after_s = after_s
         self.error: str | None = None
         self.opened = threading.Event()
+        self.ready = threading.Event()
         self.frames = 0
         self.size: tuple[int, int] = (spec.width, spec.height)
+        self.state = "waiting"
+        self.mode: CaptureMode | None = None
+        self.backend = ""
+        self.first_t: float | None = None
+        self.last_t: float | None = None
+
+    def fps(self) -> float:
+        """Measured frame rate since the first frame (0.0 before two frames)."""
+        if self.frames < 2 or self.first_t is None or self.last_t is None or self.last_t <= self.first_t:
+            return 0.0
+        return (self.frames - 1) / (self.last_t - self.first_t)
+
+    def describe_mode(self) -> str:
+        """``320x240@15 MJPG (DirectShow)``, or the frame size when the opener did not say."""
+        if self.mode is not None:
+            text = self.mode.describe()
+        elif self.frames:
+            text = f"{self.size[0]}x{self.size[1]}"
+        else:
+            return ""
+        return text + (f" ({self.backend})" if self.backend else "")
+
+    def _wait_turn(self) -> bool:
+        """Wait for ``after`` (the primary's first frame), at most ``after_s``; False when stopped."""
+        if self.after is None:
+            return not self.stop.is_set()
+        deadline = self.clock() + self.after_s
+        while not self.after.is_set() and self.clock() < deadline:
+            if self.stop.wait(0.05):
+                return False
+        return not self.stop.is_set()
 
     def _open(self) -> Any:
+        if not self._wait_turn():
+            return None
         if self.open_lock is None:
+            self.state = "opening"
             return self.opener(self.spec)
         while not self.open_lock.acquire(timeout=0.1):
             if self.stop.is_set():
                 return None
         try:
-            return None if self.stop.is_set() else self.opener(self.spec)
+            if self.stop.is_set():
+                return None
+            self.state = "opening"
+            return self.opener(self.spec)
         finally:
             self.open_lock.release()
 
     def run(self) -> None:
         try:
+            self._run()
+        finally:
+            if self.state not in ("failed",):
+                self.state = "failed" if self.error else "stopped"
+            self.ready.set()
+
+    def _run(self) -> None:
+        try:
             cap = self._open()
         except Exception as exc:
             self.error = f"cannot open camera {self.spec.device!r}: {exc}" if "camera" not in str(exc) else str(exc)
+            self.state = "failed"
             return
         if cap is None:  # stopped while waiting for its turn to open
             return
+        mode = getattr(cap, "mode", None)
+        self.mode = mode if isinstance(mode, CaptureMode) else None
+        backend = getattr(cap, "backend", "")
+        self.backend = backend if isinstance(backend, str) else ""
+        self.state = "open"
         self.opened.set()
         try:
             failures = 0
@@ -1393,19 +1558,93 @@ class CameraThread(threading.Thread):
                     if self.frames == 0:
                         if t - started > self.first_frame_s:
                             self.error = f"camera opened but sent no frame within {self.first_frame_s:g} s"
+                            self.state = "failed"
                             return
                     elif failures > 30:  # unplugged: stop; the pairer marks this camera dropped
                         self.error = "camera stopped delivering frames"
+                        self.state = "failed"
                         return
                     time.sleep(0.02)
                     continue
                 failures = 0
                 self.frames += 1
+                if self.first_t is None:
+                    self.first_t = t
+                self.last_t = t
                 self.size = (frame.shape[1], frame.shape[0])
+                self.state = "streaming"
                 self.pairer.push(self.cam, t, self.convert(frame, self.spec.mirror))
+                self.ready.set()
         finally:
             with contextlib.suppress(Exception):
                 cap.release()
+
+
+def primary_index(specs: list[CameraSpec]) -> int:
+    return next((i for i, c in enumerate(specs) if getattr(c, "role", "") == "primary"), 0)
+
+
+def camera_opener(virtual_fallback: bool = True, low_res: bool | None = None) -> Callable[[CameraSpec], Any]:
+    """The opener every multi-camera user shares: :func:`open_capture` with the NVIDIA Broadcast fallback
+    setting, a secondary allowed down to 320x240, and the backend/mode kept for the session (and across
+    starts with :func:`use_mode_store`)."""
+    import functools
+
+    if low_res is None:
+        return functools.partial(open_capture, virtual_fallback=virtual_fallback)
+    return functools.partial(open_capture, virtual_fallback=virtual_fallback, low_res=low_res)
+
+
+def start_camera_threads(
+    specs: list[CameraSpec],
+    pairer: FramePairer,
+    stop: threading.Event,
+    *,
+    open_lock: threading.Lock | None = None,
+    serial: bool | None = None,
+    virtual_fallback: bool = True,
+    opener: Callable[[CameraSpec], Any] | None = None,
+    settle_s: float = PRIMARY_SETTLE_S,
+    thread_factory: Callable[..., Any] = CameraThread,
+    start: bool = True,
+) -> list[Any]:
+    """Start one capture thread per camera, the same way everywhere (the app, Settings > Live confidence and
+    Test both cameras, ``away calibrate-cameras`` and ``away cameras test``; v0.1.15):
+
+    * one opener (:func:`camera_opener`): NVIDIA Broadcast fallback, the secondary's 320x240 and other-FOURCC
+      fallbacks, kept modes;
+    * opened one after another under ``open_lock`` (made here when ``serial``; default: on Windows, where two
+      USB webcams opening at the same moment is slow and flaky);
+    * the primary first: every other camera waits for the primary's first frame (at most ``settle_s``).
+    """
+    if open_lock is None and (_windows() if serial is None else serial):
+        open_lock = threading.Lock()
+    op = opener or camera_opener(virtual_fallback)
+    first = primary_index(specs)
+    threads: list[Any] = [None] * len(specs)
+    threads[first] = thread_factory(first, specs[first], pairer, stop, open_lock=open_lock, opener=op)
+    for i, c in enumerate(specs):
+        if i != first:
+            threads[i] = thread_factory(
+                i, c, pairer, stop, open_lock=open_lock, opener=op, after=threads[first].ready, after_s=settle_s
+            )
+    if start:
+        threads[first].start()
+        for i, th in enumerate(threads):
+            if i != first:
+                th.start()
+    return threads
+
+
+def stop_camera_threads(stop: threading.Event, threads: list[Any], timeout: float = 3.0) -> bool:
+    """Stop the capture threads and wait (``timeout`` in total) until they released their devices.
+    True when every thread ended."""
+    stop.set()
+    deadline = time.monotonic() + timeout
+    for th in threads:
+        if th.is_alive() if hasattr(th, "is_alive") else False:
+            th.join(max(0.0, deadline - time.monotonic()))
+    return not any(getattr(th, "is_alive", lambda: False)() for th in threads)
 
 
 def _bgr_to_rgb(frame: Any, mirror: bool) -> Any:  # pragma: no cover - needs OpenCV

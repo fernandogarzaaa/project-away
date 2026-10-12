@@ -459,6 +459,8 @@ that is occluded, is usually clear in the other.
 away cameras list                 # device names (V4L2 / Windows DirectShow / macOS) without opening them
 away cameras use "HD User Facing" # single-camera mode: pick the camera by name
 away cameras add 2                # index, /dev/video2, or part of the name ("brio"); saved by name
+away cameras test                 # can all configured cameras stream at the same time? (~10 s)
+away cameras test --save          # ...and save the combination that works (e.g. secondary at 320x240 MJPG)
 away calibrate-cameras            # wave an open hand through both views for ~20 s
 away calibrate-cameras --method checkerboard --checkerboard 9x6 --square-mm 25   # accurate option
 away calibrate-cameras --print-board board.png --checkerboard 9x6                # printable board
@@ -468,7 +470,23 @@ The same is available in **Settings → Cameras** (device pickers, roles, calibr
 per-camera confidence). *Calibrate* runs `calibrate-cameras` as a separate process (in the installed
 Windows app that is `ProjectAway.exe calibrate-cameras`, not `python -m away`), borrows the cameras from
 the running app, shows progress in the status line and ends with "calibrated, reprojection error X px" or
-the error. Its full output is saved as `calibration.log` next to `calibration-status.json` in the data folder. In YAML:
+the error. Its full output is saved as `calibration.log` next to `calibration-status.json` in the data folder.
+
+**Two cameras at the same time (v0.1.15).** The app, Settings' *Live confidence* and *Test both cameras*,
+`away calibrate-cameras` and `away cameras test` now all open the cameras the same way: the primary first,
+then each other camera once the primary has delivered its first frame (at most 8 s later), one after another
+on Windows, with the same fallbacks (MJPG/YUY2/NV12, the device default, and for a secondary 320x240 and
+320x240 @ 15 fps, then the NVIDIA Broadcast camera if `hands.virtual_fallback`). *Live confidence* shows each
+camera's state in the Confidence column (`opening…`, the confidence, `no frames`, or a short error) and the
+mode that worked in the status line. *Calibrate* and *Live confidence* never run together: Calibrate stops the
+live view and waits until its cameras are released, and keeps them borrowed from the app across the hand-over.
+If the secondary still fails, calibration retries it once at 320x240 MJPG after the primary is open. A camera
+that only works in a fallback mode is remembered by name (`camera-modes.json` in the data folder) and opened
+in that mode right away at the next start. *Test both cameras* / `away cameras test` streams every camera for
+~10 s and reports backend, mode, measured fps, frames and errors; if they do not all stream at the configured
+size it tries the secondary at 320x240 MJPG @ 15 and offers to save what works. While the app is still
+probing a slow camera it now says it holds the cameras and lets go as soon as Settings or calibration asks.
+In YAML:
 
 ```yaml
 hands:
@@ -639,7 +657,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1198 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1235 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -652,6 +670,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Real two-camera capture, calibration and fusion | **Untested** (no cameras in the build sandbox) |
 | Two-webcam start-up, fallback and retry (v0.1.8) | Real capture threads, probe, fallback, background retry and recovery tested with simulated slow/failing/silent cameras; **untested with real Windows MSMF/DirectShow webcams** |
 | Windows camera enumeration and naming (v0.1.11) | DirectShow list parsing/order, virtual-camera flags, name/DevicePath/`#k` resolution across hot-plug, legacy-index remap (NVIDIA Broadcast at 0, built-in at 1, USB at 2), DirectShow-first opening with logged MSMF fallback, Settings role/gating and retry labels unit-tested with a fake enumerator and fake OpenCV; the ctypes COM enumeration runs on the Windows CI runner against the DirectShow filter category (no camera there); **untested on a real PC with cameras (the reported Acer Predator with NVIDIA Broadcast)** |
+| Two cameras at once: shared start-up, Live confidence status, Calibrate/Live exclusion, `away cameras test`, kept modes (v0.1.15) | Shared sequential start-up (primary first, settle delay, one opener) used by the app, Live confidence, calibration and the camera test; per-camera status and mode; mutual exclusion and the stop-and-wait hand-over; calibration lease, low-res retry; modes kept per camera name; the app letting go while it probes; and the whole sequence (app holds both cameras → lease → Live confidence → Calibrate in a second "process" → hand back) tested with a simulated USB bus that rejects a second open of a held device and has no room for two 640x480 YUY2 streams; **untested on the real laptop (JoyCam + HD User Facing)**: whether its USB controller carries both webcams at once, and in which mode, can only be shown there (run *Test both cameras*) |
 | Camera opening modes, Media Foundation index mapping and NVIDIA Broadcast fallback (v0.1.12/v0.1.13) | MJPG-before-size, frame-verified opens, MJPG/YUY2/NV12/no-FOURCC/device-default retries, Media Foundation opened at its own index (fake MF enumerator ordered differently from DirectShow; the ctypes `MFEnumDeviceSources` enumeration itself has not run on Windows), 320x240 / 15 fps fallback for a second camera with the mode kept per session, open-failed vs no-frames errors, bandwidth and Broadcast hints, the automatic Broadcast fallback and explicit Broadcast choice unit-tested with a fake OpenCV; **untested on the real Acer Predator (JoyCam + HD User Facing + NVIDIA Broadcast)** |
 | Face gate leniency (v0.1.12) | Adaptive mouth threshold and the frontal-presence rule replayed against the gate numbers in the user's v0.1.11 log, plus no-face / other-speaker negatives; head-pose (frontal) estimate from the face mesh unit-tested on synthetic points; **not measured on a real webcam** |
 | Windows auto-update (v0.1.10) | Batch helper text and quoting (real and odd paths), launch flags, liveness check and fallbacks, forced exit, still-installing/failed report, Run update installer item, download/verify and logging unit-tested on Linux; v0.1.12 retry/relaunch/exit-code logic checked by text tests and a small interpreter of the relaunch block; **`away-update.cmd` has not been run by a real cmd.exe, and the silent Inno upgrade is untested on a real Windows desktop** |

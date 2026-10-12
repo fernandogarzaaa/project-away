@@ -566,6 +566,42 @@ def cmd_cameras(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester: Any = None, save: Any = None) -> int:
+    """``away cameras test [--seconds 10] [--save]``: can the configured cameras stream at the same time?"""
+    from away.app.camera_share import borrowed_cameras
+    from away.multicam import camtest, capture
+
+    path = _cfg_path(args)
+    cfg, _ = cfgmod.load(path)
+    cams = list(cfg.hands.cameras)
+    if not cams:
+        return _fail("no cameras in hands.cameras; add them with `away cameras add NAME` (two for multi-camera)")
+    borrow = lease_factory or (lambda: borrowed_cameras(timeout=CALIBRATE_LEASE_S, who="camera-test"))
+    with borrow() as lease:
+        if lease.app_running and not lease.handed_over:
+            return _fail("Project Away is using the cameras and did not hand them over in time - pause or quit it")
+        if lease.handed_over:
+            print("Project Away released the cameras for the test; they are handed back afterwards.")
+        if tester is None:
+            capture.use_mode_store(capture.default_mode_file())
+        run = tester or camtest.run_camera_test
+        report = run(cams, float(args.seconds), progress=lambda m: print(m, flush=True))
+    for line in report.lines():
+        print(line)
+    offer = report.save_offer(cams)
+    if offer is not None:
+        if args.save:
+            changed = camtest.save_combination(cfg, offer)
+            try:
+                (save or cfgmod.save)(cfg, path)
+            except ValueError as exc:
+                return _fail(exc)
+            print("saved: " + "; ".join(changed))
+        else:
+            print("run `away cameras test --save` to save the combination that works")
+    return 0 if report.works else 1
+
+
 def pick_camera(arg: str, devs: list[Any]) -> tuple[int | str, int | None]:
     """``away cameras add/use`` argument -> ``(what to save, index hint)``: a listed camera is saved by name
     (``"HD User Facing"``; the DevicePath or ``name #2`` when two share a name), with its index as a hint.
@@ -655,17 +691,86 @@ def cmd_calibrate_cameras(args: argparse.Namespace) -> int:
         msg = "calibration needs two cameras in hands.cameras (see `away cameras list` / `away cameras add`)"
         write_calibration_status(status, state="failed", message=msg)
         return _fail(msg)
+    return calibrate_with_lease(cfg, args)
+
+
+CALIBRATE_LEASE_S = 10.0  # the app closes two cameras one after another (each join up to 2 s)
+
+
+def calibrate_with_lease(
+    cfg: cfgmod.AppConfig, args: argparse.Namespace, lease_factory: Any = None, run: Any = None
+) -> int:
+    """Borrow the cameras from the running app (a CameraLease, ``who="calibrate"``), calibrate, give them
+    back. When the app holds them and does not let go in time, say so instead of failing on a busy device."""
     from away.app.camera_share import borrowed_cameras
 
+    status = getattr(args, "status_file", None)
+    borrow = lease_factory or (lambda: borrowed_cameras(timeout=CALIBRATE_LEASE_S, who="calibrate"))
+    calibrate = run or _run_camera_calibration
     write_calibration_status(status, state="running", progress=0, message="asking Project Away for the cameras...")
-    with borrowed_cameras(who="calibrate") as lease:  # pragma: no cover - needs cameras
+    with borrow() as lease:
+        if lease.app_running and not lease.handed_over:
+            msg = (
+                "Project Away is using the cameras and did not hand them over in time - pause or quit it "
+                "(tray menu) and calibrate again"
+            )
+            write_calibration_status(status, state="failed", message=msg)
+            return _fail(msg)
         if lease.handed_over:
             print("Project Away released the cameras for calibration; they are handed back afterwards.")
         try:
-            return _run_camera_calibration(cfg, args)
+            return int(calibrate(cfg, args))
         except Exception as exc:
             write_calibration_status(status, state="failed", message=f"calibration failed: {exc}")
             raise
+
+
+def open_calibration_cameras(
+    cams: list[Any],
+    pairer: Any,
+    stop: Any,
+    *,
+    virtual_fallback: bool = True,
+    start: Any = None,
+    retry_opener: Any = None,
+    wait_s: float = 30.0,
+    clock: Any = None,
+    sleep: Any = None,
+    say: Any = None,
+) -> list[Any]:
+    """Start the calibration cameras with the shared sequential start-up (primary first, one after another,
+    the same opener and fallbacks as the app). A secondary that still fails is retried once, after the
+    primary is streaming, at 320x240 MJPG @ 15 (``low_res`` modes)."""
+    import copy
+    import time
+
+    from away.multicam import capture
+
+    start = start or capture.start_camera_threads
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    say = say or (lambda m: print(m, flush=True))
+    threads = start(list(cams), pairer, stop, virtual_fallback=virtual_fallback)
+    first = capture.primary_index(list(cams))
+    deadline = clock() + wait_s
+    while clock() < deadline and not stop.is_set():
+        if all(th.frames > 0 or not th.is_alive() for th in threads):
+            break
+        sleep(0.05)
+    prim = threads[first]
+    if prim.frames == 0:
+        return threads  # the primary itself does not work: nothing to retry against
+    for i, th in enumerate(threads):
+        if i == first or th.frames > 0 or (th.is_alive() and not th.error):
+            continue
+        say(f"camera {cams[i].device!r} did not start ({th.error or 'no frames'}); retrying it at 320x240 MJPG...")
+        spec = copy.copy(cams[i])
+        spec.width, spec.height, spec.fps, spec.fourcc = 320, 240, 15, "MJPG"
+        opener = retry_opener or capture.camera_opener(virtual_fallback, low_res=True)
+        again = capture.CameraThread(i, spec, pairer, stop, opener=opener)
+        again.start()
+        threads[i] = again
+    return threads
 
 
 def write_calibration_status(path: str | None, **data: Any) -> None:
@@ -689,9 +794,10 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
     import numpy as np
 
     from away.hands.tracker import HandTracker
+    from away.multicam import capture
     from away.multicam import geometry as G
     from away.multicam.calibration import CheckerboardCalibrator, HandMotionCalibrator
-    from away.multicam.capture import CameraThread, FramePairer
+    from away.multicam.capture import FramePairer
     from away.multicam.fusion import ViewObs
 
     status = getattr(args, "status_file", None)
@@ -700,9 +806,9 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
     primary = next(i for i, c in enumerate(cams) if c.role == "primary")
     pairer = FramePairer(len(cams), primary, cfg.hands.multicam.pair_tolerance_ms / 1000, 0.5)
     stop = threading.Event()
-    threads = [CameraThread(i, c, pairer, stop) for i, c in enumerate(cams)]
-    for th in threads:
-        th.start()
+    capture.use_mode_store(capture.default_mode_file())
+    threads = open_calibration_cameras(cams, pairer, stop, virtual_fallback=bool(cfg.hands.virtual_fallback))
+    write_calibration_status(status, state="running", progress=0, message="cameras open; starting...")
     board = args.checkerboard if args.method == "checkerboard" else None
     try:
         if board:
@@ -757,7 +863,7 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
                     )
             ex, rep = cal_h.solve(cfg.hands.multicam.palm_length_m)
     finally:
-        stop.set()
+        capture.stop_camera_threads(stop, threads)  # devices released before the lease hands them back
     errors = [f"camera {th.spec.device!r}: {th.error}" for th in threads if th.error]
     for e in errors:
         print(e, file=sys.stderr)
@@ -968,15 +1074,24 @@ def build_parser() -> argparse.ArgumentParser:
     vc.set_defaults(fn=cmd_voice)
 
     cm = sub.add_parser(
-        "cameras", help="list | use NAME (single camera) | add NAME | remove DEVICE: choose cameras by name"
+        "cameras",
+        help="list | use NAME (single camera) | add NAME | remove DEVICE | test [--save]: choose and test cameras",
     )
-    cm.add_argument("action", choices=["list", "use", "add", "remove"], nargs="?", default="list")
+    cm.add_argument("action", choices=["list", "use", "add", "remove", "test"], nargs="?", default="list")
     cm.add_argument("device", nargs="?", help="camera name (or part of it), index from `away cameras list`, or path")
     cm.add_argument("--role", choices=["primary", "secondary"])
     cm.add_argument("--probe", action="store_true", help="open each camera to check it delivers frames")
     cm.add_argument("--json", action="store_true")
+    cm.add_argument("--seconds", type=float, default=10.0, help="test: how long to stream (default 10)")
+    cm.add_argument("--save", action="store_true", help="test: save the camera settings that worked together")
     cm.add_argument("--config")
-    cm.set_defaults(fn=lambda a: cmd_cameras(a) if a.action == "list" else cmd_cameras_edit(a))
+    cm.set_defaults(
+        fn=lambda a: (
+            cmd_cameras(a)
+            if a.action == "list"
+            else (cmd_cameras_test(a) if a.action == "test" else cmd_cameras_edit(a))
+        )
+    )
 
     cc = sub.add_parser("calibrate-cameras", help="calibrate two cameras (hand motion ~20 s, or a checkerboard)")
     cc.add_argument("--method", choices=["hand", "checkerboard"], default="hand")

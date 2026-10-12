@@ -48,3 +48,13 @@ def no_real_camera_listing(monkeypatch):
     monkeypatch.setattr(AwayApp, "_camera_list", lambda self, log=False: None)
     capture._last_logged = None
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_camera_mode_store():
+    """Camera modes kept across starts (camera-modes.json) are off unless a test turns them on."""
+    from away.multicam import capture
+
+    capture.use_mode_store(None)
+    yield
+    capture.use_mode_store(None)

@@ -1077,16 +1077,27 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     # ------------------------------------------------------------------------------ multi-camera
     def _start_cameras(self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any) -> list[Any]:
-        """Start one capture thread per camera (overridden in tests with simulated cameras)."""
-        import functools
+        """Start one capture thread per camera (overridden in tests with simulated cameras): the shared
+        :func:`~away.multicam.capture.start_camera_threads` (also used by Settings and the CLI)."""
+        from away.multicam.capture import start_camera_threads
 
-        from away.multicam.capture import CameraThread, open_capture
+        return start_camera_threads(
+            list(specs),
+            pairer,
+            session,
+            open_lock=open_lock,
+            serial=open_lock is not None,
+            virtual_fallback=bool(self.cfg.hands.virtual_fallback),
+        )
 
-        opener = functools.partial(open_capture, virtual_fallback=bool(self.cfg.hands.virtual_fallback))
-        threads = [CameraThread(i, c, pairer, session, open_lock=open_lock, opener=opener) for i, c in enumerate(specs)]
-        for th in threads:
-            th.start()
-        return threads
+    def _use_mode_store(self) -> None:
+        """Remember per camera name a fallback mode it only works in (v0.1.15), so the next start opens it in
+        that mode right away."""
+        from away.multicam import capture
+
+        if capture.mode_store() is None:
+            with contextlib.suppress(Exception):
+                capture.use_mode_store(capture.default_mode_file())
 
     @staticmethod
     def _end_cameras(session: threading.Event, threads: list[Any]) -> None:
@@ -1113,7 +1124,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         lock = threading.Lock() if self._serial_open() else None
         threads = self._start_cameras(list(specs), pairer, session, lock)
         try:
-            return probe_cameras(threads, pairer.seen, self._probe_timeout(len(specs), probe_s), self.stop_event)
+            # a lease from Settings / calibration ends the probe at once (the device is let go right away)
+            stop = _ProbeStop(self.stop_event, self.camera_share, None)
+            return probe_cameras(threads, pairer.seen, self._probe_timeout(len(specs), probe_s), stop)
         finally:
             self._end_cameras(session, threads)
 
@@ -1150,6 +1163,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         finally:
             done.set()
 
+    def _wait_handover(self, devices: list[Any]) -> None:
+        """The cameras are closed: tell the borrower (Settings, calibration) and wait until it is done."""
+        share = self.camera_share
+        share.clear_owner()
+        share.ack_released(devices)
+        self.bus.publish("camera.handover", {"released": True, "cameras": devices})
+        while share.requested() and not self.stop_event.is_set():
+            self.stop_event.wait(0.5)
+        share.clear_released()
+        self.bus.publish("camera.handover", {"released": False, "cameras": devices})
+
     def _multicam_loop(
         self,
         first_tracker: Any,
@@ -1177,6 +1201,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         cams, mc = self.cfg.hands.cameras, self.cfg.hands.multicam
         primary = next(i for i, c in enumerate(cams) if c.role == "primary")
+        if trackers is None:  # the real app (tests pass trackers and keep the store off)
+            self._use_mode_store()
         own_trackers = trackers is None
         if trackers is None:
             from away.hands.tracker import HandTracker
@@ -1210,12 +1236,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 devices = [c.device for c in run_cams]
                 session = threading.Event()
                 pairer = FramePairer(len(cams), primary, mc.pair_tolerance_ms / 1000.0, mc.dropout_ms / 1000.0)
+                if share.requested():  # Settings / calibration is using the cameras: wait until it is done
+                    self._wait_handover(devices)
+                    continue
                 lock = threading.Lock() if self._serial_open() else None
+                share.publish_owner(devices)  # visible while probing too, so a lease asks us to let go
                 threads = self._start_cameras(run_cams, pairer, session, lock)
-                failed = probe_cameras(threads, pairer.seen, timeout, self.stop_event)
+                failed = probe_cameras(threads, pairer.seen, timeout, _ProbeStop(self.stop_event, share, devices))
                 if self.stop_event.is_set():
                     self._end_cameras(session, threads)
                     break
+                if share.requested():  # asked for the cameras while probing: hand them over now
+                    self._end_cameras(session, threads)
+                    self._wait_handover(devices)
+                    continue
                 working = len(cams) - len(failed)
                 if working < 2 and after_retry:  # the set failed again right after a good probe: back off
                     backoff = min(backoff * 2.0, MULTICAM_RETRY_MAX_S)
@@ -1340,13 +1374,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     self._end_cameras(session, threads)
                 if handover:
                     self.pipeline.on_fused(None, time.monotonic())
-                    share.clear_owner()
-                    share.ack_released(devices)
-                    self.bus.publish("camera.handover", {"released": True, "cameras": devices})
-                    while share.requested() and not self.stop_event.is_set():
-                        self.stop_event.wait(0.5)
-                    share.clear_released()
-                    self.bus.publish("camera.handover", {"released": False, "cameras": devices})
+                    self._wait_handover(devices)
         finally:
             share.clear_owner()
             if own_trackers:
@@ -1437,3 +1465,25 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             pass
         finally:
             self.stop()
+
+
+class _ProbeStop:
+    """``stop`` for :func:`~away.app.camera_loop.probe_cameras`: set when the app stops or another process
+    (Settings, ``away calibrate-cameras``) asks for the cameras. With ``devices``, the owner record is kept
+    fresh while probing (a probe can take 30 s; the record goes stale after 5 s), so a lease sees the app
+    holds the cameras and asks for them instead of failing to open a busy device (v0.1.15)."""
+
+    def __init__(self, stop: threading.Event, share: Any, devices: list[Any] | None, every_s: float = 1.0) -> None:
+        self.stop, self.share, self.devices, self.every_s = stop, share, devices, every_s
+        self._next = 0.0
+
+    def is_set(self) -> bool:
+        if self.stop.is_set():
+            return True
+        now = time.monotonic()
+        if now >= self._next:
+            self._next = now + self.every_s
+            if self.devices is not None:
+                self.share.publish_owner(self.devices)
+            return bool(self.share.requested())
+        return False

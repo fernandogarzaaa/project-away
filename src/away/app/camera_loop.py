@@ -16,7 +16,7 @@ import contextlib
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, Protocol
 
 from away.app.camera_share import CameraShare
 
@@ -152,11 +152,17 @@ class CameraLoop:
         self.publish("camera.handover", {"released": False, "cameras": self.cameras})
 
 
+class StopFlag(Protocol):
+    """Anything with ``is_set()`` (a ``threading.Event``, or the app's stop-or-handover flag)."""
+
+    def is_set(self) -> bool: ...
+
+
 def probe_cameras(
     threads: Sequence[Any],
     seen: Callable[[int], bool],
     timeout_s: float,
-    stop: threading.Event,
+    stop: StopFlag,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = time.sleep,
     step: float = 0.05,
