@@ -506,6 +506,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.asr_model = ""
         self._notices: set[str] = set()
         self.gate_hint = GateHint()
+        self._face_lock = threading.Lock()
+        self.iphone: Any = None  # LiveLinkReceiver when face.source is iphone|auto
+        from away.face.source import FaceSourceSelector
+
+        if cfg.face.enabled and cfg.face.source != "webcam":
+            from away.face.livelink import LiveLinkReceiver
+
+            ip = cfg.face.iphone
+            self.iphone = LiveLinkReceiver(ip.host, ip.port, ip.stale_after)
+        self.face_source = FaceSourceSelector(cfg.face.source if self.iphone is not None else "webcam", self.iphone)
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
         from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
@@ -987,7 +997,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             else None
         )
         faces = None
-        if self.cfg.face.enabled and face_model.exists():
+        if self.cfg.face.enabled and self.face_source.needs_webcam_model and face_model.exists():
             from away.face.landmarker import FaceLandmarker
 
             faces = FaceLandmarker(face_model)
@@ -1006,11 +1016,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     helper_id=getattr(fr, "helper_id", None),
                     promoted=bool(getattr(fr, "promoted", False)),
                 )
-            if faces is not None and n % max(1, prof.face_every) == 0:
+            if faces is not None and n % max(1, prof.face_every) == 0 and self.face_source.use_webcam(t):
                 obs = faces.process(rgb, t)
-                self.pipeline.on_faces(
-                    t, [o.box for o in obs], [o.blendshapes for o in obs], [getattr(o, "frontal", None) for o in obs]
-                )
+                with self._face_lock:
+                    self.pipeline.on_faces(
+                        t,
+                        [o.box for o in obs],
+                        [o.blendshapes for o in obs],
+                        [getattr(o, "frontal", None) for o in obs],
+                    )
 
         def run_single(idx: Any, until: Any = None) -> None:
             """Track on one camera (retried while it will not open) until ``until()`` or stop. ``idx`` is a camera
@@ -1405,15 +1419,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                 extra["helper"] = fused_helper
                             self.pipeline.on_fused(fused, t_ref, **extra)
                             prim_frame = frames[primary]
-                            if faces is not None and prim_frame is not None:
+                            if (
+                                faces is not None
+                                and prim_frame is not None
+                                and self.face_source.use_webcam(prim_frame[0])
+                            ):
                                 t_p, rgb_p = prim_frame
                                 obs = faces.process(rgb_p, t_p)
-                                self.pipeline.on_faces(
-                                    t_p,
-                                    [o.box for o in obs],
-                                    [o.blendshapes for o in obs],
-                                    [getattr(o, "frontal", None) for o in obs],
-                                )
+                                with self._face_lock:
+                                    self.pipeline.on_faces(
+                                        t_p,
+                                        [o.box for o in obs],
+                                        [o.blendshapes for o in obs],
+                                        [getattr(o, "frontal", None) for o in obs],
+                                    )
                         except Exception as exc:
                             if self.stop_event.is_set() or is_shutdown_error(exc):
                                 self.stop_event.set()
@@ -1430,6 +1449,34 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 for tr in trackers[1:]:
                     with contextlib.suppress(Exception):
                         tr.close()
+
+    def _iphone_loop(self) -> None:
+        """Live Link Face (iPhone) -> face pipeline, while it is the active face source."""
+        from away.face.source import IPhoneFaceFeed
+
+        rx = self.iphone
+        if not rx.start():
+            self.bus.publish("iphone.error", {"error": rx.error})
+            return
+        ip = self.cfg.face.iphone
+        self.bus.publish("iphone.listening", {"host": ip.host, "port": ip.port, "source": self.cfg.face.source})
+        feed = IPhoneFaceFeed(
+            rx,
+            self.pipeline,
+            self.face_source,
+            ip.max_rate,
+            ip.swap_sides,
+            lock=self._face_lock,
+            on_switch=lambda src: self.bus.publish("face.source", {"source": src}),
+        )
+        seq = 0
+        while not self.stop_event.is_set():
+            seq = rx.wait(seq, 0.1)
+            try:
+                feed.step(time.monotonic())
+            except Exception as exc:  # a face-pipeline error must not kill the listener
+                self.bus.publish("iphone.error", {"error": str(exc)})
+        rx.stop()
 
     def _wifi_loop(self) -> None:
         from away.wifi.sources import IAXSource, PicoScenesSource, RSSISource, stack_csi
@@ -1462,8 +1509,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 buf_rssi = buf_rssi[len(buf_rssi) // 2 :]
 
     def start(self) -> None:
-        if self.cfg.hands.enabled or self.cfg.face.enabled:
+        webcam_face = self.cfg.face.enabled and self.face_source.needs_webcam_model
+        if self.cfg.hands.enabled or webcam_face:
             self.threads.append(threading.Thread(target=self._camera_loop, daemon=True, name="camera"))
+        if self.iphone is not None:
+            self.threads.append(threading.Thread(target=self._iphone_loop, daemon=True, name="iphone"))
         if self.cfg.voice.enabled:
             self._start_voice()
         if self.cfg.wifi.enabled:

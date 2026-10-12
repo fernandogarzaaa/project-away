@@ -956,6 +956,36 @@ def _run_camera_calibration(cfg: cfgmod.AppConfig, args: argparse.Namespace) -> 
     return 0
 
 
+def cmd_iphone(args: argparse.Namespace, webcam: Any = None) -> int:
+    """Experimental: iPhone face tracking through Epic's Live Link Face app (see docs/iphone.md)."""
+    from away.face import iphone_cli
+    from away.face.livelink import LiveLinkReceiver
+
+    cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
+    ip = cfg.face.iphone
+    port = args.port or ip.port
+    rx = LiveLinkReceiver(args.host or ip.host, port, ip.stale_after)
+    if args.action == "listen":
+        return iphone_cli.run_listen(rx, args.seconds)
+    # compare
+    seconds = args.seconds or 30.0
+    out_path = Path(args.out) if args.out else iphone_cli.default_compare_path(paths.data_dir())
+    if webcam is None:  # pragma: no cover - needs a camera + the [face] extra
+        model = _models_dir(cfg) / "face_landmarker.task"
+        if not model.exists():
+            return _fail(f"webcam face model missing ({model}); run `away setup` first")
+        webcam = iphone_cli.webcam_blendshapes(model, cfg.hands.camera_index, cfg.hands.mirror)
+    if not rx.start():
+        return _fail(str(rx.error))
+    keys = iphone_cli.SHARED_KEYS if args.all else iphone_cli.COMPARE_KEYS
+    print(f"Comparing webcam vs iPhone for {seconds:g} s: talk, blink, wink, raise your brows, open your mouth...")
+    try:
+        summary = iphone_cli.run_compare(rx, webcam, seconds, out_path, keys, ip.swap_sides)
+    finally:
+        rx.stop()
+    return 0 if summary["iphone_face_rows"] else 1
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
@@ -1180,6 +1210,16 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument("--config")
     cc.add_argument("--status-file", help=argparse.SUPPRESS)  # progress JSON for the Settings window
     cc.set_defaults(fn=cmd_calibrate_cameras)
+
+    ip = sub.add_parser("iphone", help="listen | compare: experimental iPhone face tracking (Live Link Face app)")
+    ip.add_argument("action", choices=["listen", "compare"], nargs="?", default="listen")
+    ip.add_argument("--port", type=int, help="UDP port (default face.iphone.port, 11111)")
+    ip.add_argument("--host", help="interface to listen on (default face.iphone.host, 0.0.0.0)")
+    ip.add_argument("--seconds", type=float, help="listen: stop after N s (default: until Ctrl+C); compare: default 30")
+    ip.add_argument("--out", help="compare: CSV path (default: <data dir>/iphone/compare-<time>.csv)")
+    ip.add_argument("--all", action="store_true", help="compare: log all 51 shared blendshapes, not just the key ones")
+    ip.add_argument("--config")
+    ip.set_defaults(fn=cmd_iphone)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")
