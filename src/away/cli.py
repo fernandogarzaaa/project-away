@@ -303,7 +303,10 @@ def cmd_calibrate(args: argparse.Namespace) -> int:  # pragma: no cover - needs 
     m = calibrate(_models_dir(cfg), rec, epochs=args.epochs)
     print(json.dumps(m, indent=2))
     if "recorded_holdout_accuracy" in m:
-        print("Recorded holdout metric available. Review the metrics and test on real gestures before enabling the model; it remains disabled by default.")
+        print(
+            "Recorded holdout metric available. Review the metrics and test on real gestures"
+            " before enabling the model; it remains disabled by default."
+        )
     elif "recorded_holdout_warning" in m:
         print(m["recorded_holdout_warning"])
     return 0
