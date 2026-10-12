@@ -164,8 +164,10 @@ def temporal_split(
         # Fewer than three groups cannot support distinct train/validation/test partitions.
         if len(unique_groups) >= 3:
             shuffled_groups = rng.permutation(unique_groups).tolist()
-            n_test = min(max(1, int(round(len(shuffled_groups) * test_frac)),), len(shuffled_groups) - 2)
-            n_val = min(max(1, int(round(len(shuffled_groups) * val_frac)),), len(shuffled_groups) - n_test - 1)
+            n_test = max(1, int(round(len(shuffled_groups) * test_frac)))
+            n_test = min(n_test, len(shuffled_groups) - 2)
+            n_val = max(1, int(round(len(shuffled_groups) * val_frac)))
+            n_val = min(n_val, len(shuffled_groups) - n_test - 1)
             test_groups = set(shuffled_groups[:n_test])
             val_groups = set(shuffled_groups[n_test:n_test + n_val])
             for group, indices in group_to_indices.items():
@@ -187,9 +189,10 @@ def train_temporal(
 ) -> dict[str, Any]:
     """Train (or fine-tune) the temporal TCN.
 
-    Data = synthetic sequences (+ your ``away record`` clips if given). Reported
-    accuracy is split by source: ``synthetic_holdout_accuracy`` is NOT a
-    real-world number; ``recorded_holdout_accuracy`` is, when recordings exist.
+    Data = synthetic sequences (+ your recorded clips if given). Validation selects
+    the checkpoint; the final test partition is evaluated once after training. Synthetic
+    accuracy is procedural-data fit, not a real-world number. Recorded test scores are
+    group-disjoint only when recording metadata identifies independent sessions/subjects.
     """
     import torch
 
@@ -229,7 +232,10 @@ def train_temporal(
     source = np.array(src)
     train_mask, val_mask, test_mask = temporal_split(source, groups, rng)
     t = lambda a, dt=torch.float32: torch.tensor(a, dtype=dt)  # noqa: E731
-    model = _fit(model, t(X[train_mask]), t(y[train_mask], torch.long), t(X[val_mask]), t(y[val_mask], torch.long), epochs, lr, bs=64)
+    model = _fit(
+        model, t(X[train_mask]), t(y[train_mask], torch.long),
+        t(X[val_mask]), t(y[val_mask], torch.long), epochs, lr, bs=64,
+    )
     # Test data is evaluated only after validation has selected the model checkpoint.
     with torch.no_grad():
         pred = model(t(X[test_mask])).argmax(1).numpy() if test_mask.any() else np.array([], dtype=np.int64)
