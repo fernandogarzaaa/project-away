@@ -703,7 +703,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1235 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1282 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -733,7 +733,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | faster-whisper `hotwords` | Parameter verified on the installed faster-whisper 1.2.1 by signature; **not run on real speech** |
 | Cursor ring window, pynput auto-pause listeners, F9 / edit hotkeys, clipboard edit flow | **Untested** on real desktops |
 | Static pose model | 99.27% acc / 0.982 macro-F1 on 4,094 HaGRID v2 samples from 520 unseen people (MediaPipe-annotated, not live webcam) |
-| Temporal gesture model | Synthetic only. Off by default until `away calibrate` |
+| Temporal gesture model | Synthetic only. Off by default, and stays off after `away calibrate` (v0.1.17): enable `hands.gestures.use_model` yourself once its holdout metrics look right and it works on your real gestures |
 | MediaPipe hands/face on real photos | Verified |
 | faster-whisper + Silero VAD on synthetic speech | Verified |
 | PicoScenes `.csi` parsing on sample file | Verified |
@@ -748,6 +748,14 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Auto-update (`away update`, tray item) | Version compare, asset choice, SHA-256 verify, command lines and AppImage replace unit-tested with no network (`tests/test_updater.py`); real installs on each OS **untested** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
+
+## Changes in v0.1.17
+
+**Honest temporal gesture evaluation.** Training the temporal gesture model now keeps separate train, validation and
+test splits, grouped by `session_id`/`subject_id` so frames from one recording never land on both sides. With fewer
+than 3 recording groups no recorded holdout score is reported (a warning explains why). **The learned gesture model
+stays opt-in after calibrate:** `away calibrate` prints the metrics but no longer turns on
+`hands.gestures.use_model`; review them, test on real gestures, then enable it yourself.
 
 ## Roadmap
 
