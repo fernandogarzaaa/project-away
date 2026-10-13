@@ -71,6 +71,9 @@ all = [
   "faster-whisper>=1.1", "sounddevice>=0.4.6",
   "pynput>=1.7.6", "pyperclip>=1.8",
   "pystray>=0.19", "Pillow>=10",
+  # v0.1.20: pure-Python packages the downloadable Smart cleanup engine (llama-cpp-python) imports; bundled in
+  # the installers so Settings' Download only has to fetch the engine wheel itself (away.voice.engine)
+  "diskcache>=5.6.1", "jinja2>=3.1", "typing_extensions>=4.5",
   # the [pointer] extra (Windows only)
   "comtypes>=1.2; sys_platform == 'win32'",
   # the [agent] extra (Agent Link)
@@ -89,7 +92,12 @@ all = [
   "winrt-Windows.Storage.Streams>=2.0; sys_platform == 'win32'",
 ]
 # comtypes (Windows only): the smart pointer's real UI Automation smoke test runs on the Windows CI job
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML", "comtypes>=1.2; sys_platform == 'win32'"]
+dev = [
+  "pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML",
+  "comtypes>=1.2; sys_platform == 'win32'",
+  # the Smart cleanup engine's import-time dependencies (tests load the real downloaded engine on CI)
+  "diskcache>=5.6.1", "jinja2>=3.1", "typing_extensions>=4.5",
+]
 
 [project.scripts]
 away = "away.cli:main"

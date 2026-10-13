@@ -49,6 +49,8 @@ jobs:
       # [winrt] installs the pywinrt camera packages on Windows only (environment markers); elsewhere nothing
       - run: pip install -e ".[dev,winrt,agent]" Pillow opencv-python-headless
       - name: Core tests (torch tests self-skip without the [train] extra)
+        env:
+          AWAY_NET_TESTS: "1"  # v0.1.20: download + load the pinned Smart cleanup engine on every OS
         run: pytest -p no:warnings --cov=away --cov-report=term-missing:skip-covered
 
   train:

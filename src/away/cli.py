@@ -1193,6 +1193,32 @@ def cmd_tour(args: argparse.Namespace) -> int:
     return tour_main(_cfg_path(args))  # pragma: no cover
 
 
+def cmd_cleanup_engine(args: argparse.Namespace) -> int:
+    """v0.1.20: download / check the Smart cleanup engine the installers do not bundle (away.voice.engine)."""
+    from away.voice import engine
+
+    if args.action == "status":
+        print(engine.status_line())
+        return 0
+    if args.action == "check":  # run in its own process by install(): a broken native library cannot crash the app
+        try:
+            print(engine.self_check())
+        except Exception as exc:
+            print(f"engine check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.action == "remove":
+        print("removed" if engine.remove() else "nothing to remove")
+        return 0
+    try:
+        path = engine.install(progress=None)
+    except engine.EngineInstallError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Smart cleanup engine ready: {path}")
+    return 0
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
@@ -1461,6 +1487,10 @@ def build_parser() -> argparse.ArgumentParser:
     tr = sub.add_parser("tour", help="guided first run: camera, sitting position, a 2-minute gesture tutorial")
     tr.add_argument("--text", action="store_true", help="text version (no window): camera check and tips")
     tr.set_defaults(fn=cmd_tour)
+
+    ce = sub.add_parser("cleanup-engine", help="Smart cleanup's engine (a pinned llama-cpp-python wheel)")
+    ce.add_argument("action", choices=["status", "install", "check", "remove"])
+    ce.set_defaults(fn=cmd_cleanup_engine)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")

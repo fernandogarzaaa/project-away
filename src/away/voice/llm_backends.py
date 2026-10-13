@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -32,8 +33,13 @@ class EngineError(RuntimeError):
 
 
 def llama_cpp_available() -> bool:
+    """llama-cpp-python is importable: pip-installed, or the engine Settings downloaded (away.voice.engine)."""
     import importlib.util
 
+    with contextlib.suppress(Exception):
+        from away.voice import engine
+
+        engine.activate()
     try:
         return importlib.util.find_spec("llama_cpp") is not None
     except (ImportError, ValueError):

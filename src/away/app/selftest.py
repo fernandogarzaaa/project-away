@@ -183,6 +183,21 @@ def _monitors() -> str:
     return f"{layout.summary()}; DPI awareness: {monitors.enable_dpi_awareness()}{note}"
 
 
+def _cleanup_runtime() -> str:
+    """v0.1.20 Smart cleanup: the Python packages the downloadable llama-cpp-python engine imports are bundled
+    (numpy, typing_extensions, diskcache, jinja2); the engine itself is fetched by Settings' Download button."""
+    from away.voice import engine
+
+    missing = engine.missing_dependencies()
+    assert not missing, f"Smart cleanup engine dependencies missing from the bundle: {missing}"
+    import diskcache  # noqa: F401
+    import jinja2  # noqa: F401
+
+    w = engine.wheel_for()
+    offer = f"{w.filename} ({w.size / 1e6:.0f} MB) offered" if w is not None else "no ready-made engine here"
+    return f"engine deps ok; {offer}; {engine.status_line()}"
+
+
 CHECKS: tuple[Check, ...] = (
     Check("hardware", "hardware detection + speech device", _hardware),
     Check("core", "numpy/scipy/yaml", _numpy),
@@ -192,6 +207,7 @@ CHECKS: tuple[Check, ...] = (
     Check("opencv", "camera capture", _opencv),
     Check("winrt-camera", "WinRT camera backend (Windows)", _winrt_camera),
     Check("faster-whisper", "dictation (Whisper + Silero VAD)", _faster_whisper),
+    Check("cleanup-runtime", "Smart cleanup engine dependencies", _cleanup_runtime),
     Check("hf-xet", "fast Whisper download fallback (Xet)", _hf_xet),
     Check("sounddevice", "microphone (PortAudio)", _sounddevice),
     Check("tkinter", "settings window", _tkinter),

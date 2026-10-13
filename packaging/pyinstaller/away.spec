@@ -75,6 +75,12 @@ optional("pystray", data=False, subs=True, hidden_mods=[f"pystray.{m}" for m in 
 optional("PIL", data=False)
 optional("pyperclip", data=False)
 optional("tkinter", data=False, hidden_mods=["tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"])
+# v0.1.20 Smart cleanup: Settings' Download fetches a pinned llama-cpp-python wheel (away.voice.engine) into the
+# data folder; the pure-Python packages it imports must already be in the bundle (selftest: cleanup-runtime).
+optional("diskcache", data=False, hidden_mods=["diskcache"])
+optional("jinja2", data=False, subs=True)
+optional("markupsafe", data=False, subs=True)
+optional("typing_extensions", data=False)
 # v0.1.20 Agent Link: the MCP SDK + its HTTP stack (uvicorn picks protocol/loop modules by name at run time),
 # QR codes, the OS keyring, and UI Automation on Windows. All pure Python (no new DLLs).
 optional("mcp", data=False, subs=True, meta=True)

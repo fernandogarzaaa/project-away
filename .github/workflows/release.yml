@@ -152,6 +152,18 @@ jobs:
           Run-Away @("setup", "--yes", "--skip-probe", "--asr-model", "tiny")
           python scripts/check_selftest.py --models "$env:AWAY_DATA_DIR\models" --asr tiny
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Smart cleanup engine in the frozen app (download + load in its own process; non-blocking)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          function Run-Away([string[]]$a) {
+            $p = Start-Process -FilePath dist\ProjectAway\ProjectAway.exe -ArgumentList $a -Wait -PassThru -NoNewWindow
+            if (Test-Path $env:AWAY_LOG_FILE) { Get-Content $env:AWAY_LOG_FILE; Remove-Item $env:AWAY_LOG_FILE }
+            if ($p.ExitCode -ne 0) { throw "ProjectAway.exe $a exited $($p.ExitCode)" }
+          }
+          Run-Away @("cleanup-engine", "install")
+          Run-Away @("cleanup-engine", "check")
+          Run-Away @("cleanup-engine", "remove")
       - name: Build installer with Inno Setup (preinstalled on windows-latest)
         shell: pwsh
         run: |

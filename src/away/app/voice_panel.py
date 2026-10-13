@@ -58,6 +58,8 @@ class VoicePanel:
         dictionary_path: Path | None = None,
         gpu: bool | None = None,
         engine_available: Callable[[], bool] | None = None,
+        engine_offer: Callable[[], Any] | None = None,
+        engine_install: Callable[..., Any] | None = None,
     ) -> None:
         self.cfg = cfg
         if models_dir is None:
@@ -75,6 +77,13 @@ class VoicePanel:
 
             engine_available = llama_cpp_available
         self.engine_available = engine_available
+        if engine_offer is None or engine_install is None:
+            from away.voice import engine
+
+            engine_offer = engine_offer or engine.wheel_for
+            engine_install = engine_install or engine.install
+        self.engine_offer = engine_offer  # the ready-made engine wheel for this computer, or None (v0.1.20)
+        self.engine_install = engine_install
 
     # ------------------------------------------------------------------ smart cleanup
     @property
@@ -113,9 +122,24 @@ class VoicePanel:
             return Path(self.model_key()).expanduser().is_file()
         return om.installed(m.key, self.models_dir)
 
-    def download_label(self) -> str:
+    def _engine_wheel(self) -> Any:
+        """The prebuilt engine to fetch with Download, when the engine is missing and one exists."""
+        if self.c.backend != "llama_cpp" or self.engine_available():
+            return None
+        try:
+            return self.engine_offer()
+        except Exception:
+            return None
+
+    def download_bytes(self) -> int:
         m = self._registry_model()
-        return f"Download ({human_size(m.size_bytes)})" if m is not None else "Download"
+        n = m.size_bytes if m is not None and not self.model_ready() else 0
+        w = self._engine_wheel()
+        return n + (int(w.size) if w is not None else 0)
+
+    def download_label(self) -> str:
+        n = self.download_bytes()
+        return f"Download ({human_size(n)})" if n else "Download"
 
     def problem(self, check_server: bool = False) -> Problem | None:
         """What stops Smart cleanup from working, in plain words (None = ready, or Smart cleanup is off)."""
@@ -123,9 +147,9 @@ class VoicePanel:
             return None
         backend = self.c.backend
         if backend == "llama_cpp":
-            if not self.model_ready():
-                m = self._registry_model()
-                size = f" ({human_size(m.size_bytes)}, one time)" if m is not None else ""
+            if not self.model_ready() or self._engine_wheel() is not None:
+                n = self.download_bytes()
+                size = f" ({human_size(n)}, one time)" if n else ""
                 return Problem(f"Smart cleanup needs a download{size}.", "download", self.download_label())
             if not self.engine_available():
                 return Problem(
@@ -160,14 +184,31 @@ class VoicePanel:
         return self.problem()
 
     def download(self, progress: Callable[[int, int], None] | None = None) -> str | None:
-        """One-click model download (resumes). Returns a friendly error or None."""
+        """One-click download (resumes): the model and, in the installed app, the engine (v0.1.20: a pinned,
+        sha256-checked llama-cpp-python wheel, see :mod:`away.voice.engine`). Returns a friendly error or None."""
         m = self._registry_model()
-        if m is None:
+        w = self._engine_wheel()
+        if m is None and w is None:
             return "Your own model file is used; nothing to download."
-        try:
-            om.install(m.key, self.models_dir, progress=progress)
-        except Exception as exc:
-            return f"The download stopped ({type(exc).__name__}). Check your internet and press Download to resume."
+        total = max(1, self.download_bytes())
+        done_before = [0]
+
+        def step(done: int, _total: int) -> None:
+            if progress is not None:
+                progress(min(total, done_before[0] + done), total)
+
+        if m is not None and not self.model_ready():
+            try:
+                om.install(m.key, self.models_dir, progress=step)
+            except Exception as exc:
+                return f"The download stopped ({type(exc).__name__}). Check your internet and press Download to resume."
+            done_before[0] += m.size_bytes
+        if w is not None:
+            try:
+                self.engine_install(progress=step)
+            except Exception as exc:
+                msg = str(exc) if type(exc).__name__ == "EngineInstallError" else ""
+                return msg or f"The engine download stopped ({type(exc).__name__}). Press Download to try again."
         return None
 
     def fix_action(self, fix: str) -> str | None:

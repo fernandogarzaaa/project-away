@@ -565,7 +565,14 @@ def test_cleanup_models_are_apache_pinned_and_not_restricted() -> None:
 def test_voice_panel_toggle_download_and_friendly_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = C.AppConfig()
     engine = {"ok": False}
-    p = VoicePanel(cfg, tmp_path / "models", tmp_path / "d.json", gpu=False, engine_available=lambda: engine["ok"])
+    p = VoicePanel(
+        cfg,
+        tmp_path / "models",
+        tmp_path / "d.json",
+        gpu=False,
+        engine_available=lambda: engine["ok"],
+        engine_offer=lambda: None,  # no ready-made engine for this computer: the "Learn how" path
+    )
     assert not p.smart_on() and p.problem() is None
     prob = p.set_smart(True)
     assert cfg.voice.cleanup.mode == "llm" and prob is not None and prob.fix == "download"
@@ -599,6 +606,62 @@ def test_voice_panel_toggle_download_and_friendly_errors(tmp_path: Path, monkeyp
     monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
     assert p.fix_action("start_ollama") == "https://ollama.com/download" and opened
     assert p.fix_action("download") is None
+
+
+def test_voice_panel_download_also_fetches_the_ready_made_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.1.20 installers: Download fetches the model and the pinned llama-cpp-python wheel in one go."""
+    from types import SimpleNamespace
+
+    cfg = C.AppConfig()
+    state = {"engine": False}
+    wheel = SimpleNamespace(size=8_000_000)
+    calls: list[str] = []
+
+    def install_engine(progress: Any = None) -> Path:
+        calls.append("engine")
+        if progress is not None:
+            progress(wheel.size, wheel.size)
+        state["engine"] = True
+        return tmp_path
+
+    p = VoicePanel(
+        cfg,
+        tmp_path / "models",
+        tmp_path / "d.json",
+        gpu=False,
+        engine_available=lambda: state["engine"],
+        engine_offer=lambda: wheel,
+        engine_install=install_engine,
+    )
+    prob = p.set_smart(True)
+    m = om.get("qwen2.5-0.5b")
+    assert prob is not None and prob.fix == "download" and prob.button == "Download (499 MB)"
+
+    def fake_download(url: str, dest: Path, rf: Any, meter: Any) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.truncate(m.size_bytes)
+        meter.add(m.size_bytes)
+        return dest
+
+    monkeypatch.setattr(fastdl, "download_file", fake_download)
+    seen: list[tuple[int, int]] = []
+    assert p.download(lambda d, t: seen.append((d, t))) is None
+    assert calls == ["engine"] and seen[-1] == (m.size_bytes + wheel.size, m.size_bytes + wheel.size)
+    assert p.problem() is None
+    # the model already there, the engine missing: Download fetches only the engine
+    state["engine"] = False
+    prob = p.problem()
+    assert prob is not None and prob.fix == "download" and prob.button == "Download (8 MB)"
+    from away.voice.engine import EngineInstallError
+
+    def broken(progress: Any = None) -> Path:
+        raise EngineInstallError("Smart cleanup's engine needs the Microsoft Visual C++ Redistributable (x64).")
+
+    p.engine_install = broken
+    assert "Visual C++" in (p.download() or "")
 
 
 def test_voice_panel_advanced_and_words(tmp_path: Path) -> None:
