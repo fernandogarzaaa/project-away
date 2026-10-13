@@ -168,9 +168,34 @@ class WinrtApi(Protocol):
 _winrt_state: dict[str, Any] = {}
 
 
+def preload_system_msvcp140(platform: str | None = None, loader: Callable[[str], Any] | None = None) -> bool:
+    """Load the system (or the app's bundled) ``msvcp140.dll`` before pywinrt does.
+
+    The ``winrt-runtime`` wheel ships its own old ``winrt/msvcp140.dll`` (14.29, VS 2019) next to ``_winrt.pyd``.
+    Windows keeps one ``msvcp140.dll`` per process, the first one loaded, and onnxruntime 1.2x+ needs 14.40 or
+    newer: once pywinrt has loaded the old copy, importing onnxruntime crashes the process (access violation;
+    seen in the v0.1.19 Windows installer build). Loading the system copy first makes pywinrt reuse it.
+    Returns True when a copy was loaded here; never raises."""
+    import sys
+
+    if not (platform or sys.platform).startswith("win"):
+        return False
+    if loader is None:  # pragma: no cover - Windows only
+        import ctypes
+
+        loader = ctypes.WinDLL  # type: ignore[attr-defined]
+    try:
+        loader("msvcp140.dll")  # application dir (the frozen app's bundle), then System32
+    except OSError as exc:
+        log.debug("msvcp140.dll preload failed (%s); pywinrt uses its own copy", exc)
+        return False
+    return True
+
+
 def load_winrt() -> dict[str, Any]:  # pragma: no cover - needs the Windows-only pywinrt wheels
     """The pywinrt namespaces this backend uses (imported on first use). Raises ImportError when missing."""
     if "mods" not in _winrt_state:
+        preload_system_msvcp140()
         import winrt.windows.devices.enumeration
         import winrt.windows.foundation
         import winrt.windows.foundation.collections  # noqa: F401  (IVectorView / IMapView results)

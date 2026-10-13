@@ -120,6 +120,14 @@ jobs:
           pip install torch --index-url $env:TORCH_CPU_INDEX
           pip install ".[all,train]" pyinstaller
           python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: Remove pywinrt's old msvcp140.dll (14.29; onnxruntime needs the system VC++ 2022 copy)
+        shell: pwsh
+        run: |
+          # Windows keeps the first msvcp140.dll a process loads; with winrt's old copy first, importing onnxruntime
+          # crashes (access violation), including inside PyInstaller's analysis. The system copy serves both.
+          $dll = python -c "import pathlib, importlib.util as u; print(pathlib.Path(u.find_spec('winrt._winrt').origin).parent / 'msvcp140.dll')"
+          if (Test-Path $dll) { Remove-Item $dll; Write-Host "removed $dll" }
+          python -c "import winrt.windows.media.capture, onnxruntime; print('winrt then onnxruntime: ok', onnxruntime.__version__)"
       - name: PyInstaller (strict)
         shell: pwsh
         run: |

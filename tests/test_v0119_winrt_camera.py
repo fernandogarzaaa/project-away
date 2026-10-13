@@ -1230,6 +1230,39 @@ def test_winrt_extra_is_windows_only_and_bundled() -> None:
     assert '".[dev,winrt]"' in ci
 
 
+def test_preload_system_msvcp140_before_pywinrt() -> None:
+    """pywinrt's own msvcp140.dll (14.29) must never be the process's copy: onnxruntime needs 14.40+."""
+    calls: list[str] = []
+    assert W.preload_system_msvcp140("linux", calls.append) is False and calls == []
+    assert W.preload_system_msvcp140("darwin", calls.append) is False and calls == []
+    assert W.preload_system_msvcp140("win32", calls.append) is True and calls == ["msvcp140.dll"]
+
+    def missing(name: str) -> None:
+        raise OSError(126, "not found", name)
+
+    assert W.preload_system_msvcp140("win32", missing) is False  # never raises: pywinrt then uses its own copy
+
+
+def test_installer_never_ships_or_loads_pywinrt_msvcp140() -> None:
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    spec = (root / "packaging" / "pyinstaller" / "away.spec").read_text()
+    src = spec[spec.index("def _is_winrt_msvcp") :]
+    src = src[: src.index("\n\n\n")]
+    ns: dict[str, Any] = {"re": re}
+    exec(src, ns)  # our own spec file
+    drop = ns["_is_winrt_msvcp"]
+    assert drop("winrt\\msvcp140.dll") and drop("winrt/MSVCP140.dll")
+    assert not drop("msvcp140.dll") and not drop("winrt\\_winrt.cp312-win_amd64.pyd")
+    assert not drop("onnxruntime\\capi\\msvcp140.dll")
+    assert "a.binaries = [b for b in a.binaries if not _is_winrt_msvcp(b[0])]" in spec
+    rel = (root / ".github" / "workflows" / "release.yml").read_text()
+    win = rel[rel.index("\n  windows:") : rel.index("\n  macos:")]
+    assert win.index("Remove pywinrt's old msvcp140.dll") < win.index("pyinstaller packaging/pyinstaller/away.spec")
+    assert "import winrt.windows.media.capture, onnxruntime" in win
+
+
 def test_selftest_has_a_winrt_check_that_passes_off_windows() -> None:
     check = next(c for c in selftest.CHECKS if c.name == "winrt-camera")
     if not sys.platform.startswith("win"):

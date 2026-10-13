@@ -914,7 +914,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 1657 tests collected on Linux (270 new in v0.1.19; on Linux without the optional extras 6 skip: torch training, faster-whisper, the real DirectShow / Media Foundation / pywinrt checks) (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 1659 tests collected on Linux (272 new in v0.1.19; on Linux without the optional extras 6 skip: torch training, faster-whisper, the real DirectShow / Media Foundation / pywinrt checks) (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -978,7 +978,9 @@ packages in the `[winrt]` extra, part of `[all]` and bundled in the Windows inst
 (and **Diagnose** in Settings → Cameras) lists every camera x backend with its native formats and the fps each
 mode really delivers. A failing camera is retried with a back-off and stops after `hands.camera_retry_limit`
 failures with one notice; **Retry cameras** in the tray and in Settings probes again at once. MJPG is reported
-honestly (read back after setting it). See "Multi-camera" above.
+honestly (read back after setting it). See "Multi-camera" above. The Windows installer drops pywinrt's bundled
+`msvcp140.dll` (an old 14.29 copy that made onnxruntime crash when it loaded first) and the backend preloads the
+system VC++ copy before importing pywinrt.
 
 **Auto-centering, head tracking, eye tracking and the screen map**, plus an opt-in learned gaze model and a Models
 list in Settings → Performance. See "Auto-centering, head tracking and eye tracking (v0.1.19)" above. New voice

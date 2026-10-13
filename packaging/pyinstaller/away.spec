@@ -92,6 +92,16 @@ if sys.platform == "win32":
         "winrt.windows.storage.streams",
     ]
     optional("winrt", data=False, libs=True, subs=True, hidden_mods=_winrt_ns + ["winrt._winrt", "typing_extensions"])
+    _winrt_spec = importlib.util.find_spec("winrt._winrt")
+    if _winrt_spec is not None and _winrt_spec.origin:
+        _old_msvcp = Path(_winrt_spec.origin).parent / "msvcp140.dll"
+        if _old_msvcp.exists():
+            # PyInstaller imports every collected package in one subprocess to find DLLs; with pywinrt's old
+            # msvcp140.dll loaded first, importing onnxruntime there crashes (0xC0000005). release.yml deletes it.
+            raise SystemExit(
+                f"[away.spec] delete {_old_msvcp} first (pywinrt's old msvcp140.dll crashes onnxruntime; the system "
+                "VC++ 2022 copy is used instead)"
+            )
 
 if sys.platform.startswith("linux"):
     # Linux sounddevice uses the system PortAudio; bundle one too (used when the system has none,
@@ -146,6 +156,19 @@ def _is_gpu_runtime(dest, src):
 
 a.binaries = [b for b in a.binaries if not _is_gpu_runtime(b[0], b[1])]
 print(f"[away.spec] stripped {before - len(a.binaries)} CUDA/NVIDIA binaries")
+
+
+def _is_winrt_msvcp(dest):
+    # v0.1.19: winrt-runtime ships an old msvcp140.dll (14.29) in winrt/. Windows keeps the first msvcp140.dll a
+    # process loads, and onnxruntime needs >= 14.40, so pywinrt's copy loaded first crashes onnxruntime (access
+    # violation). Ship only the top-level (system, VC++ 2022) copy; away.multicam.winrt_capture also preloads it.
+    parts = re.split(r"[\\/]", dest.lower())
+    return len(parts) >= 2 and parts[-2] == "winrt" and parts[-1] == "msvcp140.dll"
+
+
+before = len(a.binaries)
+a.binaries = [b for b in a.binaries if not _is_winrt_msvcp(b[0])]
+print(f"[away.spec] dropped {before - len(a.binaries)} pywinrt msvcp140.dll copies")
 
 pyz = PYZ(a.pure)  # noqa: F821
 exe = EXE(  # noqa: F821
