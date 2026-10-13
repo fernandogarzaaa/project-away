@@ -754,6 +754,14 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 
+## Changes in v0.1.18
+
+**Experimental iPhone face source.** `face.source: webcam|iphone|auto` can take ARKit blendshapes from the free
+Live Link Face app over Wi-Fi (UDP) instead of the webcam, with `away iphone listen|compare` to check the link and
+an automatic webcam fallback when the phone goes quiet. Unit-tested with synthetic packets and a UDP loopback;
+untested with a real iPhone. See [docs/iphone.md](docs/iphone.md). The repository now ships an MIT `LICENSE` file
+matching the package metadata.
+
 ## Changes in v0.1.17
 
 **Honest temporal gesture evaluation.** Training the temporal gesture model now keeps separate train, validation and
