@@ -186,6 +186,145 @@ TUNABLE_META: dict[str, TunableMeta] = {
         "Face", "Wink: other eye open", "Higher: the other eye may be more closed and it still counts.", ""
     ),
     "face.wink_hold": M("Face", "Wink: hold", "Higher: hold the wink longer.", "s"),
+    # ------------------------------------------------------------------ head & eyes (v0.1.19)
+    "hands.cursor.autocenter.soft_strength": M(
+        "Head & eyes",
+        "Auto-center: soft recenter strength",
+        "Higher: your resting hand drifts back to the middle of the camera view faster (0 = off).",
+        "",
+    ),
+    "hands.cursor.autocenter.comfort_tau_s": M(
+        "Head & eyes",
+        "Auto-center: comfort zone learning time",
+        "Higher: the learned resting spot follows your hand more slowly.",
+        "s",
+    ),
+    "hands.cursor.autocenter.rest_speed": M(
+        "Head & eyes",
+        "Auto-center: resting hand speed",
+        "Higher: a slowly moving hand still counts as resting.",
+        "frame/s",
+    ),
+    "hands.cursor.autocenter.edge_margin": M(
+        "Head & eyes",
+        "Auto-center: camera edge band",
+        "Higher: a wider band at the frame edge where a swing back does not drag the cursor.",
+        "frame",
+    ),
+    "hands.cursor.autocenter.edge_return_speed": M(
+        "Head & eyes",
+        "Auto-center: swing-back speed at the edge",
+        "Higher: only a quicker swing back from the edge lifts the cursor.",
+        "frame/s",
+    ),
+    "hands.cursor.head.min_cutoff": M(
+        "Head & eyes", "Head: smoothing (still)", "Lower: steadier head readings, but they lag a little.", "Hz"
+    ),
+    "hands.cursor.head.beta": M(
+        "Head & eyes", "Head: smoothing (moving)", "Higher: less lag on quick head turns; lower: smoother.", ""
+    ),
+    "hands.cursor.head.pointer_gain": M(
+        "Head & eyes", "Head pointer: speed", "Higher: the pointer moves further per degree of head turn.", "×"
+    ),
+    "hands.cursor.head.pointer_dead_zone": M(
+        "Head & eyes", "Head pointer: hold-still zone", "Higher: small head tremors are ignored.", "°"
+    ),
+    "hands.cursor.head.pointer_acceleration": M(
+        "Head & eyes",
+        "Head pointer: acceleration",
+        "Higher: quick head turns go much further than slow ones. 1 = none.",
+        "",
+    ),
+    "hands.cursor.head.coarse_cols": M(
+        "Head & eyes", "Head zones: columns per monitor", "Higher: more, smaller zones across each monitor.", ""
+    ),
+    "hands.cursor.head.coarse_rows": M(
+        "Head & eyes", "Head zones: rows per monitor", "Higher: more, smaller zones down each monitor.", ""
+    ),
+    "hands.cursor.head.coarse_yaw_span": M(
+        "Head & eyes",
+        "Head zones: turn across the desktop",
+        "Higher: turn your head further to cross the desktop (without a screen map).",
+        "°",
+    ),
+    "hands.cursor.head.coarse_pitch_span": M(
+        "Head & eyes",
+        "Head zones: tilt across the desktop",
+        "Higher: tilt your head further to go top to bottom (without a screen map).",
+        "°",
+    ),
+    "hands.cursor.head.coarse_hysteresis": M(
+        "Head & eyes",
+        "Head zones: border stickiness",
+        "Higher: look further past a border before the zone changes.",
+        "",
+    ),
+    "hands.cursor.head.coarse_dwell_s": M(
+        "Head & eyes", "Head zones: hold before a jump", "Higher: hold a new zone longer before the cursor jumps.", "s"
+    ),
+    "hands.cursor.head.switch_margin": M(
+        "Head & eyes",
+        "Monitor switch by head turn: margin",
+        "Higher: turn further toward the other monitor before it switches.",
+        "°",
+    ),
+    "hands.cursor.head.switch_dwell_s": M(
+        "Head & eyes",
+        "Monitor switch by head turn: hold",
+        "Higher: face the other monitor longer before it switches (a glance does not).",
+        "s",
+    ),
+    "hands.cursor.head.gate_tolerance": M(
+        "Head & eyes",
+        "Face gate: head turn still facing the screen",
+        "Higher: you may turn your head further and still count as facing the screen.",
+        "°",
+    ),
+    "gaze.model_rate_hz": M(
+        "Head & eyes", "Gaze: learned model rate", "Higher: the optional gaze network runs more often (more CPU).", "Hz"
+    ),
+    "gaze.min_cutoff": M(
+        "Head & eyes", "Gaze: smoothing (still)", "Lower: a steadier gaze point, but it lags a little.", "Hz"
+    ),
+    "gaze.beta": M(
+        "Head & eyes", "Gaze: smoothing (moving)", "Higher: less lag when your eyes jump; lower: smoother.", ""
+    ),
+    "gaze.ridge_alpha": M(
+        "Head & eyes",
+        "Gaze: calibration regularisation",
+        "Rarely needs changing. Higher: a smoother, less exact fit to the calibration dots.",
+        "",
+    ),
+    "gaze.jump_idle_s": M(
+        "Head & eyes",
+        "Look-to-jump: hand rest before a jump",
+        "Higher: rest your hand longer before the cursor may jump to where you look.",
+        "s",
+    ),
+    "gaze.jump_min_px": M(
+        "Head & eyes",
+        "Look-to-jump: minimum distance",
+        "Higher: the cursor only jumps when you look further away from it.",
+        "px",
+    ),
+    "gaze.drift_rate": M(
+        "Head & eyes",
+        "Gaze drift correction: rate per click",
+        "Higher: each click corrects the gaze point more (0 = off).",
+        "",
+    ),
+    "gaze.drift_max_px": M(
+        "Head & eyes",
+        "Gaze drift correction: largest offset",
+        "Higher: clicks may shift the gaze point further.",
+        "px",
+    ),
+    "gaze.drift_max_err_px": M(
+        "Head & eyes",
+        "Gaze drift correction: ignore far clicks",
+        "Higher: clicks further from where you look still correct the gaze point.",
+        "px",
+    ),
     # ------------------------------------------------------------------ voice
     "voice.vad_sensitivity": M("Voice", "Voice sensitivity", "Higher: quieter speech is picked up.", ""),
     "voice.end_silence_ms": M(

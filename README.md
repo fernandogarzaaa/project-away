@@ -914,7 +914,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | TESTCOUNT tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 1657 tests collected on Linux (270 new in v0.1.19; on Linux without the optional extras 6 skip: torch training, faster-whisper, the real DirectShow / Media Foundation / pywinrt checks) (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -964,16 +964,35 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Eye tracking + screen map (v0.1.19) | Iris features (invariant to face position, size and roll), ridge fit/predict with leave-one-dot-out error, calibration session, per-camera storage, layout check, look-to-jump, drift correction and the pipeline wiring tested with a synthetic user (head + eyes) on two monitors; iris points read from the real Face Landmarker on a photo; **the Tk calibration screens, `away gaze test` and real accuracy are untested** (no camera or display with a person in the sandbox), so the 2-4 degree figure is the literature value for webcam gaze, not a measurement |
 | Optional gaze networks (v0.1.19) | Real downloads through fastdl with the pinned SHA-256, both ONNX files run with onnxruntime 1.31 on a real face crop (CPU, 2 ARM cores); decoding, crop, rate limit, auto resolution, license opt-in, Settings Models list (rendered under Xvfb) and CLI tested with a fake session; **CUDA/DirectML untested; whether the network improves the screen map on a real user is untested** |
 | iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
-| Settings → Tuning (sections, presets, master sensitivity, undo, per-app tuning, live gauges, auto-tune) | Grouping, presets, sensitivity mapping, threshold selection, undo, per-app tuning (parse, validate, live switch in the pipeline), the auto-tune session, clip saving and the camera worker unit-tested with fake frames (`tests/test_tuning_tab.py`, `tests/test_autotune.py`); the tab itself is smoke-tested under Xvfb; **live view and auto-tune untested with a real camera** |
+| Settings → Tuning (sections, presets, master sensitivity, undo, per-app tuning, live gauges, auto-tune) (v0.1.19) | Grouping, presets, sensitivity mapping, threshold selection, undo, per-app tuning (parse, validate, live switch in the pipeline), the auto-tune session, clip saving and the camera worker unit-tested with fake frames (`tests/test_tuning_tab.py`, `tests/test_autotune.py`); the tab itself is smoke-tested under Xvfb; **live view and auto-tune untested with a real camera** |
+| Tuning tab with the head / gaze sliders (v0.1.19) | All 28 auto-centering, head and gaze tunables land in Head & eyes with titles, help and units; presets, master Sensitivity and Reset section keep them apart; per-app profile tuning of the auto-centering / head keys validates, applies (ints rounded) and switches live in the pipeline, `gaze.*` is refused per app; Sensitivity still orders cursor speed with soft recenter on (`tests/test_v0119_integration.py`); the merged Settings window (Tuning sections, Performance → Models) rendered under Xvfb; **untested on a real desktop with a real camera** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 
-## Changes since v0.1.18 (unreleased)
+## Changes in v0.1.19
+
+**Cameras: WinRT MediaCapture backend, `away cameras diagnose`, retries that back off.** Built-in cameras that
+OpenCV's DirectShow and Media Foundation cannot open (the reported Acer "HD User Facing") are tried through
+WinRT `MediaCapture`, the API the Windows Camera app uses (`hands.camera_backend: auto|dshow|msmf|winrt`; pywinrt
+packages in the `[winrt]` extra, part of `[all]` and bundled in the Windows installer). `away cameras diagnose`
+(and **Diagnose** in Settings → Cameras) lists every camera x backend with its native formats and the fps each
+mode really delivers. A failing camera is retried with a back-off and stops after `hands.camera_retry_limit`
+failures with one notice; **Retry cameras** in the tray and in Settings probes again at once. MJPG is reported
+honestly (read back after setting it). See "Multi-camera" above.
 
 **Auto-centering, head tracking, eye tracking and the screen map**, plus an opt-in learned gaze model and a Models
 list in Settings → Performance. See "Auto-centering, head tracking and eye tracking (v0.1.19)" above. New voice
 commands: "center", "look here". New CLI: `away gaze calibrate|test|clear|status`, `away gaze model
 install|status|remove`.
+
+**Settings → Tuning redesign.** Sliders grouped in collapsible sections (Cursor, Clicks, Scroll, Gestures, Face,
+Head & eyes, Voice, Other) with plain-language names, help lines, units and per-slider reset; Precise / Balanced /
+Fast presets, a master Sensitivity slider, Undo, **Save as profile...** (per-app hand and face tuning under
+`tuning:` in a bindings profile, applied live when that app is focused), a live view with gauges against the
+thresholds, and auto-tune for the pinch, auto-scroll thumb fold and palm-scroll depth. See "The Tuning tab" above.
+The 28 auto-centering, head and gaze sliders (`hands.cursor.autocenter.*`, `hands.cursor.head.*`, `gaze.*`) sit in
+**Head & eyes**; presets and the master Sensitivity slider do not touch them. Per-app profiles may tune the
+auto-centering and head sliders (they are hand-cursor settings); `gaze.*` stays global, like voice and cameras.
 
 ## Changes in v0.1.18
 

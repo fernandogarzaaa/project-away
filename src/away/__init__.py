@@ -1,4 +1,4 @@
 """Project Away: hands-free PC control (gestures, dictation, speaker gating, Wi-Fi CSI)."""
 
-__version__ = "0.1.18"
+__version__ = "0.1.19"
 __all__ = ["__version__"]

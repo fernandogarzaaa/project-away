@@ -433,7 +433,7 @@ def test_reset_and_reset_group(ctl: T.TuningController, model: SettingsModel) ->
     assert ctl.reset_group("Cursor") is None
     assert model.cfg.hands.cursor.dead_zone == DEFAULTS["hands.cursor.dead_zone"]
     assert model.cfg.voice.end_silence_ms == 1500  # another section is untouched
-    assert ctl.reset_group("Head & eyes") == "nothing to reset in Head & eyes"
+    assert ctl.reset_group("Nope") == "nothing to reset in Nope"
     assert ctl.undo()[0] is None and model.cfg.hands.cursor.dead_zone == 0.02
     assert "has no default" in ctl.reset("hands.nope")
 
