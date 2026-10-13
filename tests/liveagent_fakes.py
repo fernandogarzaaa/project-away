@@ -193,5 +193,12 @@ class H(BaseHTTPRequestHandler):
         if not self._auth(): return
         self._json(True)
 
-ThreadingHTTPServer((host, port), H).serve_forever()
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind asks socket.getfqdn(), which can stall for many seconds on macOS runners
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = host, self.server_address[1]
+
+Server((host, port), H).serve_forever()
 """
