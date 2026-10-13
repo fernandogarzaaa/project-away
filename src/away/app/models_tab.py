@@ -19,6 +19,16 @@ from typing import Any
 from away.app import model_registry as MR
 
 RESTART_NOTE = "Saved. New models load the next time Project Away starts."
+AUTO_LABEL = "Automatic (picked for this PC)"
+
+
+def _is_default(reg: MR.Registry, cfg: Any, slot: str) -> bool:
+    """The slot's settings are still the defaults ("auto"): Project Away picks the model for this PC."""
+    from away import config as cfgmod
+
+    default = cfgmod.AppConfig()
+    keys = {k for m in reg.for_slot(slot, True) for k in m.set}
+    return bool(keys) and all(MR._get(cfg, k) == MR._get(default, k) for k in keys)
 
 
 def rows(reg: MR.Registry, cfg: Any) -> list[dict[str, Any]]:
@@ -27,8 +37,9 @@ def rows(reg: MR.Registry, cfg: Any) -> list[dict[str, Any]]:
     for r in reg.rows(cfg):
         labels = [c["title"] for c in r["choices"]]
         label = r["current_title"]
-        if r["current"] is None:
-            labels = [label, *labels]  # "custom": a setting no listed model matches
+        if r["current"] is None:  # a setting no listed model matches: the automatic default, or the user's own
+            label = AUTO_LABEL if _is_default(reg, cfg, r["slot"]) else "custom"
+            labels = [label, *labels]
         out.append({**r, "labels": labels, "label": label})
     return out
 

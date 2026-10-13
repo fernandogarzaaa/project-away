@@ -552,6 +552,9 @@ def test_models_tab_logic(tmp_path: Path) -> None:
     assert MT.voice_engine(reg.get("voice-kokoro")) == "kokoro" and MT.voice_engine(reg.get("voice-classic")) == ""
     assert MT.download_hint(reg.get("cleanup-qwen-0.5b")).startswith("Download: Settings")
     assert MT.download_hint(reg.get("mediapipe-hands")) == ""
+    fresh = next(r for r in MT.rows(reg, C.AppConfig()) if r["slot"] == "stt")
+    assert fresh["label"] == MT.AUTO_LABEL and fresh["labels"][0] == MT.AUTO_LABEL  # the defaults: automatic
+    assert next(r for r in MT.rows(reg, C.AppConfig()) if r["slot"] == "voice")["label"] == "Best available"
     cfg.voice.asr_model = "tiny.en"  # a setting no listed model matches
     stt = next(r for r in MT.rows(reg, cfg) if r["slot"] == "stt")
     assert stt["label"] == "custom" and stt["labels"][0] == "custom"
