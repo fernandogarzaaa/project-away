@@ -5,6 +5,7 @@ fallback for the built-in camera (l)."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -79,7 +80,7 @@ def test_com_apartment_results() -> None:
         def __init__(self, hr: int) -> None:
             self.hr, self.args = hr, None
 
-        def CoInitializeEx(self, *a: Any) -> int:  # noqa: N802 - the Windows name
+        def CoInitializeEx(self, *a: Any) -> int:
             self.args = a
             return self.hr
 
@@ -90,7 +91,7 @@ def test_com_apartment_results() -> None:
     assert com_apartment("win32", Ole(-2147417850)) == "already"  # RPC_E_CHANGED_MODE
 
     class Broken:
-        def CoInitializeEx(self, *a: Any) -> int:  # noqa: N802
+        def CoInitializeEx(self, *a: Any) -> int:
             raise OSError("no ole32")
 
     assert com_apartment("win32", Broken()) == ""
@@ -143,7 +144,7 @@ def test_handled_windows_exceptions_are_tagged_not_crashes() -> None:
 
 
 def test_a_real_native_crash_is_kept_in_full() -> None:
-    text = "Windows fatal exception: access violation\n\nCurrent thread 0x1 (most recent call first):\n  File \"x.py\"\n"
+    text = 'Windows fatal exception: access violation\n\nCurrent thread 0x1 (most recent call first):\n  File "x.py"\n'
     out = crashlog.summarize_native(text, 7)
     assert out.startswith("native crash in pid 7:") and "access violation" in out and 'File "x.py"' in out
     assert crashlog.classify(out) == "crashed"
@@ -301,7 +302,9 @@ def test_a_restore_that_does_not_take_is_reported_and_reset_fixes_it(tmp_path: P
     big = BC.BigCursor(cur, 2, tmp_path / BC.MARKER_NAME, clock=Clock(), publish=lambda t, d: seen.append((t, d)))
     big.update(True)
     big.restore()
-    assert big.stuck and seen[-1][0] == "cursor.size_stuck" and "Reset cursor size" in seen[-1][1]["message"]
+    stuck = [d for t, d in seen if t == "cursor.size_stuck"]
+    assert big.stuck and stuck and "Reset cursor size" in stuck[0]["message"]
+    assert seen[-1] == ("cursor.size", {"size": 32, "big": False, "applied": False})
     assert cur.sets.count(32) == 2  # tried once more before reporting
     cur.sticky = False
     assert big.reset() == 32 and cur.size == 32 and not big.stuck
@@ -334,14 +337,14 @@ def test_single_instance_lock_with_a_fake_windows_mutex() -> None:
             self.names: list[str] = []
             self.closed: list[int] = []
 
-        def CreateMutexW(self, _sec: Any, _own: bool, name: str) -> int:  # noqa: N802
+        def CreateMutexW(self, _sec: Any, _own: bool, name: str) -> int:
             self.names.append(name)
             return len(self.names)
 
-        def GetLastError(self) -> int:  # noqa: N802
+        def GetLastError(self) -> int:
             return 183 if len(self.names) > 1 else 0  # ERROR_ALREADY_EXISTS for the second app
 
-        def CloseHandle(self, h: int) -> None:  # noqa: N802
+        def CloseHandle(self, h: int) -> None:
             self.closed.append(h)
 
     k = K32()
@@ -385,7 +388,7 @@ def test_glide_moves_smoothly_towards_each_new_frame() -> None:
         if p is not None:
             xs.append(p[0])
     assert xs == sorted(xs)  # never steps back
-    assert max(b - a for a, b in zip(xs, xs[1:], strict=False)) <= 6  # no jump
+    assert max(b - a for a, b in itertools.pairwise(xs)) <= 6  # no jump
     assert 108 <= xs[-1] <= 110 + 100 * g.max_ahead_s  # closes in, at most one frame of prediction ahead
 
 
@@ -565,8 +568,11 @@ def test_turn_off_and_on_a_camera_keeps_its_settings() -> None:
 # ============================================================================ (k) who holds the camera
 def _entries() -> list[tuple[str, bool, dict[str, Any]]]:
     return [
-        ("C:#Program Files#NVIDIA Corporation#NVIDIA Broadcast#NVIDIA Broadcast.exe", False,
-         {"LastUsedTimeStart": 133, "LastUsedTimeStop": 0}),
+        (
+            "C:#Program Files#NVIDIA Corporation#NVIDIA Broadcast#NVIDIA Broadcast.exe",
+            False,
+            {"LastUsedTimeStart": 133, "LastUsedTimeStop": 0},
+        ),
         ("Microsoft.WindowsCamera_8wekyb3d8bbwe", True, {"LastUsedTimeStart": 5, "LastUsedTimeStop": 9}),
         ("MSTeams_8wekyb3d8bbwe", True, {"LastUsedTimeStart": 7, "LastUsedTimeStop": 0}),
         ("C:#Program Files#Project Away#ProjectAway.exe", False, {"LastUsedTimeStart": 1, "LastUsedTimeStop": 0}),
@@ -600,7 +606,7 @@ class FakeWinreg:
         def __exit__(self, *a: Any) -> None:
             return None
 
-    def OpenKey(self, parent: Any, name: str) -> Any:  # noqa: N802
+    def OpenKey(self, parent: Any, name: str) -> Any:
         node = self.tree if parent == "HKCU" else parent.node
         if parent == "HKCU":
             node = self.tree
@@ -611,13 +617,13 @@ class FakeWinreg:
             raise OSError(name)
         return self._K(node[name])
 
-    def EnumKey(self, k: Any, i: int) -> str:  # noqa: N802
+    def EnumKey(self, k: Any, i: int) -> str:
         keys = [n for n in k.node if n != "__values__"]
         if i >= len(keys):
             raise OSError("no more")
         return keys[i]
 
-    def QueryValueEx(self, k: Any, name: str) -> tuple[Any, int]:  # noqa: N802
+    def QueryValueEx(self, k: Any, name: str) -> tuple[Any, int]:
         vals = k.node.get("__values__", {})
         if name not in vals:
             raise OSError(name)
@@ -656,7 +662,9 @@ def test_explain_names_the_holder_in_plain_words() -> None:
     via = CU.explain("HD User Facing", users, broadcast_from="HD User Facing")
     assert via["broadcast_uses_it"] and via["message"].startswith("Your built-in camera is used by NVIDIA Broadcast")
     held = CU.explain("HD User Facing", users)
-    assert held["message"] == "Your built-in camera is being used by NVIDIA Broadcast and MSTeams. Close it, then Retry."
+    assert (
+        held["message"] == "Your built-in camera is being used by NVIDIA Broadcast and MSTeams. Close it, then Retry."
+    )
     assert held["actions"][0].startswith("close:C:\\Program Files\\NVIDIA") and held["actions"][-1] == "retry"
     free = CU.explain("JoyCam", [])
     assert free["message"].startswith("JoyCam could not be opened") and free["actions"] == ["retry"]
@@ -734,33 +742,32 @@ def test_native_modes_turn_reported_formats_into_capture_modes() -> None:
 
 def test_winrt_tries_the_next_format_after_element_not_found() -> None:
     """The camera reports formats it then refuses ("Element not found"): each is tried, closest first."""
-    import asyncio
-
     from away.multicam import winrt_capture as W
+    from test_v0119_winrt_camera import FakeApi, nf  # the fake WinRT camera of the v0.1.19 tests
 
-    fmts = [_native(640, 480, 30, "MJPG"), _native(1280, 720, 30, "NV12"), _native(1920, 1080, 30, "NV12")]
-    tried: list[Any] = []
+    fmts = [nf(1280, 720, 30, "NV12", 0), nf(640, 480, 30, "MJPG", 1), nf(1920, 1080, 30, "NV12", 2)]
 
-    class Api:
-        async def set_format(self, _src: Any, f: Any) -> None:
-            tried.append(f)
-            if f.width != 1280:
+    class Refusing(FakeApi):
+        async def set_format(self, source: Any, fmt: Any) -> None:
+            self.calls.append(("set_format", fmt))
+            if fmt.width != 1920:
                 raise OSError("Element not found. (0x80070490)")
+            source.current = fmt
 
-    async def run() -> Any:
-        chosen = None
-        cap = types.SimpleNamespace(tried=[])
-        for cand in W.ranked_formats(fmts, 640, 480, 30)[: W.FORMAT_TRIES]:
-            try:
-                await Api().set_format(None, cand)
-                chosen = cand
-                break
-            except Exception as exc:
-                cap.tried.append(f"{cand.describe()}: {exc}")
-        return chosen, cap.tried
+    api = Refusing(formats=fmts, current=fmts[0])
+    cap = W.WinrtCapture("HD User Facing", 640, 480, 30, "", api=api, open_timeout=5.0, out_size=(640, 480))
+    try:
+        assert cap.isOpened()
+        sets = [c[1] for c in api.calls if c[0] == "set_format"]
+        assert len(sets) == 3 and sets[-1].width == 1920  # every refused format tried before the one that worked
+        assert sets == W.ranked_formats(fmts, 640, 480, 30)
+        assert cap.native == fmts[2] and len(cap.tried) == 2 and "0x80070490" in cap.tried[0]
+    finally:
+        cap.release()
 
-    chosen, failed = asyncio.run(run())
-    assert chosen is not None and chosen.width == 1280
-    assert tried[0].width == 640 and failed and "0x80070490" in failed[0]
-    src = Path(W.__file__).read_text(encoding="utf-8")
-    assert "for cand in ranked_formats(self.formats, w, h, f, fcc)[:FORMAT_TRIES]:" in src  # the same loop
+    api2 = Refusing(formats=fmts[:2], current=fmts[0])  # none can be set: the camera's current format is used
+    cap2 = W.WinrtCapture("HD User Facing", 640, 480, 30, "", api=api2, open_timeout=5.0, out_size=(640, 480))
+    try:
+        assert cap2.isOpened() and cap2.native == fmts[0] and len(cap2.tried) == 2
+    finally:
+        cap2.release()
