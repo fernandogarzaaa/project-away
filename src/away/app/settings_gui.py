@@ -127,6 +127,7 @@ VOICE_FIELDS = {
     "updates.channel": UPDATE_CHANNELS,
     "performance.mode": PERFORMANCE_MODES,
     "hands.camera_backend": CAMERA_BACKENDS,
+    "face.gate_when_camera_busy": ("block", "allow"),  # v0.1.22
 }
 # Tuning tab glyphs, escaped: some tests read this file with the Windows default code page
 OPEN_MARK, CLOSED_MARK, RESET_MARK, RECORDING_MARK = "\u25be ", "\u25b8 ", "\u21ba", "\u25cf"
@@ -389,6 +390,7 @@ class SettingsModel:
             "updates.channel",
             "performance.mode",
             "face.gate_dictation",
+            "face.gate_when_camera_busy",
             "hands.roles.mode",
             "hands.palm_scroll.enabled",
             "hands.palm_scroll.invert",
@@ -2200,6 +2202,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
             ("voice.ambient_fallback", "No wake word + no camera"),
+            ("face.gate_when_camera_busy", "While a camera check has the camera (block = don't type)"),
             ("updates.channel", "Update channel"),
         ):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=3)

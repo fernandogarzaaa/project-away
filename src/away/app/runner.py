@@ -644,6 +644,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.asr_model = ""
         self._notices: set[str] = set()
         self.gate_hint = GateHint()
+        # v0.1.22: the face gate knows who borrowed the camera and when the camera last delivered a frame
+        self.pipeline.gate.camera_holder = lambda: self.camera_in_use_by
+        self.pipeline.gate.when_camera_busy = cfg.face.gate_when_camera_busy
+        from away.voice.talk import TalkHook
+
+        # v0.1.22 "Talk to your agent": Agent Link fills in the agents and where messages go
+        self.talk = TalkHook(enabled=lambda: bool(getattr(self.cfg.agent_link, "talk_enabled", True)))
+        self.other_audio: Any = None  # away.voice.other_audio.OtherAudioMeter (Windows, while voice runs)
         self._face_lock = threading.Lock()
         self.gaze_net: Any = None  # NetRunner (optional learned gaze model), created with the first face
         self.iphone: Any = None  # LiveLinkReceiver when face.source is iphone|auto
@@ -763,6 +771,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._camera_episode += 1
 
     def _on_utterance(self, ev: Any) -> None:
+        data = ev.data or {}
+        gi = data.get("gate") if isinstance(data.get("gate"), dict) else {}
+        if data.get("decision") == "ignore" and gi.get("camera_busy") and not gi.get("allowed", False):
+            self.notice(
+                "Project Away: speech not typed",
+                "The camera is being used by a camera check or Settings, so Project Away can't see whether you are "
+                "the one talking. What you say is not typed until the camera comes back. (Settings > Voice can "
+                "type anyway.)",
+                key="camera-busy-dictation",
+            )
         if self.gate_hint.observe(ev.data):
             self.bus.publish(
                 "voice.gate_hint",
@@ -867,6 +885,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             amb.gate = self.pipeline.gate.allow_ambient if face_gate else None
             amb.commands_enabled = v.commands_enabled
             amb.ep.set_sensitivity(v.vad_sensitivity)
+            amb.strict_ratio, amb.strict_confidence = float(v.strict_motion_ratio), float(v.strict_confidence)
+            amb.other_audio_needs_mouth = bool(v.other_audio_needs_mouth)
+        self.pipeline.gate.when_camera_busy = new.face.gate_when_camera_busy
         for k, val in vars(v).items():
             setattr(self.cfg.voice, k, val)
         if v.mode != self.voice.mode:
@@ -895,6 +916,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.voice.context import active_app
         from away.voice.dictation import DictationSession, MicStream
         from away.voice.output import ListSink, make_sink
+        from away.voice.speech import ECHO
         from away.voice.vad import make_vad
 
         v = self.cfg.voice
@@ -1027,8 +1049,22 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             commands_enabled=v.commands_enabled,
             submit=submit,
             gate_info=lambda: self.pipeline.gate.last_explain,
+            echo=ECHO,
+            talk=self.talk,
         )
+        ambient.strict_ratio, ambient.strict_confidence = float(v.strict_motion_ratio), float(v.strict_confidence)
+        ambient.other_audio_needs_mouth = bool(v.other_audio_needs_mouth)
+        try:  # v0.1.22: is another app (a video) playing sound? Windows only, needs pycaw
+            from away.voice.other_audio import make_meter
+
+            meter = make_meter()
+            if meter.reader is not None and not self.dry_run:
+                self.other_audio = meter.start()
+                ambient.other_audio = meter.playing_during
+        except Exception as exc:
+            self._publish_quiet("voice.other_audio_unavailable", {"error": str(exc)})
         self.voice = VoiceController(v.mode, dictation, ambient, self.bus)
+        self.voice.echo = ECHO  # v0.1.22: the microphone ignores the computer's own voice
         vctx.attach(asr, dictation, ambient)
         if not self.cfg.app.always_on:
             self.voice.set_muted(True)
@@ -1178,6 +1214,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         prof = self.profile
 
         def process(n: int, t: float, rgb: Any) -> None:
+            self.pipeline.gate.note_camera_frame(t)  # v0.1.22: the camera is delivering (for the face gate)
             if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
                 self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
