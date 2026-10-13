@@ -6,7 +6,6 @@ import json
 import threading
 
 import pytest
-from liveagent_fakes import FakeTransport, openai_chunks, sse
 
 from away.liveagent import catalog, keys, privacy, untrusted
 from away.liveagent import settings as st
@@ -17,6 +16,7 @@ from away.liveagent.ledger import BudgetExceeded, CostLedger
 from away.liveagent.providers import AnthropicProvider, FakeProvider, OpenAICompatProvider
 from away.liveagent.router import Breakers, CallRecord, Funnel, NoModel, Router, classify
 from away.liveagent.textstream import SentenceSplitter, ThinkFilter, for_speech, sentences, strip_reasoning
+from liveagent_fakes import FakeTransport, openai_chunks, sse
 
 
 # ------------------------------------------------------------------------------------------------ text stream
@@ -215,8 +215,12 @@ def test_funnel_retries_a_429_once_when_told_how_long() -> None:
 def test_funnel_first_token_timeout_moves_on() -> None:
     slow = FakeProvider(id="slow", replies=["late"], latency=0.5)
     fast = FakeProvider(id="fast", replies=["quick answer"])
-    f = _funnel({"slow": slow, "fast": fast}, [catalog.guess("slow", "s"), catalog.guess("fast", "f")],
-                first_token_timeout=0.1, preferred="slow/s")
+    f = _funnel(
+        {"slow": slow, "fast": fast},
+        [catalog.guess("slow", "s"), catalog.guess("fast", "f")],
+        first_token_timeout=0.1,
+        preferred="slow/s",
+    )
     rec = CallRecord("chat")
     assert f.complete("chat", [{"role": "user", "content": "x"}], rec) == "quick answer"
     assert "no answer" in rec.attempts[0][1]
@@ -330,11 +334,15 @@ def test_anthropic_stream_skips_thinking() -> None:
     def handler(method, url, headers, body):
         assert headers["x-api-key"] == "ak" and headers["anthropic-version"] == AnthropicProvider.VERSION
         assert body["system"] == "be brief" and body["messages"] == [{"role": "user", "content": "hi"}]
-        return 200, {}, sse(
-            {"type": "message_start", "message": {"usage": {"input_tokens": 9}}},
-            {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}},
-            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hi!"}},
-            {"type": "message_delta", "usage": {"output_tokens": 2}},
+        return (
+            200,
+            {},
+            sse(
+                {"type": "message_start", "message": {"usage": {"input_tokens": 9}}},
+                {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}},
+                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hi!"}},
+                {"type": "message_delta", "usage": {"output_tokens": 2}},
+            ),
         )
 
     p = AnthropicProvider("anthropic", "ak", client=Client(FakeTransport(handler)))
@@ -344,9 +352,13 @@ def test_anthropic_stream_skips_thinking() -> None:
 
 
 def test_catalog_free_models_rotate_and_skip_jev() -> None:
-    served = {"big-pickle": {"name": "Big Pickle", "cost": {"input": 0, "output": 0}},
-              "space-bunny-free": {"modalities": {"input": ["text", "image"]}, "cost": {"input": 0, "output": 0}},
-              "jev-1.13-free": {}, "test": {}, "claude-opus-5": {"cost": {"input": 5, "output": 25}}}
+    served = {
+        "big-pickle": {"name": "Big Pickle", "cost": {"input": 0, "output": 0}},
+        "space-bunny-free": {"modalities": {"input": ["text", "image"]}, "cost": {"input": 0, "output": 0}},
+        "jev-1.13-free": {},
+        "test": {},
+        "claude-opus-5": {"cost": {"input": 5, "output": 25}},
+    }
     got = catalog.opencode_free_models(served=served)
     assert [m.id for m in got] == ["big-pickle", "space-bunny-free"]
     assert got[1].vision and all(m.may_keep_prompts and m.free for m in got)
@@ -373,8 +385,19 @@ def test_jev_client_free_without_key_and_typed_answers() -> None:
     assert a.value is True and a.probabilities["yes"] == 0.87
     assert calls[0]["body"]["model"] == "jev-1.13-free" and "Authorization" not in calls[0]["headers"]
     assert calls[0]["url"] == "https://opencode.ai/inference/v1/systemone"
-    t2 = FakeTransport(_jev_handler({"q": {"type": "choice", "choice": "computer", "confidence": 1,
-                                           "probabilities": {"chat": 0, "computer": 1}}}, calls))
+    t2 = FakeTransport(
+        _jev_handler(
+            {
+                "q": {
+                    "type": "choice",
+                    "choice": "computer",
+                    "confidence": 1,
+                    "probabilities": {"chat": 0, "computer": 1},
+                }
+            },
+            calls,
+        )
+    )
     assert JevClient("k", Client(t2)).choice("open notepad", "kind?", {"chat": "", "computer": ""}).value == "computer"
     assert calls[-1]["body"]["model"] == "jev-1.13" and calls[-1]["headers"]["Authorization"] == "Bearer k"
 
@@ -422,8 +445,10 @@ def test_funnel_is_thread_safe_enough_for_parallel_turns() -> None:
     p = FakeProvider(id="p", replies=["one two three."], free=True)
     f = _funnel({"p": p}, [catalog.guess("p", "m", free=True)])
     out: list[str] = []
-    ths = [threading.Thread(target=lambda: out.append(f.complete("chat", [{"role": "user", "content": "x"}])))
-           for _ in range(5)]
+    ths = [
+        threading.Thread(target=lambda: out.append(f.complete("chat", [{"role": "user", "content": "x"}])))
+        for _ in range(5)
+    ]
     for t in ths:
         t.start()
     for t in ths:

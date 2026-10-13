@@ -67,8 +67,14 @@ def release_feed(version: str, assets: dict[str, bytes], bad_digest: str = "") -
     out = []
     for name, data in assets.items():
         digest = "sha256:" + (bad_digest or hashlib.sha256(data).hexdigest())
-        out.append({"name": name, "size": len(data), "digest": digest,
-                    "browser_download_url": f"https://example.invalid/{name}"})
+        out.append(
+            {
+                "name": name,
+                "size": len(data),
+                "digest": digest,
+                "browser_download_url": f"https://example.invalid/{name}",
+            }
+        )
     return {"tag_name": f"v{version}", "assets": out}
 
 
@@ -85,7 +91,7 @@ def fake_downloader(files: dict[str, bytes]) -> Callable[..., str]:
 
 
 # ------------------------------------------------------------------------------------------------ fake opencode
-FAKE_OPENCODE = r'''
+FAKE_OPENCODE = r"""
 import base64, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -181,4 +187,4 @@ class H(BaseHTTPRequestHandler):
         self._json(True)
 
 ThreadingHTTPServer((host, port), H).serve_forever()
-'''
+"""

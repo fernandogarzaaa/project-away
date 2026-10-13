@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-from liveagent_fakes import FAKE_OPENCODE, fake_downloader, make_archive, release_feed
 
 from away.liveagent import catalog, keys, opencode
 from away.liveagent import settings as st
@@ -21,27 +20,37 @@ from away.liveagent.ledger import CostLedger
 from away.liveagent.providers import FakeProvider
 from away.liveagent.router import Funnel, Router
 from away.liveagent.speech import BargeIn, LiveSpeech, wrap_feed
+from liveagent_fakes import FAKE_OPENCODE, fake_downloader, make_archive, release_feed
 
 
 # ------------------------------------------------------------------------------------------------ release feed
 def test_asset_choice_per_platform() -> None:
-    assert opencode.asset_candidates("win32", "AMD64") == ["opencode-windows-x64.zip",
-                                                            "opencode-windows-x64-baseline.zip"]
+    assert opencode.asset_candidates("win32", "AMD64") == [
+        "opencode-windows-x64.zip",
+        "opencode-windows-x64-baseline.zip",
+    ]
     assert opencode.asset_candidates("win32", "ARM64") == ["opencode-windows-arm64.zip"]
     assert opencode.asset_candidates("darwin", "arm64") == ["opencode-darwin-arm64.zip"]
     assert opencode.asset_candidates("linux", "aarch64", musl=False) == ["opencode-linux-arm64.tar.gz"]
     assert opencode.asset_candidates("linux", "x86_64", musl=True)[0] == "opencode-linux-x64-musl.tar.gz"
 
 
-@pytest.mark.parametrize("plat,name,kind", [("win32", "opencode-windows-x64.zip", "zip"),
-                                            ("linux", "opencode-linux-x64.tar.gz", "tar")])
+@pytest.mark.parametrize(
+    "plat,name,kind", [("win32", "opencode-windows-x64.zip", "zip"), ("linux", "opencode-linux-x64.tar.gz", "tar")]
+)
 def test_install_from_a_fake_release_feed_verifies_the_checksum(tmp_path, plat, name, kind) -> None:
     exe = opencode.exe_name(plat)
     data = make_archive(kind, exe)
     feed = release_feed("1.19.0", {name: data, "latest.json": b"{}"})
     seen: list[tuple[int, int]] = []
-    info = opencode.install(tmp_path, progress=lambda d, t: seen.append((d, t)), release=feed,
-                            downloader=fake_downloader({name: data}), platform=plat, machine="x86_64")
+    info = opencode.install(
+        tmp_path,
+        progress=lambda d, t: seen.append((d, t)),
+        release=feed,
+        downloader=fake_downloader({name: data}),
+        platform=plat,
+        machine="x86_64",
+    )
     assert info["version"] == "1.19.0" and Path(info["path"]).is_file() and info["license"] == "MIT"
     assert seen[-1] == (len(data), len(data))
     assert opencode.installed_engine(tmp_path)["sha256"] == info["sha256"]
@@ -53,8 +62,13 @@ def test_install_refuses_a_bad_checksum_or_missing_fingerprint(tmp_path) -> None
     data = make_archive("tar")
     bad = release_feed("1.19.0", {"opencode-linux-x64.tar.gz": data}, bad_digest="0" * 64)
     with pytest.raises(opencode.EngineError, match="fingerprint"):
-        opencode.install(tmp_path, release=bad, downloader=fake_downloader({"opencode-linux-x64.tar.gz": data}),
-                         platform="linux", machine="x86_64")
+        opencode.install(
+            tmp_path,
+            release=bad,
+            downloader=fake_downloader({"opencode-linux-x64.tar.gz": data}),
+            platform="linux",
+            machine="x86_64",
+        )
     assert not list((tmp_path / "engines" / "opencode").glob("*.part"))
     assert opencode.installed_engine(tmp_path) is None
     nodigest = {"tag_name": "v1", "assets": [{"name": "opencode-linux-x64.tar.gz", "browser_download_url": "u"}]}
@@ -76,16 +90,26 @@ def test_install_refuses_unsafe_archive_paths(tmp_path) -> None:
     data = buf.getvalue()
     feed = release_feed("2.0.0", {"opencode-linux-x64.tar.gz": data})
     with pytest.raises(opencode.EngineError, match="unsafe"):
-        opencode.install(tmp_path, release=feed, downloader=fake_downloader({"opencode-linux-x64.tar.gz": data}),
-                         platform="linux", machine="x86_64")
+        opencode.install(
+            tmp_path,
+            release=feed,
+            downloader=fake_downloader({"opencode-linux-x64.tar.gz": data}),
+            platform="linux",
+            machine="x86_64",
+        )
 
 
 def test_update_check_follows_releases_and_never_touches_your_own_cli(tmp_path, monkeypatch) -> None:
     data = make_archive("tar")
     name = "opencode-linux-x64.tar.gz"
     assert opencode.check_update(tmp_path)["updated"] is False  # no copy of Away's own: nothing to update
-    opencode.install(tmp_path, release=release_feed("1.19.0", {name: data}), downloader=fake_downloader({name: data}),
-                     platform="linux", machine="x86_64")
+    opencode.install(
+        tmp_path,
+        release=release_feed("1.19.0", {name: data}),
+        downloader=fake_downloader({name: data}),
+        platform="linux",
+        machine="x86_64",
+    )
     newer = release_feed("1.20.1", {name: data})
     monkeypatch.setattr(opencode, "latest_release", lambda client=None: newer)
     assert opencode.check_update(tmp_path, apply=False)["available"] == "1.20.1"
@@ -98,15 +122,21 @@ def test_update_check_follows_releases_and_never_touches_your_own_cli(tmp_path, 
 
 def test_find_cli_and_private_environment(tmp_path) -> None:
     assert opencode.find_cli(lambda n: "C:/npm/opencode.cmd" if n == "opencode.cmd" else None, platform="win32") == [
-        "cmd", "/c", "C:/npm/opencode.cmd"]
+        "cmd",
+        "/c",
+        "C:/npm/opencode.cmd",
+    ]
     assert opencode.find_cli(lambda n: "/usr/bin/opencode", platform="linux") == ["/usr/bin/opencode"]
     home = tmp_path / "h"
     (home / ".opencode" / "bin").mkdir(parents=True)
     (home / ".opencode" / "bin" / "opencode").write_text("x")
     assert opencode.find_cli(lambda n: None, home=home, platform="linux") == [str(home / ".opencode/bin/opencode")]
     assert opencode.find_cli(lambda n: None, home=tmp_path / "none", platform="linux") is None
-    env = opencode.private_env(tmp_path, "pw", {"OPENAI_API_KEY": "sk-x", "GITHUB_TOKEN": "g", "PATH": "/bin",
-                                                "OPENCODE_CONFIG": "/u", "GROQ_KEY": "k"})
+    env = opencode.private_env(
+        tmp_path,
+        "pw",
+        {"OPENAI_API_KEY": "sk-x", "GITHUB_TOKEN": "g", "PATH": "/bin", "OPENCODE_CONFIG": "/u", "GROQ_KEY": "k"},
+    )
     assert env["PATH"] == "/bin" and env["OPENCODE_SERVER_PASSWORD"] == "pw"
     assert not any(k in env for k in ("OPENAI_API_KEY", "GITHUB_TOKEN", "OPENCODE_CONFIG", "GROQ_KEY"))
     assert env["XDG_CONFIG_HOME"].startswith(str(tmp_path))
@@ -178,9 +208,13 @@ def test_use_free_models_one_click_downloads_when_missing(tmp_path, monkeypatch)
         return {}
 
     monkeypatch.setattr(opencode, "find_cli", lambda *a, **k: None)
-    rt = runtime.Runtime(tmp_path, keystore=keys.KeyStore(keys.MemoryBackend()),
-                         server_factory=lambda: opencode.OpenCodeServer([sys.executable, str(script)],
-                                                                        tmp_path / "home", start_timeout=30))
+    rt = runtime.Runtime(
+        tmp_path,
+        keystore=keys.KeyStore(keys.MemoryBackend()),
+        server_factory=lambda: opencode.OpenCodeServer(
+            [sys.executable, str(script)], tmp_path / "home", start_timeout=30
+        ),
+    )
     s = st.LiveSettings()
     steps: list[str] = []
     try:
@@ -278,7 +312,9 @@ def _agent(tmp_path, replies, route="chat", s: st.LiveSettings | None = None, to
 
 
 def test_chat_turn_streams_sentences_to_the_voice_and_logs_redacted(tmp_path) -> None:
-    agent, speech, p = _agent(tmp_path, ["<think>let me think</think>Sure. Paris is the capital of France. Anything else?"])
+    agent, speech, p = _agent(
+        tmp_path, ["<think>let me think</think>Sure. Paris is the capital of France. Anything else?"]
+    )
     turn = agent.handle("what's the capital of France? my mail is me@x.com")
     assert speech.said == ["Sure. Paris is the capital of France.", "Anything else?"]
     assert turn.outcome == "answered" and turn.model and turn.first_token_s is not None
@@ -291,8 +327,11 @@ def test_chat_turn_streams_sentences_to_the_voice_and_logs_redacted(tmp_path) ->
 
 def test_computer_turn_plans_json_steps_and_finishes(tmp_path) -> None:
     tools = FakeTools()
-    replies = ['{"tool": "look"}', 'ok {"tool": "act", "action": "click", "element": "Save"} done',
-               '{"tool": "say", "text": "Saved your file."}']
+    replies = [
+        '{"tool": "look"}',
+        'ok {"tool": "act", "action": "click", "element": "Save"} done',
+        '{"tool": "say", "text": "Saved your file."}',
+    ]
     agent, speech, p = _agent(tmp_path, replies, route="computer", tools=tools)
     turn = agent.handle("save my file")
     assert tools.acts == [("click", {"element": "Save"})]
@@ -312,7 +351,10 @@ def test_handoff_and_refused_steps(tmp_path) -> None:
         def act(self, action, why="", screen_text="", **kw):
             raise RuntimeError("you did not allow 'Send'")
 
-    replies = ['{"tool": "act", "action": "click", "element": "Send"}', '{"tool": "say", "text": "Okay, I did not send it."}']
+    replies = [
+        '{"tool": "act", "action": "click", "element": "Send"}',
+        '{"tool": "say", "text": "Okay, I did not send it."}',
+    ]
     agent2, speech2, p2 = _agent(tmp_path, replies, route="computer", tools=Refusing())
     agent2.handle("send the email")
     assert "refused: you did not allow 'Send'" in json.dumps(p2.calls[-1]["messages"])
@@ -321,8 +363,9 @@ def test_handoff_and_refused_steps(tmp_path) -> None:
 
 def test_without_permissions_a_computer_request_is_just_chat(tmp_path) -> None:
     s = st.LiveSettings(enabled=True, allow_control=False, allow_screen=False, allow_settings=False)
-    agent, speech, _ = _agent(tmp_path, ["I can't use your computer yet, but here is how."], route="computer",
-                              s=s, tools=FakeTools())
+    agent, speech, _ = _agent(
+        tmp_path, ["I can't use your computer yet, but here is how."], route="computer", s=s, tools=FakeTools()
+    )
     assert agent.handle("open notepad").route == "computer" and speech.said[0].startswith("I can't")
 
 
@@ -330,7 +373,10 @@ def test_stop_word_cancels_and_parse_action() -> None:
     sp = FakeSpeech()
     a = LiveAgent(lambda: st.LiveSettings(), lambda: None, speech=sp)  # type: ignore[arg-type,return-value]
     assert a.submit("stop") and sp.interrupted == 1
-    assert parse_action('```json\n{"tool": "act", "action": "type_text", "text": "hi {there}"}\n```')["text"] == "hi {there}"
+    assert (
+        parse_action('```json\n{"tool": "act", "action": "type_text", "text": "hi {there}"}\n```')["text"]
+        == "hi {there}"
+    )
     assert parse_action("I will just say hello.")["tool"] == "say"
     assert Turn(1, 0.0, "x").public()["time"]
 
@@ -410,8 +456,13 @@ def _fake_app() -> Any:
     sent: list[tuple] = []
     talk.deliver = lambda t, x, s: (sent.append((t, x)), "Sent to Hark")[1]
     bus = SimpleNamespace(publish=lambda *a, **k: None)
-    return SimpleNamespace(talk=talk, bus=bus, agent_link=None, voice=None,
-                           cfg=SimpleNamespace(speech=None, voice=SimpleNamespace(sample_rate=16000))), sent
+    return SimpleNamespace(
+        talk=talk,
+        bus=bus,
+        agent_link=None,
+        voice=None,
+        cfg=SimpleNamespace(speech=None, voice=SimpleNamespace(sample_rate=16000)),
+    ), sent
 
 
 def test_hey_name_reaches_the_live_agent_through_the_existing_wake_words(tmp_path) -> None:
@@ -423,12 +474,16 @@ def test_hey_name_reaches_the_live_agent_through_the_existing_wake_words(tmp_pat
     got: list[str] = []
     host.agent.submit = lambda text, source="voice": got.append(text) or True  # type: ignore[method-assign]
     assert all(a["id"] != "live-agent" for a in app.talk.agents())  # off: not listening
-    st.save(st.LiveSettings(enabled=True, name="Jarvis", providers=[st.ProviderConfig("opencode_free", "opencode_free")]),
-            host.watcher.path)
+    st.save(
+        st.LiveSettings(enabled=True, name="Jarvis", providers=[st.ProviderConfig("opencode_free", "opencode_free")]),
+        host.watcher.path,
+    )
     host.watcher.poll()
     route = app.talk.route("Hey Jarvis, what time is it in Tokyo?")
     assert route is not None and route.target == "live-agent"
-    assert app.talk.send(route.target, route.body, "voice") == "Jarvis is answering" and got == ["what time is it in Tokyo?"]
+    assert app.talk.send(route.target, route.body, "voice") == "Jarvis is answering" and got == [
+        "what time is it in Tokyo?"
+    ]
     hark = app.talk.route("Hey Hark, write the report")
     assert app.talk.send(hark.target, hark.body, "voice") == "Sent to Hark" and sent == [("a1", "write the report")]
     assert host.tray_text().startswith("Live agent: on")
@@ -441,8 +496,10 @@ def test_agent_link_domain_switch_and_off_never_on(tmp_path) -> None:
 
     app, _ = _fake_app()
     host = LiveAgentHost(app, tmp_path)
-    st.save(st.LiveSettings(enabled=True, providers=[st.ProviderConfig("groq", "groq", "openai/gpt-oss-20b")]),
-            host.watcher.path)
+    st.save(
+        st.LiveSettings(enabled=True, providers=[st.ProviderConfig("groq", "groq", "openai/gpt-oss-20b")]),
+        host.watcher.path,
+    )
     host.watcher.poll()
     register_domain(host)
     try:
@@ -500,10 +557,9 @@ def test_attach_never_raises(tmp_path) -> None:
 
 # ------------------------------------------------------------------------------------------------ Settings logic
 def test_settings_panel_keys_test_remove(tmp_path, monkeypatch) -> None:
-    from liveagent_fakes import FakeTransport, openai_chunks
-
     from away.liveagent.gui import LivePanel, plain_error
     from away.liveagent.http import Client, HttpError
+    from liveagent_fakes import FakeTransport, openai_chunks
 
     def handler(method, url, headers, body):
         if url.endswith("/models"):
@@ -520,12 +576,14 @@ def test_settings_panel_keys_test_remove(tmp_path, monkeypatch) -> None:
     assert ok and msg.startswith("Works"), msg
     assert ks.get("groq") == "gsk_good_key_123456" and "gsk_good" not in panel.path.read_text()
     assert panel.s.preferred == "groq/openai/gpt-oss-20b"
-    assert ("groq/openai/gpt-oss-20b", "Openai/gpt Oss 20b - Groq") in panel.model_choices() or len(panel.model_choices()) == 2
+    assert ("groq/openai/gpt-oss-20b", "Openai/gpt Oss 20b - Groq") in panel.model_choices() or len(
+        panel.model_choices()
+    ) == 2
     ks.set("groq", "gsk_bad_key_99999999")
     ok, msg = panel.test("groq")
     assert not ok and "refused" in msg
     assert panel.add_key("openai", "")[1] == "Paste the key first"
-    assert panel.set_name("Jarvis") == 'Say "Hey Jarvis"' and panel.set_name("!!") .startswith("Use a short")
+    assert panel.set_name("Jarvis") == 'Say "Hey Jarvis"' and panel.set_name("!!").startswith("Use a short")
     assert panel.remove("groq") == "Removed" and ks.get("groq") == "" and not panel.s.providers
     assert plain_error(HttpError(429, "x")).startswith("too many") and panel.recent_turns() == []
     assert "60 MB" in panel.engine_text() or "opencode" in panel.engine_text()
