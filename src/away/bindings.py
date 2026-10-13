@@ -124,6 +124,7 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "cursor": CURSOR_ARGS,
     "macro": None,  # free: a saved shortcut's id (away.control.macros.NAME_RE)
     "macro_control": MACRO_CONTROL_ARGS,
+    "agent": ("summon", "look", "screen", "wrong", "stop"),  # Agent Link (v0.1.20): tell connected AI agents
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
 # continuous mouse actions only make sense on the matching continuous gesture
@@ -324,6 +325,11 @@ def default_profile() -> Profile:
             "record macro": a("macro_control:record"),
             "stop recording": a("macro_control:stop_recording"),
             "stop": a("macro_control:stop"),  # stops a running shortcut (does nothing otherwise)
+            "hey agent": a("agent:summon"),  # Agent Link (v0.1.20): connected AI agents get these as events
+            "hey agent look": a("agent:look"),
+            "hey agent look at my screen": a("agent:screen"),
+            "that was wrong": a("agent:wrong"),
+            "stop agent": a("agent:stop"),
         },
         face={
             "brow_raise": a("dictation:toggle"),

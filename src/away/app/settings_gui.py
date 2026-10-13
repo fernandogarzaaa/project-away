@@ -1507,6 +1507,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_cameras(nb)
         self._build_performance(nb)
         self._build_studio(nb)  # v0.1.20: Gesture Studio replaces the old "Test gesture" tab
+        from away.agentlink import gui as agent_gui  # Agent Link (v0.1.20), isolated in its own module
+
+        with contextlib.suppress(Exception):
+            agent_gui.build_tab(self, nb)
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches (first tab)

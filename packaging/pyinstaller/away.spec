@@ -75,6 +75,18 @@ optional("pystray", data=False, subs=True, hidden_mods=[f"pystray.{m}" for m in 
 optional("PIL", data=False)
 optional("pyperclip", data=False)
 optional("tkinter", data=False, hidden_mods=["tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"])
+# v0.1.20 Agent Link: the MCP SDK + its HTTP stack (uvicorn picks protocol/loop modules by name at run time),
+# QR codes, the OS keyring, and UI Automation on Windows. All pure Python (no new DLLs).
+optional("mcp", data=False, subs=True, meta=True)
+optional("uvicorn", data=False, subs=True)
+optional("starlette", data=False, subs=True)
+optional("sse_starlette", data=False, subs=True)
+optional("pydantic", data=False, subs=True, meta=True)
+optional("pydantic_settings", data=False, subs=True, meta=True)
+optional("qrcode", data=False, subs=True)
+optional("keyring", data=False, subs=True, meta=True)
+if sys.platform == "win32":
+    optional("uiautomation", data=True, subs=True)
 if sys.platform == "win32":
     # v0.1.19: the WinRT MediaCapture camera backend (away.multicam.winrt_capture imports pywinrt lazily, so
     # PyInstaller never sees it). "winrt" is a namespace package: name every module and bundle its .pyd/.dll.

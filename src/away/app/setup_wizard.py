@@ -86,7 +86,11 @@ def run(
     if unknown:
         rep.warnings.append("ignored unknown config keys: " + ", ".join(unknown))
     mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
-    out(f"Project Away setup\n  data:   {paths.data_dir()}\n  config: {paths.config_file()}")
+    out(
+        "Project Away setup: the bridge between you and your AI agents, controlled by your hands, face and voice.\n"
+        "  (Connect your AI later in Settings > Agent Link.)\n"
+        f"  data:   {paths.data_dir()}\n  config: {paths.config_file()}"
+    )
 
     out("\n[1/4] MediaPipe models")
     for mf in models.MEDIAPIPE_MODELS:

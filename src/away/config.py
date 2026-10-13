@@ -403,6 +403,75 @@ class UpdatesConfig:
     allow_unverified: bool = False  # install a download that has no published SHA-256 (not recommended)
 
 
+AUTOFIX_MODES = ("ask", "auto_low_risk")
+
+
+@dataclass
+class AgentLinkConfig:
+    """Agent Link (v0.1.20): connect AI agents (Claude, ChatGPT, Cursor...). Nothing is shared until you connect an
+    agent and allow it on this PC; see README "Connect your AI agent"."""
+
+    enabled: bool = True  # False: no Agent Link at all (no local server, no detectors)
+    remote_ttl_min: int = 60  # a remote agent's access expires after this (it can pair again)
+    local_ttl_days: int = 30  # an agent on this PC (Claude Desktop, Cursor) stays connected this long
+    pairing_ttl_s: int = 600  # a pairing link / QR / 6-digit code works once, within this time
+    control_ttl_min: int = 30  # "Let it use my computer" ends after this; approved again every session
+    port: int = 0  # local server port on 127.0.0.1 (0 = any free port)
+    rate_per_s: float = 10.0  # requests per second per client (burst rate_burst)
+    rate_burst: int = 40
+    action_rate_per_s: float = 4.0  # computer actions per second per agent
+    cloudflared_download: bool = True  # download the pinned cloudflared when you connect a remote agent
+    cloudflared_path: str = ""  # use this cloudflared instead
+    screen_fps: float = 1.0  # live screen view rate (0.2-2)
+    screen_max_width: int = 960  # screenshots are scaled down to this width
+    snapshot_max_width: int = 320  # camera stills are scaled down to this width
+    record_buffer_s: float = 30.0  # landmarks kept in memory for bundles and auto-detectors
+    detectors: bool = True  # save a diagnostics bundle when a camera / crash / misfire problem is detected
+    detector_cooldown_s: float = 600.0
+    fps_drop_ratio: float = 0.5
+    misfire_threshold: int = 4  # "that was wrong" / cancelled actions within a minute
+    autofix: str = "ask"  # ask: agents' setting changes need your OK | auto_low_risk: thresholds apply at once
+    stop_hotkey: str = "ctrl+alt+esc"  # stops an agent that is using the computer
+    github_issues: bool = False  # file a GitHub issue when a detector trips (token in the OS keyring)
+    github_repo: str = "fernandogarzaaa/project-away"
+
+
+def validate_agent_link(a: AgentLinkConfig) -> None:
+    if a.autofix not in AUTOFIX_MODES:
+        raise ValueError(f"agent_link.autofix must be {'|'.join(AUTOFIX_MODES)}, got {a.autofix!r}")
+    for name, lo, hi in (
+        ("remote_ttl_min", 1, 1440),
+        ("local_ttl_days", 1, 365),
+        ("pairing_ttl_s", 60, 3600),
+        ("control_ttl_min", 1, 240),
+        ("port", 0, 65535),
+        ("rate_burst", 1, 1000),
+        ("screen_max_width", 160, 3840),
+        ("snapshot_max_width", 80, 1280),
+        ("misfire_threshold", 1, 100),
+    ):
+        v = getattr(a, name)
+        if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+            raise ValueError(f"agent_link.{name} must be an integer in [{lo}, {hi}], got {v!r}")
+    for name, flo, fhi in (
+        ("rate_per_s", 0.1, 1000.0),
+        ("action_rate_per_s", 0.1, 20.0),
+        ("screen_fps", 0.2, 2.0),
+        ("record_buffer_s", 0.0, 300.0),
+        ("detector_cooldown_s", 0.0, 86400.0),
+        ("fps_drop_ratio", 0.05, 0.95),
+    ):
+        v = getattr(a, name)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not flo <= float(v) <= fhi:
+            raise ValueError(f"agent_link.{name} must be a number in [{flo}, {fhi}], got {v!r}")
+    try:
+        canonical(str(a.stop_hotkey))
+    except KeyComboError as exc:
+        raise ValueError(f"agent_link.stop_hotkey: {exc}") from None
+    if not str(a.github_repo).count("/") == 1:
+        raise ValueError("agent_link.github_repo must be owner/name")
+
+
 CONFIG_VERSION = 4  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9..v0.1.13; 4 = v0.1.14
 
 
@@ -419,6 +488,7 @@ class AppConfig:
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     attention: AttentionConfig = field(default_factory=AttentionConfig)  # v0.1.20 attention gate (away.comfort)
     comfort: ComfortConfig = field(default_factory=ComfortConfig)  # v0.1.20 arm fatigue + break reminders
+    agent_link: AgentLinkConfig = field(default_factory=AgentLinkConfig)
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -699,6 +769,7 @@ def validate(cfg: AppConfig) -> None:
     validate_profile_tuning(cfg)
     validate_cleanup(cfg.voice.cleanup, cfg.voice.dictionary)
     validate_macros_config(cfg.macros)
+    validate_agent_link(cfg.agent_link)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:

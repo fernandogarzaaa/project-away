@@ -1227,7 +1227,7 @@ def test_winrt_extra_is_windows_only_and_bundled() -> None:
     spec = (root / "packaging" / "pyinstaller" / "away.spec").read_text()
     assert 'optional("winrt"' in spec and "winrt.windows.media.capture.frames" in spec
     ci = (root / ".github" / "workflows" / "ci.yml").read_text()
-    assert '".[dev,winrt]"' in ci
+    assert '".[dev,winrt,agent]"' in ci  # v0.1.20: + the [agent] extra (Agent Link tests)
 
 
 def test_preload_system_msvcp140_before_pywinrt() -> None:
