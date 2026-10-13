@@ -937,7 +937,8 @@ def test_stream_cameras_on_the_simulated_bus_measures_each_camera() -> None:
     res = camtest.stream_cameras(specs, 0.4, start=_starter(bus, "test", fallbacks=False))
     assert res[0].ok and res[0].mode == "640x480@30 YUY2" and res[0].backend == "DirectShow"
     assert not res[1].ok and "sent no frames" in res[1].error  # both at 640x480 YUY2: over the bus limit
-    assert res[0].fps > 20 and res[0].frames > 5
+    # a simulated 30 fps camera; a busy CI runner (macOS) measured 17 fps, so only check it really streamed
+    assert res[0].fps > 10 and res[0].frames > 3
     assert bus.holder == {}  # released after the test
 
     res2 = camtest.stream_cameras(camtest.low_res_specs(specs), 0.3, start=_starter(bus, "test", fallbacks=False))
