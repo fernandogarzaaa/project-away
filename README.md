@@ -1481,8 +1481,8 @@ The list comes from three places: the built-in manifest (`src/away/data/models.j
    * `set`: the settings this model uses. Only `hands.*`, `face.*`, `gaze.*`, `voice.*` and `speech.*` keys are
      accepted (never `agent_link.*`).
    * `license`: an SPDX name. Anything not permissive is hidden from Settings → Models.
-   * A file to download needs `url` (https, from huggingface.co, github.com / objects.githubusercontent.com or
-     files.pythonhosted.org) and its `sha256`.
+   * A file to download needs `url` (https, from huggingface.co, github.com, objects.githubusercontent.com,
+     raw.githubusercontent.com, files.pythonhosted.org or storage.googleapis.com) and its `sha256`.
    * `runtime`: `mediapipe`, `onnx`, `gguf`, `whisper`, `rules`, `ollama` or `system`.
 2. Update the checksum file: `python -c "import hashlib;print(hashlib.sha256(open('models/catalog.json','rb').read()).hexdigest()+'  catalog.json')" > models/catalog.sha256`
 3. Open a pull request. `tests/test_v0123_voices_models.py` checks the checksum and validates every entry.
