@@ -54,10 +54,10 @@ jobs:
         run: pytest -p no:warnings --cov=away --cov-report=term-missing:skip-covered
 
   gpu-windows:
-    # v0.1.24: GPU hand/face tracking through ONNX Runtime + DirectML. Allowed to fail while it settles: GitHub's
-    # Windows runners have no real graphics card, so DirectML runs on its software (WARP) adapter there. This proves
-    # the provider loads and the pinned models run through it, not that a real card is faster. The installer still
-    # ships plain onnxruntime (unchanged on purpose).
+    # v0.1.24: GPU hand/face tracking through ONNX Runtime + DirectML. Allowed to fail while it settles. GitHub's
+    # Windows runners have no DirectX 12 graphics card: the DirectML runtime loads but finds no device, so this proves
+    # the provider installs, the pinned models download and run, and the app falls back to the processor with a note.
+    # It says nothing about speed on a real card. The installer still ships plain onnxruntime (unchanged on purpose).
     name: GPU tracking (Windows, onnxruntime-directml, allowed to fail)
     runs-on: windows-latest
     continue-on-error: true

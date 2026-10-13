@@ -339,8 +339,18 @@ def test_real_models_download_and_run(tmp_path: Path) -> None:
     hp, fp = gm.paths("hands", tmp_path), gm.paths("face", tmp_path)
     hands = OnnxHandLandmarker(hp["palm_detector"], hp["hand_landmark"], 2, prov)
     print("providers available:", avail, "hand session uses:", hands.providers)
-    if os.environ.get("AWAY_EXPECT_DML") == "1":
-        assert "DmlExecutionProvider" in hands.providers  # the Windows CI job with onnxruntime-directml
+    if os.environ.get("AWAY_EXPECT_DML") == "1":  # the Windows CI job with onnxruntime-directml
+        assert "DmlExecutionProvider" in avail  # the DirectML runtime itself loads
+        if "DmlExecutionProvider" not in hands.providers:
+            # GitHub's Windows runners have no DirectX 12 graphics card ("No devices detected that match the filter
+            # criteria"), so ONNX Runtime quietly runs the session on the processor. The app must notice that and
+            # fall back to MediaPipe with a note instead of claiming the graphics card.
+            notes: list[str] = []
+            cfg = C.AppConfig()
+            cfg.hands.compute = "gpu"
+            assert compute.hand_factory(cfg, tmp_path / "hand.task", tmp_path, on_note=notes.append) is None
+            assert notes, "the fallback to the processor must say why"
+            print("DirectML loaded but found no device; fallback note:", notes[0])
     blank = np.full((480, 640, 3), 128, np.uint8)
     assert hands.detect_for_video(blank, 0).hand_landmarks == []
     face = OnnxFaceLandmarker(fp["face_detector"], fp["face_landmark"], fp["face_blendshape"], 1, prov)
