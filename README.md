@@ -31,7 +31,7 @@ settings, so skipping is always fine.
 3. **Try it out (about 2 minutes):** point at three circles, pinch to click, scroll, and pause with an open palm.
    Each one turns green as soon as Project Away sees it. Nothing on your computer is clicked while you practise.
 4. **Make it comfortable:** two optional switches, *Only respond when I'm looking at the screen* and
-   *Switch to head control when my arm is tired* (see section 7).
+   *Switch to head control when my arm is tired* (see section 6).
 5. **Eye setup (optional):** follow a few dots with your eyes.
 
 Run it again any time: tray menu → **Guided first run...**, or **Settings → Getting started**
@@ -138,7 +138,7 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Optional gaze model:** a learned eye-gaze network can be downloaded in Settings → Performance → Models. Its
   weights are for **research use only** (see below), so it is never installed automatically.
 
-### 7. Comfort: only when you're looking, tired arms and breaks
+### 6. Comfort: only when you're looking, tired arms and breaks
 
 All of these are plain switches in **Settings → Getting started** (the first tab). The numbers behind them are
 under **Advanced** there, and in **Settings → Tuning**; you never need to touch them.
@@ -156,7 +156,7 @@ under **Advanced** there, and in **Settings → Tuning**; you never need to touc
 - **Remind me to take a break** (on): a short note after 30 minutes of continuous gesture use. Being away from the
   camera for 2 minutes counts as a break.
 
-### 6. If something goes wrong
+### 7. If something goes wrong
 
 - **Models didn't finish downloading:** reopen the app (see Installing above). It resumes.
 - **Cursor doesn't move:** check another app isn't using the camera (Zoom, Teams, the Camera app), then restart Project Away from the tray.
