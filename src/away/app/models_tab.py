@@ -181,7 +181,12 @@ def build(win: Any, nb: Any, data_dir: Path | None = None) -> Any:  # pragma: no
                 text = "Voice downloaded."
             except Exception as exc:
                 text = f"The download did not finish ({str(exc)[:120]})."
-            win._ui.post(lambda: (msg.set(text), refresh()))
+
+            def done() -> None:
+                msg.set(text)
+                refresh()
+
+            win._ui.post(done)
 
         threading.Thread(target=run, daemon=True, name="models-download").start()
 
