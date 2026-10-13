@@ -283,7 +283,8 @@ class Pipeline:
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
-        self.comfort.apply_config(cfg)
+        if hasattr(self, "comfort"):  # a pinned profile's tuning is applied in __init__, before the hub exists
+            self.comfort.apply_config(cfg)
 
     def attention_state(self) -> dict[str, Any]:
         """Attention gate + arm-fatigue snapshot for the UI (v0.1.20)."""
