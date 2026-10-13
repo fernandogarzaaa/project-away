@@ -15,6 +15,7 @@ import yaml
 
 from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
+from away.comfort.settings import AttentionConfig, ComfortConfig, comfort_tunables, validate_comfort
 from away.control.keys import KeyComboError, canonical
 
 
@@ -404,6 +405,8 @@ class AppConfig:
     wifi: WifiConfig = field(default_factory=WifiConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    attention: AttentionConfig = field(default_factory=AttentionConfig)  # v0.1.20 attention gate (away.comfort)
+    comfort: ComfortConfig = field(default_factory=ComfortConfig)  # v0.1.20 arm fatigue + break reminders
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -672,6 +675,7 @@ def validate(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be a number in [{lo}, {hi}], got {value!r}")
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
+    validate_comfort(cfg)
     validate_profile_tuning(cfg)
 
 
@@ -834,6 +838,7 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.palm_scroll.friction", cfg.hands.palm_scroll.friction, 0.5, 20.0),
         ("hands.min_camera_fps", cfg.hands.min_camera_fps, 1.0, 60.0),
         *tracking_tunables(cfg),
+        *comfort_tunables(cfg),
     ]
 
 

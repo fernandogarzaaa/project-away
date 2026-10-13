@@ -109,7 +109,15 @@ class TrayController:
             "off": "voice off",
         }.get(state, state)
         text = f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
+        text += self.attention_suffix()
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
+
+    def attention_suffix(self) -> str:
+        """v0.1.20: " - waiting for you (raise your hand...)" while the attention gate is on."""
+        from away.comfort.ui import tray_suffix
+
+        fn = getattr(getattr(self.app, "pipeline", None), "attention_state", None)
+        return tray_suffix(fn()) if callable(fn) else ""
 
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
@@ -179,6 +187,25 @@ class TrayController:
         self.app.stop()
 
 
+def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[Any]:
+    """Tray menu (v0.1.20): "Only respond when I'm looking at the screen" (a check box) and "Guided first run"."""
+    from away.comfort import actions
+
+    def on_gate(_icon: Any, _item: Any) -> None:
+        on = not actions.switch_value(ctl.app.cfg, "attention.enabled")
+        err = actions.set_switch_in_file("attention.enabled", on, live_cfg=ctl.app.cfg)
+        notify("Project Away", err or ("Only responding when you look at the screen" if on else "Always responding"))
+
+    return [
+        pystray.MenuItem(
+            "Only respond when I'm looking at the screen",
+            on_gate,
+            checked=lambda _i: actions.switch_value(ctl.app.cfg, "attention.enabled"),
+        ),
+        pystray.MenuItem("Guided first run...", lambda _icon, _item: actions.launch_first_run()),
+    ]
+
+
 def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a GUI process
     try:
         subprocess.Popen(ctl.settings_command())
@@ -228,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.app import crashlog
 
     crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
+    had_config = cfgmod.config_path().exists()  # v0.1.20: an existing user is not shown the first-run guide
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
     ctl = TrayController(app)
@@ -235,6 +263,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     app.start()
     if not cfg.app.start_minimized:
         open_settings(ctl)
+    from away.app import first_run
+
+    first_start = first_run.should_auto_open()  # v0.1.20: once ever; a new user gets the guide, others a hint
+    if first_start:
+        first_run.mark_seen()
 
     def refresh(icon: Any) -> None:
         icon.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
@@ -353,13 +386,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             lambda _icon, _item: ctl.retry_cameras(),
             visible=lambda _i: ctl.camera_retry_stopped(),
         ),
+        *comfort_menu_items(pystray, ctl, notify),  # v0.1.20: attention gate switch + guided first run
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
-    for topic in ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested"):
+    for topic in ("voice.state", "app.paused", "attention.state", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))
@@ -377,6 +411,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
                 "Project Away: faster speech available", f"{gpu_offer['text']}. Use the tray menu: Install GPU pack."
             )
     ctl.mark_activity()  # the idle clock starts at launch
+    if first_start:
+        if had_config:
+            notify("Project Away", "New: a guided tour and comfort helpers. Tray menu > Guided first run...")
+        else:
+            from away.comfort.actions import launch_first_run
+
+            launch_first_run()
     if crash_note:
         ctl.crash_note = f"{crash_note} ({crashlog.crash_log_path()})"
         notify("Project Away", ctl.crash_note)

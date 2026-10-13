@@ -24,6 +24,7 @@ from away import paths
 from away.actions import ActionExecutor, CustomGestureDetector, Dispatcher, hotkey_map
 from away.app.tunables import profile_tuned
 from away.bindings import Action
+from away.comfort.hub import ComfortHub
 from away.config import AppConfig
 from away.control.mouse import MouseBackend, MouseController, RecordingBackend
 from away.events import EventBus
@@ -143,6 +144,8 @@ class Pipeline:
             publish=lambda topic, data: self.bus.publish(topic, data),
         )
         self.mouse.gaze_point = lambda: self.headgaze.estimator.point if self.headgaze.estimator else None
+        # v0.1.20 attention gate + arm fatigue + break reminders (away.comfort)
+        self.comfort = ComfortHub(cfg, self.headgaze, publish=lambda topic, data: self.bus.publish(topic, data))
 
     @property
     def hand_prefer(self) -> str:
@@ -217,6 +220,7 @@ class Pipeline:
             "frozen": bool(self.mouse.stabilizer is not None and self.mouse.stabilizer.frozen),
             "direction": self.palm.direction if state == "palmscroll" else self.gestures.autoscroll.direction,
             "size": int(self.cfg.hands.cursor.big_cursor_size),
+            "attention": self.comfort.gate.state if self.cfg.attention.indicator else "off",
         }
 
     def set_paused(self, paused: bool) -> None:
@@ -279,6 +283,11 @@ class Pipeline:
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
+        self.comfort.apply_config(cfg)
+
+    def attention_state(self) -> dict[str, Any]:
+        """Attention gate + arm-fatigue snapshot for the UI (v0.1.20)."""
+        return self.comfort.attention_state()
 
     def hotkeys(self) -> dict[str, str]:
         return hotkey_map(self.cfg.bindings, self.cfg.voice, self.dispatcher.profile)
@@ -329,6 +338,8 @@ class Pipeline:
         palm-glide scroll). ``promoted``: the pointer was the helper until now (its flat palm must not pause)."""
         accepted = []
         self._check_auto_pause(t)
+        if not self.comfort.allow_hand(t, landmarks):  # attention gate / resting arm: the hand does not count
+            landmarks = pinch = depth = points3d = helper = helper_points3d = None
         if pointer_id is not None and self._pointer_id is not None and pointer_id != self._pointer_id:
             # the pointer role moved to the other hand: end the old hand's drag/scroll and re-anchor the cursor
             # on the new one (no jump)
@@ -471,10 +482,13 @@ class Pipeline:
             ex = extras[k] if k < len(extras) else None
             raw_pose = getattr(ex, "pose", None)
             self.headgaze.on_face(t, raw_pose, getattr(ex, "proxy", None), getattr(ex, "gaze", None), net)
+            self.comfort.on_face(t, raw_pose is not None)
             if self.headgaze.facing(raw_pose) and user_frontal is not True:
                 # an off-axis webcam sees the head turned even while the user looks at the screens: the head pose
                 # (relative to the usual / calibrated screen-facing pose) says "facing the screen"
                 user_frontal = True
+        elif extras is not None:
+            self.comfort.on_face(t, False)
         present = (user is not None) if self.gate.primary is not None else bool(ids)
         self.gate.observe(t, active, len(ids), user_score, user_frontal, present)
         if self.cfg.face.brow_raise_toggle and self.gate.primary in ids:
@@ -780,6 +794,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     # voice -------------------------------------------------------------------
     def _run_voice_command(self, phrase: str) -> bool:
+        if not self.pipeline.comfort.voice_allowed():  # attention.gate_voice: not looking at the screen
+            return False
         act = self.pipeline.fire("voice", phrase)
         return act.kind != "none"
 
@@ -787,6 +803,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.voice.handle_action(kind, arg)
 
     def _ambient_command(self, act: Action, phrase: str) -> None:
+        if not self.pipeline.comfort.voice_allowed():
+            return
         self.pipeline.fire("voice", phrase)
 
     def _start_voice(self) -> None:
