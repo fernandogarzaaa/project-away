@@ -16,6 +16,7 @@ import yaml
 from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
 from away.control.keys import KeyComboError, canonical
+from away.studio.settings import StudioConfig, ZonesConfig
 
 
 @dataclass
@@ -409,6 +410,9 @@ class AppConfig:
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
     models_dir: str | None = None
     bindings: BindingsConfig = field(default_factory=BindingsConfig)
+    # Gesture Studio (v0.1.20): one zone map per camera/profile, per-gesture settings (away.studio.settings)
+    zones: ZonesConfig = field(default_factory=ZonesConfig)
+    studio: StudioConfig = field(default_factory=StudioConfig)
     # what :func:`migrate` changed while loading (not saved); the app re-saves the file when non-empty
     migrations: list[str] = field(default_factory=list, compare=False, repr=False)
 
@@ -554,6 +558,9 @@ def _copy_voice_bindings(b: Any) -> Any:
 
 
 def validate(cfg: AppConfig) -> None:
+    from away.studio.pack import validate_studio
+
+    validate_studio(cfg)  # zones + studio (v0.1.20)
     if cfg.hands.cursor.mode not in ("relative", "absolute"):
         raise ValueError(f"hands.cursor.mode must be relative|absolute, got {cfg.hands.cursor.mode!r}")
     if cfg.voice.output not in ("paste", "type"):

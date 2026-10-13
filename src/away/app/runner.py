@@ -41,6 +41,7 @@ from away.hands.landmarks import as_array, pinch_ratio
 from away.hands.palmscroll import PalmScroller
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
+from away.studio.engine import StudioRuntime, fire_studio_gesture
 from away.voice.always_on import GateHint
 from away.voice.clap import camera_view
 from away.wifi.classifier import CoarseCSIClassifier
@@ -125,6 +126,7 @@ class Pipeline:
             cfg.bindings, self.executor, self.gestures, active_app=active_app, paused=self.output_paused
         )
         self.dispatcher.on_fire = self._on_fire
+        self.studio = StudioRuntime(cfg, profile=self.dispatcher._profile)  # zones + Studio gestures (v0.1.20)
         self._base_cfg = copy.deepcopy(cfg)  # the global tunables, before any per-app profile tuning
         self.dispatcher.on_profile = self._on_profile
         first = self.dispatcher._profile
@@ -156,6 +158,7 @@ class Pipeline:
     def _on_profile(self, name: str) -> None:
         """The focused app picked another bindings profile: apply its tuning (or go back to the global values)."""
         self.apply_config(profile_tuned(self._base_cfg, name), base=False)
+        self.studio.set_profile(name)
 
     def _on_fire(self, trig: str, act: Action) -> None:
         self.bus.publish("action.fired", {"trigger": trig, "action": str(act)})
@@ -279,6 +282,8 @@ class Pipeline:
         self.cfg.bindings = cfg.bindings
         self.dispatcher.set_bindings(cfg.bindings)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
+        self.cfg.zones, self.cfg.studio = cfg.zones, cfg.studio
+        self.studio.apply_config(self.cfg)
 
     def hotkeys(self) -> dict[str, str]:
         return hotkey_map(self.cfg.bindings, self.cfg.voice, self.dispatcher.profile)
@@ -351,6 +356,7 @@ class Pipeline:
                 self.cfg.hands.multicam.palm_length_m,
             )
         suppress = self.palm.active
+        zone_ok = self.studio.check_zone(landmarks)  # Gesture Studio zones gate activations (v0.1.20)
         ratio = None
         if landmarks is not None:
             ratio = pinch if pinch is not None else pinch_ratio(as_array(landmarks))
@@ -360,12 +366,18 @@ class Pipeline:
         if self.temporal is not None and landmarks is not None:
             probs = self.temporal.push(landmarks, handedness)
             self.fusion.update_model(probs)
-            for name in self.custom.update(t, probs) if not suppress else []:
+            for name in self.custom.update(t, probs) if not suppress and zone_ok else []:
                 self.bus.publish("gesture.custom", {"name": name}, t)
                 self.dispatcher.on_gesture(GestureEvent("custom", t, {"name": name}))
                 accepted.append(f"custom:{name}")
+        if landmarks is not None and not suppress:
+            for name in self.studio.update(t, landmarks, handedness, helper):
+                accepted += fire_studio_gesture(self, name, t)
         pointed = False
         for ev in self.gestures.update(t, landmarks, pinch=pinch, suppress=suppress):
+            if not self.studio.event_allowed(ev.kind, ev.data):
+                self.bus.publish("gesture.zoned", {"kind": ev.kind}, t)
+                continue
             if ev.kind not in ("move", "hand_lost", "drag_end", "autoscroll", "autoscroll_stop"):
                 self.palm.stop_momentum()  # a pointer gesture ends the palm-scroll coast
             if not self.fusion.accept(ev):
@@ -399,6 +411,8 @@ class Pipeline:
         through the bindings (``gesture:palm_tap``, so a pause action still works while paused)."""
         out = []
         for ev in events:
+            if not self.studio.event_allowed(ev.kind, ev.data):
+                continue
             if ev.kind == "palm_tap":
                 self.bus.publish("gesture.palm_tap", dict(ev.data), ev.t)
                 self.dispatcher.on_gesture(ev)
@@ -428,6 +442,8 @@ class Pipeline:
 
     def _synthetic_gesture(self, ev: GestureEvent) -> list[str]:
         """Gestures detected outside the state machine (dwell, push) go through the same bindings."""
+        if not self.studio.event_allowed(ev.kind, ev.data):
+            return []
         self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), ev.t)
         self.dispatcher.on_gesture(ev)
         return [ev.kind]
