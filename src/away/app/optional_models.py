@@ -120,6 +120,58 @@ CLEANUP_MODELS: tuple[OptionalModel, ...] = (
 )
 
 
+# v0.1.24 model refresh: Qwen3.5 (Apache-2.0, 2026-03-02; unsloth GGUF pinned to a Hub commit). Optional: the
+# default stays Qwen2.5 until "Test my PC" or you pick one (voice.cleanup.model: qwen3.5-2b | qwen3.5-2b-q8 |
+# qwen3.5-0.8b). Non-thinking mode, <think> removed (away.voice.cleanup_next).
+_UNSLOTH = "https://huggingface.co/unsloth/"
+QWEN35_NOTICE = "Apache-2.0 (Qwen3.5 by Alibaba Cloud, GGUF by Unsloth); runs locally, nothing is sent anywhere."
+CLEANUP_MODELS = (
+    *CLEANUP_MODELS,
+    OptionalModel(
+        key="qwen3.5-2b",
+        name="Smart cleanup: newer standard (Qwen3.5-2B, Q4_K_M)",
+        filename="cleanup_qwen3.5-2b-q4_k_m.gguf",
+        url=_UNSLOTH + "Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+        sha256="aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+        size_bytes=1_280_835_840,
+        license="Apache-2.0",
+        notice=QWEN35_NOTICE,
+        restricted=False,
+        kind="cleanup",
+        purpose="better instruction following than Qwen2.5-1.5B (IFEval 61.2 vs 47.4, different harnesses); GPU",
+        cost="not measured yet on a PC like yours: run Test my PC",
+    ),
+    OptionalModel(
+        key="qwen3.5-2b-q8",
+        name="Smart cleanup: newer, best quality (Qwen3.5-2B, Q8_0)",
+        filename="cleanup_qwen3.5-2b-q8_0.gguf",
+        url=_UNSLOTH + "Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q8_0.gguf",
+        sha256="1b04acba824817554f4ce23639bc8495ff70453b8fcb047900c731521021f2c1",
+        size_bytes=2_012_012_800,
+        license="Apache-2.0",
+        notice=QWEN35_NOTICE,
+        restricted=False,
+        kind="cleanup",
+        purpose="the same model at near-lossless 8-bit; needs a graphics card",
+        cost="not measured yet on a PC like yours: run Test my PC",
+    ),
+    OptionalModel(
+        key="qwen3.5-0.8b",
+        name="Smart cleanup: newer light (Qwen3.5-0.8B, Q4_K_M)",
+        filename="cleanup_qwen3.5-0.8b-q4_k_m.gguf",
+        url=_UNSLOTH + "Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf",
+        sha256="bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+        size_bytes=532_517_120,
+        license="Apache-2.0",
+        notice=QWEN35_NOTICE,
+        restricted=False,
+        kind="cleanup",
+        purpose="about the size of the old 0.5B, closer to the old 1.5B in quality; the CPU choice",
+        cost="~2 s per sentence on 2 shared ARM CPU cores (llama-cpp-python 0.3.36 CPU build, measured)",
+    ),
+)
+
+
 def all_models() -> tuple[OptionalModel, ...]:
     """Every downloadable model: :data:`MODELS` (gaze) plus :data:`CLEANUP_MODELS`."""
     return MODELS + CLEANUP_MODELS

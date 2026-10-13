@@ -365,7 +365,9 @@ class SmartCleaner:
         except Exception as exc:
             stats.method, stats.error = "fallback", f"cleanup engine error: {type(exc).__name__}: {exc}"
             return base
-        out = strip_wrapping(raw)
+        from away.voice.cleanup_next import strip_think
+
+        out = strip_wrapping(strip_think(raw))  # v0.1.24: a stray <think> block is never typed
         terms = self.dictionary.words() if self.dictionary is not None else []
         verdict = guard(base, out, terms)
         if not verdict.ok:
