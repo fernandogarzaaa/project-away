@@ -173,6 +173,8 @@ class Service:
         self._record_lock = threading.Lock()
         self._watchers: set[str] = set()
         self.watching = watching
+        self._listening: dict[str, int] = {}  # v0.1.23: agent id -> open event waits (a live connection)
+        self._listen_lock = threading.Lock()
 
     # ------------------------------------------------------------- helpers
     @staticmethod
@@ -202,6 +204,7 @@ class Service:
             "autofix_mode": self._s("autofix", "ask"),
             "pending_prompts": len(self.prompts.pending()),
             "event_seq": self.events.seq,
+            "inbox_unread": self.inbox.unread(agent.id, agent.name),  # v0.1.23
         }
 
     def get_context(self, agent: Agent) -> dict[str, Any]:
@@ -272,11 +275,12 @@ class Service:
         }
 
     # ---------------------------------------------------------------- tune
-    def change_settings(self, agent: Agent, ops: list[dict[str, Any]], why: str = "") -> dict[str, Any]:
-        """Apply changes with the user's policy: ask first (default), or low-risk changes at once and tell them."""
+    def change_settings(self, agent: Agent, ops: Any = None, why: str = "", changes: Any = None) -> dict[str, Any]:
+        """Apply changes with the user's policy: ask first (default), or low-risk changes at once and tell them.
+        v0.1.23: ``ops`` (alias ``changes``) is a list of changes, one change, or ``{key: value}``."""
         self.require(agent, perms.TUNE)
         specs: list[Op] = []
-        for o in ops:
+        for o in normalize_ops(ops if ops is not None else changes):
             op = Op.from_dict(o)
             if op.domain == "presets" and op.op == "apply":
                 specs.extend(preset_ops(self.cfg(), op.key, self.changes.presets))
@@ -613,14 +617,34 @@ class Service:
         deadline = time.monotonic() + max(0.0, min(float(timeout_s), 120.0))
         seq = int(since)
         tp = tuple(topics) if topics else None
-        while True:
-            evs = self.events.wait(seq, max(0.0, deadline - time.monotonic()), tp)
-            mine = [_for_agent(e, agent.id) for e in evs]
-            out = [e for e in mine if e is not None]
-            if evs:
-                seq = max(seq, max(int(e["seq"]) for e in evs))
-            if out or time.monotonic() >= deadline:
-                return {"seq": self.events.seq, "events": out}
+        with self._listen_lock:
+            self._listening[agent.id] = self._listening.get(agent.id, 0) + 1
+        try:
+            while True:
+                evs = self.events.wait(seq, max(0.0, deadline - time.monotonic()), tp)
+                mine = [_for_agent(e, agent.id) for e in evs]
+                out = [e for e in mine if e is not None]
+                if evs:
+                    seq = max(seq, max(int(e["seq"]) for e in evs))
+                if out or time.monotonic() >= deadline:
+                    return {"seq": self.events.seq, "events": out}
+        finally:
+            with self._listen_lock:
+                n = self._listening.get(agent.id, 1) - 1
+                if n > 0:
+                    self._listening[agent.id] = n
+                else:
+                    self._listening.pop(agent.id, None)
+
+    def reachable(self, agent: Any, now: float | None = None) -> bool:
+        """v0.1.23: will this agent see a message soon? It has access and contacted the PC in the last
+        :data:`RECENT_S` seconds, has a live connection open (an event wait / stream), or has a wake-up address."""
+        now = time.time() if now is None else now
+        if not agent.active(now):
+            return False
+        with self._listen_lock:
+            live = self._listening.get(agent.id, 0) > 0
+        return live or now - float(agent.last_seen) < RECENT_S or bool(getattr(agent, "wake_url", ""))
 
     # ----------------------------------------------------------- inbox (v0.1.22)
     def deliver_message(self, target: str, text: str, source: str = "voice") -> dict[str, Any]:
@@ -631,7 +655,11 @@ class Service:
         text = str(text or "").strip()
         if not text:
             return {"sent": False, "label": "", "reason": "nothing was said"}
-        ts = ib.resolve_targets(str(target or ""), self.registry.list(), str(self._s("default_agent", "") or ""))
+        # v0.1.23: an agent whose link expired is still someone you can talk to; its messages wait for it
+        active = self.registry.list()
+        known = self.registry.known() if hasattr(self.registry, "known") else active
+        pool = known if target else (active or known)
+        ts = ib.resolve_targets(str(target or ""), pool, str(self._s("default_agent", "") or ""))
         if not ts:
             return {"sent": False, "label": "", "reason": "No AI agent is connected, so the message was not sent."}
         m = self.inbox.add(text, ts, source)
@@ -639,13 +667,22 @@ class Service:
             "user.message",
             {"id": m.id, "text": m.text, "source": source, "to": list(m.to_names), "_for": list(m.to)},
         )
-        return {"sent": True, "label": ib.sent_label(m.to_names), "to": list(m.to_names), "id": m.id}
+        away = [a.name for a in ts if not self.reachable(a)]
+        note = waiting_note(away)
+        return {
+            "sent": True,
+            "label": ib.sent_label(m.to_names),
+            "to": list(m.to_names),
+            "id": m.id,
+            "waiting": away,
+            "note": note,
+        }
 
     def inbox_list(self, agent: Agent, unread_only: bool = False) -> dict[str, Any]:
-        ms = self.inbox.for_agent(agent.id, bool(unread_only))
+        ms = self.inbox.for_agent(agent.id, bool(unread_only), agent.name)
         return {
             "messages": [m.public(agent.id) for m in ms],
-            "unread": self.inbox.unread(agent.id),
+            "unread": self.inbox.unread(agent.id, agent.name),
             "wake_phrase": agent.wake_phrase(),
             "how_to_reply": "inbox action=reply with id and text (shown and read aloud)",
         }
@@ -653,7 +690,7 @@ class Service:
     def inbox_read(self, agent: Agent, id: str | None = None) -> dict[str, Any]:
         if id in (None, ""):
             raise ValueError("give the message id (inbox action=list shows them)")
-        m = self.inbox.get(agent.id, str(id))
+        m = self.inbox.get(agent.id, str(id), agent.name)
         self.inbox.mark_read(agent.id, m)
         return m.public(agent.id)
 
@@ -705,6 +742,47 @@ class Service:
         self.control.revoke_agent(agent.id)
         self.registry.revoke(agent.id)
         return {"disconnected": True}
+
+
+def normalize_ops(ops: Any) -> list[dict[str, Any]]:
+    """v0.1.23: the forms an agent may send to settings change: ``[{"key": ..., "value": ...}, ...]``, one
+    ``{"key": ..., "value": ...}``, or ``{"hands.cursor.gain": 1.8, ...}``. Anything else is a plain ChangeError."""
+    hint = 'send changes as a list like [{"key": "hands.cursor.gain", "value": 1.8}] or as {"hands.cursor.gain": 1.8}'
+    if ops is None or ops == [] or ops == {}:
+        raise ChangeError("nothing to change; " + hint)
+    if isinstance(ops, str):
+        import json
+
+        try:
+            ops = json.loads(ops)
+        except ValueError:
+            raise ChangeError(hint) from None
+    if isinstance(ops, dict):
+        if "key" in ops or "domain" in ops or "op" in ops:
+            return [ops]
+        return [{"domain": "settings", "op": "set", "key": str(k), "value": v} for k, v in ops.items()]
+    if isinstance(ops, (list, tuple)):
+        out = []
+        for i, o in enumerate(ops):
+            if not isinstance(o, dict):
+                raise ChangeError(f"change {i + 1} is not an object; " + hint)
+            out.append(o)
+        return out
+    raise ChangeError(hint)
+
+
+RECENT_S = 120.0  # v0.1.23: an agent that contacted the PC this recently counts as connected for messages
+
+
+def waiting_note(names: list[str]) -> str:
+    """ "Hark isn't connected right now; I'll keep your message until it checks in." ("" when all are here)."""
+    ns = [n for n in names if n]
+    if not ns:
+        return ""
+    if len(ns) == 1:
+        return f"{ns[0]} isn't connected right now; I'll keep your message until it checks in."
+    who = ", ".join(ns[:-1]) + " and " + ns[-1]
+    return f"{who} aren't connected right now; I'll keep your message until they check in."
 
 
 def _for_agent(ev: dict[str, Any], agent_id: str) -> dict[str, Any] | None:

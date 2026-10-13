@@ -139,6 +139,15 @@ def _windows_and_clean(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 # ====================================================================== bug 1: MJPG + verified open
+
+
+@pytest.fixture
+def external_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.1.23: NVIDIA Broadcast is never a fallback for the built-in camera (opening it makes Broadcast take the
+    built-in camera). These older tests check the fallback mechanics, which still apply to an external camera."""
+    monkeypatch.setattr(capture, "broadcast_fallback_allowed", lambda _name: True)
+
+
 def test_mjpg_is_set_before_size_and_fps_and_a_frame_is_verified() -> None:
     cv2 = FakeCV2()
     got = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), **_quick())
@@ -308,7 +317,7 @@ def test_msmf_index_matching_by_name_occurrence_and_fallbacks(caplog: Any) -> No
     assert capture.msmf_index(1, None, [], f"'{BUILTIN}'", lambda: list(MF_LIST)) == MF_BUILTIN  # by name only
 
 
-def test_media_foundation_is_tried_before_the_virtual_fallback() -> None:
+def test_media_foundation_is_tried_before_the_virtual_fallback(external_camera: None) -> None:
     cv2 = FakeCV2(_builtin_dead())
     got = capture.open_camera(1, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
     assert [o for o in cv2.opened] == [(1, 700), (MF_BUILTIN, 1400), (2, 700)]  # DirectShow, MSMF, Broadcast
@@ -343,7 +352,7 @@ def test_no_broadcast_hint_without_a_broadcast_camera() -> None:
     assert "NVIDIA Broadcast" not in str(err.value)
 
 
-def test_unopenable_camera_falls_back_to_the_one_free_broadcast_camera(caplog: Any) -> None:
+def test_unopenable_camera_falls_back_to_the_one_free_broadcast_camera(caplog: Any, external_camera: None) -> None:
     cv2 = FakeCV2(_builtin_dead())
     with caplog.at_level(logging.INFO, logger="away.cameras"):
         got = capture.open_camera(1, 640, 480, 30, cv2=cv2, devices=_devs(), virtual_fallback=True, **_quick())
@@ -783,10 +792,10 @@ def test_gate_hint_fires_less_often() -> None:
 def test_version_is_0_1_13() -> None:
     from away import __version__
 
-    assert __version__ == "0.1.22"
+    assert __version__ == "0.1.23"
     root = Path(__file__).parents[1]
-    assert 'version = "0.1.22"' in (root / "pyproject.toml").read_text()
-    assert '#define AppVersion "0.1.22"' in (root / "packaging" / "windows" / "away.iss").read_text()
+    assert 'version = "0.1.23"' in (root / "pyproject.toml").read_text()
+    assert '#define AppVersion "0.1.23"' in (root / "packaging" / "windows" / "away.iss").read_text()
     assert os.path.exists(root / "src" / "away" / "__init__.py")
 
 

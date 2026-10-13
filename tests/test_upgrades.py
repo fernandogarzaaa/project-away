@@ -234,6 +234,9 @@ def test_pipeline_auto_pause_blocks_output_then_resumes_without_jump():
     assert p.bus.history("app.auto_paused")[-1].data == {"paused": True}
     clk.t = 1.0
     p.on_hand(1.0, make_hand({"middle": 1, "ring": 1, "pinky": 1}, center=(0.7, 0.5), scale=0.2))
+    assert p.output_paused()  # v0.1.23: resumes only after the mouse stayed quiet AUTO_PAUSE_DWELL_S more
+    clk.t = 1.6
+    p.on_hand(1.6, make_hand({"middle": 1, "ring": 1, "pinky": 1}, center=(0.7, 0.5), scale=0.2))
     assert not p.output_paused() and p.bus.history("app.auto_paused")[-1].data == {"paused": False}
     assert p.mouse.mapper._prev is not None  # re-anchored on the first frame after resuming
 

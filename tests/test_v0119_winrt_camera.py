@@ -52,6 +52,15 @@ def nf(w: int, h: int, fps: float, sub: str = "MJPG", i: int = 0) -> NativeForma
 
 
 # =============================================================================== 1. native format choice
+
+
+@pytest.fixture
+def external_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.1.23: NVIDIA Broadcast is never a fallback for the built-in camera (opening it makes Broadcast take the
+    built-in camera). These older tests check the fallback mechanics, which still apply to an external camera."""
+    monkeypatch.setattr(capture, "broadcast_fallback_allowed", lambda _name: True)
+
+
 def test_30fps_beats_the_exact_size_and_720p_is_allowed_for_it() -> None:
     fmts = [nf(640, 480, 15, i=0), nf(1280, 720, 30, i=1), nf(1920, 1080, 30, i=2)]
     got = choose_format(fmts, 640, 480, 30)
@@ -561,7 +570,7 @@ def test_slow_winrt_still_lets_the_sweep_find_a_fast_mode(monkeypatch: pytest.Mo
     got.cap.release()
 
 
-def test_broadcast_fallback_only_after_winrt_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_broadcast_fallback_only_after_winrt_failed(monkeypatch: pytest.MonkeyPatch, external_camera: None) -> None:
     clock = Clock()
     cv2 = FakeCV2({**DEAD_BUILTIN, (2, DSHOW): (True, 30.0)}, clock)
     _winrt(monkeypatch, cv2, opens=False)
@@ -867,9 +876,9 @@ def test_the_retry_backs_off_stops_and_notifies_once(tmp_path: Path) -> None:
     app._single_until_retry(run_single, JOYCAM, [C.CameraSpec(BUILTIN, "secondary")], 0.05, 0.1)
     assert len(probes) == 3 and len(retries) == 3 and len(stopped) == 1 and len(notices) == 1
     assert [r["attempt"] for r in retries] == [1, 2, 3] and retries[-1]["next_s"] is None
-    assert retries[0]["next_s"] == pytest.approx(0.1) and retries[1]["next_s"] == pytest.approx(0.2)
-    # every wait is at least as long as scheduled: 0.05, then 0.1, then 0.2 (the cap is 4 x the start)
-    assert probes[0] - t0 >= 0.045 and probes[1] - probes[0] >= 0.095 and probes[2] - probes[1] >= 0.19
+    assert retries[0]["next_s"] == pytest.approx(0.15) and retries[1]["next_s"] == pytest.approx(0.2)
+    # v0.1.23: every wait is at least as long as scheduled: 0.05, then 3x (0.15), then the full max (0.2)
+    assert probes[0] - t0 >= 0.045 and probes[1] - probes[0] >= 0.145 and probes[2] - probes[1] >= 0.19
     assert "stopped retrying HD User Facing after 3 failed attempts" in notices[0]["message"]
     assert app.camera_retry_stopped
     st = CL.read_retry_status(tmp_path / "share")
@@ -1117,7 +1126,12 @@ def test_cli_cameras_diagnose(tmp_path: Path, capsys: Any) -> None:
 # =============================================================================== 8. config
 def test_new_config_keys_defaults_and_validation() -> None:
     h = C.AppConfig().hands
-    assert (h.camera_backend, h.camera_retry_s, h.camera_retry_max_s, h.camera_retry_limit) == ("auto", 45.0, 900.0, 8)
+    assert (h.camera_backend, h.camera_retry_s, h.camera_retry_max_s, h.camera_retry_limit) == (
+        "auto",
+        300.0,
+        3600.0,
+        3,
+    )
     cfg, _ = C.from_dict({"hands": {"camera_backend": "winrt", "camera_retry_limit": 0}})
     assert cfg.hands.camera_backend == "winrt" and cfg.hands.camera_retry_limit == 0
     for bad in (

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "about": "Online model catalog for Project Away. Add a model with a pull request: see README > Models > Add a model to the catalog. models/catalog.sha256 must be the SHA-256 of this file.",
+  "models": [],
+  "modes": {}
+}

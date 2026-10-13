@@ -114,6 +114,8 @@ class TrayController:
         text += f" - {cam}" if cam else ""
         badge = self.agent_badge()
         text += f" - {badge}" if badge else ""
+        hint = str(getattr(self.app, "health_hint", "") or "")  # v0.1.23: busy PC / choppy tracking
+        text += f" - {hint}" if hint else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
 
     def camera_status(self) -> str:
@@ -230,6 +232,80 @@ class TrayController:
         self.app.stop()
 
 
+class TrayGuard:
+    """v0.1.23: every call into the tray icon goes through here. The crash log showed Windows COM errors
+    (0x80010108 RPC_E_DISCONNECTED) in pystray's _hide/_message and one access violation: icon updates came from
+    camera / voice threads while the icon was being stopped. Calls are serialized, never made once stopping began,
+    and an error in one is logged once instead of escaping."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.stopping = False
+        self.errors = 0
+        self._lock = threading.RLock()
+
+    def call(self, fn: Any, *args: Any, **kw: Any) -> Any:
+        if self.stopping:
+            return None
+        with self._lock:
+            if self.stopping:
+                return None
+            try:
+                return fn(*args, **kw)
+            except Exception as exc:
+                self.errors += 1
+                if self.errors <= 3:
+                    import logging
+
+                    logging.getLogger("away.tray").warning("tray icon update failed (ignored): %s", exc)
+                return None
+
+    def stop(self, icon: Any) -> None:
+        """Hide and stop the icon once; a COM object that is already gone is not touched again."""
+        with self._lock:
+            if self.stopping:
+                return
+            self.stopping = True
+            for step in ("hide", "stop"):
+                try:
+                    if step == "hide":
+                        if getattr(icon, "visible", False):
+                            icon.visible = False
+                    else:
+                        icon.stop()
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger("away.tray").info("tray icon %s failed (ignored): %s", step, exc)
+
+
+def com_apartment(platform: str | None = None, ole32: Any = None) -> str:
+    """v0.1.23: the tray's main thread is a single-threaded COM apartment (what Shell_NotifyIcon and the tray's
+    window expect), set before anything else touches COM. Returns "sta", "already" (set earlier, maybe as MTA by
+    another library), or "" off Windows."""
+    plat = platform or sys.platform
+    if not plat.startswith("win"):
+        return ""
+    try:
+        if ole32 is None:  # pragma: no cover - Windows only
+            import ctypes
+
+            ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
+        hr = int(ole32.CoInitializeEx(None, 0x2)) & 0xFFFFFFFF  # COINIT_APARTMENTTHREADED
+    except Exception:
+        return ""
+    if hr in (0, 1):  # S_OK, S_FALSE (already an STA)
+        return "sta"
+    return "already"  # RPC_E_CHANGED_MODE: another library made it MTA first
+
+
+def camera_menu_text(app: Any) -> str:
+    """v0.1.23: "Internal camera unavailable (probably in use by NVIDIA Broadcast)" while a camera is given up on."""
+    info = getattr(app, "camera_unavailable", None)
+    return str(info.get("headline") or "") if isinstance(info, dict) else ""
+
+
 def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[Any]:
     """Tray menu (v0.1.20): "Only respond when I'm looking at the screen" (a check box) and "Guided first run"."""
     from away.comfort import actions
@@ -288,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.control.monitors import enable_dpi_awareness
 
     enable_dpi_awareness()  # before pystray/pynput/tkinter (Windows; no-op elsewhere)
+    com_apartment()  # v0.1.23: STA on the tray thread before pystray / SAPI / pycaw touch COM
     import pystray
 
     from away.app.frozen import setup_logging
@@ -298,6 +375,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.app import crashlog
 
     crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
+    from away.app import instance
+
+    if not instance.acquire():  # v0.1.23: already running: show its Settings instead of a second app
+        logging.getLogger("away.tray").info("Project Away is already running: opening its Settings")
+        with contextlib.suppress(Exception):
+            subprocess.Popen(TrayController.settings_command())
+        return 0
     had_config = cfgmod.config_path().exists()  # v0.1.20: an existing user is not shown the first-run guide
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
@@ -312,9 +396,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     if first_start:
         first_run.mark_seen()
 
+    guard = TrayGuard()
+
+    def _set_icon(ic: Any) -> None:
+        ic.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
+        ic.title = ctl.title()
+
     def refresh(icon: Any) -> None:
-        icon.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
-        icon.title = ctl.title()
+        guard.call(_set_icon, icon)
 
     def on_pause(icon: Any, _item: Any) -> None:
         ctl.toggle_pause()
@@ -337,11 +426,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     def on_quit(icon: Any, _item: Any) -> None:
         updates.stop()
         ctl.quit()
-        icon.stop()
+        guard.stop(icon)
 
     def notify(title: str, message: str) -> None:
+        if guard.stopping:
+            return
         try:
-            icon.notify(message, title)
+            with guard._lock:
+                icon.notify(message, title)
         except Exception:
             from away.app.frozen import notify as desktop_notify
 
@@ -349,8 +441,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
 
     def _safe_update_menu(ic: Any) -> None:
         # some pystray backends cannot rebuild the menu from another thread; the next open does
-        with contextlib.suppress(Exception):
-            ic.update_menu()
+        guard.call(ic.update_menu)
 
     def quit_for_update() -> None:
         # Runs on the update worker thread. pystray's icon.stop() only posts a message to the tray loop, but
@@ -424,10 +515,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             visible=lambda _i: bool(gpu_offer["text"]),
             enabled=lambda _i: not gpu_offer["installing"],
         ),
+        pystray.MenuItem(  # v0.1.23: "Internal camera unavailable (probably in use by NVIDIA Broadcast)"
+            lambda _i: camera_menu_text(app) or "Camera unavailable",
+            None,
+            enabled=False,
+            visible=lambda _i: bool(camera_menu_text(app)),
+        ),
         pystray.MenuItem(
             "Retry cameras",
             lambda _icon, _item: ctl.retry_cameras(),
             visible=lambda _i: ctl.camera_retry_stopped(),
+        ),
+        pystray.MenuItem(
+            lambda _i: "Turn off " + ", ".join((getattr(app, "camera_unavailable", None) or {}).get("devices") or []),
+            lambda _icon, _item: [app.turn_off_camera(d) for d in (app.camera_unavailable or {}).get("devices", [])],
+            visible=lambda _i: bool(camera_menu_text(app)),
         ),
         *comfort_menu_items(pystray, ctl, notify),  # v0.1.20: attention gate switch + guided first run
         pystray.MenuItem(
@@ -442,13 +544,24 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             lambda _icon, _item: ctl.disconnect_agents(),
             visible=lambda _i: bool(ctl.agent_badge()),
         ),
+        pystray.MenuItem(  # v0.1.23
+            "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
+        ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
-    topics = ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested")
+    topics = (
+        "voice.state",
+        "app.paused",
+        "gesture.clutch",
+        "cameras.retry_stopped",
+        "cameras.retry_requested",
+        "cameras.turned_off",
+        "app.health_hint",
+    )
     # v0.1.20: the attention gate and connected AI agents change the tray title
     for topic in (*topics, "attention.state", "agentlink.changed", "camera.handover"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
@@ -480,9 +593,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         notify("Project Away", ctl.crash_note)
 
     def _sync(ic: Any) -> None:
+        if guard.stopping:
+            return
         ctl.paused = bool(app.pipeline.paused)
         refresh(ic)
-        ic.update_menu()
+        guard.call(ic.update_menu)
 
     updates.start()  # reports the last install; first check right away, then every 24 h (unless updates.check: false)
     icon.run()

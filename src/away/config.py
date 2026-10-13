@@ -98,6 +98,9 @@ class CursorConfig:
     # Enlarge the system cursor while gesture control is active (users sit far from the screen); it shrinks back
     # on pause, so the size also shows the state. 0 = off, 1..5 = 1.5x, 2x, 3x, 4x, 6x (Windows only)
     big_cursor_size: int = 2
+    # v0.1.23: the cursor moves this many times a second, gliding between hand frames (smooth even when the camera
+    # is slow); 0 = move once per hand frame (as before v0.1.23)
+    output_hz: int = 120
     autocenter: AutoCenterConfig = field(default_factory=AutoCenterConfig)
     # off | coarse (the head moves the cursor in big steps between zones, the hand refines) | pointer (head-only
     # pointer while no hand points, for when the hands are busy; clicks with the face triggers)
@@ -227,9 +230,11 @@ class HandsConfig:
     # v0.1.19: a camera that failed while another one tracks is re-probed after camera_retry_s, then after twice
     # as long each time (capped at camera_retry_max_s); after camera_retry_limit failed probes in a row the app
     # stops retrying and says so (tray / Settings > Cameras > Retry cameras starts again). 0 = never stop.
-    camera_retry_s: float = 45.0
-    camera_retry_max_s: float = 900.0
-    camera_retry_limit: int = 8
+    # v0.1.23: 5 min, then 15 min, then 60 min (each wait 3x the last, the last one the full max), then it stops
+    # until Retry or the camera list changes; probes never open NVIDIA Broadcast and wait while a hand is tracked
+    camera_retry_s: float = 300.0
+    camera_retry_max_s: float = 3600.0
+    camera_retry_limit: int = 3
     max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
     # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
     roles: RolesConfig = field(default_factory=RolesConfig)
@@ -239,6 +244,9 @@ class HandsConfig:
     gestures: GestureConfig = field(default_factory=GestureConfig)
     dwell: DwellConfig = field(default_factory=DwellConfig)
     cameras: list[CameraSpec] = field(default_factory=list)  # 2+ entries turn on multi-camera fusion
+    # v0.1.23: cameras you (or an agent) turned off ("Turn off" next to a failing camera); kept here with their
+    # settings so "Turn on" puts them back exactly. They are never opened or retried while off.
+    disabled_cameras: list[CameraSpec] = field(default_factory=list)
     multicam: MultiCamConfig = field(default_factory=MultiCamConfig)
 
 
@@ -446,6 +454,12 @@ class AgentLinkConfig:
     # go to that agent's inbox instead of being typed
     talk_enabled: bool = True
     default_agent: str = ""  # the agent "Hey agent" and the summon gesture go to ("" = every connected agent)
+    # v0.1.23: say "Sent to <agent>" (or "<agent> isn't connected right now...") aloud after a spoken message
+    talk_confirm_aloud: bool = True
+    # v0.1.23 backup link: standard = Cloudflare quick tunnel; backup = an SSH relay (no Cloudflare, no account)
+    link_type: str = "standard"
+    backup_relay: str = "localhost.run"  # localhost.run | pinggy
+    ssh_path: str = ""  # use this ssh program for the backup link ("" = the system's)
 
 
 SPEECH_RATES = ("slow", "normal", "fast")
@@ -462,6 +476,11 @@ class SpeechConfig:
     rate: str = "normal"  # slow | normal | fast
     volume: str = "normal"  # quiet | normal | loud
     voice: str = ""  # part of a voice's name ("Zira", "Samantha"); "" = the system's default voice
+    # v0.1.23 natural voices: auto (Natural (Kokoro) when downloaded, then Light (Piper), then Windows natural,
+    # then the classic voice) | kokoro | piper | windows | classic. Downloads: Settings > Voice & input > Voice.
+    engine: str = "auto"
+    kokoro_voice: str = "af_heart"  # af_heart | af_bella | am_michael | bf_emma | bm_george
+    piper_voice: str = "lessac"  # lessac | amy
 
 
 def validate_speech(s: SpeechConfig) -> None:
@@ -469,6 +488,14 @@ def validate_speech(s: SpeechConfig) -> None:
         raise ValueError(f"speech.rate must be {'|'.join(SPEECH_RATES)}, got {s.rate!r}")
     if s.volume not in SPEECH_VOLUMES:
         raise ValueError(f"speech.volume must be {'|'.join(SPEECH_VOLUMES)}, got {s.volume!r}")
+    if s.engine not in ("auto", "kokoro", "piper", "windows", "classic"):
+        raise ValueError(f"speech.engine must be auto|kokoro|piper|windows|classic, got {s.engine!r}")
+    if s.kokoro_voice not in ("af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"):
+        raise ValueError(
+            f"speech.kokoro_voice must be af_heart|af_bella|am_michael|bf_emma|bm_george, got {s.kokoro_voice!r}"
+        )
+    if s.piper_voice not in ("lessac", "amy"):
+        raise ValueError(f"speech.piper_voice must be lessac|amy, got {s.piper_voice!r}")
     if not isinstance(s.voice, str) or len(s.voice) > 60:
         raise ValueError("speech.voice must be text (part of a voice's name), at most 60 characters")
 
@@ -476,6 +503,10 @@ def validate_speech(s: SpeechConfig) -> None:
 def validate_agent_link(a: AgentLinkConfig) -> None:
     if not isinstance(a.default_agent, str) or len(a.default_agent) > 60:
         raise ValueError("agent_link.default_agent must be an agent's name (at most 60 characters) or empty")
+    if a.link_type not in ("standard", "backup"):
+        raise ValueError(f"agent_link.link_type must be standard|backup, got {a.link_type!r}")
+    if a.backup_relay not in ("localhost.run", "pinggy"):
+        raise ValueError(f"agent_link.backup_relay must be localhost.run|pinggy, got {a.backup_relay!r}")
     if a.autofix not in AUTOFIX_MODES:
         raise ValueError(f"agent_link.autofix must be {'|'.join(AUTOFIX_MODES)}, got {a.autofix!r}")
     for name, lo, hi in (
@@ -615,7 +646,7 @@ def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> A
         if isinstance(current, BindingsConfig):
             setattr(obj, key, parse_bindings(value, prefix + key))
             continue
-        if key == "cameras" and isinstance(obj, HandsConfig):
+        if key in ("cameras", "disabled_cameras") and isinstance(obj, HandsConfig):
             setattr(obj, key, _parse_cameras(value, prefix + key, unknown))
             continue
         if is_dataclass(current) and isinstance(value, dict):
@@ -758,12 +789,19 @@ def validate(cfg: AppConfig) -> None:
     mh = cfg.hands.max_hands
     if isinstance(mh, bool) or not isinstance(mh, int) or not 1 <= mh <= 4:
         raise ValueError(f"hands.max_hands must be an integer in [1, 4], got {mh!r}")
+    oh = c.output_hz
+    if isinstance(oh, bool) or not isinstance(oh, int) or not (oh == 0 or 30 <= oh <= 240):
+        raise ValueError(f"hands.cursor.output_hz must be 0 (off) or an integer in [30, 240], got {oh!r}")
     bc = c.big_cursor_size
     if isinstance(bc, bool) or not isinstance(bc, int) or not 0 <= bc <= 5:
         raise ValueError(f"hands.cursor.big_cursor_size must be an integer in [0, 5] (0 = off), got {bc!r}")
     validate_camera_device("hands.camera_index", cfg.hands.camera_index)
     validate_hint("hands.camera_hint", cfg.hands.camera_hint)
     validate_cameras(cfg.hands.cameras)
+    if not isinstance(cfg.hands.disabled_cameras, list) or len(cfg.hands.disabled_cameras) > 16:
+        raise ValueError("hands.disabled_cameras must be a list of at most 16 cameras")
+    for i, cam in enumerate(cfg.hands.disabled_cameras):
+        validate_camera_device(f"hands.disabled_cameras[{i}].device", cam.device)
     cfg.hands.camera_fourcc = validate_fourcc("hands.camera_fourcc", cfg.hands.camera_fourcc)
     h = cfg.hands
     if h.camera_backend not in CAMERA_BACKENDS:

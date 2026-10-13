@@ -1,0 +1,4 @@
+# Byte-exact on every OS: the app verifies models/catalog.json against catalog.sha256,
+# so Windows checkouts must not convert line endings.
+models/catalog.json -text
+models/catalog.sha256 -text

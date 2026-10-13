@@ -58,10 +58,14 @@ def cmd_agent(args: argparse.Namespace) -> int:
         print(
             f"Agent Link: {'on' if (st.get('server') or {}).get('running') else 'idle'}"
             + (f", secure link {st['link']['url']}" if (st.get("link") or {}).get("url") else "")
+            + (f", backup link {st['link']['backup_url']}" if (st.get("link") or {}).get("backup_url") else "")
         )
         for a in agents:
             mark = "\u2713 connected" if a.get("connected") else "not connected right now"
-            print(f"  {a['name']} ({a['kind']}, {mark}): {', '.join(a['permissions'])}  [id {a['id']}]")
+            unread = f", {a['unread']} unread message(s)" if a.get("unread") else ""
+            print(f"  {a['name']} ({a['kind']}, {mark}{unread}): {', '.join(a['permissions'])}  [id {a['id']}]")
+        for w in st.get("waiting") or []:  # v0.1.23
+            print(f"  {w['name']} (link ended): {w['unread']} message(s) waiting; pair it again under the same name")
         if not agents:
             print("  no agents connected")
         ctl = st.get("control") or {}
@@ -72,7 +76,12 @@ def cmd_agent(args: argparse.Namespace) -> int:
         scopes = perms.to_list(perms.normalize(args.scopes))
         remote = not args.local
         if alive:
-            rid = host.send_request("pair" if action == "pair" else "serve", scopes=scopes, remote=remote)
+            rid = host.send_request(
+                "pair" if action == "pair" else "serve",
+                scopes=scopes,
+                remote=remote,
+                relay=getattr(args, "relay", None),
+            )
             res = _wait_result(rid, 90.0)
             if res is None:
                 print("error: Project Away did not answer", file=sys.stderr)
@@ -94,7 +103,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         h.start()
         try:
             if action == "pair":
-                _print_pairing(h.start_pairing(scopes, remote=remote))
+                _print_pairing(h.start_pairing(scopes, remote=remote, relay=getattr(args, "relay", None)))
             else:
                 print(f"local port {h.ensure_server()}")
             while True:
@@ -282,6 +291,12 @@ def add_parsers(sub: Any) -> None:
         help=f"permissions to ask for, comma-separated ({', '.join(perms.ALL)}); default read,diagnose",
     )
     ag.add_argument("--local", action="store_true", help="pair: no secure internet link (agents on this PC only)")
+    ag.add_argument(
+        "--relay",
+        choices=["standard", "backup"],
+        default=None,
+        help="pair: standard = Cloudflare link; backup = an SSH relay that does not use Cloudflare (v0.1.23)",
+    )
     ag.add_argument("--yes", "-y", action="store_true")
     ag.set_defaults(fn=cmd_agent)
 

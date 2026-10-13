@@ -12,7 +12,10 @@ Engagement combines up to four checks, each one optional:
 * **onset dwell**: all of the above held for ``onset_s`` before gestures count.
 
 Hysteresis so it never flickers: once engaged, the hand may sink 0.05 lower and the head turn 5° further, and any
-failing check is forgiven for ``grace_s`` before gestures stop. Voice commands (``gate_voice``) only need the
+failing check is forgiven for ``grace_s`` before gestures stop. v0.1.23: the same lower threshold already holds
+while arming, and arming only falls back to idle after the checks failed for ``MIN_DWELL_S`` (0.5 s): a hand
+hovering right at the line (0.42-0.45 of the picture) used to toggle arming/idle every second.
+Voice commands (``gate_voice``) only need the
 facing/gaze part: nobody raises a hand to speak.
 """
 
@@ -29,6 +32,8 @@ HEIGHT_HYSTERESIS = 0.05  # picture heights
 FACING_HYSTERESIS = 5.0  # degrees
 FACE_TIMEOUT_S = 1.5  # face frames stop for this long = no face in view (slow PCs track faces every Nth frame)
 GAZE_TIMEOUT_S = 1.5
+
+MIN_DWELL_S = 0.5  # v0.1.23: arming falls back to idle only after the checks failed this long
 
 STATES = ("off", "idle", "arming", "engaged", "grace")
 
@@ -146,7 +151,8 @@ class AttentionGate:
             self.checks = Checks()
             return True
         was = self.state in ("engaged", "grace")
-        self.checks = Checks(self._facing_check(t, was), self._gaze_check(t), self._hand_check(landmarks, was))
+        held = was or self.state == "arming"  # v0.1.23: arming uses the lower (keep) thresholds too
+        self.checks = Checks(self._facing_check(t, held), self._gaze_check(t), self._hand_check(landmarks, held))
         if self.checks.ok():
             self._bad_since = None
             if was:
@@ -155,6 +161,11 @@ class AttentionGate:
                 if self._ok_since is None:
                     self._ok_since = t
                 self.state = "engaged" if t - self._ok_since >= float(self.cfg.onset_s) else "arming"
+        elif self.state == "arming":
+            if self._bad_since is None:
+                self._bad_since = t
+            if t - self._bad_since >= MIN_DWELL_S:
+                self.state, self._bad_since, self._ok_since = "idle", None, None
         else:
             self._ok_since = None
             if was:

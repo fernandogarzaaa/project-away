@@ -561,6 +561,34 @@ def winrt_name(me: CameraDevice | None, label: str | None) -> str | None:
     return text if text and not text.isdigit() and not text.startswith("/dev/") else None
 
 
+def native_modes(
+    name: str | None, width: int, height: int, fps: int, lister: Callable[..., Any] | None = None, limit: int = 4
+) -> list[CaptureMode]:
+    """v0.1.23: the camera's own formats (from WinRT), closest to the request first, as capture modes."""
+    if not name:
+        return []
+    try:
+        if lister is None:
+            ok, _why = winrt_factory_available()
+            if not ok:
+                return []
+            from away.multicam import winrt_capture
+
+            lister = winrt_capture.list_formats
+        formats, _err = lister(name)
+        from away.multicam.winrt_capture import ranked_formats
+
+        out: list[CaptureMode] = []
+        for f in ranked_formats(formats, width, height, fps):
+            m = CaptureMode(int(f.width), int(f.height), round(f.fps), f.fourcc())
+            if m not in out:
+                out.append(m)
+        return out[:limit]
+    except Exception as exc:
+        log.warning("camera %r: could not list its formats: %s", name, exc)
+        return []
+
+
 def winrt_factory_available() -> tuple[bool, str]:
     from away.multicam import winrt_capture
 
@@ -578,6 +606,27 @@ def winrt_factory(name: str, width: int, height: int, occurrence: int = 0) -> Ca
         )
 
     return make
+
+
+_INTERNAL_RE = re.compile(r"user facing|integrated|internal|built-?in|facetime|front camera|laptop", re.I)
+_configured_internal: set[str] = set()
+
+
+def is_internal_camera(name: str) -> bool:
+    """A laptop's built-in camera (``HD User Facing``, ``Integrated Camera``...)."""
+    return bool(_INTERNAL_RE.search(str(name or "")))
+
+
+def configure_cameras(devices: Any) -> None:
+    """v0.1.23: the cameras the app is set up to use. While one of them is the built-in camera, NVIDIA Broadcast's
+    virtual camera is never opened as a fallback: opening it wakes Broadcast up, and Broadcast then takes the
+    built-in camera for itself, so the camera we wanted fails again."""
+    _configured_internal.clear()
+    _configured_internal.update(str(d) for d in devices if is_internal_camera(str(d)))
+
+
+def broadcast_fallback_allowed(name: str) -> bool:
+    return not is_internal_camera(name) and not _configured_internal
 
 
 def is_broadcast_camera(name: str) -> bool:
@@ -1739,9 +1788,25 @@ def _open_camera(
                 if got is not None:
                     return got
 
+    if windows and not virtual and WINRT in allowed and "Media Foundation" in allowed:
+        # v0.1.23: ask the camera which formats it really has (WinRT lists them) and try the closest ones through
+        # Media Foundation; 640x480 MJPG may simply not exist on a built-in camera ("Element not found")
+        native = native_modes(winrt_name(me, label), int(width), int(height), int(fps or 0))
+        if native:
+            log.warning("camera %r: trying the formats it reports: %s", name, ", ".join(m.describe() for m in native))
+            at = by_backend("Media Foundation", native)
+            got = None if at is None else attempt(at)
+            if got is not None:
+                return got
+
     hints: list[str] = []
     broadcast = [d for d in devs if d.virtual and is_broadcast_camera(d.name) and d.index is not None]
     alt = free_broadcast(devs, src) if not virtual and isinstance(src, int) else None
+    if alt is not None and not broadcast_fallback_allowed(name):
+        log.warning(
+            "camera %r: not opening NVIDIA Broadcast's camera as a fallback (it would take the built-in camera)", name
+        )
+        alt = None
 
     if search.best is not None:  # it streams, but too slowly in every mode
         best = search.best

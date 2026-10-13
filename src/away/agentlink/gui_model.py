@@ -129,11 +129,17 @@ class AgentLinkModel:
         app = clients.APPS[key]
         return None, f"Done! {app.steps} You'll be asked to Allow it here the first time."
 
-    def start_remote(self, scopes: list[str]) -> tuple[Problem | None, dict[str, Any] | None]:
+    def start_remote(self, scopes: list[str], relay: str | None = None) -> tuple[Problem | None, dict[str, Any] | None]:
         p = self.not_running()
         if p is not None:
             return p, None
-        rid = self.send("pair", scopes=perms.to_list(perms.normalize(scopes)), remote=True, download=True)
+        rid = self.send(
+            "pair",
+            scopes=perms.to_list(perms.normalize(scopes)),
+            remote=True,
+            download=True,
+            relay=relay or self.link_type(),
+        )
         res = self.wait_result(rid, 120.0)
         if not res.get("ok"):
             return Problem(str(res.get("error") or "Something went wrong."), "Try again", "retry"), None
@@ -182,15 +188,62 @@ class AgentLinkModel:
         res = self.wait_result(self.send("bundle"), 60.0)
         return f"Saved {res['result']['path']}" if res.get("ok") else str(res.get("error"))
 
-    def new_link(self) -> tuple[Problem | None, dict[str, Any] | None]:
-        """v0.1.22: a fresh secure link (new web address); nobody is disconnected."""
+    def new_link(self, relay: str | None = None) -> tuple[Problem | None, dict[str, Any] | None]:
+        """v0.1.22: a fresh secure link (new web address); nobody is disconnected. v0.1.23: of the chosen type."""
         p = self.not_running()
         if p is not None:
             return p, None
-        res = self.wait_result(self.send("new_link"), 120.0)
+        res = self.wait_result(self.send("new_link", relay=relay or self.link_type()), 120.0)
         if not res.get("ok"):
             return Problem(str(res.get("error") or "Something went wrong."), "Try again", "retry"), None
         return None, dict(res["result"])
+
+    def backup_link(self) -> tuple[Problem | None, dict[str, Any] | None]:
+        """v0.1.23 "Blocked? Try the backup link": a link that does not go through Cloudflare."""
+        p = self.not_running()
+        if p is not None:
+            return p, None
+        res = self.wait_result(self.send("backup_link"), 120.0)
+        if not res.get("ok"):
+            return Problem(str(res.get("error") or "Something went wrong."), "Try again", "retry"), None
+        return None, dict(res["result"])
+
+    def link_type(self) -> str:
+        """v0.1.23: "standard" (Cloudflare) or "backup" (SSH relay), saved in agent_link.link_type."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return str(cfg.agent_link.link_type or "standard")
+        except Exception:
+            return "standard"
+
+    def set_link_type(self, kind: str) -> None:
+        from away import config as cfgmod
+
+        if kind not in ("standard", "backup"):
+            raise ValueError("link type must be standard or backup")
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.link_type = kind
+        cfgmod.save(cfg, path)
+
+    @staticmethod
+    def inbox_lines(st: dict[str, Any]) -> list[str]:
+        """v0.1.23: unread messages per agent, and messages kept for agents whose link ended."""
+        out = []
+        for a in st.get("agents") or []:
+            n = int(a.get("unread") or 0)
+            if n:
+                out.append(f"{a['name']}: {n} unread message{'s' if n != 1 else ''}")
+        for w in st.get("waiting") or []:
+            n = int(w.get("unread") or 0)
+            out.append(
+                f"{w['name']}: {n} message{'s' if n != 1 else ''} waiting (not connected; pair it again under the "
+                "same name to deliver them)"
+            )
+        return out
 
     def set_talk(self, agent_id: str, wake_word: str | None = None, wake_url: str | None = None) -> str:
         """v0.1.22: an agent's own wake word and "wake me" address. Returns "" or a plain error."""

@@ -99,21 +99,25 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         ctx: Context,
         action: str = "list",
         domain: str | None = None,
-        changes: list[dict] | None = None,
+        changes: list[dict] | dict | None = None,
         why: str | None = None,
         what: str | None = None,
         limit: int | None = None,
+        ops: list[dict] | dict | None = None,
     ) -> Any:
         """Read and change the person's settings (changing needs "Change my settings").
         - action="list": what can be changed; with `domain` (settings, zones, bindings, custom_gestures,
-          profiles, presets, macros, gestures) its items, current values and allowed ranges.
-        - action="change": `changes` = [{"domain": "settings", "op": "set", "key": "hands.cursor.gain",
-          "value": 1.8}, ...] (bindings: key "gesture:pinch", value "mouse:click"; presets: op "apply"), `why` =
-          the reason, citing the person's preference. By default the person approves a before/after first.
+          profiles, presets, macros, gestures, cameras) its items, current values and allowed ranges.
+        - action="change": `changes` (or `ops`) = [{"domain": "settings", "op": "set", "key": "hands.cursor.gain",
+          "value": 1.8}, ...] or simply {"hands.cursor.gain": 1.8} (bindings: key "gesture:pinch", value
+          "mouse:click"; presets: op "apply"; a failing camera: {"domain": "cameras", "op": "disable", "key":
+          "<camera name>"}, undoable; models: {"domain": "models", "op": "switch", "key": "stt", "value":
+          "whisper-small-cpu"} or op "mode" with key light|balanced|best), `why` = the reason, citing the
+          person's preference. By default the person approves a before/after first.
         - action="undo": `what` = "last" | "today" | a change id. action="history": recent changes (`limit`).
         - action="config": the whole configuration (secrets redacted)."""
         return await group(
-            ctx, "settings", action=action, domain=domain, changes=changes, why=why, what=what, limit=limit
+            ctx, "settings", action=action, domain=domain, changes=changes, why=why, what=what, limit=limit, ops=ops
         )
 
     @mcp.tool()

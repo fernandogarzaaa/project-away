@@ -318,15 +318,24 @@ class RetryBackoff:
     """Exponential back-off for re-probing failed cameras: ``base_s``, then twice as long after every failure,
     capped at ``max_s``; ``exhausted`` once ``limit`` failures happened in a row (0 = never). Pure logic."""
 
-    def __init__(self, base_s: float = 45.0, max_s: float = 900.0, limit: int = 8) -> None:
+    def __init__(
+        self, base_s: float = 45.0, max_s: float = 900.0, limit: int = 8, factor: float = 2.0, last_max: bool = False
+    ) -> None:
         self.base_s = max(0.0, float(base_s))
         self.max_s = max(self.base_s, float(max_s))
         self.limit = max(0, int(limit))
+        self.factor = max(1.0, float(factor))
+        self.last_max = bool(last_max)  # v0.1.23: the last attempt before stopping waits the full max_s
         self.failures = 0
+
+    def _wait(self, f: int) -> float:
+        if self.last_max and self.limit > 0 and f >= self.limit - 1:
+            return float(self.max_s)
+        return float(min(self.max_s, self.base_s * (self.factor ** min(f, 60))))
 
     def delay(self) -> float:
         """Seconds to wait before the next attempt."""
-        return float(min(self.max_s, self.base_s * (2.0 ** min(self.failures, 60))))
+        return self._wait(self.failures)
 
     def failed(self) -> None:
         self.failures += 1
@@ -342,7 +351,25 @@ class RetryBackoff:
         """The waits of the next ``n`` attempts (default: until the limit) from a fresh start, for messages and
         tests: 45, 90, 180, 360, 720, 900, 900, 900."""
         count = self.limit if n is None else n
-        return [float(min(self.max_s, self.base_s * (2.0 ** min(f, 60)))) for f in range(count)]
+        return [self._wait(f) for f in range(count)]
+
+
+# v0.1.23: words that mean another program holds the camera (NVIDIA Broadcast keeps its source camera open)
+BUSY_WORDS = ("element not found", "in use", "busy", "being used", "0x80070490", "0xc00d3704", "access denied")
+
+
+def unavailable_text(name: str, reason: str = "", broadcast_present: bool = False) -> str:
+    """ "Internal camera unavailable (probably in use by NVIDIA Broadcast)" for the tray and Settings > Cameras."""
+    low = str(name).lower()
+    internal = any(w in low for w in ("user facing", "integrated", "internal", "built-in", "facetime"))
+    label = "Internal camera" if internal else str(name or "A camera")
+    why = str(reason or "").lower()
+    busy = any(w in why for w in BUSY_WORDS)
+    if broadcast_present and (busy or not why):
+        return f"{label} unavailable (probably in use by NVIDIA Broadcast)"
+    if busy:
+        return f"{label} unavailable (probably in use by another app)"
+    return f"{label} unavailable"
 
 
 def _data_folder(folder: Any = None) -> Any:
@@ -419,6 +446,11 @@ def retry_status_text(status: Mapping[str, Any] | None) -> str:
     failed = status.get("failed") or {}
     names = ", ".join(str(k) for k in failed) or "a camera"
     n = int(status.get("attempts") or 0)
+    if status.get("stopped") and status.get("headline"):  # v0.1.23
+        return (
+            f"{status['headline']}. Project Away stopped retrying {names} after {n} failed attempts so it does not "
+            "slow your other camera down. Press Retry to try again, or Turn off to stop using it."
+        )
     if status.get("stopped"):
         return (
             f"Project Away stopped retrying {names} after {n} failed attempts. Fix the camera (or remove it), "

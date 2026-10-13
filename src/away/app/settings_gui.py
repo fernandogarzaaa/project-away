@@ -11,6 +11,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import copy
+import logging
 import math
 import os
 import queue
@@ -593,6 +594,44 @@ class SettingsModel:
             return ""
 
     @staticmethod
+    def reset_cursor_size() -> str:
+        """v0.1.23 "Reset cursor size to normal"."""
+        from away.app.bigcursor import BigCursor, default_backend
+
+        size = BigCursor(default_backend(), 0).reset()
+        return f"mouse pointer back to {size} px" if sys.platform.startswith("win") else "nothing to reset here"
+
+    @staticmethod
+    def failed_cameras(folder: Any = None) -> list[str]:
+        """v0.1.23: the cameras the running app gave up on (for "Turn off")."""
+        from away.app.camera_loop import read_retry_status
+
+        try:
+            st = read_retry_status(folder) or {}
+        except Exception:
+            return []
+        return [str(k) for k in (st.get("failed") or {})] if st.get("stopped") else []
+
+    def turn_off_cameras(self, devices: list[str], save: bool = True) -> tuple[str | None, str]:
+        """v0.1.23 "Turn off": the failing cameras move to hands.disabled_cameras (saved at once). (error, done)."""
+        from away.app.camera_switch import CameraSwitchError, turn_off
+
+        if not devices:
+            return "no camera is failing right now", ""
+        done = []
+        for d in devices:
+            try:
+                done.append(turn_off(self.cfg, d))
+            except CameraSwitchError as exc:
+                return str(exc), "; ".join(done)
+        if save:
+            try:
+                self.save()
+            except ValueError as exc:
+                return str(exc), "; ".join(done)
+        return None, "; ".join(done) + " (Turn it back on: add it again in this tab)"
+
+    @staticmethod
     def request_camera_retry(folder: Any = None) -> str | None:
         """Retry cameras: ask the running app to probe its failed cameras now. An error message, or None."""
         from away.app.camera_loop import request_camera_retry
@@ -707,6 +746,16 @@ class SettingsModel:
                 new[0].role = "secondary"
         new.append(CameraSpec(device, role, index_hint=self._hint(device), mirror=h.mirror))
         return self._cams_try(new)
+
+    def remove_camera_and_save(self, i: int) -> str | None:
+        """v0.1.23: Remove in Settings > Cameras writes the config file at once."""
+        err = self.remove_camera(i)
+        if err is None:
+            try:
+                self.save()
+            except ValueError as exc:
+                return str(exc)
+        return err
 
     def remove_camera(self, i: int) -> str | None:
         if not self.cfg.hands.cameras:
@@ -1447,6 +1496,7 @@ TAB_ORDER = (
     "Cameras",
     "Tuning",
     "Performance",
+    "Models",  # v0.1.23
 )
 
 
@@ -1556,6 +1606,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         with contextlib.suppress(Exception):
             agent_gui.build_tab(self, nb)
+        try:  # v0.1.23 Settings > Models (model registry), isolated in its own module
+            from away.app import models_tab
+
+            models_tab.build(self, nb)
+        except Exception as exc:
+            logging.getLogger("away.settings").warning("Models tab unavailable: %s", exc)
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
@@ -2306,6 +2362,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             command=lambda v: self._on_scale("hands.cursor.big_cursor_size", float(v)),
         ).grid(row=r, column=1, columnspan=2, sticky="w")
         self.scales["hands.cursor.big_cursor_size#voice"] = (cvar, None)
+        ttk.Button(  # v0.1.23: a pointer left big (two copies of the app, a crash) goes back to normal
+            f, text="Reset cursor size to normal", command=lambda: self._report(None, self.m.reset_cursor_size())
+        ).grid(row=r, column=3, sticky="w", padx=4)
         r += 1
         for cpath in ("voice.clap_sensitivity", "voice.clap_double_window"):
             cs = {t.path: t for t in self.m.tunables()}[cpath]
@@ -2436,6 +2495,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_diag_btn = ttk.Button(tools, text="Diagnose", command=self._cam_diagnose)
         self.cam_diag_btn.pack(side="left", padx=2)
         ttk.Button(tools, text="Retry cameras", command=self._cam_retry).pack(side="left", padx=2)
+        # v0.1.23: stop using a camera that keeps failing (it is kept, with its settings, to turn back on)
+        ttk.Button(tools, text="Turn off failing camera", command=self._cam_turn_off).pack(side="left", padx=2)
         outf = ttk.Frame(f)
         outf.grid(row=12, column=0, columnspan=6, sticky="nsew", pady=(4, 0))
         f.rowconfigure(12, weight=1)
@@ -2490,6 +2551,13 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         err = self.m.request_camera_retry()
         self._report(err, "asked Project Away to retry the cameras now")
         self.cam_retry_var.set("")
+
+    def _cam_turn_off(self) -> None:
+        err, done = self.m.turn_off_cameras(self.m.failed_cameras())
+        self._report(err, done or None)
+        self._cam_refresh()
+        if not err:
+            self.m.request_camera_retry()  # the app re-reads its cameras and stops probing the one turned off
 
     def _cam_diagnose(self) -> None:
         err = self._cam_tools.begin("test")  # it opens every camera: never at the same time as the other tools
@@ -2576,7 +2644,15 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _cam_remove(self) -> None:
         i = self._cam_selected()
         if i is not None:
-            self._report(self.m.remove_camera(i))
+            err = self.m.remove_camera(i)
+            if err is None:  # v0.1.23: saved at once (the running app picks it up live), no extra Save needed
+                try:
+                    p = self.m.save()
+                    self._report(None, f"camera removed and saved ({p.name})")
+                except ValueError as exc:
+                    self._report(str(exc))
+            else:
+                self._report(err)
             self._cam_refresh()
 
     def _cam_calibrate(self) -> None:

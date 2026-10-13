@@ -261,6 +261,22 @@ class Telemetry:
             return "no camera picture yet (the camera is starting, is turned off, or none was found)"
         return "the camera stopped sending pictures (unplugged, or another app took it)"
 
+    def top_processes(self, every_s: float = 10.0) -> list[dict[str, Any]]:
+        """v0.1.23: the 5 programs using the most CPU (cached for ``every_s``)."""
+        now = self.clock()
+        cached = getattr(self, "_top", None)
+        if cached is not None and now - cached[0] < every_s:
+            return list(cached[1])
+        rows: list[dict[str, Any]] = []
+        try:
+            from away.app.sysload import top_processes
+
+            rows = top_processes(5)
+        except Exception:
+            rows = []
+        self._top = (now, rows)
+        return rows
+
     def health(self) -> dict[str, Any]:
         proc, system = self.cpu.sample()
         fps = self.fps()
@@ -269,7 +285,7 @@ class Telemetry:
             "fps_note": self.fps_note(fps),
             "camera_in_use_by": self.camera_in_use_by,
             "latency": self.latency(),
-            "cpu": {"process_pct": proc, "system_pct": system},
+            "cpu": {"process_pct": proc, "system_pct": system, "top": self.top_processes()},
             "gpu": self.gpu.sample(),
             "models": dict(self.models),
         }

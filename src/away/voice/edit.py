@@ -99,7 +99,9 @@ class LLMEditor:
                 ],
             }
         ).encode()
-        headers = {"Content-Type": "application/json"}
+        from away.voice.llm_backends import user_agent
+
+        headers = {"Content-Type": "application/json", "User-Agent": user_agent()}  # v0.1.23: Groq needs one
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(self.base_url + "/chat/completions", data=body, headers=headers)

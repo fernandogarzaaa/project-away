@@ -313,7 +313,11 @@ class Speaker:
     ) -> None:
         self.echo = echo or ECHO  # v0.1.22: the microphone ignores the voice while it speaks
         self.settings = settings or (lambda: None)
-        self.factories = engine_factories() if factories is None else list(factories)
+        # v0.1.23: no explicit list = the natural voices (away.voice.natural) first, re-checked whenever an engine
+        # starts (a voice downloaded in Settings is used from the next message on), then the classic voices
+        self._auto = factories is None
+        self._failed: set[str] = set()
+        self.factories = self._auto_factories() if factories is None else list(factories)
         self.on_error = on_error
         self.engine_name = ""
         self.last_error = ""
@@ -381,7 +385,12 @@ class Speaker:
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._run, daemon=True, name="away-speech")
                 self._thread.start()
-        return {"spoken": True, "engine": self.engine_name or self.factories[0][0], "queued": True}
+        return {
+            "spoken": True,
+            "engine": self.engine_name or self.factories[0][0],
+            "voice": self.voice_label(),
+            "queued": True,
+        }
 
     __call__ = say
 
@@ -392,7 +401,31 @@ class Speaker:
     def stop(self) -> None:
         self._q.put(None)
 
+    def _auto_factories(self) -> list[tuple[str, Callable[[], Engine]]]:
+        out: list[tuple[str, Callable[[], Engine]]] = []
+        with contextlib.suppress(Exception):
+            from away.voice.natural import natural_factories
+
+            out += natural_factories(self._cfg_or_none)
+        out += engine_factories()
+        return [f for f in out if f[0] not in self._failed]
+
+    def _cfg_or_none(self) -> Any:
+        return self._cfg()
+
+    def voice_label(self) -> str:
+        """v0.1.23: which voice speaks ("Natural (Kokoro): af_heart"), reported back to agents."""
+        name = self.engine_name or (self.factories[0][0] if self.factories else "")
+        s = self._cfg()
+        if name.startswith("Natural (Kokoro)"):
+            return f"{name}: {getattr(s, 'kokoro_voice', 'af_heart')}"
+        if name.startswith("Light (Piper)"):
+            return f"{name}: {getattr(s, 'piper_voice', 'lessac')}"
+        return name
+
     def _make(self) -> Engine | None:
+        if self._auto:
+            self.factories = self._auto_factories()
         while self.factories:
             name, factory = self.factories[0]
             try:
@@ -401,6 +434,7 @@ class Speaker:
                 return eng
             except Exception as exc:
                 self._fail(f"{name} could not start: {exc}")
+                self._failed.add(name)
                 self.factories.pop(0)  # try the next engine
         return None
 
@@ -426,15 +460,24 @@ class Speaker:
                 if eng is None:
                     self._fail("no voice engine could start")
                 else:
-                    try:
-                        with self.echo.speaking():
-                            eng.speak(text, self.voice())
-                        self.spoken = [*self.spoken[-19:], text]
-                    except Exception as exc:
-                        self._fail(f"{self.engine_name} failed: {exc}")
-                        with contextlib.suppress(Exception):
-                            eng.close()
-                        eng = None
+                    for _attempt in range(4):  # v0.1.23: a failing engine falls back silently to the next one
+                        try:
+                            with self.echo.speaking():
+                                eng.speak(text, self.voice())
+                            self.spoken = [*self.spoken[-19:], text]
+                            break
+                        except Exception as exc:
+                            self._fail(f"{self.engine_name} failed: {exc}")
+                            with contextlib.suppress(Exception):
+                                eng.close()
+                            eng = None
+                            if len(self.factories) <= 1:
+                                break
+                            self._failed.add(self.engine_name)
+                            self.factories.pop(0)
+                            eng = self._make()
+                            if eng is None:
+                                break
                 if self._q.empty():
                     self._idle.set()
         finally:
