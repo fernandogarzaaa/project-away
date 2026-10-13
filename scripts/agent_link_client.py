@@ -237,20 +237,28 @@ class Client:
         )
 
     # ------------------------------------------------------------------ requests
-    def request(self, method: str, path: str, body: Any = None, raw: bool = False, _retry: bool = True) -> Any:
-        try:
-            status, payload, headers = self._send(method, path, body)
-        except (urllib.error.URLError, OSError) as exc:
-            if _retry and self.find_address():
-                return self.request(method, path, body, raw, _retry=False)
-            raise LinkError(f"cannot reach Project Away ({exc}); is the PC on and the app running?") from None
-        if status == 401 and _retry and self.refresh():
-            return self.request(method, path, body, raw, _retry=False)
-        if status in MOVED_STATUSES and _retry and self.find_address():
-            return self.request(method, path, body, raw, _retry=False)
-        if status >= 400:
-            raise LinkError(f"error {status}: {self._error(status, payload)}")
-        return (payload, headers) if raw else json.loads(payload.decode("utf-8") or "null")
+    def request(self, method: str, path: str, body: Any = None, raw: bool = False) -> Any:
+        """One call; on the way it may follow a moved address and renew access once each."""
+        moved = refreshed = False
+        while True:
+            try:
+                status, payload, headers = self._send(method, path, body)
+            except (urllib.error.URLError, OSError) as exc:
+                if not moved and self.find_address():
+                    moved = True
+                    continue
+                raise LinkError(f"cannot reach Project Away ({exc}); is the PC on and the app running?") from None
+            if status == 401 and not refreshed:
+                refreshed = True
+                if self.refresh():
+                    continue
+            if status in MOVED_STATUSES and not moved:
+                moved = True
+                if self.find_address():
+                    continue
+            if status >= 400:
+                raise LinkError(f"error {status}: {self._error(status, payload)}")
+            return (payload, headers) if raw else json.loads(payload.decode("utf-8") or "null")
 
     def call(self, tool: str, **kwargs: Any) -> Any:
         return self.request("POST", f"/v1/rpc/{tool}", kwargs)
