@@ -613,3 +613,21 @@ def test_panel_states_in_plain_words(tmp_path, monkeypatch):
     assert p.is_ready(reg.models["voice-pocket-tts"])
     assert p.is_ready(reg.models["voice-windows"])  # built in
     assert not p.is_ready(reg.models["wake-livekit-custom"])  # no trained file yet
+
+
+def test_new_model_hint_ignores_the_2026_10_models(tmp_path):
+    """The v0.1.23 tray hint keeps talking only about the v0.1.23 catalog; the newer models wait in their panel."""
+    reg = Registry(tmp_path)
+    assert reg.models[NEM].from_next and not reg.models["whisper-large-v3-turbo-gpu"].from_next
+    assert model_registry.new_model_hint(reg, tmp_path) == ""
+    item = {
+        "id": VAD,
+        "slot": "vad",
+        "title": "x",
+        "license": "MIT",
+        "set": {"models_next.vad": "silero6"},
+        "from_next": False,
+        "source": "built-in",
+    }
+    m = model_registry.validate(item, next_entry=True)
+    assert m.from_next is False and m.source == "built-in"  # a catalog cannot set either field

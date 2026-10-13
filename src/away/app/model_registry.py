@@ -99,6 +99,7 @@ class Model:
     notes: str = ""
     version: str = ""
     released: str = ""
+    from_next: bool = False  # came from the catalog's models_next (offered by the Newer models panel, not the hint)
 
     @property
     def is_permissive(self) -> bool:
@@ -163,7 +164,7 @@ def validate(item: Any, next_entry: bool = False) -> Model:
     if runtime and runtime not in allowed:
         raise ValueError(f"{mid}: unknown runtime {runtime!r}")
     known = set(Model.__dataclass_fields__)
-    m = Model(**{k: v for k, v in item.items() if k in known and k != "source"})
+    m = Model(**{k: v for k, v in item.items() if k in known and k not in ("source", "from_next")})
     m.size = int(m.size or 0)
     return m
 
@@ -259,6 +260,7 @@ class Registry:
                         setattr(old, f, getattr(m, f))
                 continue
             m.source = "catalog"
+            m.from_next = True
             self.models[m.id] = m
 
     # ----------------------------------------------------------------- reads
@@ -518,7 +520,8 @@ def new_model_hint(reg: Registry, data_dir: Path | None = None) -> str:
     """ "A faster speech model is available - try it (Settings > Models)" for the first unseen permissive model."""
     seen = seen_ids(data_dir)
     for m in reg.models.values():
-        if m.source == "catalog" and m.is_permissive and m.id not in seen:
+        # v0.1.24: the 2026-10 models are offered by Settings > Newer models / Test my PC, never by this hint
+        if m.source == "catalog" and m.is_permissive and m.id not in seen and not m.from_next:
             what = SLOT_TITLES[m.slot].lower()
             return f"A new {what} model is available: {m.title} - try it in Settings > Models"
     return ""
