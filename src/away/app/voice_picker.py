@@ -62,6 +62,15 @@ def status_text(cfg: Any, data_dir: Path | None = None) -> str:
     return "Ready."
 
 
+def license_text(cfg: Any) -> str:
+    """v0.1.23: what the Download fetches and under which licences (GPL-3.0 espeak-ng / phonemizer), shown before
+    the person downloads anything ("" for voices that download nothing)."""
+    eng = cfg.speech.engine if cfg.speech.engine in ("kokoro", "piper") else ""
+    if not eng:
+        return ""
+    return natural.LICENSE_NOTE + "\n" + "; ".join(natural.license_lines(eng))
+
+
 def preview(cfg: Any, speaker_factory: Callable[[Any], Any] | None = None) -> dict[str, Any]:
     """Say a short sentence with the chosen voice (falls back like a real message)."""
     from away.voice.speech import Speaker
@@ -89,6 +98,8 @@ def build(win: Any, parent: Any, row: int) -> int:  # pragma: no cover - Tk widg
     row2.pack(fill="x", padx=4)
     ttk.Label(row2, textvariable=msg, wraplength=520, foreground="#555").pack(side="left")
     bar = ttk.Progressbar(row2, length=160, maximum=100.0)
+    lic = tk.StringVar(value=license_text(cfg))  # v0.1.23: licences of the opt-in download, shown up front
+    ttk.Label(box, textvariable=lic, wraplength=620, foreground="#666", justify="left").pack(fill="x", padx=4)
     sp_holder: dict[str, Any] = {}
 
     def save() -> None:
@@ -101,6 +112,7 @@ def build(win: Any, parent: Any, row: int) -> int:  # pragma: no cover - Tk widg
         apply_label(cfg, var.get())
         save()
         msg.set(status_text(cfg))
+        lic.set(license_text(cfg))
         dl.configure(state="normal" if needs_download(cfg) else "disabled")
 
     def sped(_e: Any = None) -> None:

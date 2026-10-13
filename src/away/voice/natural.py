@@ -182,6 +182,34 @@ ESPEAK_WHEELS = {
 }
 
 
+# v0.1.23 licensing. Nothing below is bundled in the installers; each piece is downloaded only when the person
+# presses Download for a natural voice, and these notes are shown next to that button first.
+LICENSES: dict[str, list[tuple[str, str]]] = {
+    "kokoro": [
+        ("Kokoro-82M voice model", "Apache-2.0"),
+        ("kokoro-onnx", "MIT"),
+        ("phonemizer", "GPL-3.0-or-later"),
+        ("espeak-ng (espeakng-loader)", "GPL-3.0-or-later"),
+    ],
+    "piper": [
+        ("Piper voice (en_US lessac / amy)", "voice data: Blizzard 2013 Lessac licence / mimic3-voices (model card)"),
+        ("phonemizer", "GPL-3.0-or-later"),
+        ("espeak-ng (espeakng-loader)", "GPL-3.0-or-later"),
+    ],
+}
+LICENSE_NOTE = (
+    "Natural voices are downloaded separately, only when you press Download; they are not part of Project Away's "
+    "MIT-licensed installer. They include espeak-ng and phonemizer, which are GPL-3.0 (free software; source at "
+    "github.com/espeak-ng/espeak-ng and github.com/bootphon/phonemizer). Piper's voices come with their own data "
+    "licence (see the Piper model card)."
+)
+
+
+def license_lines(engine: str) -> list[str]:
+    """Plain lines for the voice picker: "phonemizer: GPL-3.0-or-later"."""
+    return [f"{what}: {lic}" for what, lic in LICENSES.get(engine, [])]
+
+
 class VoiceDownloadError(RuntimeError):
     pass
 

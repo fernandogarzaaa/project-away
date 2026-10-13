@@ -21,6 +21,9 @@ APP = "ProjectAway"
 STRICT = os.environ.get("AWAY_SPEC_STRICT") == "1"
 HERE = ROOT / "packaging" / "pyinstaller"
 
+# v0.1.23: never bundled (GPL-3.0); downloaded on request at run time only (away.voice.natural)
+NON_PERMISSIVE = ["espeakng_loader", "phonemizer", "piper", "piper_phonemize", "piper_tts", "espeak"]
+NON_PERMISSIVE_FILES = ("espeak", "phonemizer", "piper_phonemize", "libpiper")
 datas = collect_data_files("away")  # bundled static_pose.npz / gesture_tcn.onnx
 binaries = []
 hidden = collect_submodules("away")
@@ -165,6 +168,10 @@ a = Analysis(  # noqa: F821
         "tensorboard",
         "IPython",
         "pytest",
+        # v0.1.23 licensing: GPL voice pieces are never bundled. espeak-ng (GPL-3.0, via espeakng_loader) and
+        # phonemizer (GPL-3.0) are an opt-in runtime download (Settings > Voice & input > Voice > Download);
+        # piper-tts / piper_phonemize (GPL) are not used at all (Piper voices run directly on onnxruntime).
+        *NON_PERMISSIVE,
     ],
     noarchive=False,
 )
@@ -198,6 +205,16 @@ def _is_winrt_msvcp(dest):
 before = len(a.binaries)
 a.binaries = [b for b in a.binaries if not _is_winrt_msvcp(b[0])]
 print(f"[away.spec] dropped {before - len(a.binaries)} pywinrt msvcp140.dll copies")
+
+def _is_non_permissive(dest, src):
+    low = (dest + " " + src).lower()
+    return any(w in low for w in NON_PERMISSIVE_FILES)
+
+
+before = len(a.binaries) + len(a.datas)
+a.binaries = [b for b in a.binaries if not _is_non_permissive(b[0], b[1])]
+a.datas = [d for d in a.datas if not _is_non_permissive(d[0], d[1])]
+print(f"[away.spec] dropped {before - len(a.binaries) - len(a.datas)} GPL voice files (espeak-ng / phonemizer)")
 
 pyz = PYZ(a.pure)  # noqa: F821
 exe = EXE(  # noqa: F821
