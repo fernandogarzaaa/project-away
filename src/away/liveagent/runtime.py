@@ -281,19 +281,26 @@ def use_free_models(
     free = rt.free_models(refresh=True)
     if not free:
         raise opencode.EngineError("opencode is running but lists no free models right now")
-    first = free[0]
-    add_provider(s, "opencode_free", first.id)
-    if not s.preferred or s.preferred.startswith("opencode_free/"):
-        s.preferred = first.ref
-    s.enabled = True
-    tell("Checking a free model answers...")
     from away.liveagent.textstream import strip_reasoning
 
-    t0 = time.monotonic()
-    text = strip_reasoning("".join(server.chat_stream(first.id, "Reply with the single word: ready", timeout=45)))
-    if not text:
-        raise opencode.EngineError("the free model gave an empty answer")
-    return f"Free models are on ({first.label()}, answered in {time.monotonic() - t0:.1f} s)"
+    tell("Checking a free model answers...")
+    problems: list[str] = []
+    for m in sorted(free, key=lambda m: (not m.fast, m.id != "big-pickle"))[:6]:
+        t0 = time.monotonic()
+        try:
+            text = strip_reasoning("".join(server.chat_stream(m.id, "Reply with the single word: ready", timeout=30)))
+        except Exception as exc:
+            problems.append(f"{m.label()}: {str(exc)[:80]}")
+            continue
+        if not text:
+            problems.append(f"{m.label()}: empty answer")
+            continue
+        add_provider(s, "opencode_free", m.id)
+        if not s.preferred or s.preferred.startswith("opencode_free/"):
+            s.preferred = m.ref
+        s.enabled = True
+        return f"Free models are on ({m.label()}, answered in {time.monotonic() - t0:.1f} s)"
+    raise opencode.EngineError("no free model answered right now (" + "; ".join(problems[:3]) + ")")
 
 
 def fallback_options(data_dir: Path | None = None, client: Client | None = None) -> list[dict[str, str]]:

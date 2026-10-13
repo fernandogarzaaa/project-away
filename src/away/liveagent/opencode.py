@@ -627,6 +627,15 @@ class OpenCodeServer:
                     err = props.get("error")
                     if err:
                         raise _error_from(err)
+                elif t == "session.status" and (props.get("status") or {}).get("type") == "retry":
+                    # opencode would keep retrying (e.g. "Free usage exceeded"); for a live answer it is faster to
+                    # stop here and let the funnel try the next model
+                    stt = props.get("status") or {}
+                    with contextlib.suppress(Exception):
+                        self.client.send("POST", f"{self.url}/session/{sid}/abort", {}, auth, 5).read()
+                    reason = str((stt.get("action") or {}).get("reason") or "")
+                    msg = str(stt.get("message") or "the model is busy")
+                    raise HttpError(429, f"{msg} ({reason})" if reason else msg)
                 elif t == "session.idle" or (
                     t == "session.status" and (props.get("status") or {}).get("type") == "idle"
                 ):

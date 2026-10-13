@@ -114,8 +114,12 @@ def emit(ev):
         except Exception:
             state["clients"].remove(w)
 
-def run_turn(sid, text):
+def run_turn(sid, text, model):
     time.sleep(0.05)
+    if model == "big-pickle-limited":
+        emit({"type": "session.status", "properties": {"sessionID": sid, "status": {"type": "retry", "attempt": 1,
+              "message": "Free usage exceeded, subscribe to Go", "action": {"reason": "free_tier_limit"}}}})
+        return
     state["perms"].append({"id": "per_1", "sessionID": sid, "permission": "bash"})
     emit({"type": "permission.asked", "properties": {"sessionID": sid, "id": "per_1"}})
     for _ in range(100):
@@ -176,8 +180,11 @@ class H(BaseHTTPRequestHandler):
         if self.path.endswith("/prompt_async"):
             sid = self.path.split("/")[2]
             text = body["parts"][0]["text"]
-            threading.Thread(target=run_turn, args=(sid, text), daemon=True).start()
+            model = body["model"]["modelID"]
+            threading.Thread(target=run_turn, args=(sid, text, model), daemon=True).start()
             self.send_response(204); self.end_headers(); return
+        if self.path.endswith("/abort"):
+            return self._json(True)
         if self.path.startswith("/permission/") and self.path.endswith("/reply"):
             state["rejected"].append(self.path.split("/")[2])
             return self._json(body.get("reply") == "reject")

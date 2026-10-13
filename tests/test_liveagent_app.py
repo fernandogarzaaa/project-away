@@ -171,6 +171,9 @@ def test_server_lifecycle_auth_free_models_chat_and_tool_rejection(fake_server, 
     assert srv.client.get_json(f"{srv.url}/rejected", srv._auth(), 5) == ["per_1"]  # the bash ask got "no"
     log = (srv.home / "state" / "fake.log").read_text()
     assert '"env_has_secret": false' in log and str(srv.home.parent / "work") in log
+    with pytest.raises(HttpError) as limited:  # "Free usage exceeded": stop at once, the funnel tries another model
+        list(srv.chat_stream("big-pickle-limited", "hi", timeout=20))
+    assert limited.value.status == 429 and "free_tier_limit" in str(limited.value)
     srv.stop()
     assert not srv.running()
     srv.last_used = -1e9
@@ -222,8 +225,8 @@ def test_use_free_models_one_click_downloads_when_missing(tmp_path, monkeypatch)
     finally:
         rt.stop()
     assert installed and "Downloading opencode" in steps[0]
-    assert s.enabled and s.preferred == "opencode_free/big-pickle" and s.provider("opencode_free")
-    assert msg.startswith("Free models are on (Big Pickle")
+    assert s.enabled and s.preferred == "opencode_free/nemotron-3.5-lightning-free" and s.provider("opencode_free")
+    assert msg.startswith("Free models are on (Nemotron 3.5 Lightning")  # the fast free model answers voice
 
 
 def test_fallback_options_offer_free_keys(tmp_path) -> None:
