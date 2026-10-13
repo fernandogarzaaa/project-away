@@ -494,6 +494,12 @@ RETRY_FRAME_S = 1.5  # every further mode (the multi-camera probe waits MULTICAM
 # the fastest mode wins, and a camera that stays slow in every mode on both backends is replaced by a free NVIDIA
 # Broadcast camera when that reaches the minimum itself.
 MIN_CAMERA_FPS = 10.0  # the default of hands.min_camera_fps
+# v0.1.21 (JoyCam: "1280x720@30 YUY2 ... 10.0 fps measured; ok"): uncompressed 720p over USB 2 stops at ~10 fps.
+# A mode between MIN_CAMERA_FPS and TRACKING_FPS still works, but the search goes on to smaller sizes and keeps the
+# fastest mode that reaches TRACKING_FPS (hand tracking needs speed more than resolution).
+TRACKING_FPS = 24.0
+SPEED_SIZES = ((960, 540), (640, 360), (640, 480))  # tried when the configured size is larger than these
+SPEED_FOURCCS = ("MJPG", "YUY2")
 MEASURE_S = 1.5  # frames are counted this long in every attempted mode (0 = accept the first frame unmeasured)
 SWEEP_FOURCCS = ("MJPG", "YUY2", "NV12", "")  # "" = the driver's default format
 SWEEP_SIZES = ((640, 480), (320, 240))  # after the configured size
@@ -639,6 +645,8 @@ def capture_modes(
         modes += [CaptureMode(w, h, f, x) for x in DSHOW_FOURCCS if x != fcc]
     if fcc:
         modes.append(CaptureMode(w, h, f, ""))
+    if fcc and other_fourccs:
+        modes += speed_modes(w, h, f)
     modes.append(DEVICE_DEFAULT)
     if low_res:
         lw, lh = LOW_RES
@@ -648,6 +656,20 @@ def capture_modes(
     for m in modes:
         if m not in out:
             out.append(m)
+    return out
+
+
+def speed_modes(width: int, height: int, fps: int) -> list[CaptureMode]:
+    """v0.1.21: smaller sizes (960x540, 640x360, 640x480; MJPG then YUY2) to try when the configured size is only
+    slow: a webcam that sends 720p uncompressed at 10 fps usually sends 640x480 at 30."""
+    out: list[CaptureMode] = []
+    if int(width) * int(height) <= 640 * 480:
+        return out  # already a tracking-sized mode
+    for sw, sh in SPEED_SIZES:
+        if sw * sh >= int(width) * int(height):
+            continue
+        for fcc in SPEED_FOURCCS:
+            out.append(CaptureMode(sw, sh, int(fps or 0) or SWEEP_FPS, fcc))
     return out
 
 
@@ -790,6 +812,8 @@ def apply_mode(cap: Any, mode: CaptureMode, cv2: Any, label: str = "") -> str:
     if got and got != mode.fourcc:
         with contextlib.suppress(Exception):
             cap.set(prop, fourcc_code(mode.fourcc))
+            if mode.fps:  # DirectShow resets the frame rate when the media type changes
+                cap.set(cv2.CAP_PROP_FPS, mode.fps)
         got = _read_fourcc(cap, prop)
         if got == mode.fourcc:
             log.info("camera %s: %s accepted only after the size was set", label or "?", mode.fourcc)
@@ -803,6 +827,28 @@ def apply_mode(cap: Any, mode: CaptureMode, cv2: Any, label: str = "") -> str:
         )
     elif not got:
         log.info("camera %s: asked for %s; the driver does not report its pixel format", label or "?", mode.fourcc)
+    return got
+
+
+def apply_mode_size_first(cap: Any, mode: CaptureMode, cv2: Any, label: str = "") -> str:
+    """The other order some DirectShow drivers need (v0.1.21, for MJPG): size, FOURCC, size again, then the frame
+    rate, on a freshly opened capture. Returns the FOURCC the driver reports."""
+    prop = getattr(cv2, "CAP_PROP_FOURCC", 6)
+    with contextlib.suppress(Exception):
+        if mode.width and mode.height:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
+        cap.set(prop, fourcc_code(mode.fourcc))
+        if mode.width and mode.height:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
+        if mode.fps:
+            cap.set(cv2.CAP_PROP_FPS, mode.fps)
+        cap.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
+    got = _read_fourcc(cap, prop)
+    log.info(
+        "camera %s: retried %s with the size set first -> driver reports %s", label or "?", mode.fourcc, got or "?"
+    )
     return got
 
 
@@ -1016,8 +1062,15 @@ class _Search:
         sleep: Callable[[float], Any],
         min_fps: float,
         measure_s: float,
+        good_fps: float | None = None,
+        trusted: CaptureMode | None = None,
     ) -> None:
         self.label, self.cv2 = label, cv2
+        # v0.1.21: a mode below good_fps (but at least min_fps) is remembered in ``ok_best`` and the search goes on;
+        # ``trusted`` (the best mode a full search found before, camera-modes.json "best") is accepted at min_fps
+        self.good_fps = float(good_fps) if good_fps and good_fps > min_fps else None
+        self.trusted = trusted
+        self.ok_best: _Candidate | None = None
         self.first_frame_s, self.retry_frame_s = first_frame_s, retry_frame_s
         self.clock, self.sleep = clock, sleep
         self.min_fps, self.measure_s = float(min_fps), float(measure_s)
@@ -1061,7 +1114,26 @@ class _Search:
                 return None
             self.opened = True
             if at.factory is None:
-                apply_mode(cap, mode, cv2, self.label)
+                got_fcc = apply_mode(cap, mode, cv2, self.label)
+                if mode.fourcc == "MJPG" and got_fcc and got_fcc != mode.fourcc:
+                    # v0.1.21: the driver kept another format (JoyCam: YUY2). Retry on a fresh capture with the size
+                    # first; if it still is not MJPG, skip this mode instead of measuring YUY2 under an MJPG name.
+                    with contextlib.suppress(Exception):
+                        cap.release()
+                    cap = self._create(at.src, at.api, at.factory, mode)
+                    if not cap.isOpened() or apply_mode_size_first(cap, mode, cv2, self.label) not in ("", "MJPG"):
+                        with contextlib.suppress(Exception):
+                            cap.release()
+                        self.tried.append(f"{at.backend} {mode.describe()}: driver kept {got_fcc}")
+                        log.info(
+                            "camera %s: %s index %s will not send MJPG at %s (driver keeps %s); next mode",
+                            self.label,
+                            at.backend,
+                            at.src,
+                            mode.describe(),
+                            got_fcc,
+                        )
+                        continue
             else:  # the backend chose a native format itself: that is the mode to remember
                 native = getattr(cap, "mode", None)
                 mode = native if isinstance(native, CaptureMode) else mode
@@ -1085,6 +1157,33 @@ class _Search:
             fps, frame = measure_fps(cap, frame, self.measure_s, self.clock, self.sleep, self.cancelled)
             rb = read_back(cap, cv2)
             cand = _Candidate(at.backend, at.api, at.src, mode, fps, at.factory)
+            slow_for_tracking = (
+                fps is not None
+                and self.good_fps is not None
+                and self.min_fps <= fps < self.good_fps
+                and not (self.trusted is not None and mode == self.trusted)
+            )
+            if slow_for_tracking:
+                assert fps is not None and self.good_fps is not None
+                log.info(
+                    "%s",
+                    attempt_line(
+                        self.label,
+                        at.backend,
+                        at.src,
+                        mode,
+                        rb,
+                        fps,
+                        f"works, but below {self.good_fps:g} fps for smooth tracking; trying smaller modes",
+                    ),
+                )
+                self.tried.append(f"{at.backend} {mode.describe()}: {fps:.1f} fps")
+                if self.ok_best is None or (self.ok_best.fps or 0.0) < fps:
+                    self.ok_best = cand
+                with contextlib.suppress(Exception):
+                    cap.release()
+                self._check()
+                continue
             if fps is None or fps >= self.min_fps:
                 log.info("%s", attempt_line(self.label, at.backend, at.src, mode, rb, fps, "ok"))
                 log.info(
@@ -1387,6 +1486,7 @@ def open_camera(
     measure_s: float | None = None,
     sweep_budget_s: float | None = None,
     backend: str | None = None,
+    good_fps: float | None = None,
 ) -> OpenedCamera:
     """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works: read a frame, then
     measure the frame rate for ``measure_s`` (default MEASURE_S; 0 = do not measure).
@@ -1444,6 +1544,7 @@ def open_camera(
             measure_s=MEASURE_S if measure_s is None else float(measure_s),
             sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
             backend=backend,
+            good_fps=TRACKING_FPS if good_fps is None else float(good_fps),
         )
     finally:
         with _lock:
@@ -1471,6 +1572,7 @@ def _open_camera(
     measure_s: float,
     sweep_budget_s: float,
     backend: str | None = None,
+    good_fps: float = 0.0,
 ) -> OpenedCamera:
     devs = list(devices or [])
     me = next((d for d in devs if (d.index if d.index is not None else d.path) == src), None)
@@ -1492,7 +1594,8 @@ def _open_camera(
         allowed = ["DirectShow", *allowed]  # virtual cameras (NVIDIA Broadcast) are DirectShow filters
     if kept is not None and kept[0] not in allowed and kept[0] != "default":
         kept = None  # remembered for a backend that hands.camera_backend now rules out
-    search = _Search(repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep, min_fps, measure_s)
+    trusted = kept[1] if kept is not None and saved_mode_info().get(key, {}).get("best") else None
+    search = _Search(repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep, min_fps, measure_s, good_fps, trusted)
     mf_index: list[int | None] = []  # computed once, when Media Foundation is first needed
     winrt_tried: list[bool] = []
 
@@ -1503,9 +1606,9 @@ def _open_camera(
             mf_index.append(msmf_index(src, me, devs, repr(name), msmf_lister))
         return mf_index[0]
 
-    def found(got: tuple[Any, Any, _Candidate], first: tuple[str, CaptureMode]) -> OpenedCamera:
+    def found(got: tuple[Any, Any, _Candidate], first: tuple[str, CaptureMode], best: bool = False) -> OpenedCamera:
         cap, frame, cand = got
-        _remember(key, name, cand.backend, cand.mode, first, cand.fps, min_fps)
+        _remember(key, name, cand.backend, cand.mode, first, cand.fps, min_fps, best=best)
         if cand.factory is None:
             cap, frame = scaled(cap, frame, cand.mode, int(width), int(height))
         return OpenedCamera(HeldCapture(cap, str(src)), frame, cand.mode, src, name, backend=cand.backend, fps=cand.fps)
@@ -1592,6 +1695,22 @@ def _open_camera(
             got = None if at is None else attempt(at)
             if got is not None:
                 return got
+
+    if search.ok_best is not None:
+        # v0.1.21: nothing reached TRACKING_FPS; use the fastest mode that works (e.g. 720p YUY2 at 10 fps when no
+        # smaller mode is faster) and remember it as this camera's best, so the next start does not search again
+        okb = search.ok_best
+        log.warning(
+            "camera %r: no mode reached %g fps; using the fastest that works: %s %s at %.1f fps",
+            name,
+            good_fps,
+            okb.backend,
+            okb.mode.describe(),
+            okb.fps or 0.0,
+        )
+        reopened = search.reopen(okb)
+        if reopened is not None:
+            return found((reopened[0], reopened[1], okb), (allowed[0] if windows else "default", modes[0]), best=True)
 
     # every mode so far either failed or was too slow
     sweep_backends = [b for b in ("DirectShow", "Media Foundation") if b in allowed] if windows else ["default"]
@@ -1744,6 +1863,7 @@ def _remember(
     first: tuple[str, CaptureMode],
     fps: float | None = None,
     min_fps: float = 0.0,
+    best: bool = False,
 ) -> None:
     with _lock:
         before = _session_modes.get(key)
@@ -1760,8 +1880,9 @@ def _remember(
         )
     elif before is None:
         log.info("camera %r: opened with %s in mode %s", name, backend, mode.describe())
-    if (backend, mode) != first:
-        remember_mode(key, backend, mode, fps=fps)  # only works in a fallback mode: open it that way next start
+    if (backend, mode) != first or best:
+        # only works in a fallback mode (or this is the best of a full search): open it that way next start
+        remember_mode(key, backend, mode, fps=fps, best=best)
     elif key in saved_modes():
         forget_mode(key)  # the configured mode works again
 
@@ -1842,6 +1963,7 @@ def saved_mode_info() -> dict[str, dict[str, Any]]:
         out[str(key)] = {
             "fps": float(mf) if isinstance(mf, (int, float)) and not isinstance(mf, bool) else None,
             "slow": v.get("slow") is True,
+            "best": v.get("best") is True,  # v0.1.21: the fastest mode of a full search (no faster one exists)
         }
     return out
 
@@ -1860,6 +1982,8 @@ def _write_modes(modes: dict[str, tuple[str, CaptureMode]], info: dict[str, dict
             row["measured_fps"] = round(float(extra["fps"]), 2)
         if extra.get("slow"):
             row["slow"] = True
+        if extra.get("best"):
+            row["best"] = True
         data[k] = row
     with contextlib.suppress(OSError):
         _mode_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1868,7 +1992,9 @@ def _write_modes(modes: dict[str, tuple[str, CaptureMode]], info: dict[str, dict
         os.replace(tmp, _mode_file)
 
 
-def remember_mode(key: str, backend: str, mode: CaptureMode, fps: float | None = None, slow: bool = False) -> None:
+def remember_mode(
+    key: str, backend: str, mode: CaptureMode, fps: float | None = None, slow: bool = False, best: bool = False
+) -> None:
     """Save the mode a camera works in (when the store is on) and use it for the rest of this session. ``fps``:
     the frame rate measured in it; ``slow``: it is the fastest mode of a full search and still below the
     minimum (the next start checks only this mode before falling back)."""
@@ -1878,8 +2004,8 @@ def remember_mode(key: str, backend: str, mode: CaptureMode, fps: float | None =
         return
     modes = saved_modes()
     info = saved_mode_info()
-    new_info = {"fps": fps, "slow": bool(slow)}
-    old_info = info.get(key, {"fps": None, "slow": False})
+    new_info = {"fps": fps, "slow": bool(slow), "best": bool(best)}
+    old_info = info.get(key, {"fps": None, "slow": False, "best": False})
     if modes.get(key) != (backend, mode) or old_info != new_info:
         modes[key] = (backend, mode)
         info[key] = new_info
