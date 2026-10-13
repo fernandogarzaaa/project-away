@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import logging
 import copy
 import math
 import os
@@ -1495,6 +1496,7 @@ TAB_ORDER = (
     "Cameras",
     "Tuning",
     "Performance",
+    "Models",  # v0.1.23
 )
 
 
@@ -1604,6 +1606,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         with contextlib.suppress(Exception):
             agent_gui.build_tab(self, nb)
+        try:  # v0.1.23 Settings > Models (model registry), isolated in its own module
+            from away.app import models_tab
+
+            models_tab.build(self, nb)
+        except Exception as exc:
+            logging.getLogger("away.settings").warning("Models tab unavailable: %s", exc)
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
