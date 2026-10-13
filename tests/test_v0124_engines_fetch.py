@@ -440,3 +440,22 @@ def test_qwen35_cleanup_models_are_pinned_and_kept_out_of_the_v0123_list(tmp_pat
         assert m.kind == "cleanup_next" and len(m.sha256) == 64 and "/resolve/main/" not in m.url
         assert m.license == "Apache-2.0" and not m.restricted
     assert keys.isdisjoint({row["key"] for row in om.describe(tmp_path)})
+
+
+def test_optional_extras_exist_and_stay_out_of_all_and_the_installers():
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+
+    root = Path(__file__).resolve().parent.parent
+    extras = tomllib.loads((root / "pyproject.toml").read_text())["project"]["optional-dependencies"]
+    assert extras["moonshine"] == ["moonshine-voice>=0.1.5,<0.2"]
+    assert (
+        extras["wakeword"][0].startswith("livekit-wakeword>=0.3.0")
+        and "python_version >= '3.11'" in extras["wakeword"][0]
+    )
+    assert extras["pocket"] == ["pocket-tts>=3.2,<4"]
+    joined = " ".join(extras["all"])
+    for pkg in ("moonshine-voice", "livekit-wakeword", "pocket-tts"):
+        assert pkg not in joined
+        for f in (root / "packaging").rglob("*"):
+            if f.is_file() and f.suffix in (".txt", ".spec", ".iss", ".py", ".ps1", ".sh", ".toml", ".cfg", ".nsi"):
+                assert pkg not in f.read_text(encoding="utf-8", errors="ignore"), f

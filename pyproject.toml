@@ -67,6 +67,13 @@ parakeet = ["nemo_toolkit[asr]>=2.0"]
 # v0.1.20 Smart cleanup engine (voice.cleanup.mode: llm). Not in [all]: it builds llama.cpp from source where no
 # wheel exists. GPU builds: see README "Smart cleanup".
 cleanup = ["llama-cpp-python>=0.3.2"]
+# v0.1.24 newer models (optional; never in [all] or the installers - Settings can also fetch the first two as
+# pinned, sha256-checked engines). Moonshine v2 streaming speech on the CPU (MIT):
+moonshine = ["moonshine-voice>=0.1.5,<0.2"]
+# livekit-wakeword (Apache-2.0) runs a "Hey <name>" model you trained; it needs Python 3.11 or newer
+wakeword = ["livekit-wakeword>=0.3.0,<0.4; python_version >= '3.11'"]
+# Kyutai pocket-tts instant voice (experimental; code MIT, weights CC-BY-4.0: credit Kyutai). Pulls in PyTorch.
+pocket = ["pocket-tts>=3.2,<4"]
 all = [
   "mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17",
   "faster-whisper>=1.1", "sounddevice>=0.4.6", "pycaw>=20240210; sys_platform == 'win32'",
