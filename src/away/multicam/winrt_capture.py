@@ -114,6 +114,24 @@ def choose_format(
     return min(pool, key=rank)
 
 
+FORMAT_TRIES = 6  # v0.1.23: native formats tried (closest first) before the camera's current one
+
+
+def ranked_formats(
+    formats: Sequence[NativeFormat], width: int, height: int, fps: float = 0, fourcc: str = ""
+) -> list[NativeFormat]:
+    """v0.1.23: every native format, the one :func:`choose_format` picks first, then the next best of the rest."""
+    rest = list(formats)
+    out: list[NativeFormat] = []
+    while rest:
+        best = choose_format(rest, width, height, fps, fourcc, max_size=(100000, 100000) if out else MAX_NATIVE)
+        if best is None:
+            break
+        out.append(best)
+        rest = [f for f in rest if f is not best]
+    return out
+
+
 def bgra_to_bgr(data: Any, width: int, height: int, stride: int = 0) -> Any:
     """A BGRA8 buffer (``SoftwareBitmap.CopyToBuffer``) -> a contiguous ``height x width x 3`` BGR array.
     ``stride``: bytes per row when rows are padded (0 = ``width * 4``)."""
@@ -408,6 +426,7 @@ class WinrtCapture:
         self.error = ""
         self.native: NativeFormat | None = None
         self.formats: list[NativeFormat] = []
+        self.tried: list[str] = []  # v0.1.23: every format that could not be set
         self.sharing = ""
         self.frame_size: tuple[int, int] = (0, 0)
         self.frames = 0
@@ -470,18 +489,17 @@ class WinrtCapture:
             w, h, f, fcc = self.request
             chosen: NativeFormat | None = None
             if self.sharing == "exclusive":
-                chosen = choose_format(self.formats, w, h, f, fcc)
-                if chosen is not None:
+                # v0.1.23: "Element not found" (0x80070490) usually means that exact type does not exist: try the
+                # closest native formats one after another (each logged), then the camera's current format
+                for cand in ranked_formats(self.formats, w, h, f, fcc)[:FORMAT_TRIES]:
                     try:
-                        await api.set_format(source, chosen)
+                        await api.set_format(source, cand)
+                        chosen = cand
+                        log.info("camera %r: WinRT format %s set", self.name, cand.describe())
+                        break
                     except Exception as exc:
-                        log.warning(
-                            "camera %r: WinRT could not set %s (%s); using its current format",
-                            self.name,
-                            chosen.describe(),
-                            exc,
-                        )
-                        chosen = None
+                        self.tried.append(f"{cand.describe()}: {exc}")
+                        log.warning("camera %r: WinRT could not set %s (%s)", self.name, cand.describe(), exc)
             self.native = chosen or api.current_format(source)
             reader = await api.start_reader(capture, source, self._on_frame)
             self._opened = True

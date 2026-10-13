@@ -1331,6 +1331,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             ).run()
 
         self._camera_list(log=True)  # the enumerated cameras (source, index, name, virtual) -> away.log
+        with contextlib.suppress(Exception):  # v0.1.23: no NVIDIA Broadcast fallback while the built-in camera is set
+            from away.multicam.capture import configure_cameras
+
+            h = self.cfg.hands
+            configure_cameras([c.device for c in h.cameras] if h.cameras else [h.camera_index])
         try:
             while not self.stop_event.is_set():
                 if len(self.cfg.hands.cameras) >= 2 and hands is not None:
