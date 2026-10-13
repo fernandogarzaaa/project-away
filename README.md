@@ -173,7 +173,7 @@ Something you do often, like opening your mail and starting a new message? Teach
 
 1. Open **Settings > Shortcuts** and press the big **Record a shortcut** button (or say **"record shortcut"**, or pick
    **Record a shortcut** in the tray menu).
-2. Do the clicks and typing yourself, the normal way. A small red **Recording** bar shows at the top; press its **Stop**
+2. Do the clicks and typing yourself, the normal way, or hands-free: pinch-clicks and dictated text count too. A small red **Recording** bar shows at the top; press its **Stop**
    button when you are done (or say **"stop recording"**).
 3. Give it a name, then choose what runs it: **say** a phrase ("open mail") or **make a gesture**. That's it.
 
@@ -1233,7 +1233,7 @@ v0.1.20. Everything runs on your PC; nothing is uploaded.
 | Key | Default | Meaning |
 |---|---|---|
 | `voice.cleanup.mode` | `rules` | `off` (Whisper's text as heard) \| `rules` \| `llm` |
-| `voice.cleanup.backend` | `llama_cpp` | `llama_cpp` (built in, needs `pip install "project-away[cleanup]"`) \| `ollama` (a local Ollama server) \| `openai` (any OpenAI-compatible server from `AWAY_LLM_BASE_URL` / `AWAY_LLM_MODEL` / `AWAY_LLM_API_KEY`) |
+| `voice.cleanup.backend` | `llama_cpp` | `llama_cpp` (built in; the installers download the engine with the model, pip installs use `pip install "project-away[cleanup]"`) \| `ollama` (a local Ollama server) \| `openai` (any OpenAI-compatible server from `AWAY_LLM_BASE_URL` / `AWAY_LLM_MODEL` / `AWAY_LLM_API_KEY`) |
 | `voice.cleanup.model` | `auto` | `auto` (the downloaded cleanup model; the standard one with an NVIDIA GPU, the light one otherwise), `qwen2.5-1.5b`, `qwen2.5-0.5b`, a path to your own `.gguf`, or the server's model name (Ollama: `qwen2.5:1.5b`) |
 | `voice.cleanup.timeout_ms` | `1500` | budget for the model; slower = the rule output is typed |
 | `voice.cleanup.tones` | `{}` | per-app tone, keyed by process name or bindings profile name: `{slack.exe: formal, chrome: casual}`; tones `auto casual neutral formal verbatim code` |
@@ -1259,10 +1259,19 @@ from Hugging Face pinned to a commit, SHA-256 checked, resumable, never bundled:
 Both licenses were checked on the model cards and in the GGUF repositories' `LICENSE` files. Qwen2.5-3B is
 deliberately not offered: it uses the Qwen Research license (non-commercial).
 
-**Engine.** `llama-cpp-python` is an optional extra (`pip install "project-away[cleanup]"`); it is not in `[all]`
-and therefore **not in the one-click installers yet** (it compiles llama.cpp where no wheel exists). In an
-installer build the Smart cleanup switch says so and offers **Learn how**; you can use Ollama instead
-(`ollama pull qwen2.5:1.5b`, then Advanced > Engine > Ollama). For an NVIDIA GPU install a CUDA wheel, e.g.
+**Engine.** In the installed app (v0.1.20) the **Download** button fetches the engine together with the model:
+the official prebuilt **CPU** wheel of `llama-cpp-python` 0.3.36 for your computer, pinned by size and SHA-256
+in `away/voice/engine.py` (Windows x64 7.8 MB, macOS Apple Silicon 24.9 MB, Linux x86-64 27.1 MB, Linux ARM64
+24.9 MB, from the llama-cpp-python GitHub release). Only its `llama_cpp` package is unpacked, into
+`<data dir>/engines/`, and it is first loaded in a separate process (`away cleanup-engine check`), so a broken
+native library can never crash the app; if that check fails the engine is removed again and Settings explains
+why (on Windows the usual cause is a missing Microsoft Visual C++ Redistributable). The wheels talk to llama.cpp
+through ctypes (they work with any Python version) and ship no `msvcp140.dll`. The small pure-Python packages it
+imports (diskcache, jinja2) are bundled in the installers. `away cleanup-engine status|install|check|remove`
+does the same from a terminal. No ready-made engine exists for Intel Macs and Windows on ARM: use Ollama
+(`ollama pull qwen2.5:1.5b`, then Advanced > Engine > Ollama), which is also the way to use a GPU today. From pip,
+`pip install "project-away[cleanup]"` installs llama-cpp-python itself (a pip copy always wins over a downloaded
+one); for an NVIDIA GPU install a CUDA wheel, e.g.
 `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`.
 
 **Measured latency** (`scripts/bench_cleanup.py`, 8 sample sentences, CPU-only llama-cpp-python 0.3.36 on 2
@@ -1282,7 +1291,7 @@ so prose like "correct the plan to match the budget" is still typed) and "spell 
 corrections: on Windows the focused field is re-read for `watch_seconds` after a dictation, and a small word
 substitution you make in that span is learned after it was seen `learn_after` times.
 
-## Gesture Studio (v0.1.20, unreleased)
+## Gesture Studio (v0.1.20)
 
 Settings → **Gesture Studio** replaces the old "Test gesture" tab (its "built-in gesture" line still shows what
 the state machine saw and what it is bound to). It borrows the camera from the running app through the same
@@ -1477,7 +1486,7 @@ Config (`macros:` in config.yaml, all optional):
 | `default_speed` | `1x` | speed of new recordings (`1x`, `2x`, `instant`) |
 | `max_delay_s` | `3.0` | longer recorded pauses are shortened to this |
 | `min_gap_s` | `0.05` | smallest gap between steps (so apps keep up at "instant") |
-| `record_away_input` | `false` | also record the clicks/keys Project Away itself produced |
+| `record_away_input` | `true` | also record the clicks/keys Project Away itself produced (gesture clicks, dictated text); on since v0.1.20 so you can record a shortcut hands-free. A shortcut being replayed is never recorded into another, Away's own windows never count, and password boxes stay excluded |
 | `record_text_without_password_check` | `false` | record typed text where password boxes can't be detected |
 | `use_ui_automation` | `true` | Windows: remember and find controls by name |
 | `store_dir` | `""` | shortcut folder (`""` = `<data dir>/macros`) |
@@ -1549,7 +1558,7 @@ Config (`macros:` in config.yaml, all optional):
 | Smart pointer: magnetic targets (v0.1.20) | Attraction (bounded, continuous at the edge, no pull along wide text boxes), sticky friction (jitter over a button cut by more than 40 %, more hover frames landing on a small button), escape on fast moves, offset cap and bleed-off, warp reset, steady-click rewind resync, spatial index equal to a full scan and fast on 2,000 elements, background cache thread, stale and error handling unit-tested with fake targets; the UI Automation backend tested against a mocked comtypes; a real UIAutomationCore smoke test (create the automation object, walk the foreground window) runs on the Windows CI runner; **untested on a real Windows desktop with a webcam: how the pull and friction feel, which apps expose their buttons (Chrome/Electron/Qt/games vary), mixed-DPI coordinates** |
 | Smart pointer: look + say (v0.1.20) | Phrase parsing, number words, fuzzy name scores, ambiguity and dedupe, the numbered chooser with timeout, gaze-or-cursor "click that", focus with click fallback, bound-phrase precedence, pause / switch-off, always-on phrase table and dictation fallback, friendly errors tested through the real Pipeline with a fake backend; **untested with a real microphone and Whisper, the numbered badge window has never been drawn on Windows, and UIA SetFocus is untested on real apps** |
 | Smart pointer: predictive smoothing (v0.1.20) | Kalman filter behaviour and the synthetic jitter/latency benchmark against the existing One Euro filter in tests (lag 8x lower, still-hand jitter under the dead zone, overshoot bounded); live switching from Settings tested; **untested with a real webcam, so it ships off** |
-| Smart pointer Settings section (v0.1.20) | Toggle / config mapping, health messages and the Install fix (with a fake pip) unit-tested; a Tk test of the section exists but needs Xvfb, which the build sandbox did not have this time and the CI test job does not start, so **the Settings section has not been rendered** |
+| Smart pointer Settings section (v0.1.20) | Toggle / config mapping, health messages and the Install fix (with a fake pip) unit-tested; the section rendered and driven under Xvfb in the merged window (that run found and fixed a blank status line: its text variable was garbage-collected); **untested on a real Windows desktop** |
 | Attention gate (v0.1.20) | Onset dwell, hand height/size checks, height and facing hysteresis, grace period, no-face / stale-face / never-ran-face cases, gaze on/off/stale, voice gating, hints, the pipeline treating an un-engaged hand as absent (drag ends cleanly), hot-reload, ring tint and tray title tested with synthetic hands and fake head/gaze trackers (`tests/test_v0120_attention_comfort.py`); **untested with a live webcam**: whether 0.25 picture heights is the right "hand raised" line for a real desk and camera angle, and how the head-pose facing check behaves with an off-axis webcam |
 | Arm fatigue + break reminders (v0.1.20) | Time-only, sinking-hand, tremor and combined triggers, a short dip vs. a real rest, slow drift not counted as tremor, camera stalls, switch to the head pointer and back (also across a config reload), no switch without face tracking, tip cooldown and break timing tested with synthetic hand paths and noise; **not validated on real people**: the thresholds are a starting point, MediaPipe landmark jitter on a real webcam may dominate the tremor sign, and the head-pointer hand-over has not been felt on real hardware |
 | Guided first run, Settings → Getting started, tray items (v0.1.20) | Step list, skip/back, progress dots, saved state, plug-in steps (placeholder, replacement, broken plug-ins), framing tips, the tutorial coach driven by the real gesture state machine, the camera session with a fake camera (events, preview, face sampling, hand-back, errors), friendly errors, the model download fix, `away tour --text` and the tray menu items unit-tested (`tests/test_v0120_first_run.py`); the window was walked through every step and the Settings tab rendered under Xvfb with a fake camera; **untested on a real Windows desktop and with a real webcam** (live preview speed, the 2-minute target, `ms-settings:privacy-webcam`, the auto-open on a real first start, the tray check box on Windows) |
@@ -1560,7 +1569,8 @@ Config (`macros:` in config.yaml, all optional):
 | Gesture Studio window (v0.1.20) | Built and driven under Xvfb (tab replaces Test gesture, fake frames with the picture, zones, bars, details charts, wizard steps 1-2, gesture dialog) and screenshots checked; **untested on a real desktop with a real camera**: the live picture rate, the wizard's timing with a person, real actions with practice mode off (pynput) |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Smart cleanup rules, app categories and tones, model guard, timeout fallback (v0.1.20) | Unit-tested with a mocked model (`tests/test_v0120_voice_context.py`): accepted polish, invented content rejected, 150 ms budget kept with a 600 ms model, no queueing behind a timed-out call, engine errors, code/terminal pass-through, chat/email tone, sentence continuation, the dictation session end to end; Ollama and OpenAI-compatible engines tested against a local HTTP server |
-| Smart cleanup with the real models (v0.1.20) | Both Qwen2.5 GGUF files downloaded and SHA-256 checked; run through `SmartCleaner` with CPU-only llama-cpp-python 0.3.36 on Linux aarch64 (latency above); a real-model smoke test exists but is skipped in CI (`AWAY_TEST_GGUF`); **untested on Windows, on a GPU (CUDA/Metal llama.cpp builds) and with the frozen installers (the engine is not bundled)** |
+| Smart cleanup with the real models (v0.1.20) | Both Qwen2.5 GGUF files downloaded and SHA-256 checked; run through `SmartCleaner` with CPU-only llama-cpp-python 0.3.36 on Linux aarch64 (latency above); a real-model smoke test exists but is skipped in CI (`AWAY_TEST_GGUF`); **untested on Windows with a real model and on a GPU (CUDA/Metal llama.cpp builds)** |
+| Smart cleanup engine download for installer users (v0.1.20) | Pinned wheel table, size + SHA-256 check (a tampered file is never unpacked), unpacking only `llama_cpp` (path traversal refused), the separate-process load check and its clean-up, friendly errors and the Settings Download button (model + engine in one go) unit-tested (`tests/test_cleanup_engine.py`); the real Linux ARM64 wheel downloaded, verified, loaded through `away cleanup-engine check` and generated text with a tiny GGUF in the build sandbox; the CI test job downloads and loads the real wheel on Windows, macOS and Ubuntu (`AWAY_NET_TESTS=1`); the frozen Windows app runs install + check in the release workflow (non-blocking step); **untested on a real user PC, in particular one without the Visual C++ Redistributable** |
 | Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
 | Parakeet, Wayland | **Untested** |
