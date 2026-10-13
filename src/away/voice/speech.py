@@ -31,6 +31,65 @@ from typing import Any, Protocol
 
 log = logging.getLogger("away.speech")
 
+ECHO_TAIL_S = 0.7  # v0.1.22: the microphone keeps ignoring sound this long after the voice stops (room echo)
+
+
+class EchoGuard:
+    """v0.1.22: while the computer's voice speaks (and ``tail_s`` after), the microphone must not hear it: the
+    agent's spoken "Can you hear me now?" was transcribed and typed. :class:`Speaker` marks each spoken message;
+    the voice input asks :meth:`active` (drop the audio) and :meth:`overlaps` (drop an utterance that ran into it).
+    Times are ``time.monotonic()`` seconds."""
+
+    def __init__(self, tail_s: float = ECHO_TAIL_S, clock: Callable[[], float] | None = None) -> None:
+        import time as _time
+
+        self.tail_s = float(tail_s)
+        self.clock = clock or _time.monotonic
+        self._lock = threading.Lock()
+        self._speaking = 0  # nested begin() calls
+        self._since = 0.0
+        self.spans: list[tuple[float, float]] = []  # finished (start, end + tail), the last few
+
+    def begin(self) -> None:
+        with self._lock:
+            if self._speaking == 0:
+                self._since = self.clock()
+            self._speaking += 1
+
+    def end(self) -> None:
+        with self._lock:
+            if self._speaking == 0:
+                return
+            self._speaking -= 1
+            if self._speaking == 0:
+                self.spans = [*self.spans[-19:], (self._since, self.clock() + self.tail_s)]
+
+    @contextlib.contextmanager
+    def speaking(self) -> Any:
+        self.begin()
+        try:
+            yield
+        finally:
+            self.end()
+
+    def active(self, now: float | None = None) -> bool:
+        """True while the voice speaks or within ``tail_s`` after it stopped."""
+        t = self.clock() if now is None else now
+        with self._lock:
+            if self._speaking:
+                return True
+            return any(a <= t <= b for a, b in self.spans)
+
+    def overlaps(self, t0: float, t1: float) -> bool:
+        """True when ``[t0, t1]`` touches a time the voice was speaking (or its tail)."""
+        with self._lock:
+            if self._speaking and t1 >= self._since:
+                return True
+            return any(t0 <= b and t1 >= a for a, b in self.spans)
+
+
+ECHO = EchoGuard()  # one per process: the app's microphone and Agent Link's voice share it
+
 RATES = ("slow", "normal", "fast")
 VOLUMES = ("quiet", "normal", "loud")
 SAPI_RATE = {"slow": -3, "normal": 0, "fast": 3}  # SpVoice.Rate: -10..10
@@ -250,7 +309,9 @@ class Speaker:
         settings: Callable[[], Any] | None = None,
         factories: list[tuple[str, Callable[[], Engine]]] | None = None,
         on_error: Callable[[str], None] | None = None,
+        echo: EchoGuard | None = None,
     ) -> None:
+        self.echo = echo or ECHO  # v0.1.22: the microphone ignores the voice while it speaks
         self.settings = settings or (lambda: None)
         self.factories = engine_factories() if factories is None else list(factories)
         self.on_error = on_error
@@ -366,7 +427,8 @@ class Speaker:
                     self._fail("no voice engine could start")
                 else:
                     try:
-                        eng.speak(text, self.voice())
+                        with self.echo.speaking():
+                            eng.speak(text, self.voice())
                         self.spoken = [*self.spoken[-19:], text]
                     except Exception as exc:
                         self._fail(f"{self.engine_name} failed: {exc}")

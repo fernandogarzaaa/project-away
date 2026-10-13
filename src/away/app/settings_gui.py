@@ -127,6 +127,7 @@ VOICE_FIELDS = {
     "updates.channel": UPDATE_CHANNELS,
     "performance.mode": PERFORMANCE_MODES,
     "hands.camera_backend": CAMERA_BACKENDS,
+    "face.gate_when_camera_busy": ("block", "allow"),  # v0.1.22
 }
 # Tuning tab glyphs, escaped: some tests read this file with the Windows default code page
 OPEN_MARK, CLOSED_MARK, RESET_MARK, RECORDING_MARK = "\u25be ", "\u25b8 ", "\u21ba", "\u25cf"
@@ -389,6 +390,7 @@ class SettingsModel:
             "updates.channel",
             "performance.mode",
             "face.gate_dictation",
+            "face.gate_when_camera_busy",
             "hands.roles.mode",
             "hands.palm_scroll.enabled",
             "hands.palm_scroll.invert",
@@ -1575,6 +1577,39 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         note = crashlog.last_crash_note() or crashlog.recent_note()
         if note:
             self._report(None, f"{note} ({crashlog.crash_log_path()})")
+            self._crash_banner(note)
+
+    def _crash_banner(self, note: str) -> None:
+        """v0.1.22: the "unexpected error was logged last time" notice with Open and Dismiss (an old note used to
+        come back at every start for 12 hours)."""
+        from away.app import crashlog
+
+        tk, ttk = self.tk, self.ttk
+        bar = tk.Frame(self.root, background="#fff8c5")
+        tk.Label(bar, text=note.capitalize(), background="#fff8c5").pack(side="left", padx=8, pady=3)
+
+        def dismiss() -> None:
+            crashlog.dismiss_note()
+            bar.destroy()
+            self._report(None)
+
+        def open_log() -> None:
+            with contextlib.suppress(Exception):
+                import os
+
+                p = crashlog.crash_log_path()
+                if sys.platform == "win32":
+                    os.startfile(str(p))  # type: ignore[attr-defined]
+                else:
+                    import subprocess
+
+                    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(p)])
+
+        ttk.Button(bar, text="Dismiss", command=dismiss).pack(side="right", padx=4, pady=2)
+        ttk.Button(bar, text="Open the log", command=open_log).pack(side="right", pady=2)
+        with contextlib.suppress(Exception):
+            bar.pack(side="top", fill="x", before=self.nb)
+        self.crash_bar = bar
 
     def select_tab(self, name: str) -> bool:
         """Show the first tab whose title contains ``name`` (case-insensitive). False when none does."""
@@ -2200,6 +2235,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             ("voice.mode", "Input mode"),
             ("voice.intent", "Always-on intent"),
             ("voice.ambient_fallback", "No wake word + no camera"),
+            ("face.gate_when_camera_busy", "While a camera check has the camera (block = don't type)"),
             ("updates.channel", "Update channel"),
         ):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=3)

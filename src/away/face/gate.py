@@ -67,6 +67,14 @@ class SpeechGate:
         self.baseline_margin = baseline_margin
         # per frame: (the user's face is at the screen, it faces the camera: True/False, None = unknown)
         self._pose: deque[tuple[bool, bool | None]] = deque(maxlen=horizon)
+        # v0.1.22: the "no face frames during speech (CPU busy?)" allowance only holds when the camera really kept
+        # delivering frames (face tracking was just behind) and nobody else held it. A camera check or Settings
+        # borrowing the camera follows ``when_camera_busy``: "block" (default: don't type, the app shows a notice)
+        # or "allow".
+        self.last_camera_frame = -1e9  # time of the newest captured camera frame (note_camera_frame)
+        self.camera_recent_s = 2.0
+        self.camera_holder: Any = lambda: None  # () -> "Settings (camera check)" while someone borrows the camera
+        self.when_camera_busy = "block"
 
     def enroll(self, face_sizes: dict[int, float]) -> int | None:
         """Pick the largest visible face as the primary user."""
@@ -90,6 +98,18 @@ class SpeechGate:
         self._scores.append((t, score))
         present = n_faces > 0 if user_present is None else bool(user_present and n_faces > 0)
         self._pose.append((present, frontal if present else None))
+
+    def note_camera_frame(self, t: float) -> None:
+        """A camera frame was captured at ``t`` (whether or not face tracking processed it)."""
+        if t > self.last_camera_frame:
+            self.last_camera_frame = t
+
+    def _holder(self) -> str | None:
+        try:
+            h = self.camera_holder()
+        except Exception:
+            return None
+        return str(h) if h else None
 
     def mouth_threshold(self, before: float) -> tuple[float, float | None]:
         """``(threshold, baseline)``: the speaking score that counts as a moving mouth, relative to the user's
@@ -142,10 +162,19 @@ class SpeechGate:
             return done(False, "identity check: not the enrolled user")
         if not idx:
             before = [(t, n) for t, _a, n in log if t <= hi]
+            holder = self._holder()
+            if holder:
+                info["camera_busy"] = holder
+                if self.when_camera_busy == "allow":
+                    return done(True, f"camera busy ({holder} is using it); typing anyway (your setting)")
+                return done(False, f"camera busy: {holder} is using the camera, so speech is not typed")
             if before and t1 - before[-1][0] <= self.starved_s and before[-1][1] > 0:
                 # face tracking delivered nothing during the utterance (the CPU was busy, e.g. with speech
-                # recognition) but the user was at the screen just before: give them the benefit of the doubt
-                return done(True, "no face frames during speech (CPU busy?); a face was present just before")
+                # recognition) but the user was at the screen just before: give them the benefit of the doubt -
+                # v0.1.22: only while the camera itself kept delivering frames
+                if t0 - self.camera_recent_s <= self.last_camera_frame:
+                    return done(True, "no face frames during speech (CPU busy?); a face was present just before")
+                return done(False, "no camera frames during speech (the camera stopped)")
             return done(False, "no face frames" if not before else "no face at the screen")
         window = [log[i] for i in idx]
         win_scores = [scores[i][1] if i < len(scores) else None for i in idx]

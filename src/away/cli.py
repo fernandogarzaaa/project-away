@@ -650,8 +650,16 @@ def cmd_cameras_diagnose(
             return _fail(f"camera {device!r} not found (see `away cameras list`)" if device else "no cameras found")
         seconds = diagnose.MEASURE_S if args.seconds is None else float(args.seconds)
         print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
+        budget = getattr(args, "budget", None)
         (runner or diagnose.run_diagnose)(
-            devs, width=width, height=height, fps=fps, measure_s=seconds, out=lambda m: print(m, flush=True)
+            devs,
+            width=width,
+            height=height,
+            fps=fps,
+            measure_s=seconds,
+            out=lambda m: print(m, flush=True),
+            budget_s=diagnose.BUDGET_S if budget is None else float(budget),
+            include_virtual=bool(getattr(args, "include_virtual", False) or device not in (None, "")),
         )
     return 0
 
@@ -1435,6 +1443,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--seconds", type=float, default=None, help="test: how long to stream (default 10); diagnose: per mode (1)"
     )
     cm.add_argument("--save", action="store_true", help="test: save the camera settings that worked together")
+    cm.add_argument(
+        "--budget", type=float, default=None, help="diagnose: stop after this many seconds (default 60, 0 = no limit)"
+    )
+    cm.add_argument(
+        "--include-virtual", action="store_true", help="diagnose: also check virtual cameras (NVIDIA Broadcast, OBS)"
+    )
     cm.add_argument("--config")
     cm.set_defaults(
         fn=lambda a: (

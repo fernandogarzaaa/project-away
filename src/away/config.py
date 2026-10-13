@@ -285,6 +285,11 @@ class VoiceConfig:
     clap_sensitivity: float = 0.5  # 0 = only sharp, loud claps .. 1 = softer claps (more false triggers)
     clap_double_window: float = 0.6  # second clap within this many seconds = double clap (a single waits this long)
     clap_require_hands: bool = False  # only accept claps while the camera sees both hands close together
+    # v0.1.22: stray speech from videos / other people. When the mouth moved in fewer than strict_motion_ratio of the
+    # frames, the transcript needs strict_confidence; while another app plays sound (Windows), the mouth must move.
+    strict_motion_ratio: float = 0.25
+    strict_confidence: float = 0.7
+    other_audio_needs_mouth: bool = True
     # v0.1.20: smart cleanup (rules / optional local LLM, per-app tone) and the personal dictionary
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     dictionary: DictionaryConfig = field(default_factory=DictionaryConfig)
@@ -309,6 +314,9 @@ class FaceConfig:
     enabled: bool = True
     source: str = "webcam"  # webcam | iphone | auto (experimental iPhone via Live Link Face; see docs/iphone.md)
     gate_dictation: bool = True
+    # v0.1.22: while a camera check or Settings borrows the camera, the face gate cannot see you:
+    # block = don't type what it hears (default; a notice says why) | allow = type anyway
+    gate_when_camera_busy: str = "block"
     speaking_threshold: float = 0.25
     correlation_window: float = 1.5  # seconds
     min_correlation: float = 0.2
@@ -434,6 +442,10 @@ class AgentLinkConfig:
     stop_hotkey: str = "ctrl+alt+esc"  # stops an agent that is using the computer
     github_issues: bool = False  # file a GitHub issue when a detector trips (token in the OS keyring)
     github_repo: str = "fernandogarzaaa/project-away"
+    # v0.1.22 "Talk to your agent": say "Hey <agent name>, ..." (or use the summon gesture, then speak) and the words
+    # go to that agent's inbox instead of being typed
+    talk_enabled: bool = True
+    default_agent: str = ""  # the agent "Hey agent" and the summon gesture go to ("" = every connected agent)
 
 
 SPEECH_RATES = ("slow", "normal", "fast")
@@ -462,6 +474,8 @@ def validate_speech(s: SpeechConfig) -> None:
 
 
 def validate_agent_link(a: AgentLinkConfig) -> None:
+    if not isinstance(a.default_agent, str) or len(a.default_agent) > 60:
+        raise ValueError("agent_link.default_agent must be an agent's name (at most 60 characters) or empty")
     if a.autofix not in AUTOFIX_MODES:
         raise ValueError(f"agent_link.autofix must be {'|'.join(AUTOFIX_MODES)}, got {a.autofix!r}")
     for name, lo, hi in (
@@ -695,6 +709,12 @@ def validate(cfg: AppConfig) -> None:
         val = getattr(perf, name)
         if isinstance(val, bool) or not isinstance(val, int) or not 0 <= val <= top:
             raise ValueError(f"performance.{name} must be an integer in [0, {top}] (0 = auto), got {val!r}")
+    if cfg.face.gate_when_camera_busy not in ("block", "allow"):
+        raise ValueError(f"face.gate_when_camera_busy must be block|allow, got {cfg.face.gate_when_camera_busy!r}")
+    for name in ("strict_motion_ratio", "strict_confidence"):
+        val = getattr(cfg.voice, name)
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not 0.0 <= float(val) <= 1.0:
+            raise ValueError(f"voice.{name} must be a number in [0, 1], got {val!r}")
     if cfg.voice.device not in ("auto", "cuda", "cpu"):
         raise ValueError(f"voice.device must be auto|cuda|cpu, got {cfg.voice.device!r}")
     if not str(cfg.voice.asr_model or "").strip():

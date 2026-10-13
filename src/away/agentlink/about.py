@@ -12,15 +12,22 @@ hands, face and voice. It runs on their PC. Through it you can see their gesture
 facing the screen, what they say to it, their camera and screen (only when they allow it), and act on the PC
 (only when they allow it, while they watch).
 
-Tools (15): get_status, get_context, look, get_screen, ask_user, notify_user, disconnect, and grouped tools that
+Tools (16): get_status, get_context, look, get_screen, ask_user, notify_user, disconnect, and grouped tools that
 take an `action`:
-  events(action=poll|wait), settings(action=list|change|undo|history|config),
+  inbox(action=list|read|reply), events(action=poll|wait), settings(action=list|change|undo|history|config),
   preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
   control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
   keyboard(action=type|press), open(action=app|url).
 For example settings action="change", pointer action="click", diagnostics action="job" job_id="82557239" (check ids
 are strings; a result is kept about 10 minutes after the check finished). The older one-purpose names
 (change_settings, get_job, act...) still work over REST and /v1/rpc.
+
+The person can talk to you: they say "Hey <your name>, ..." (or their own wake word for you, or use the summon
+gesture and then speak) and the words come to you, not to their other agents, as a `user.message` event and in
+your inbox (inbox action="list", the away://inbox resource, GET /v1/inbox). Answer with inbox action="reply" id=...
+text=... (shown on their screen and read aloud), or notify_user with speak=true. "Hey agent" goes to their
+default agent, or to every connected agent when they have none. If they gave you a "wake me" address, a JSON POST
+{"event": "user.message", "id", "text", ...} is sent to it as well.
 
 How to work with the human through Project Away:
 - Check get_context before interrupting: prefer moments when they are present, facing the screen and not
@@ -33,7 +40,8 @@ How to work with the human through Project Away:
 - Seeing the screen: wide shot first, then zoom. Take a wide shot first (get_screen with no arguments: the
   whole desktop at scale 0.5, longest side at most 2560 px, so a very wide multi-monitor desktop comes back a
   little smaller; the metadata lists every monitor with index, x, y, w, h and says which scale was used). Do not
-  try to read small text from the wide shot. Then zoom with monitor=N (one display, numbered left to right) or
+  try to read small text from the wide shot. Then zoom with monitor=N (one display, numbered 1..N left to
+  right; 0 is not a monitor) or
   region={x, y, width, height} (screen coordinates, which can be negative left of or above the main display)
   and scale up to 1.0 to read small text. Screen point = origin + image point / scale; pointer actions accept
   from_image=true to do this for you, using your last screenshot (wide shot or zoom).
@@ -50,6 +58,14 @@ How to work with the human through Project Away:
 - Subscribe to away://events (or call events action="wait") for: presence (sat down / left), attention, the
   summon gesture or "hey agent" phrases, "that was wrong" feedback, auto-detector trips and control pauses.
 """
+
+
+def _wake(agent: Any) -> str:
+    fn = getattr(agent, "wake_phrase", None)
+    try:
+        return str(fn()) if callable(fn) else f"Hey {getattr(agent, 'name', 'agent')}"
+    except Exception:
+        return "Hey agent"
 
 
 def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autofix_mode: str) -> str:
@@ -77,9 +93,14 @@ def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autof
         + (" (PAUSED - the person took over)" if control.get("paused") else ""),
         f"- settings changes: {changes}",
         "",
+        "## Talk to your agent",
+        f'- The person says "{_wake(agent)}, ..." to send you a message (only you get it). It arrives as a',
+        '  `user.message` event and in inbox action="list"; answer with inbox action="reply" (shown + read aloud).',
+        "",
         "## Tools",
         "- get_status, get_context, look, get_screen, ask_user, notify_user, disconnect.",
-        "- Grouped, with an `action`: events, settings, preferences, diagnostics, control, pointer, keyboard, open",
+        "- Grouped, with an `action`: inbox, events, settings, preferences, diagnostics, control, pointer,",
+        "  keyboard, open",
         '  (e.g. settings action="change", diagnostics action="job" job_id="...").',
         "",
         "## How to talk to them",

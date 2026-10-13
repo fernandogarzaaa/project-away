@@ -10,6 +10,7 @@ the whole report is unit-tested with fake cameras.
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -22,6 +23,7 @@ BACKEND_LABELS = {"dshow": "DirectShow", "msmf": "Media Foundation", "winrt": "W
 MEASURE_S = 1.0  # frames are counted this long per mode
 FIRST_FRAME_S = 3.0
 MAX_WINRT_FORMATS = 6  # native formats opened per camera (all of them are listed)
+BUDGET_S = 60.0  # v0.1.22: the whole diagnosis stops after this long (it ran for minutes on the user's PC)
 
 
 def diagnose_modes(width: int = 640, height: int = 480, fps: int = 30) -> list[CaptureMode]:
@@ -105,11 +107,21 @@ def run_diagnose(
     max_winrt_formats: int = MAX_WINRT_FORMATS,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = time.sleep,
+    budget_s: float | None = BUDGET_S,
+    include_virtual: bool = False,
 ) -> list[str]:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
-    (Settings shows them while the diagnosis runs) and all of them are returned."""
+    (Settings shows them while the diagnosis runs) and all of them are returned.
+
+    v0.1.22: virtual cameras (NVIDIA Broadcast, OBS...) are skipped unless ``include_virtual`` (or the camera was
+    named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so."""
     lines: list[str] = []
     say = out or (lambda _m: None)
+    started = clock()
+    budget = float(budget_s or 0.0)
+
+    def over() -> bool:
+        return budget > 0 and clock() - started > budget
 
     def emit(text: str) -> None:
         lines.append(text)
@@ -125,10 +137,20 @@ def run_diagnose(
     if not devices:
         emit("no cameras found")
         return lines
+    stopped = False
     for dev in devices:
         where = dev.index if dev.index is not None else dev.path
+        if dev.virtual and not include_virtual and len(devices) > 1:
+            emit(f"camera {where}: {dev.name} (virtual) - skipped; name it to check it anyway")
+            continue
+        if over():
+            stopped = True
+            break
         emit(f"camera {where}: {dev.name}" + (" (virtual)" if dev.virtual else ""))
         for b in use:
+            if over():
+                stopped = True
+                break
             label = BACKEND_LABELS.get(b, b)
             if b == "winrt":
                 _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
@@ -151,6 +173,9 @@ def run_diagnose(
             emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
             best: tuple[float, str] | None = None
             for mode in diagnose_modes(width, height, fps):
+                if over():
+                    stopped = True
+                    break
                 try:
                     cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
                 except Exception as exc:
@@ -179,6 +204,13 @@ def run_diagnose(
             b, m = modes
             fps_txt = f" ({saved['fps']:.1f} fps measured)" if saved and saved.get("fps") is not None else ""
             emit(f"  remembered for this camera: {b} {m.describe()}{fps_txt}")
+        if stopped:
+            break
+    if stopped:
+        emit(
+            f"stopped after {budget:g} s (time limit) - the cameras checked so far are above; "
+            "name one camera to check just that one"
+        )
     return lines
 
 
@@ -241,6 +273,69 @@ def _winrt(
         finally:
             with contextlib.suppress(Exception):
                 cap.release()
+
+
+# ------------------------------------------------------------------------------------------- driver noise
+# v0.1.22: NVIDIA Broadcast's virtual camera driver writes "[VCAMDS] ..." lines to stderr every time a camera is
+# opened, flooding the report. These patterns are camera-driver / OpenCV chatter, not results.
+NOISE_PATTERNS = (
+    re.compile(r"^\s*\[VCAMDS\]"),  # NVIDIA Broadcast virtual camera
+    re.compile(r"^\s*\[\s*(WARN|INFO|DEBUG|ERROR):\d+@[\d.]+\]"),  # OpenCV's own log lines
+    re.compile(r"^\s*\[[A-Z][A-Z0-9_]{2,15}\]\s"),  # other drivers' "[TAG] message" lines
+)
+NOISE_NAMES = {"VCAMDS": "NVIDIA Broadcast"}
+
+
+def is_noise(line: str) -> bool:
+    return any(p.search(line) for p in NOISE_PATTERNS)
+
+
+class NoiseFilter:
+    """Collapses camera-driver chatter in a stream of output lines: the first line of each kind is kept (shortened),
+    the rest are counted, and :meth:`summary` says how many were hidden."""
+
+    def __init__(self, keep_first: int = 1) -> None:
+        self.keep_first = keep_first
+        self.counts: dict[str, int] = {}
+
+    @staticmethod
+    def kind(line: str) -> str:
+        m = re.match(r"^\s*\[\s*([A-Za-z0-9_]+)", line)
+        return m.group(1).upper() if m else "driver"
+
+    def feed(self, line: str) -> str | None:
+        """The line to show, or None when it is hidden."""
+        if not is_noise(line):
+            return line
+        k = self.kind(line)
+        n = self.counts.get(k, 0) + 1
+        self.counts[k] = n
+        if n <= self.keep_first:
+            return f"(camera driver) {line.strip()[:160]}"
+        return None
+
+    def hidden(self) -> int:
+        return sum(max(0, n - self.keep_first) for n in self.counts.values())
+
+    def summary(self) -> str:
+        """ "(hid 812 camera-driver messages: NVIDIA Broadcast [VCAMDS])" or ""."""
+        if not self.hidden():
+            return ""
+        parts = [
+            f"{NOISE_NAMES[k]} [{k}]" if k in NOISE_NAMES else f"[{k}]"
+            for k, n in self.counts.items()
+            if n > self.keep_first
+        ]
+        n = self.hidden()
+        return f"(hid {n} camera-driver message{'s' if n != 1 else ''}: {', '.join(parts)})"
+
+
+def filter_lines(lines: Sequence[str]) -> list[str]:
+    f = NoiseFilter()
+    out = [x for x in (f.feed(line) for line in lines) if x is not None]
+    if f.summary():
+        out.append(f.summary())
+    return out
 
 
 def diagnose_devices(device: Any = None) -> list[CameraDevice]:  # pragma: no cover - lists real cameras

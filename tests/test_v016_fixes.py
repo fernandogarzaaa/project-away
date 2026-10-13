@@ -395,6 +395,7 @@ def test_gate_tolerates_starved_face_tracking_but_not_absence():
     g = SpeechGate()
     for i in range(5):
         g.observe(i * 0.1, 0, 1, 0.4)
+    g.note_camera_frame(2.8)  # v0.1.22: only while the camera itself kept delivering frames
     # no face frames during the utterance (CPU busy with Whisper) right after the user was there
     assert g.explain(3.0, 4.0)["allowed"] and "CPU busy" in g.last_explain["reason"]
     tv = SpeechGate()

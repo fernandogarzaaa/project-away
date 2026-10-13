@@ -33,7 +33,7 @@ from away.voice.context import whisper_prompt
 from away.voice.dictation import Cleaner, DictationSession
 from away.voice.hallucination import clean_transcript
 from away.voice.output import TextSink
-from away.voice.weak_speech import should_drop
+from away.voice.weak_speech import STRICT_CONFIDENCE, STRICT_MOTION_RATIO, should_drop
 
 WAKE_LEADS = ("hey", "ok", "okay", "hi")
 START_ACTIONS = (Action("dictation", "start"), Action("dictation", "toggle"))
@@ -195,7 +195,7 @@ def match_wake(text: str, wake_word: str) -> tuple[bool, str]:
 
 @dataclass
 class Decision:
-    kind: str  # command | type | wake | ignore
+    kind: str  # command | type | wake | ignore | listen / message (v0.1.22: talking to an agent)
     reason: str = ""
     action: Action | None = None
     text: str = ""
@@ -286,8 +286,20 @@ class AmbientSession:
         clock: Callable[[], float] = time.monotonic,
         submit: Callable[[Callable[[], None]], None] | None = None,
         gate_info: Callable[[], dict[str, Any]] | None = None,
+        echo: Any = None,
+        other_audio: Callable[[float, float], bool] | None = None,
+        talk: Any = None,
     ) -> None:
         self.asr, self.cleaner, self.sink, self.ep = asr, cleaner, sink, endpointer
+        # v0.1.22: the computer's own voice (away.voice.speech.EchoGuard: .overlaps(t0, t1)) is never transcribed
+        self.echo = echo
+        # v0.1.22: another app played sound during [t0, t1] (away.voice.other_audio); then the mouth must move
+        self.other_audio = other_audio
+        self.other_audio_needs_mouth = True
+        self.strict_ratio = STRICT_MOTION_RATIO
+        self.strict_confidence = STRICT_CONFIDENCE
+        # v0.1.22: "Hey <agent>, ..." goes to that agent's inbox (away.voice.talk.TalkHook)
+        self.talk = talk
         self.gate_info = gate_info  # the face gate's evidence for its last decision (logged with the utterance)
         self.commands = commands
         self.run_command = run_command
@@ -337,6 +349,14 @@ class AmbientSession:
 
     def process(self, u: Utterance) -> AmbientResult:
         seconds = len(u.audio) / self.ep.sr
+        if self.echo is not None and _safe(lambda: self.echo.overlaps(u.t0, u.t1)):
+            # v0.1.22: the agent's spoken "Can you hear me now?" was transcribed and typed
+            u.audio = np.zeros(0, dtype=np.float32)
+            d0 = Decision("ignore", "dropped: the computer's own voice was speaking")
+            res0 = AmbientResult(d0, seconds=seconds)
+            self.results.append(res0)
+            self._publish("voice.utterance", {"decision": "ignore", "reason": d0.reason, "text": ""})
+            return res0
         app = self.context() if self.context else None
         prompt = whisper_prompt(app, self.vocabulary)
         heard = self.asr.transcribe(u.audio, prompt)
@@ -349,6 +369,19 @@ class AmbientSession:
             dropped = why if not raw and heard.strip() else ""
         gate = self.gate(u.t0, u.t1) if (self.gate is not None and not self.wake_word) else None
         now = self.clock()
+        conf = _confidence(self.asr)
+        gi: dict[str, Any] | None = None
+        if gate is not None and self.gate_info is not None:
+            with contextlib.suppress(Exception):
+                gi = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
+        other = False
+        oa = self.other_audio
+        if oa is not None and self.other_audio_needs_mouth:
+            other = _safe(lambda: oa(u.t0, u.t1))
+        if not dropped and self.talk is not None and self.listening:
+            msg = self._talk(raw, gate, gi, conf, other, seconds, app)
+            if msg is not None:
+                return msg
         d = decide(
             raw,
             commands=commands,
@@ -362,14 +395,17 @@ class AmbientSession:
         )
         if dropped:
             d = Decision("ignore", f"dropped: {dropped}")
-        conf = _confidence(self.asr)
-        gi: dict[str, Any] | None = None
-        if gate is not None and self.gate_info is not None:
-            with contextlib.suppress(Exception):
-                gi = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
         if d.kind == "type":
             # v0.1.21: "uh" / "Dikontak" were typed with the gate's "mouth motion weak" allowance (0 moving frames)
-            why = should_drop(d.text, gi, conf)
+            # v0.1.22: + barely-moving mouth needs confidence 0.7; other apps playing sound need mouth motion
+            why = should_drop(
+                d.text,
+                gi,
+                conf,
+                other_audio=other,
+                strict_ratio=self.strict_ratio,
+                strict_confidence=self.strict_confidence,
+            )
             if why:
                 d = Decision("ignore", f"dropped: {why}", phrase=d.phrase)
         res = AmbientResult(d, raw=raw or heard, seconds=seconds, meta={"app": app, "gate": gate, "confidence": conf})
@@ -390,8 +426,74 @@ class AmbientSession:
             data["confidence"] = conf
         if gi is not None:
             data["gate"] = gi
+        if other:
+            data["other_audio"] = True
         self._publish("voice.utterance", data)
         return res
+
+    def _talk(
+        self,
+        raw: str,
+        gate: bool | None,
+        gi: dict[str, Any] | None,
+        conf: float | None,
+        other: bool,
+        seconds: float,
+        app: str | None,
+    ) -> AmbientResult | None:
+        """v0.1.22 "Talk to your agent": "Hey <agent>, <message>" (or anything said while a summon is waiting)
+        goes to the agent's inbox instead of being typed. None: not a message, carry on as dictation."""
+        talk = self.talk
+        if not raw.strip():
+            return None
+        try:
+            route = talk.route(raw)
+            waiting = talk.state.armed() if talk.ready() else None
+        except Exception:
+            return None
+        if route is None and waiting is None:
+            return None
+        target = route.target if route is not None else str(waiting)
+        body = route.body if route is not None else raw.strip()
+        source = "voice" if route is not None else str(getattr(talk.state, "source", "voice"))
+        data: dict[str, Any] = {"text": ""}  # the message itself is not repeated on the event bus
+        if conf is not None:
+            data["confidence"] = conf
+        if gi is not None:
+            data["gate"] = gi
+        if gate is False:
+            d = Decision("ignore", "face gate: not sent to your agent (the camera did not see you talking)")
+        elif route is not None and not body:
+            talk.arm(target, "voice")
+            d = Decision("listen", f"waiting for your message ({route.phrase})", phrase=route.phrase)
+        else:
+            why = should_drop(
+                body,
+                gi,
+                conf,
+                other_audio=other,
+                strict_ratio=self.strict_ratio,
+                strict_confidence=self.strict_confidence,
+            )
+            if why:
+                d = Decision("ignore", f"dropped: {why}")
+            else:
+                talk.state.disarm()
+                label = talk.send(target, body, source)
+                d = Decision("message", label or "could not send it to your agent")
+                data["sent_to"] = label
+        res = AmbientResult(d, raw=raw, seconds=seconds, meta={"app": app, "gate": gate, "confidence": conf})
+        self.results.append(res)
+        data.update(decision=d.kind, reason=d.reason)
+        self._publish("voice.utterance", data)
+        return res
+
+
+def _safe(fn: Callable[[], Any]) -> bool:
+    try:
+        return bool(fn())
+    except Exception:
+        return False
 
 
 def _confidence(asr: Any) -> float | None:
@@ -434,6 +536,8 @@ class VoiceController:
         self.bus = bus
         self.enabled = enabled
         self.muted = False
+        self.echo: Any = None  # v0.1.22: away.voice.speech.EchoGuard (the app sets it)
+        self._echo_dropping = False
         self._last_state: str | None = None
         self._emit()
 
@@ -467,6 +571,13 @@ class VoiceController:
     def feed(self, chunk: Any) -> Any:
         if not self.enabled or self.muted:
             return None  # dropped: never buffered, never transcribed
+        if self.echo is not None and _safe(self.echo.active):
+            # v0.1.22: the computer's own voice is speaking (and 0.7 s after): the microphone hears nothing
+            if not self._echo_dropping and self.ambient is not None:
+                self.ambient.reset()  # an utterance cut by the voice is thrown away, not half-transcribed
+            self._echo_dropping = True
+            return None
+        self._echo_dropping = False
         if self.mode == "always_on":
             return self.ambient.feed(chunk) if self.ambient is not None else None
         if self.dictation is not None:

@@ -42,6 +42,8 @@ EVENT_TOPICS = (
     "prompt",
     "change",
     "notify",
+    "user.message",  # v0.1.22: the person spoke to you (only the agents it was sent to see it)
+    "inbox",
 )
 MAX_RECORD_S = 120.0
 
@@ -129,8 +131,14 @@ class Service:
         events: EventHub | None = None,
         watching: Callable[[str, bool], None] = lambda _name, _on: None,
         monitors: Callable[[], Any] | None = None,
+        inbox: Any = None,
     ) -> None:
         self.data_dir = Path(data_dir)
+        if inbox is None:
+            from away.agentlink.inbox import Inbox
+
+            inbox = Inbox()
+        self.inbox = inbox  # v0.1.22 "Talk to your agent"
         # v0.1.21: the monitor layout (away.control.monitors Monitor objects), for get_screen's monitor/region; None:
         # the system's (one display the size of the screenshot when it cannot be read)
         self.monitors = monitors
@@ -224,7 +232,11 @@ class Service:
             from away.agentlink.bundle import _tail
 
             file_lines = _tail(p, 400_000).decode("utf-8", "replace").splitlines()[-lines:]
-        return {"app_log": file_lines, "events": mem}
+        from away.app import crashlog
+
+        # v0.1.22: crash.log too (crashes and uncaught errors; the Settings notice points at it)
+        crash = crashlog.tail(self.data_dir / "logs", min(lines, 400))
+        return {"app_log": file_lines, "crash_log": crash, "events": mem}
 
     def get_config(self, agent: Agent) -> dict[str, Any]:
         from away import config as cfgmod
@@ -512,8 +524,12 @@ class Service:
             opts: dict[str, Any] = {}
             if scale is not None:
                 opts["scale"] = shot.parse_scale(scale)
-            if monitor not in (None, "", 0):
-                opts["monitor"] = int(monitor)  # type: ignore[arg-type]
+            if monitor not in (None, ""):
+                n = int(monitor)  # type: ignore[arg-type]
+                ds = self._displays((1, 1))
+                if not any(d.index == n for d in ds):
+                    raise ValueError(shot.monitor_error(n, ds))  # v0.1.22: monitors are numbered from 1
+                opts["monitor"] = n
             if region not in (None, "", {}):
                 r = shot.parse_region(region)
                 opts["region"] = list(r) if r else None
@@ -549,13 +565,17 @@ class Service:
     def ask_user(
         self,
         agent: Agent,
-        question: str,
+        question: str | None = None,
         options: list[str] | None = None,
         timeout_s: float = 60.0,
         urgency: str = "normal",
         speak: bool = False,
+        message: str | None = None,
+        text: str | None = None,
     ) -> dict[str, Any]:
-        """``speak``: also read the question and its choices aloud (v0.1.21; "Let agents talk to me" must be on)."""
+        """``speak``: also read the question and its choices aloud (v0.1.21; "Let agents talk to me" must be on).
+        ``message`` / ``text`` are accepted as other names for ``question`` (v0.1.22)."""
+        question = _text_arg(question, message if message not in (None, "") else text, "ask_user", "question")
         res = self.prompts.ask(
             question, options, agent=agent.name, timeout_s=timeout_s, urgency=urgency, speak=bool(speak)
         )
@@ -563,10 +583,19 @@ class Service:
             res["spoken"] = bool(self._speech_allowed())
         return res
 
-    def notify_user(self, agent: Agent, text: str, level: str = "info", speak: bool = False) -> dict[str, Any]:
+    def notify_user(
+        self,
+        agent: Agent,
+        text: str | None = None,
+        level: str = "info",
+        speak: bool = False,
+        message: str | None = None,
+    ) -> dict[str, Any]:
         """A message on screen ("Message from <agent>", bottom-right, ~6 s), optionally read aloud. ``shown`` and
-        ``spoken`` are only true when that really happened (v0.1.21)."""
-        return self.prompts.notify(text, level, speak, agent=agent.name)
+        ``spoken`` are only true when that really happened (v0.1.21). ``message`` is accepted as another name for
+        ``text`` (v0.1.22)."""
+        body = _text_arg(text, message, "notify_user")
+        return self.prompts.notify(body, level, speak, agent=agent.name)
 
     def _speech_allowed(self) -> bool:
         tts = self.prompts.tts
@@ -579,8 +608,71 @@ class Service:
     def wait_for_event(
         self, agent: Agent, since: int = 0, timeout_s: float = 30.0, topics: list[str] | None = None
     ) -> dict[str, Any]:
-        evs = self.events.wait(int(since), float(timeout_s), tuple(topics) if topics else None)
-        return {"seq": self.events.seq, "events": evs}
+        """Events after ``since``. v0.1.22: an event addressed to some agents (a ``user.message``) is only seen by
+        them; the wait goes on while only other agents' events arrive."""
+        deadline = time.monotonic() + max(0.0, min(float(timeout_s), 120.0))
+        seq = int(since)
+        tp = tuple(topics) if topics else None
+        while True:
+            evs = self.events.wait(seq, max(0.0, deadline - time.monotonic()), tp)
+            mine = [_for_agent(e, agent.id) for e in evs]
+            out = [e for e in mine if e is not None]
+            if evs:
+                seq = max(seq, max(int(e["seq"]) for e in evs))
+            if out or time.monotonic() >= deadline:
+                return {"seq": self.events.seq, "events": out}
+
+    # ----------------------------------------------------------- inbox (v0.1.22)
+    def deliver_message(self, target: str, text: str, source: str = "voice") -> dict[str, Any]:
+        """The person spoke to an agent ("Hey Claude, ..." -> ``target`` = its id; "" = the default agent, or
+        every connected agent when none is set). Returns ``{"sent", "label" ("Sent to Claude"), "to", "id"}``."""
+        from away.agentlink import inbox as ib
+
+        text = str(text or "").strip()
+        if not text:
+            return {"sent": False, "label": "", "reason": "nothing was said"}
+        ts = ib.resolve_targets(str(target or ""), self.registry.list(), str(self._s("default_agent", "") or ""))
+        if not ts:
+            return {"sent": False, "label": "", "reason": "No AI agent is connected, so the message was not sent."}
+        m = self.inbox.add(text, ts, source)
+        self.events.publish(
+            "user.message",
+            {"id": m.id, "text": m.text, "source": source, "to": list(m.to_names), "_for": list(m.to)},
+        )
+        return {"sent": True, "label": ib.sent_label(m.to_names), "to": list(m.to_names), "id": m.id}
+
+    def inbox_list(self, agent: Agent, unread_only: bool = False) -> dict[str, Any]:
+        ms = self.inbox.for_agent(agent.id, bool(unread_only))
+        return {
+            "messages": [m.public(agent.id) for m in ms],
+            "unread": self.inbox.unread(agent.id),
+            "wake_phrase": agent.wake_phrase(),
+            "how_to_reply": "inbox action=reply with id and text (shown and read aloud)",
+        }
+
+    def inbox_read(self, agent: Agent, id: str | None = None) -> dict[str, Any]:
+        if id in (None, ""):
+            raise ValueError("give the message id (inbox action=list shows them)")
+        m = self.inbox.get(agent.id, str(id))
+        self.inbox.mark_read(agent.id, m)
+        return m.public(agent.id)
+
+    def inbox_reply(
+        self,
+        agent: Agent,
+        id: str | None = None,
+        text: str | None = None,
+        speak: bool = True,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        """Answer a message: shown on screen ("Message from <agent>") and read aloud unless ``speak`` is false."""
+        if id in (None, ""):
+            raise ValueError("give the id of the message you are answering")
+        body = _text_arg(text, message, "inbox reply")
+        m = self.inbox.reply(agent.id, agent.name, str(id), body)
+        res = self.prompts.notify(body, "info", bool(speak), agent=agent.name)
+        self.events.publish("inbox.reply", {"id": m.id, "agent": agent.name, "_for": [agent.id]})
+        return {"replied": True, "id": m.id, **res}
 
     # --------------------------------------------------------- control
     def request_control(self, agent: Agent, why: str = "", minutes: float | None = None) -> dict[str, Any]:
@@ -613,6 +705,25 @@ class Service:
         self.control.revoke_agent(agent.id)
         self.registry.revoke(agent.id)
         return {"disconnected": True}
+
+
+def _for_agent(ev: dict[str, Any], agent_id: str) -> dict[str, Any] | None:
+    """The event as this agent may see it (None when it is addressed to other agents only)."""
+    data = ev.get("data") or {}
+    targets = data.get("_for")
+    if targets is None:
+        return ev
+    if agent_id not in targets:
+        return None
+    return dict(ev, data={k: v for k, v in data.items() if k != "_for"})
+
+
+def _text_arg(primary: Any, alias: Any, tool: str, name: str = "text") -> str:
+    """v0.1.22: agents send ``message`` instead of ``text`` (or ``question``); accept either, refuse neither."""
+    val = primary if primary not in (None, "") else alias
+    if val in (None, ""):
+        raise ValueError(f"{tool} needs the words to show: {name} (or message)")
+    return str(val)
 
 
 __all__ = ["ControlRefused", "EventHub", "Forbidden", "NotAvailable", "Service"]

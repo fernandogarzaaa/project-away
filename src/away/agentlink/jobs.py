@@ -191,17 +191,26 @@ class JobRunner:
                 kw: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
                 if sys.platform == "win32":  # pragma: no cover
                     kw["creationflags"] = 0x08000000
+                from away.multicam.diagnose import NoiseFilter
+
+                noise = NoiseFilter()  # v0.1.22: NVIDIA Broadcast's [VCAMDS] stderr lines flooded the output
                 proc = self.runner(self.command(args), **kw)
                 deadline = time.time() + 600
                 assert proc.stdout is not None
                 for line in proc.stdout:
-                    job.output.append(line.rstrip())
+                    shown = noise.feed(line.rstrip())
+                    if shown is not None:
+                        job.output.append(shown)
                     if time.time() > deadline:
                         proc.kill()
                         job.output.append("(stopped after 10 minutes)")
                         break
                 rc = proc.wait(timeout=30)
+                if noise.summary():
+                    job.output.append(noise.summary())
                 job.result = {"exit_code": rc}
+                if noise.hidden():
+                    job.result["driver_messages_hidden"] = noise.hidden()
             self.out_dir.mkdir(parents=True, exist_ok=True)
             f = self.out_dir / f"cameras-{job.kind}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
             f.write_text("\n".join(job.output) + "\n", encoding="utf-8")

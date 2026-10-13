@@ -47,6 +47,8 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.status_lbl = tk.Label(top, textvariable=self.status, font=("TkDefaultFont", 13, "bold"))
         self.status_lbl.pack(side="left")
         ttk.Button(top, text="Disconnect all", command=self._disconnect_all).pack(side="right")
+        # v0.1.22: a fresh web address for remote agents, without disconnecting anyone
+        ttk.Button(top, text="New link", command=self._new_link).pack(side="right", padx=4)
         big = tk.Button(
             f,
             text="  Connect an AI agent  ",
@@ -62,10 +64,35 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         big.pack(anchor="w", pady=6)
         self.problem = ttk.Frame(f)
         self.problem.pack(fill="x")
+        self.link_note = tk.StringVar(value="")  # v0.1.22: the result of "New link"
+        ttk.Label(f, textvariable=self.link_note, wraplength=640, justify="left", foreground="#1a7f37").pack(anchor="w")
 
         self.prompt_box = ttk.LabelFrame(f, text="Waiting for your answer", padding=6)
         self.agents_box = ttk.LabelFrame(f, text="Your agents", padding=6)
         self.agents_box.pack(fill="x", pady=6)
+        # v0.1.22 "Talk to your agent"
+        tb = ttk.LabelFrame(f, text="Talk to your agent", padding=6)
+        tb.pack(fill="x", pady=6)
+        ttk.Label(
+            tb,
+            text="Say \u201cHey\u201d and an agent's name (\u201cHey Claude, ...\u201d) and your words go to that "
+            "agent instead of being typed. \u201cHey agent\u201d or the summon gesture goes to:",
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w")
+        self.talk_on = tk.BooleanVar(value=model.talk_enabled())
+        ttk.Checkbutton(
+            tb,
+            text="Listen for \u201cHey\u201d + an agent's name (off: those words are typed like any others)",
+            variable=self.talk_on,
+            command=lambda: self.m.set_talk_enabled(self.talk_on.get()),
+        ).pack(anchor="w")
+        drow = ttk.Frame(tb)
+        drow.pack(fill="x", pady=2)
+        self.default_var = tk.StringVar(value=model.default_agent() or "Every connected agent")
+        self.default_cb = ttk.Combobox(drow, textvariable=self.default_var, state="readonly", width=28)
+        self.default_cb.pack(side="left")
+        self.default_cb.bind("<<ComboboxSelected>>", lambda _e: self._set_default())
         self.control_box = ttk.LabelFrame(f, text="Using your computer", padding=6)
         self.control_box.pack(fill="x", pady=6)
         self.control_text = tk.StringVar(value="No agent is using your computer.")
@@ -239,7 +266,7 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
 
     def _render_agents(self, agents: list[dict[str, Any]]) -> None:
         box = self.agents_box
-        key = [(a["id"], a["connected"], tuple(a["scopes"])) for a in agents]
+        key = [(a["id"], a["connected"], tuple(a["scopes"]), a.get("wake_phrase"), a.get("wake_me")) for a in agents]
         if getattr(self, "_agents_key", None) == key:
             return
         self._agents_key = key
@@ -253,12 +280,20 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
             row.pack(fill="x", pady=2)
             mark = "\u2713" if a["connected"] else "\u2022"
             self.ttk.Label(row, text=f"{mark} {a['name']}", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+            if a.get("wake_phrase"):
+                self.ttk.Label(row, text=f"  say \u201c{a['wake_phrase']}\u201d", foreground="#1f6feb").pack(
+                    side="left"
+                )
             self.ttk.Label(row, text="  " + ", ".join(a["permissions"]), foreground="#555").pack(side="left")
             self.ttk.Button(row, text="Disconnect", command=lambda i=a["id"]: self.m.revoke(i)).pack(side="right")
             self.ttk.Button(
                 row, text="Undo its changes today", command=lambda i=a["id"]: self.m.undo_agent_today(i)
             ).pack(side="right", padx=2)
             self.ttk.Button(row, text="Permissions", command=lambda ag=a: self._edit_perms(ag)).pack(side="right")
+            self.ttk.Button(row, text="Wake word", command=lambda ag=a: self._edit_talk(ag)).pack(side="right", padx=2)
+        from away.agentlink.gui_model import AgentLinkModel
+
+        self.default_cb["values"] = AgentLinkModel.default_choices(agents)
 
     def _edit_perms(self, agent: dict[str, Any]) -> None:
         tk, ttk = self.tk, self.ttk
@@ -278,6 +313,70 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
             top.destroy()
 
         ttk.Button(top, text="Save", command=save).pack(pady=8)
+
+    def _edit_talk(self, agent: dict[str, Any]) -> None:
+        """v0.1.22: this agent's own wake word and the optional "wake me" address."""
+        tk, ttk = self.tk, self.ttk
+        top = tk.Toplevel(self.frame)
+        top.title(f"Talking to {agent['name']}")
+        ttk.Label(top, text=f"Wake word (empty = \u201cHey {agent['name']}\u201d):").pack(
+            anchor="w", padx=12, pady=(10, 2)
+        )
+        word = tk.StringVar(value=str(agent.get("wake_word") or ""))
+        ttk.Entry(top, textvariable=word, width=36).pack(anchor="w", padx=12)
+        ttk.Label(
+            top,
+            text="Wake-up address (optional). If your agent gave you one, paste it here and it is told right away "
+            "when you talk to it. Leave empty if you don't know.",
+            wraplength=380,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        url = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=url, width=48).pack(anchor="w", padx=12)
+        on = "on" if agent.get("wake_me") else "off"
+        ttk.Label(top, text=f"Wake-up is {on} now (leave the box empty to keep it).", foreground="#555").pack(
+            anchor="w", padx=12
+        )
+        off = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Turn wake-up off", variable=off).pack(anchor="w", padx=12)
+        msg = tk.StringVar(value="")
+        ttk.Label(top, textvariable=msg, foreground="#cf222e").pack(anchor="w", padx=12)
+
+        def save() -> None:
+            u = "" if off.get() else (url.get().strip() or None)
+            err = self.m.set_talk(agent["id"], word.get().strip(), u)
+            if err:
+                msg.set(err)
+                return
+            top.destroy()
+
+        ttk.Button(top, text="Save", command=save).pack(pady=8)
+
+    def _set_default(self) -> None:
+        from away.agentlink.gui_model import EVERYONE
+
+        v = self.default_var.get()
+        self.m.set_default_agent("" if v == EVERYONE else v)
+
+    def _new_link(self) -> None:
+        self.link_note.set("Getting a new link...")
+
+        def done(res: Any) -> None:
+            if isinstance(res, Exception):
+                self.link_note.set(str(res))
+                return
+            problem, info = res
+            if problem is not None:
+                self.link_note.set(problem.text)
+                return
+            with contextlib.suppress(Exception):
+                self.win.root.clipboard_clear()
+                self.win.root.clipboard_append(str(info.get("url", "")))
+            self.link_note.set(
+                f"New link (copied): {info.get('url')}  Paste it into your AI app. {info.get('note', '')}"
+            )
+
+        self._bg(self.m.new_link, done)
 
     def _prefs_items(self) -> list[str]:
         from away import paths

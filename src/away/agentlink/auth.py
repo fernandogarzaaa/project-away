@@ -76,6 +76,10 @@ class Agent:
     link_hash: str = ""  # the pairing code this connector keeps using as its URL (remote only)
     always_allow: list[str] = field(default_factory=list)  # risky-action categories the user always allows
     client: dict[str, Any] = field(default_factory=dict)  # MCP clientInfo (name, version)
+    # v0.1.22 "Talk to your agent": the person's own wake word for this agent ("" = "Hey <name>"), and the optional
+    # "wake me" address a message is POSTed to (set by the person in Settings > Agent Link; off by default)
+    wake_word: str = ""
+    wake_url: str = ""
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -98,7 +102,14 @@ class Agent:
             "connected": self.active(now) and now - self.last_seen < 90,
             "always_allow": list(self.always_allow),
             "client": dict(self.client),
+            "wake_word": self.wake_word,
+            "wake_phrase": self.wake_phrase(),
+            "wake_me": bool(self.wake_url),
         }
+
+    def wake_phrase(self) -> str:
+        """What the person says to talk to this agent: "Hey Claude" (or their own wake word)."""
+        return self.wake_word.strip() or f"Hey {self.name}"
 
 
 @dataclass
@@ -222,6 +233,22 @@ class AgentRegistry:
         now = self.clock()
         with self._lock:
             return [a for a in self.agents.values() if include_inactive or a.active(now)]
+
+    def set_talk(self, agent_id: str, wake_word: str | None = None, wake_url: str | None = None) -> Agent:
+        """v0.1.22: the person's wake word for this agent and its "wake me" address (None = unchanged, "" = off)."""
+        from away.agentlink.inbox import check_wake_url
+
+        with self._lock:
+            a = self.agents.get(agent_id)
+            if a is None:
+                raise KeyError(f"unknown agent {agent_id!r}")
+            if wake_word is not None:
+                w = NAME_RE.sub("", str(wake_word)).strip()[:40]
+                a.wake_word = w
+            if wake_url is not None:
+                a.wake_url = check_wake_url(wake_url)
+        self.save()
+        return a
 
     def revoke(self, agent_id: str) -> bool:
         with self._lock:
