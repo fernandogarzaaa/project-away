@@ -158,6 +158,9 @@ class Telemetry:
         self._present = False
         self._presence_changed = clock()
         self._attention = "unknown"
+        # v0.1.21: why the camera may be at 0 fps (who borrowed it, the last camera problem)
+        self.camera_in_use_by: str | None = None
+        self.camera_problem: str | None = None
         self.on_change: Callable[[str, dict[str, Any]], None] | None = None  # presence / attention transitions
 
     # ------------------------------------------------------------------ inputs
@@ -204,6 +207,16 @@ class Telemetry:
                 self.log.append(f"{time.strftime('%H:%M:%S')} [{topic}] {item['data']}")
         if topic.startswith(("dictation.", "voice.utterance")):
             self.last_dictation_t = now
+        self._camera_event(topic, data)
+
+    def _camera_event(self, topic: str, data: dict[str, Any]) -> None:
+        if topic == "camera.handover":
+            self.camera_in_use_by = str(data.get("by_label") or "Settings") if data.get("released") else None
+        elif topic in ("camera.error", "cameras.degraded", "cameras.slow"):
+            msg = data.get("error") or data.get("message") or data.get("failed") or topic
+            self.camera_problem = str(msg)[:300]
+        elif topic in ("camera.recovered", "cameras.started", "cameras.restored"):
+            self.camera_problem = None
 
     def add_log(self, line: str) -> None:
         with self._lock:
@@ -230,10 +243,31 @@ class Telemetry:
             "n": len(vals),
         }
 
+    def fps_note(self, fps: dict[str, float] | None = None) -> str | None:
+        """Why the camera frame rate is 0 (v0.1.21), in plain words; None when a camera is delivering."""
+        fps = self.fps() if fps is None else fps
+        if fps and any(v > 0 for v in fps.values()):
+            return None
+        if self.camera_in_use_by:
+            return (
+                f"{self.camera_in_use_by} is using the camera, so gestures wait; Project Away takes the camera back "
+                "a few seconds after that window stops using it (or is closed)"
+            )
+        if bool(self._safe(self.paused)):
+            return "gestures are paused (the camera keeps running, but say or show 'resume' to use it)"
+        if self.camera_problem:
+            return f"the camera has a problem: {self.camera_problem}"
+        if not self.frames:
+            return "no camera picture yet (the camera is starting, is turned off, or none was found)"
+        return "the camera stopped sending pictures (unplugged, or another app took it)"
+
     def health(self) -> dict[str, Any]:
         proc, system = self.cpu.sample()
+        fps = self.fps()
         return {
-            "fps": self.fps(),
+            "fps": fps,
+            "fps_note": self.fps_note(fps),
+            "camera_in_use_by": self.camera_in_use_by,
             "latency": self.latency(),
             "cpu": {"process_pct": proc, "system_pct": system},
             "gpu": self.gpu.sample(),
@@ -287,6 +321,8 @@ class Telemetry:
             "active_app": app,
             "gestures_paused": bool(self._safe(self.paused)),
             "hand_visible": now - self.last_hand_t <= 1.0,
+            "camera_in_use_by": self.camera_in_use_by,  # v0.1.21: e.g. "Settings (Gesture Studio)"
+            "camera_note": self.fps_note(),
             "fatigue_mode": ext.pop("fatigue", None),  # None until the attention/comfort feature is merged
             "extensions": ext,
             "since_presence_change_s": _round(now - self._presence_changed, 1),

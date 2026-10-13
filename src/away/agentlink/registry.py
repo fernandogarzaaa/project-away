@@ -42,13 +42,22 @@ MERGE_TODO: tuple[str, ...] = (
     "a 'zones' op that edits them is not exposed yet",
 )
 
-FORBIDDEN_PREFIXES = ("bindings.allow_shell", "agent_link.", "updates.", "models_dir", "telemetry")
+FORBIDDEN_PREFIXES = (
+    "bindings.allow_shell",
+    "agent_link.",
+    "updates.",
+    "models_dir",
+    "telemetry",
+    "speech.enabled",  # "Let agents talk to me" is the person's switch, never an agent's
+)
 CHOICES: dict[str, tuple[str, ...]] = {
     "hands.cursor.mode": ("relative", "absolute"),
     "hands.cursor.curve": ("power", "sigmoid"),
     "hands.roles.mode": ("auto", "right", "left", "any"),
     "hands.cursor.smoothing": ("one_euro", "predictive"),  # smart pointer: "Smoother cursor"
     "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
+    "speech.rate": cfgmod.SPEECH_RATES,  # v0.1.21: how fast agents speak to you
+    "speech.volume": cfgmod.SPEECH_VOLUMES,
 }
 SWITCHES = (
     "hands.dwell.enabled",
@@ -65,6 +74,7 @@ SWITCHES = (
     "comfort.break_reminders",
     "zones.enabled",  # Gesture Studio zones
     "zones.block_cursor",
+    "speech.read_messages_aloud",  # v0.1.21 (speech.enabled, "Let agents talk to me", stays the person's own)
 )
 ZONE_KEYS = ("hands.cursor.active_region",)
 SAFE_ACTION_KINDS = (

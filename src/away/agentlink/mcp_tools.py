@@ -145,9 +145,10 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         return await call(ctx, "run_diagnose", kind=kind, device=device, seconds=seconds)
 
     @mcp.tool()
-    async def get_job(ctx: Context, job_id: str) -> dict:
-        """State and output of a check started with run_diagnose."""
-        return await call(ctx, "get_job", job_id=job_id)
+    async def get_job(ctx: Context, job_id: str = "", id: str = "") -> dict:
+        """State and output of a check started with run_diagnose (`id` works as an alias of `job_id`). Results
+        are kept 10 minutes after the check finished; the error says "unknown" or "expired"."""
+        return await call(ctx, "get_job", job_id=str(job_id or id))
 
     @mcp.tool()
     async def record_session(ctx: Context, seconds: float = 10.0, note: str = "") -> dict:
@@ -186,16 +187,25 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     # ------------------------------------------------------------------ human
     @mcp.tool()
     async def ask_user(
-        ctx: Context, question: str, options: list[str] | None = None, timeout_s: float = 60.0, urgency: str = "normal"
+        ctx: Context,
+        question: str,
+        options: list[str] | None = None,
+        timeout_s: float = 60.0,
+        urgency: str = "normal",
+        speak: bool = False,
     ) -> dict:
         """Ask the person on their screen. They answer with thumbs up (first/yes option), thumbs down (last/no),
         a finger count (option N), a custom gesture, a click or by voice. urgency low|normal waits for a polite
         moment; high shows at once. Returns {answer, method, waited_s}; answer is null on timeout."""
-        return await call(ctx, "ask_user", question=question, options=options, timeout_s=timeout_s, urgency=urgency)
+        return await call(
+            ctx, "ask_user", question=question, options=options, timeout_s=timeout_s, urgency=urgency, speak=speak
+        )
 
     @mcp.tool()
     async def notify_user(ctx: Context, text: str, level: str = "info", speak: bool = False) -> dict:
-        """Show a short toast on the person's screen (level info|success|warning|error), optionally spoken."""
+        """Show a short message on the person's screen ("Message from <you>", bottom-right, ~6 s; level
+        info|success|warning|error). speak=true also reads it aloud with the computer's voice (when the person
+        allows agents to talk). Returns {shown, spoken} - each false with a reason when it did not happen."""
         return await call(ctx, "notify_user", text=text, level=level, speak=speak)
 
     # ---------------------------------------------------------------- control

@@ -93,7 +93,7 @@ def tuning_camera_worker(
 ) -> None:
     """Camera -> landmarks -> live gauges (+ auto-tune trials). Nothing is executed."""
     from away import paths
-    from away.app.camera_share import CameraLease, CameraShare, camera_error_message
+    from away.app.camera_share import LEASE_IDLE_S, CameraLease, CameraShare, camera_error_message
 
     cfg = model.cfg
     idx = cfg.hands.camera_index
@@ -113,7 +113,9 @@ def tuning_camera_worker(
                 release_s=cfg.hands.roles.release_s,
             )
 
-    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-tuning")
+    lease = CameraLease(
+        share or CameraShare(), timeout=lease_timeout, who="settings-tuning", idle_s=LEASE_IDLE_S, stop=stop
+    )
     try:
         lease.open()
         if lease.handed_over:
@@ -132,6 +134,7 @@ def tuning_camera_worker(
             for t, rgb in frames(idx, cfg.hands.mirror):
                 if stop.is_set():
                     break
+                lease.touch()  # v0.1.21: frames are flowing (a stuck preview gives the camera back)
                 while True:
                     try:
                         cmd = commands.get_nowait()

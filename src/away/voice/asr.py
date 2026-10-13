@@ -25,12 +25,15 @@ class FakeASR:
 
     name = "fake"
 
-    def __init__(self, outputs: list[str] | None = None) -> None:
+    def __init__(self, outputs: list[str] | None = None, confidences: list[float | None] | None = None) -> None:
         self.outputs = list(outputs or [])
+        self.confidences = list(confidences or [])
         self.calls: list[tuple[int, str | None]] = []
+        self.last_confidence: float | None = None
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
         self.calls.append((len(audio), prompt))
+        self.last_confidence = self.confidences.pop(0) if self.confidences else None
         return self.outputs.pop(0) if self.outputs else ""
 
 
@@ -64,9 +67,14 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
         self.language = language
         self.hotwords = hotwords
         self.beam_size = max(1, int(beam_size))
+        self.last_confidence: float | None = None
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
-        return whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords, self.beam_size)
+        stats: dict[str, object] = {}
+        text = whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords, self.beam_size, stats)
+        conf = stats.get("confidence")
+        self.last_confidence = float(conf) if isinstance(conf, (int, float)) else None
+        return text
 
 
 def resolve_whisper_model(model: str, download_root: str | None) -> str:
@@ -94,6 +102,7 @@ def whisper_transcribe(
     prompt: str | None,
     hotwords: str | None,
     beam_size: int = 5,
+    stats: dict[str, object] | None = None,
 ) -> str:
     """Call ``WhisperModel.transcribe`` with the vocabulary as ``initial_prompt`` and, when the installed
     faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``. Silent-segment hallucinations are
@@ -109,8 +118,14 @@ def whisper_transcribe(
     if hotwords and supports_kwarg(fn, "hotwords"):
         kw["hotwords"] = hotwords
     segments, _info = fn(np.asarray(audio, dtype=np.float32), **kw)
+    segs = list(segments)  # a generator: the text and the confidence both need it
+    if stats is not None:
+        from away.voice.hallucination import segment_ok
+        from away.voice.weak_speech import confidence_of
+
+        stats["confidence"] = confidence_of([s for s in segs if segment_ok(s)])  # v0.1.21 (weak-evidence filter)
     # segments Whisper produced over silence (high no_speech_prob AND low avg_logprob) are dropped
-    return join_segments(segments)
+    return join_segments(segs)
 
 
 class ParakeetASR:  # pragma: no cover - optional NVIDIA NeMo backend
@@ -217,6 +232,12 @@ class FallbackASR:
     @property
     def device(self) -> str:
         return "cpu" if self.cpu is not None else "cuda"
+
+    @property
+    def last_confidence(self) -> float | None:
+        backend = self.cpu if self.cpu is not None else self.gpu
+        v = getattr(backend, "last_confidence", None)
+        return float(v) if isinstance(v, (int, float)) else None
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
         if self.cpu is not None:

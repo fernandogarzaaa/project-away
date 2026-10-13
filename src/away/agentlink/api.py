@@ -30,6 +30,7 @@ from typing import Any
 from away.agentlink import perms
 from away.agentlink.auth import Agent, AgentRegistry, Pairing, clean_name, same
 from away.agentlink.control import ControlRefused
+from away.agentlink.jobs import JobLookupError
 from away.agentlink.ratelimit import FailureLockout, TokenBucket
 from away.agentlink.registry import ChangeError
 from away.agentlink.safepaths import UnsafePath
@@ -110,6 +111,8 @@ def error_status(exc: BaseException) -> tuple[int, str]:
         return 400, str(exc)
     if isinstance(exc, NotAvailable):
         return 503, str(exc)
+    if isinstance(exc, JobLookupError):
+        return (410 if exc.reason == "expired" else 404), str(exc)
     if isinstance(exc, (KeyError, FileNotFoundError)):
         return 404, str(exc).strip("'\"")
     if isinstance(exc, RuntimeError):
@@ -484,6 +487,8 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         for k, v in request.query_params.items():
             if k == "topics":
                 out[k] = [t for t in v.split(",") if t]
+            elif k == "id" or k.endswith("_id"):
+                out[k] = v  # v0.1.21: ids stay strings ("82557239" is a check id, not a number)
             elif v.lower() in ("true", "false"):
                 out[k] = v.lower() == "true"
             elif re.fullmatch(r"-?\d+", v):

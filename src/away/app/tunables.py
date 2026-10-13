@@ -349,6 +349,16 @@ TUNABLE_META: dict[str, TunableMeta] = {
 }
 # v0.1.20 smart pointer (away.pointer.config): the numbers behind the three plain toggles, kept out of the way
 TUNABLE_META.update({p: M("Advanced", *text) for p, text in POINTER_TUNABLE_TEXT.items()})
+# v0.1.21: how agents speak to you (agents may change these; "Let agents talk to me" is yours alone)
+TUNABLE_META.update(
+    {
+        "speech.rate": M("Advanced", "How fast agents speak", "slow, normal or fast."),
+        "speech.volume": M("Advanced", "How loud agents speak", "quiet, normal or loud."),
+        "speech.read_messages_aloud": M(
+            "Advanced", "Read every agent message aloud", "On: messages are spoken even when the agent did not ask."
+        ),
+    }
+)
 del M
 
 # A path segment containing one of these -> "Head & eyes" (head pose, gaze, auto-centre features).

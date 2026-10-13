@@ -35,6 +35,11 @@ class EventBus:
         self._history_max = history
         self.errors: list[tuple[str, BaseException]] = []
 
+    def has_subscribers(self, topic: str) -> bool:
+        """Someone listens to ``topic`` itself (not only ``*``): e.g. the tray for ``app.notice`` (v0.1.21)."""
+        with self._lock:
+            return bool(self._subs.get(topic))
+
     def subscribe(self, topic: str, handler: Handler) -> Callable[[], None]:
         with self._lock:
             self._subs[topic].append(handler)

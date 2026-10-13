@@ -332,12 +332,14 @@ class Service:
         self.require(agent, perms.DIAGNOSE)
         return self.jobs.start(kind, device, seconds).public()
 
-    def get_job(self, agent: Agent, job_id: str) -> dict[str, Any]:
+    def get_job(self, agent: Agent, job_id: str | int | None = None, id: str | int | None = None) -> dict[str, Any]:
+        """A check's state. ``id`` is accepted as an alias of ``job_id`` (v0.1.21); the error says whether the id
+        is unknown or its result expired."""
         self.require(agent, perms.DIAGNOSE)
-        j = self.jobs.get(job_id)
-        if j is None:
-            raise KeyError(f"no check {job_id!r}")
-        return j.public()
+        key = job_id if job_id not in (None, "") else id
+        if key in (None, ""):
+            raise ValueError("give the check's id: job_id (as returned by run_diagnose)")
+        return self.jobs.lookup(key).public()
 
     def record_session(self, agent: Agent, seconds: float = 10.0, note: str = "") -> dict[str, Any]:
         """Record the next ``seconds`` of landmarks + events (no video) to ``recordings/agent/<time>.awayrec``."""
@@ -471,11 +473,28 @@ class Service:
         options: list[str] | None = None,
         timeout_s: float = 60.0,
         urgency: str = "normal",
+        speak: bool = False,
     ) -> dict[str, Any]:
-        return self.prompts.ask(question, options, agent=agent.name, timeout_s=timeout_s, urgency=urgency)
+        """``speak``: also read the question and its choices aloud (v0.1.21; "Let agents talk to me" must be on)."""
+        res = self.prompts.ask(
+            question, options, agent=agent.name, timeout_s=timeout_s, urgency=urgency, speak=bool(speak)
+        )
+        if speak:
+            res["spoken"] = bool(self._speech_allowed())
+        return res
 
     def notify_user(self, agent: Agent, text: str, level: str = "info", speak: bool = False) -> dict[str, Any]:
-        return self.prompts.notify(f"{agent.name}: {text}", level, speak)
+        """A message on screen ("Message from <agent>", bottom-right, ~6 s), optionally read aloud. ``shown`` and
+        ``spoken`` are only true when that really happened (v0.1.21)."""
+        return self.prompts.notify(text, level, speak, agent=agent.name)
+
+    def _speech_allowed(self) -> bool:
+        tts = self.prompts.tts
+        fn = getattr(tts, "allowed", None)
+        try:
+            return tts is not None and (bool(fn()) if callable(fn) else True)
+        except Exception:
+            return False
 
     def wait_for_event(
         self, agent: Agent, since: int = 0, timeout_s: float = 30.0, topics: list[str] | None = None
