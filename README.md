@@ -1259,16 +1259,17 @@ from Hugging Face pinned to a commit, SHA-256 checked, resumable, never bundled:
 Both licenses were checked on the model cards and in the GGUF repositories' `LICENSE` files. Qwen2.5-3B is
 deliberately not offered: it uses the Qwen Research license (non-commercial).
 
-**Engine.** In the installed app (v0.1.20) the **Download** button fetches the engine together with the model:
+**Engine.** In the installed Windows and Linux apps (v0.1.20) the **Download** button fetches the engine together with the model:
 the official prebuilt **CPU** wheel of `llama-cpp-python` 0.3.36 for your computer, pinned by size and SHA-256
-in `away/voice/engine.py` (Windows x64 7.8 MB, macOS Apple Silicon 24.9 MB, Linux x86-64 27.1 MB, Linux ARM64
-24.9 MB, from the llama-cpp-python GitHub release). Only its `llama_cpp` package is unpacked, into
+in `away/voice/engine.py` (Windows x64 7.8 MB, Linux x86-64 27.1 MB, Linux ARM64 24.9 MB, from the
+llama-cpp-python GitHub release). Only its `llama_cpp` package is unpacked, into
 `<data dir>/engines/`, and it is first loaded in a separate process (`away cleanup-engine check`), so a broken
 native library can never crash the app; if that check fails the engine is removed again and Settings explains
 why (on Windows the usual cause is a missing Microsoft Visual C++ Redistributable). The wheels talk to llama.cpp
 through ctypes (they work with any Python version) and ship no `msvcp140.dll`. The small pure-Python packages it
 imports (diskcache, jinja2) are bundled in the installers. `away cleanup-engine status|install|check|remove`
-does the same from a terminal. No ready-made engine exists for Intel Macs and Windows on ARM: use Ollama
+does the same from a terminal. No ready-made engine is offered for Macs (the release's Apple Silicon wheel is damaged as published: its
+dylibs fail their CRC check, which the CI caught) or Windows on ARM: use Ollama
 (`ollama pull qwen2.5:1.5b`, then Advanced > Engine > Ollama), which is also the way to use a GPU today. From pip,
 `pip install "project-away[cleanup]"` installs llama-cpp-python itself (a pip copy always wins over a downloaded
 one); for an NVIDIA GPU install a CUDA wheel, e.g.
@@ -1570,7 +1571,7 @@ Config (`macros:` in config.yaml, all optional):
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Smart cleanup rules, app categories and tones, model guard, timeout fallback (v0.1.20) | Unit-tested with a mocked model (`tests/test_v0120_voice_context.py`): accepted polish, invented content rejected, 150 ms budget kept with a 600 ms model, no queueing behind a timed-out call, engine errors, code/terminal pass-through, chat/email tone, sentence continuation, the dictation session end to end; Ollama and OpenAI-compatible engines tested against a local HTTP server |
 | Smart cleanup with the real models (v0.1.20) | Both Qwen2.5 GGUF files downloaded and SHA-256 checked; run through `SmartCleaner` with CPU-only llama-cpp-python 0.3.36 on Linux aarch64 (latency above); a real-model smoke test exists but is skipped in CI (`AWAY_TEST_GGUF`); **untested on Windows with a real model and on a GPU (CUDA/Metal llama.cpp builds)** |
-| Smart cleanup engine download for installer users (v0.1.20) | Pinned wheel table, size + SHA-256 check (a tampered file is never unpacked), unpacking only `llama_cpp` (path traversal refused), the separate-process load check and its clean-up, friendly errors and the Settings Download button (model + engine in one go) unit-tested (`tests/test_cleanup_engine.py`); the real Linux ARM64 wheel downloaded, verified, loaded through `away cleanup-engine check` and generated text with a tiny GGUF in the build sandbox; the CI test job downloads and loads the real wheel on Windows, macOS and Ubuntu (`AWAY_NET_TESTS=1`); the frozen Windows app runs install + check in the release workflow (non-blocking step); **untested on a real user PC, in particular one without the Visual C++ Redistributable** |
+| Smart cleanup engine download for installer users (v0.1.20) | Pinned wheel table, size + SHA-256 check (a tampered file is never unpacked), unpacking only `llama_cpp` (path traversal refused), the separate-process load check and its clean-up, friendly errors and the Settings Download button (model + engine in one go) unit-tested (`tests/test_cleanup_engine.py`); the real Linux ARM64 wheel downloaded, verified, loaded through `away cleanup-engine check` and generated text with a tiny GGUF in the build sandbox; the CI test job downloads and loads the real wheel on Windows and Ubuntu (`AWAY_NET_TESTS=1`; on macOS it found the published Apple Silicon wheel damaged, so Macs get no engine download and use Ollama or pip; a damaged archive is now a friendly error); the frozen Windows app runs install + check in the release workflow (non-blocking step); **untested on a real user PC, in particular one without the Visual C++ Redistributable** |
 | Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
 | Parakeet, Wayland | **Untested** |
@@ -1620,8 +1621,9 @@ input, Agent Link, Cameras, Tuning, Performance.
 **Smart cleanup and My words.** Dictation now drops "um"s and repeated words, understands "no wait, make it
 Tuesday", and adjusts its tone to the app: casual in chat, tidy in email and documents, word for word in code
 editors and terminals. The optional **Smart cleanup** switch adds a small local AI model (Qwen2.5, Apache-2.0)
-for proper punctuation; in the installed app one **Download** button fetches the model and a pinned, SHA-256
-checked CPU engine (llama-cpp-python), tested in a separate process before it is used. If the model is ever slow
+for proper punctuation; in the Windows and Linux apps one **Download** button fetches the model and a pinned,
+SHA-256 checked CPU engine (llama-cpp-python), tested in a separate process before it is used (on a Mac, use
+Ollama). If the model is ever slow
 the basic cleanup is typed instead, so you never wait. For a GPU, use Ollama. **My words** is your own word list
 for names and terms ("add Jonie to my dictionary", "correct Jonnie to Jonie"); fixes you make by hand are learned
 too. Everything runs on your PC.

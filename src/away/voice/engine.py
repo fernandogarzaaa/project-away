@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -54,18 +55,15 @@ class Wheel:
 
 # Official CPU wheels of llama-cpp-python v0.3.36 (sizes and sha256 from the GitHub release's asset digests,
 # re-checked by downloading each file). CUDA builds are not offered: they need a matching CUDA runtime.
+# No macOS entry: the release's macosx_11_0_arm64 wheel is damaged as published (its zip directory points past
+# the real entries and the dylibs fail their CRC; the published sha256 matches that damaged file), so Macs use
+# Ollama or pip until a good wheel is pinned.
 WHEELS: dict[tuple[str, str], Wheel] = {
     ("win32", "amd64"): Wheel(
         "win_amd64",
         f"llama_cpp_python-{VERSION}-py3-none-win_amd64.whl",
         7_767_370,
         "ae5e88a2cf464e5a2dde7c8898c2d5c71cc24d03cac6396bf7509456bde0b9fb",
-    ),
-    ("darwin", "arm64"): Wheel(
-        "macos_arm64",
-        f"llama_cpp_python-{VERSION}-py3-none-macosx_11_0_arm64.whl",
-        24_928_299,
-        "1bec5e1d9fc7c4919aaece647bbd3e1a7f36ac8fd2714c8cda7e6991a544557b",
     ),
     ("linux", "x86_64"): Wheel(
         "linux_x86_64",
@@ -177,13 +175,17 @@ def unpack(wheel_file: Path, dest: Path) -> None:
     tmp = dest.with_name(dest.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    with zipfile.ZipFile(wheel_file) as zf:
-        for info in _safe_members(zf):
-            zf.extract(info, tmp)
-            mode = (info.external_attr >> 16) & 0o777
-            if mode and not info.is_dir():
-                with contextlib.suppress(OSError):
-                    (tmp / info.filename).chmod(mode | 0o600)
+    try:
+        with zipfile.ZipFile(wheel_file) as zf:
+            for info in _safe_members(zf):
+                zf.extract(info, tmp)  # CRC-checked: a damaged archive raises instead of leaving a broken engine
+                mode = (info.external_attr >> 16) & 0o777
+                if mode and not info.is_dir():
+                    with contextlib.suppress(OSError):
+                        (tmp / info.filename).chmod(mode | 0o600)
+    except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise EngineInstallError("The engine download looks damaged. Press Download to try again.") from exc
     shutil.rmtree(dest, ignore_errors=True)
     tmp.replace(dest)
 

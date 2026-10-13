@@ -59,8 +59,8 @@ class FakeDevices:
         self.behaviour[dev] = kw
 
     def opener(self, spec: C.CameraSpec) -> FakeCap:
-        b = self.behaviour.get(int(spec.device), {})
-        with self.lock:
+        with self.lock:  # read under the lock so a test can change several devices between two probes
+            b = self.behaviour.get(int(spec.device), {})
             self.opening += 1
             self.max_parallel_opens = max(self.max_parallel_opens, self.opening)
             self.opens.append(int(spec.device))
@@ -364,8 +364,17 @@ def test_no_camera_keeps_retrying_and_recovers(tmp_path):
     app.bus.subscribe("app.notice", lambda e: notes.append(e.data["message"]))
 
     def fix_later() -> None:
-        while devs.opens.count(0) < 2:  # after at least one retry of the whole set
-            time.sleep(0.02)
+        # after at least one retry of the whole set, and between two probes: fixing camera 0 while a probe has
+        # already opened it but not yet camera 1 would (correctly) leave the app on camera 1 alone
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            with devs.lock:
+                n0, n1 = devs.opens.count(0), devs.opens.count(1)
+                if n0 >= 2 and n0 == n1 and devs.opening == 0:
+                    devs.behaviour[0] = {}
+                    devs.behaviour[1] = {}
+                    return
+            time.sleep(0.005)
         devs.set(0)
         devs.set(1)
 

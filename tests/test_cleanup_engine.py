@@ -48,7 +48,6 @@ def copying_downloader(src: Path) -> Any:
     ("system", "machine", "tag"),
     [
         ("win32", "AMD64", "win_amd64"),
-        ("darwin", "arm64", "macos_arm64"),
         ("linux", "x86_64", "linux_x86_64"),
         ("linux", "aarch64", "linux_aarch64"),
     ],
@@ -62,6 +61,7 @@ def test_a_pinned_wheel_for_each_installer_platform(system: str, machine: str, t
 
 def test_no_wheel_for_unsupported_platforms() -> None:
     assert engine.wheel_for("darwin", "x86_64") is None  # Intel Macs: Ollama or pip
+    assert engine.wheel_for("darwin", "arm64") is None  # the published 0.3.36 macOS wheel is damaged
     assert engine.wheel_for("win32", "arm64") is None
 
 
@@ -124,6 +124,17 @@ def test_unpack_refuses_paths_outside_the_folder(tmp_path: Path, evil: str) -> N
     with pytest.raises(engine.EngineInstallError):
         engine.unpack(tmp_path / "x.whl", tmp_path / "out")
     assert not (tmp_path / "evil.py").exists()
+
+
+def test_a_damaged_archive_is_a_friendly_error_and_leaves_nothing(tmp_path: Path) -> None:
+    make_wheel(tmp_path / "x.whl")
+    raw = bytearray((tmp_path / "x.whl").read_bytes())
+    i = raw.index(b"__version__")  # stored data of llama_cpp/__init__.py: its CRC no longer matches
+    raw[i : i + 11] = b"XXXXXXXXXXX"
+    (tmp_path / "x.whl").write_bytes(bytes(raw))
+    with pytest.raises(engine.EngineInstallError, match="damaged"):
+        engine.unpack(tmp_path / "x.whl", tmp_path / "out")
+    assert not (tmp_path / "out").exists() and not (tmp_path / "out.tmp").exists()
 
 
 def test_download_errors_and_missing_dependencies_are_friendly(tmp_path: Path, monkeypatch: Any) -> None:
