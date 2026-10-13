@@ -125,6 +125,16 @@ def parse_region(value: Any) -> tuple[int, int, int, int] | None:
     return round(x), round(y), round(w), round(h)
 
 
+def monitor_error(n: int, ds: Sequence[Display]) -> str:
+    """ "there is no monitor 0; monitors are numbered 1..3 (1: 1920x1080 at 0,0; ...); leave monitor out for the
+    whole desktop"."""
+    listing = "; ".join(f"{d.index}: {d.w}x{d.h} at {d.x},{d.y}" for d in ds)
+    return (
+        f"there is no monitor {n}; monitors are numbered 1..{len(ds)} ({listing}); "
+        "leave monitor out for the whole desktop"
+    )
+
+
 def plan(
     ds: Sequence[Display],
     image_size: tuple[int, int],
@@ -145,18 +155,19 @@ def plan(
     if iw < 1 or ih < 1:
         raise ScreenRequestError("empty screenshot")
     kx, ky = iw / float(vw), ih / float(vh)  # image pixels per screen pixel (1.0 normally)
-    if monitor not in (None, "", 0, "0") and region not in (None, "", {}):
+    if monitor not in (None, "") and region not in (None, "", {}):
         raise ScreenRequestError("give either monitor or region, not both")
     what = "desktop"
     ax, ay, aw, ah = vx, vy, vw, vh
-    if monitor not in (None, "", 0, "0"):
+    if monitor not in (None, ""):
         try:
             n = int(monitor)
         except (TypeError, ValueError):
             raise ScreenRequestError(f"monitor must be a number 1..{len(ds)}") from None
         d = next((d for d in ds if d.index == n), None)
         if d is None:
-            raise ScreenRequestError(f"there is no monitor {n}; this computer has {len(ds)} (1..{len(ds)})")
+            # v0.1.22: monitor=0 used to return the whole desktop silently; monitors are numbered from 1
+            raise ScreenRequestError(monitor_error(n, ds))
         ax, ay, aw, ah = d.x, d.y, d.w, d.h
         what = f"monitor {n}"
     reg = parse_region(region)

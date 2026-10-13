@@ -25,6 +25,9 @@ class Problem:
     fix: str = ""  # "url:https://..." | "start_app" | "retry"
 
 
+EVERYONE = "Every connected agent"  # v0.1.22: the default-agent menu's "no default" choice
+
+
 class AgentLinkModel:
     def __init__(
         self,
@@ -178,6 +181,58 @@ class AgentLinkModel:
     def bundle(self) -> str:
         res = self.wait_result(self.send("bundle"), 60.0)
         return f"Saved {res['result']['path']}" if res.get("ok") else str(res.get("error"))
+
+    def new_link(self) -> tuple[Problem | None, dict[str, Any] | None]:
+        """v0.1.22: a fresh secure link (new web address); nobody is disconnected."""
+        p = self.not_running()
+        if p is not None:
+            return p, None
+        res = self.wait_result(self.send("new_link"), 120.0)
+        if not res.get("ok"):
+            return Problem(str(res.get("error") or "Something went wrong."), "Try again", "retry"), None
+        return None, dict(res["result"])
+
+    def set_talk(self, agent_id: str, wake_word: str | None = None, wake_url: str | None = None) -> str:
+        """v0.1.22: an agent's own wake word and "wake me" address. Returns "" or a plain error."""
+        from away.agentlink.inbox import check_wake_url
+
+        data: dict[str, Any] = {"agent_id": agent_id}
+        if wake_word is not None:
+            data["wake_word"] = wake_word
+        if wake_url is not None:
+            try:
+                data["wake_url"] = check_wake_url(wake_url)
+            except ValueError as exc:
+                return str(exc)
+        if not self.alive():
+            return "Project Away isn't running; start it and try again."
+        res = self.wait_result(self.send("set_talk", **data), 15.0)
+        return "" if res.get("ok") else str(res.get("error") or "Could not save.")
+
+    def set_default_agent(self, name: str) -> None:
+        """v0.1.22: who "Hey agent" and the summon gesture talk to ("" = every connected agent)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.default_agent = str(name or "").strip()[:60]
+        cfgmod.save(cfg, path)
+
+    def default_agent(self) -> str:
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return str(cfg.agent_link.default_agent or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def default_choices(agents: list[dict[str, Any]]) -> list[str]:
+        """The default-agent menu: "Every connected agent" first, then each agent's name."""
+        names = [str(a.get("name", "")) for a in agents if a.get("name")]
+        return [EVERYONE, *dict.fromkeys(names)]
 
     def set_autofix(self, mode: str) -> None:
         from away import config as cfgmod

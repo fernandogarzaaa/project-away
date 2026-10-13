@@ -14,6 +14,7 @@ message and tells the agent (:mod:`away.agentlink.inbox`). Pure logic, unit-test
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -167,10 +168,8 @@ class TalkHook:
     def arm(self, target: str = DEFAULT, source: str = "gesture") -> None:
         self.state.arm(target, source)
         if self.on_armed is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self.on_armed(target)
-            except Exception:
-                pass
 
     def send(self, target: str, text: str, source: str) -> str:
         if self.deliver is None:

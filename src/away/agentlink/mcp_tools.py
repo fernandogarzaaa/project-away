@@ -27,6 +27,7 @@ from away.agentlink.groups import resolve
 
 LIVE_SCREEN = "away://screen/live"
 EVENTS = "away://events"
+INBOX = "away://inbox"
 SUBSCRIBABLE = (LIVE_SCREEN, EVENTS)
 
 
@@ -61,8 +62,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37). Related tools are one tool with an `action` (away.agentlink.groups); every old
-    # name still works on the REST API and /v1/rpc/<name>.
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox). Related tools are one tool with an `action`
+    # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
     async def get_status(ctx: Context) -> dict:
@@ -192,26 +193,54 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     @mcp.tool()
     async def ask_user(
         ctx: Context,
-        question: str,
+        question: str | None = None,
         options: list[str] | None = None,
         timeout_s: float = 60.0,
         urgency: str = "normal",
         speak: bool = False,
+        message: str | None = None,
     ) -> dict:
         """Ask the person on their screen. They answer with thumbs up (first/yes option), thumbs down (last/no),
         a finger count (option N), a custom gesture, a click or by voice. urgency low|normal waits for a polite
         moment; high shows at once. speak=true also reads the question aloud. Returns {answer, method,
-        waited_s}; answer is null on timeout."""
+        waited_s}; answer is null on timeout. (`message` works as another name for `question`.)"""
         return await call(
-            ctx, "ask_user", question=question, options=options, timeout_s=timeout_s, urgency=urgency, speak=speak
+            ctx,
+            "ask_user",
+            question=question,
+            options=options,
+            timeout_s=timeout_s,
+            urgency=urgency,
+            speak=speak,
+            message=message,
         )
 
     @mcp.tool()
-    async def notify_user(ctx: Context, text: str, level: str = "info", speak: bool = False) -> dict:
+    async def notify_user(
+        ctx: Context, text: str | None = None, level: str = "info", speak: bool = False, message: str | None = None
+    ) -> dict:
         """Show a short message on the person's screen ("Message from <you>", bottom-right, ~6 s; level
         info|success|warning|error). speak=true also reads it aloud with the computer's voice (when the person
-        allows agents to talk). Returns {shown, spoken} - each false with a reason when it did not happen."""
-        return await call(ctx, "notify_user", text=text, level=level, speak=speak)
+        allows agents to talk). Returns {shown, spoken} - each false with a reason when it did not happen.
+        Use it to answer a message from your inbox out loud. (`message` works as another name for `text`.)"""
+        return await call(ctx, "notify_user", text=text, level=level, speak=speak, message=message)
+
+    @mcp.tool()
+    async def inbox(
+        ctx: Context,
+        action: str = "list",
+        id: str | None = None,
+        text: str | None = None,
+        unread_only: bool = False,
+        speak: bool = True,
+    ) -> dict:
+        """Messages the person spoke to you ("Hey <your name>, ..." or the summon gesture, then speaking). Each
+        also arrives as a `user.message` event (events action="wait", topics=["user.message"]).
+        - action="list": your messages, newest first (`unread_only`).
+        - action="read": one message by `id` (marks it read).
+        - action="reply": answer message `id` with `text`; it is shown on their screen and read aloud
+          (speak=false to only show it). Same as notify_user with speak=true."""
+        return await group(ctx, "inbox", action=action, id=id, text=text, unread_only=unread_only, speak=speak)
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
@@ -286,6 +315,11 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     async def prefs_res() -> str:
         """The person's preference notes."""
         return str((await call(_ctx(mcp), "get_preferences"))["text"])
+
+    @mcp.resource("away://inbox", mime_type="application/json")
+    async def inbox_res() -> str:
+        """Messages the person spoke to you (newest first)."""
+        return json.dumps(await call(_ctx(mcp), "inbox_list"), default=str)
 
     @mcp.resource("away://context", mime_type="application/json")
     async def context_res() -> str:

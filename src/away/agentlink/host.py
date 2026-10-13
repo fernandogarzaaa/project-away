@@ -493,6 +493,11 @@ class AgentLinkHost:
         pipe.on_hand = on_hand
         pipe.on_faces = on_faces
         pipe.executor.hooks["agent"] = self._agent_action
+        talk = getattr(app, "talk", None)
+        if talk is not None:  # v0.1.22 "Talk to your agent": "Hey <agent>, ..." -> that agent's inbox
+            talk.agents = self._talk_agents
+            talk.deliver = self._deliver_message
+            talk.on_armed = self._talk_armed
         tel = self.core.telemetry
         tel.voice_state = lambda: app.voice_state()
         tel.active_app = lambda: pipe.dispatcher.last_app
@@ -573,11 +578,54 @@ class AgentLinkHost:
         if topic in ("action.cancelled", "action.undone", "feedback.wrong"):
             self.core.events.publish("misfire", {"topic": topic, **{k: str(v)[:100] for k, v in data.items()}})
 
+    # ------------------------------------------------------------ talk (v0.1.22)
+    def _talk_agents(self) -> list[dict[str, Any]]:
+        return [{"id": a.id, "name": a.name, "wake_word": a.wake_word} for a in self.core.registry.list()]
+
+    def _deliver_message(self, target: str, text: str, source: str) -> str:
+        """A spoken message for an agent (``target`` id, "" = default / everyone): stored in its inbox, its
+        ``user.message`` event, its wake-up POST; shows "Sent to <agent>". Returns that label ("" = not sent)."""
+        res = self.core.service.deliver_message(target, text, source)
+        if res.get("sent"):
+            self._flash(str(res["label"]))
+            return str(res["label"])
+        self._notice("Project Away", str(res.get("reason") or "Your message could not be sent."))
+        return ""
+
+    def _target_names(self, target: str) -> str:
+        from away.agentlink.inbox import resolve_targets
+
+        ts = resolve_targets(target, self.core.registry.list(), str(self.cfg().agent_link.default_agent or ""))
+        names = [a.name for a in ts]
+        if not names:
+            return ""
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+    def _talk_armed(self, target: str) -> None:
+        who = self._target_names(target)
+        self._flash(f"Listening... say your message for {who}" if who else "No AI agent is connected yet")
+
+    def talk_ready(self) -> bool:
+        """The summon gesture can open a message: always-on listening runs and talking is turned on."""
+        app = self.app
+        talk = getattr(app, "talk", None)
+        voice = getattr(app, "voice", None)
+        return bool(
+            talk is not None
+            and talk.ready()
+            and voice is not None
+            and getattr(voice, "mode", "") == "always_on"
+            and not getattr(voice, "muted", True)
+        )
+
     def _agent_action(self, arg: str, data: dict[str, Any]) -> None:
         """``agent:summon|look|screen|wrong|stop`` bindings (gestures or voice phrases the user binds)."""
         ev = self.core.events
         if arg == "summon":
             ev.publish("summon", {"source": "gesture or voice"})
+            if self.talk_ready() and self.core.registry.list():
+                self.app.talk.arm("", "gesture")  # v0.1.22: the next thing said goes to the default agent / everyone
+                return
             threading.Thread(
                 target=self.core.prompts.notify, args=("Your agents were called", "info"), daemon=True
             ).start()
@@ -724,6 +772,28 @@ class AgentLinkHost:
         self.tunnel = tunnel.Tunnel(exe)
         return self.tunnel.start(port)
 
+    def new_link(self, scopes: Any = None) -> dict[str, Any]:
+        """v0.1.22 "New link": a fresh secure link (a new web address) without disconnecting anyone. Cloudflare
+        sometimes blocks one agent's servers on one temporary address (every request answers 403); a new address
+        usually fixes it. Agents on this PC are not affected; remote agents need the new address."""
+        old = self.tunnel.url if self.tunnel is not None else None
+        keep_scopes = scopes if scopes is not None else (self.pairing or {}).get("scopes")
+        if self.tunnel is not None:
+            self.tunnel.stop()
+            self.tunnel = None
+        self.pairing = None
+        if keep_scopes is None:
+            from away.agentlink.gui_model import AgentLinkModel
+
+            keep_scopes = AgentLinkModel.default_scopes()
+        res = self.start_pairing(keep_scopes, remote=True, download=True)
+        res["previous_url"] = old
+        res["note"] = (
+            "New web address ready. Your agents stay connected; a remote agent (ChatGPT, Claude.ai) needs the new "
+            "address pasted in again."
+        )
+        return res
+
     def stop_tunnel(self) -> None:
         if self.tunnel is not None:
             self.tunnel.stop()
@@ -803,6 +873,15 @@ class AgentLinkHost:
         if a == "stop_link":
             self.stop_tunnel()
             return {}
+        if a == "new_link":
+            return self.new_link(req.get("scopes"))
+        if a == "set_talk":
+            ag = core.registry.set_talk(
+                str(req.get("agent_id")),
+                req.get("wake_word") if "wake_word" in req else None,
+                req.get("wake_url") if "wake_url" in req else None,
+            )
+            return ag.public()
         if a == "revoke":
             core.control.revoke_agent(str(req.get("agent_id")))
             return {"revoked": core.registry.revoke(str(req.get("agent_id")))}
@@ -898,6 +977,11 @@ def friendly_error(exc: BaseException) -> str:
         return 'Agent Link needs its extra parts: pip install "project-away[agent]" (the installer includes them).'
     if "cloudflared" in low or "secure link" in low:
         return "Couldn't start the secure link. Check your internet connection and try again."
+    if "403" in low or "forbidden" in low:
+        return (
+            "Cloudflare blocked this link for your agent (it answers 403 to everything). Press \u201cNew link\u201d "
+            "for a fresh address; your agents stay connected."
+        )
     if "urlopen" in low or "getaddrinfo" in low or "timed out" in low:
         return "No internet connection right now. Connect and try again."
     return text[:200]

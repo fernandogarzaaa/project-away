@@ -68,6 +68,11 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "type": GroupAction("act", ("text",), fixed={"action": "type_text"}),
         "press": GroupAction("act", ("keys",), fixed={"action": "press_keys"}),
     },
+    "inbox": {  # v0.1.22 "Talk to your agent"
+        "list": GroupAction("inbox_list", ("unread_only",)),
+        "read": GroupAction("inbox_read", ("id",)),
+        "reply": GroupAction("inbox_reply", ("id", "text", "speak")),
+    },
     "open": {
         "app": GroupAction("act", ("name",), fixed={"action": "open_app"}),
         "url": GroupAction("act", ("url",), fixed={"action": "open_url"}),
