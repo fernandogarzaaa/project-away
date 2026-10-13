@@ -746,6 +746,16 @@ class SettingsModel:
         new.append(CameraSpec(device, role, index_hint=self._hint(device), mirror=h.mirror))
         return self._cams_try(new)
 
+    def remove_camera_and_save(self, i: int) -> str | None:
+        """v0.1.23: Remove in Settings > Cameras writes the config file at once."""
+        err = self.remove_camera(i)
+        if err is None:
+            try:
+                self.save()
+            except ValueError as exc:
+                return str(exc)
+        return err
+
     def remove_camera(self, i: int) -> str | None:
         if not self.cfg.hands.cameras:
             return "it is the only camera; pick another device for it instead"
@@ -2626,7 +2636,15 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _cam_remove(self) -> None:
         i = self._cam_selected()
         if i is not None:
-            self._report(self.m.remove_camera(i))
+            err = self.m.remove_camera(i)
+            if err is None:  # v0.1.23: saved at once (the running app picks it up live), no extra Save needed
+                try:
+                    p = self.m.save()
+                    self._report(None, f"camera removed and saved ({p.name})")
+                except ValueError as exc:
+                    self._report(str(exc))
+            else:
+                self._report(err)
             self._cam_refresh()
 
     def _cam_calibrate(self) -> None:

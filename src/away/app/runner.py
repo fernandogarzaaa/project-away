@@ -924,8 +924,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """v0.1.23: a camera turned off or on in Settings takes effect without restarting the app (the rest of
         the camera setup still applies at the next start, as before)."""
         h, nh = self.cfg.hands, new.hands
-        if [str(c.device) for c in h.disabled_cameras] == [str(c.device) for c in nh.disabled_cameras]:
+        same_off = [str(c.device) for c in h.disabled_cameras] == [str(c.device) for c in nh.disabled_cameras]
+        same_on = [str(c.device) for c in h.cameras] == [str(c.device) for c in nh.cameras]
+        if same_off and same_on and h.camera_index == nh.camera_index:
             return
+        # v0.1.23: a camera removed (or turned off) in Settings > Cameras applies at once, without a restart
+        self._camera_set_dirty = True
         h.disabled_cameras = nh.disabled_cameras
         h.cameras = nh.cameras
         h.camera_index, h.camera_hint, h.camera_fourcc = nh.camera_index, nh.camera_hint, nh.camera_fourcc
@@ -1663,7 +1667,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 why = wait_for_retry(delay, done, self.stop_event, asked)
                 if why == "done":
                     return
-                if self._turned_off(failed_specs):  # v0.1.23: turned off: back to the outer loop (new config)
+                if self._turned_off(failed_specs) or getattr(self, "_camera_set_dirty", False):
+                    # v0.1.23: turned off / removed: back to the outer loop, which starts the new camera set
                     self._retry_status(None)
                     self.camera_unavailable = None
                     ready.set()
@@ -1863,6 +1868,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         try:
             while not self.stop_event.is_set():
                 if [str(c.device) for c in self.cfg.hands.cameras] != [str(c.device) for c in cams]:
+                    self._camera_set_dirty = False
                     # v0.1.23: a camera was turned off (tray / Settings / an agent): start over with the new set
                     self._camera_set_changed_since = time.monotonic()
                     break
