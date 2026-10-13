@@ -43,7 +43,8 @@ def save_clip(
         raise ValueError("no hand frames captured")
     folder = Path(folder) / label
     folder.mkdir(parents=True, exist_ok=True)
-    stem = f"{label}_{time.strftime('%Y%m%d-%H%M%S')}_{int(time.time() * 1000) % 1000:03d}"
+    now = time.time()  # one reading for both parts (the seconds could tick between two)
+    stem = f"{label}_{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}_{int(now * 1000) % 1000:03d}"
     path = folder / f"{stem}.npz"
     n = 1
     while path.exists():  # several clips saved within one millisecond
