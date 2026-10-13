@@ -165,10 +165,10 @@ class HandsConfig:
     # Settings and the app log; calibration refuses to run with it; a too-slow camera is replaced by a free
     # NVIDIA Broadcast camera (when virtual_fallback is on and Broadcast itself reaches this rate)
     min_camera_fps: float = 10.0
-    # v0.1.18: the Windows capture backend: auto (DirectShow, then Media Foundation, then WinRT MediaCapture, the
+    # v0.1.19: the Windows capture backend: auto (DirectShow, then Media Foundation, then WinRT MediaCapture, the
     # Windows Camera app's API) | dshow | msmf | winrt (that backend alone). Ignored on macOS / Linux.
     camera_backend: str = "auto"
-    # v0.1.18: a camera that failed while another one tracks is re-probed after camera_retry_s, then after twice
+    # v0.1.19: a camera that failed while another one tracks is re-probed after camera_retry_s, then after twice
     # as long each time (capped at camera_retry_max_s); after camera_retry_limit failed probes in a row the app
     # stops retrying and says so (tray / Settings > Cameras > Retry cameras starts again). 0 = never stop.
     camera_retry_s: float = 45.0

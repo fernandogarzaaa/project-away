@@ -1,4 +1,4 @@
-"""v0.1.18: the WinRT MediaCapture camera backend, honest MJPG forcing, camera retries that back off and stop,
+"""v0.1.19: the WinRT MediaCapture camera backend, honest MJPG forcing, camera retries that back off and stop,
 ``away cameras diagnose``, and the Settings > Cameras fixes.
 
 Real-PC findings (Acer Predator Helios 300, Windows 11, v0.1.17) these tests pin down:

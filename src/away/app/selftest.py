@@ -138,7 +138,7 @@ def _pyperclip() -> str:
 
 
 def _winrt_camera() -> str:
-    """The WinRT MediaCapture camera backend (v0.1.18; Windows only): the pywinrt namespaces load."""
+    """The WinRT MediaCapture camera backend (v0.1.19; Windows only): the pywinrt namespaces load."""
     if not sys.platform.startswith("win"):
         return "n/a (Windows only)"
     from away.multicam import winrt_capture

@@ -1,4 +1,4 @@
-"""WinRT MediaCapture capture backend (Windows; v0.1.18, untested on real hardware).
+"""WinRT MediaCapture capture backend (Windows; v0.1.19, untested on real hardware).
 
 Why: on an Acer Predator Helios 300 the built-in camera ("HD User Facing") never opens through OpenCV's
 DirectShow or Media Foundation backends (or delivers 1.0 fps), yet the Windows Camera app shows it smoothly.

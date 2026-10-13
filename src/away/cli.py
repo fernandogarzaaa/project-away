@@ -621,7 +621,7 @@ def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester
 def cmd_cameras_diagnose(
     args: argparse.Namespace, lease_factory: Any = None, runner: Any = None, lister: Any = None
 ) -> int:
-    """``away cameras diagnose [DEVICE] [--seconds 1]`` (v0.1.18): every camera on every backend (DirectShow,
+    """``away cameras diagnose [DEVICE] [--seconds 1]`` (v0.1.19): every camera on every backend (DirectShow,
     Media Foundation, WinRT): its native formats where the backend lists them, and whether each mode opens and
     how fast it streams. The cameras are borrowed from the running app first."""
     from away.app.camera_share import borrowed_cameras, confirm_handover

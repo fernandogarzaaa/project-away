@@ -256,7 +256,7 @@ def test_sweep_modes_order_and_fps() -> None:
     assert {m.fps for m in modes} == {capture.SWEEP_FPS}  # CAP_PROP_FPS is always asked for
     assert (
         capture.sweep_modes(640, 480, 15)[0] == CaptureMode(640, 480, 15, "MJPG")
-        and len(capture.sweep_modes(640, 480, 15)) == 10  # v0.1.18: + 1280x720 MJPG and driver format
+        and len(capture.sweep_modes(640, 480, 15)) == 10  # v0.1.19: + 1280x720 MJPG and driver format
     )
     assert capture.sweep_modes(640, 480, 15)[-2:] == [
         CaptureMode(1280, 720, 15, "MJPG"),

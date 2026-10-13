@@ -497,7 +497,7 @@ MIN_CAMERA_FPS = 10.0  # the default of hands.min_camera_fps
 MEASURE_S = 1.5  # frames are counted this long in every attempted mode (0 = accept the first frame unmeasured)
 SWEEP_FOURCCS = ("MJPG", "YUY2", "NV12", "")  # "" = the driver's default format
 SWEEP_SIZES = ((640, 480), (320, 240))  # after the configured size
-# v0.1.18: 1280x720 last (MJPG and the driver's format): some built-in cameras deliver 30 fps only in their HD
+# v0.1.19: 1280x720 last (MJPG and the driver's format): some built-in cameras deliver 30 fps only in their HD
 # mode; the frames are downscaled to the configured size (ScaledCapture), keeping the aspect ratio
 SWEEP_HD = (1280, 720)
 SWEEP_HD_FOURCCS = ("MJPG", "")
@@ -507,7 +507,7 @@ BANDWIDTH_HINT = "two USB cameras may exceed the USB bandwidth; try another USB 
 _BROADCAST_RE = re.compile(r"nvidia broadcast", re.IGNORECASE)
 
 
-# v0.1.18: hands.camera_backend. "auto" tries DirectShow, Media Foundation, then WinRT MediaCapture (the API the
+# v0.1.19: hands.camera_backend. "auto" tries DirectShow, Media Foundation, then WinRT MediaCapture (the API the
 # Windows Camera app uses: the Acer's built-in camera opened only there); the others use that backend alone.
 WINRT = "WinRT"
 CAMERA_BACKENDS = ("auto", "dshow", "msmf", "winrt")
@@ -767,7 +767,7 @@ class OpenedCamera:
 def apply_mode(cap: Any, mode: CaptureMode, cv2: Any, label: str = "") -> str:
     """FOURCC first (DirectShow picks the media type when the size is set), then size and frame rate.
 
-    v0.1.18 (JoyCam asked for MJPG read back YUY2): the FOURCC is read back after the size was set; when the
+    v0.1.19 (JoyCam asked for MJPG read back YUY2): the FOURCC is read back after the size was set; when the
     driver reports another one it is set once more (some DirectShow drivers only take it once the size is
     known) and read back again. Returns what the driver reports (``""`` when it reports nothing); a camera
     that ignores the request is logged as such (``label`` names it) instead of claiming the requested format."""
@@ -840,7 +840,7 @@ def resize_frame(frame: Any, width: int, height: int) -> Any:
 
 class ScaledCapture:
     """A capture whose frames are downscaled to fit ``max_w`` x ``max_h`` (aspect ratio kept): the 1280x720 sweep
-    mode delivers HD frames while the rest of the app asked for the configured size (v0.1.18)."""
+    mode delivers HD frames while the rest of the app asked for the configured size (v0.1.19)."""
 
     def __init__(self, cap: Any, max_w: int, max_h: int) -> None:
         self._cap = cap
@@ -896,7 +896,7 @@ class _Attempt:
     api: Any  # cv2.CAP_* (None = OpenCV's default backend)
     src: int | str  # the index in *that* backend's numbering
     modes: list[CaptureMode]
-    # v0.1.18: opens a capture for a mode itself (the WinRT backend picks the native format from the mode);
+    # v0.1.19: opens a capture for a mode itself (the WinRT backend picks the native format from the mode);
     # None = cv2.VideoCapture(src, api) + apply_mode
     factory: Callable[[CaptureMode], Any] | None = None
 
@@ -1326,7 +1326,7 @@ def msmf_index(
 
 def sweep_modes(width: int, height: int, fps: int, virtual: bool = False) -> list[CaptureMode]:
     """The slow-camera sweep (v0.1.16): MJPG, YUY2, NV12 and the driver's format at the configured size, then
-    640x480, then 320x240, each asking for ``fps`` (or SWEEP_FPS) with ``CAP_PROP_FPS``; v0.1.18: then 1280x720
+    640x480, then 320x240, each asking for ``fps`` (or SWEEP_FPS) with ``CAP_PROP_FPS``; v0.1.19: then 1280x720
     in MJPG and the driver's format (downscaled to the configured size when it is used). A virtual camera only
     in its own format (and never in HD)."""
     f = int(fps or 0) or SWEEP_FPS
@@ -1398,7 +1398,7 @@ def open_camera(
        process already holds another camera) 320x240 and 320x240 at 15 fps;
     2. Media Foundation at the index *its own* list gives this camera (:func:`msmf_index`): the configured
        size, then nothing forced;
-    3. v0.1.18, when DirectShow and Media Foundation failed or stayed below ``min_fps``: WinRT MediaCapture
+    3. v0.1.19, when DirectShow and Media Foundation failed or stayed below ``min_fps``: WinRT MediaCapture
        (:mod:`away.multicam.winrt_capture`, the Windows Camera app's API) by the camera's name, in the native
        format closest to the configured one (1280x720 allowed, downscaled);
     4. only when every mode so far delivered frames but below ``min_fps`` (default MIN_CAMERA_FPS): the sweep
@@ -1520,7 +1520,7 @@ def _open_camera(
         return None if got is None else found(got, (allowed[0] if windows else "default", modes[0]))
 
     def winrt_attempt(mode_list: list[CaptureMode]) -> _Attempt | None:
-        """The WinRT attempt (v0.1.18), or None when it cannot be made here (logged once per open)."""
+        """The WinRT attempt (v0.1.19), or None when it cannot be made here (logged once per open)."""
         if winrt_tried:
             return None
         winrt_tried.append(True)
@@ -2177,7 +2177,7 @@ def open_capture(
     gives the frame that proved the mode works. A secondary camera may fall back to 320x240 (``low_res``
     overrides that: True also for the primary, False never). ``min_fps``: hands.min_camera_fps.
 
-    ``skip_held`` (the background re-probe of failed cameras, v0.1.18): a camera this process already holds
+    ``skip_held`` (the background re-probe of failed cameras, v0.1.19): a camera this process already holds
     open (the one that is working) is never opened again; that is an error instead (it means the failed
     camera's name now resolves to the working camera)."""
     if cv2 is None:  # pragma: no cover - real OpenCV

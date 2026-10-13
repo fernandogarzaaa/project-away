@@ -51,7 +51,7 @@ MULTICAM_PROBE_S = 45.0
 HANDOVER_FREE_S = 15.0  # a hand-over waits at most this long for this process's cameras to be closed
 SPEED_CHECK_S = 5.0  # after this long streaming, each camera's measured frame rate is logged (ok / too slow)
 MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones (default hands.camera_retry_s)
-MULTICAM_RETRY_MAX_S = 900.0  # back-off ceiling (default hands.camera_retry_max_s; v0.1.18: 15 min)
+MULTICAM_RETRY_MAX_S = 900.0  # back-off ceiling (default hands.camera_retry_max_s; v0.1.19: 15 min)
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
 
 
@@ -533,7 +533,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         atexit.register(self._restore_cursor)
         self._camera_episode = 0  # bumps when the cameras recover, so a new failure is notified again
-        # v0.1.18: camera retries back off and stop after hands.camera_retry_limit failures; "Retry cameras"
+        # v0.1.19: camera retries back off and stop after hands.camera_retry_limit failures; "Retry cameras"
         # (tray, or Settings through a request file) sets this to probe again at once
         self._camera_retry_now = threading.Event()
         self.camera_retry_stopped = False
@@ -1156,7 +1156,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         lock = threading.Lock() if self._serial_open() else None
         import inspect
 
-        # v0.1.18: a re-probe never reopens (or re-sweeps) the camera that is tracking right now
+        # v0.1.19: a re-probe never reopens (or re-sweeps) the camera that is tracking right now
         extra = {"skip_held": True} if "skip_held" in inspect.signature(self._start_cameras).parameters else {}
         threads = self._start_cameras(list(specs), pairer, session, lock, **extra)
         try:
@@ -1166,7 +1166,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         finally:
             self._end_cameras(session, threads)
 
-    # camera retries (v0.1.18) ---------------------------------------------------
+    # camera retries (v0.1.19) ---------------------------------------------------
     def retry_cameras(self) -> None:
         """ "Retry cameras" (tray menu): probe the failed cameras again now and restart the back-off."""
         self.camera_retry_stopped = False
@@ -1253,7 +1253,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """Track on ``device`` alone and probe the failed cameras in the background: first after ``every_s``,
         then after twice as long each time (capped at hands.camera_retry_max_s); return (to retry the full
         multi-camera set) once they all deliver frames. After hands.camera_retry_limit failed probes it stops
-        probing and says so until "Retry cameras" is pressed (v0.1.18). Tracking is never interrupted by a probe
+        probing and says so until "Retry cameras" is pressed (v0.1.19). Tracking is never interrupted by a probe
         that still fails, and the working camera is never reopened by a probe (``_probe_specs``)."""
         from away.app.camera_loop import retry_labels, wait_for_retry
 
@@ -1375,7 +1375,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         * One camera left: track on it alone (``run_single``) and re-probe the failed cameras without touching
           the working one, after ``retry_s`` (default hands.camera_retry_s) and then twice as long each time up
           to hands.camera_retry_max_s, stopping after hands.camera_retry_limit failures until "Retry cameras"
-          (v0.1.18); when they deliver again, go back to fusion (the first wait also doubles if the set keeps
+          (v0.1.19); when they deliver again, go back to fusion (the first wait also doubles if the set keeps
           failing right after a good probe).
         * No camera works: nothing is claimed; the whole set is retried after ``none_retry_s``, backing off and
           stopping the same way.

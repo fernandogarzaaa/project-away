@@ -76,7 +76,7 @@ optional("PIL", data=False)
 optional("pyperclip", data=False)
 optional("tkinter", data=False, hidden_mods=["tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"])
 if sys.platform == "win32":
-    # v0.1.18: the WinRT MediaCapture camera backend (away.multicam.winrt_capture imports pywinrt lazily, so
+    # v0.1.19: the WinRT MediaCapture camera backend (away.multicam.winrt_capture imports pywinrt lazily, so
     # PyInstaller never sees it). "winrt" is a namespace package: name every module and bundle its .pyd/.dll.
     _winrt_ns = [
         "winrt.system",

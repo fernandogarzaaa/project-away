@@ -32,7 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hands = ["mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17"]
-# v0.1.18: the WinRT MediaCapture camera backend (Windows only; the API the Windows Camera app uses)
+# v0.1.19: the WinRT MediaCapture camera backend (Windows only; the API the Windows Camera app uses)
 winrt = [
   "winrt-runtime>=2.0; sys_platform == 'win32'",
   "winrt-Windows.Foundation>=2.0; sys_platform == 'win32'",

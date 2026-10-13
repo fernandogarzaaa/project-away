@@ -500,7 +500,7 @@ class SettingsModel:
 
     def role_default(self, selected: int | None = None) -> str:
         """What the Role picker shows: primary in single-camera mode (the only camera is the primary, so Apply on
-        it just works), the selected camera's own role, or secondary for a camera about to be added. v0.1.18:
+        it just works), the selected camera's own role, or secondary for a camera about to be added. v0.1.19:
         the only camera (also a one-entry hands.cameras) and a set without a primary default to primary."""
         cams = self.cfg.hands.cameras
         if len(cams) <= 1:
@@ -512,7 +512,7 @@ class SettingsModel:
         return "secondary"
 
     def device_choice(self, selected: int | None = None, choices: list[str] | None = None) -> str:
-        """The Device picker entry for a camera row (v0.1.18: the picker was blank until a row was selected):
+        """The Device picker entry for a camera row (v0.1.19: the picker was blank until a row was selected):
         the selected row's camera, else the only (or primary) camera; ``""`` when it is not in the list."""
         from away.multicam.capture import find_device
 
@@ -1260,7 +1260,7 @@ def camera_diagnose_worker(
     runner: Callable[..., Any] | None = None,
     lister: Callable[[], list[Any]] | None = None,
 ) -> None:
-    """Settings > Cameras > Diagnose (v0.1.18): the same report as ``away cameras diagnose``, one line at a time
+    """Settings > Cameras > Diagnose (v0.1.19): the same report as ``away cameras diagnose``, one line at a time
     on ``out`` (strings), then ``{"done": True}`` (or ``{"error": str}``). The cameras are borrowed from the app."""
     from away.app.camera_share import SharedLease, confirm_handover
     from away.multicam import capture, diagnose
@@ -1825,7 +1825,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             "<<ComboboxSelected>>",
             lambda _e: self._report(self.m.set_voice("hands.multicam.fusion", self.cam_fusion.get())),
         )
-        # v0.1.18: the Windows capture backend (auto: DirectShow, Media Foundation, then WinRT MediaCapture)
+        # v0.1.19: the Windows capture backend (auto: DirectShow, Media Foundation, then WinRT MediaCapture)
         ttk.Label(f, text="Capture backend:").grid(row=6, column=2, sticky="e", padx=(12, 0))
         self.cam_backend = tk.StringVar(value=self.m.camera_backend())
         bcb = ttk.Combobox(f, textvariable=self.cam_backend, values=list(CAMERA_BACKENDS), state="readonly", width=8)
@@ -1847,7 +1847,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             "The primary camera is the cursor's frame of reference.",
             foreground="#555",
         ).grid(row=8, column=0, columnspan=6, sticky="w")
-        # v0.1.18: the app's camera retry state, Diagnose / Retry cameras, and the test / diagnose output in a
+        # v0.1.19: the app's camera retry state, Diagnose / Retry cameras, and the test / diagnose output in a
         # read-only, word-wrapped, scrollable text box (long lines were cut off in a label)
         self.cam_retry_var = tk.StringVar()
         ttk.Label(f, textvariable=self.cam_retry_var, foreground="#a33", wraplength=640, justify="left").grid(

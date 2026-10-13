@@ -287,7 +287,7 @@ def camera_speed_lines(threads: Sequence[Any], min_fps: float) -> list[tuple[boo
     return out
 
 
-# ------------------------------------------------------------------------------ camera retries (v0.1.18)
+# ------------------------------------------------------------------------------ camera retries (v0.1.19)
 # v0.1.17 on the Acer: the background re-probe of a dead camera fired 306 times in one day (every 45 s, forever),
 # each time reopening a camera for ~10 s. It now backs off exponentially and stops after a number of failures,
 # with a notice; "Retry cameras" (tray, Settings > Cameras) starts it again.

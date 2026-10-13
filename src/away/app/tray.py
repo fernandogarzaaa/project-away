@@ -158,7 +158,7 @@ class TrayController:
 
     # GPU pack ---------------------------------------------------------------
     def camera_retry_stopped(self) -> bool:
-        """The app gave up re-probing a failed camera (v0.1.18): the tray then offers "Retry cameras"."""
+        """The app gave up re-probing a failed camera (v0.1.19): the tray then offers "Retry cameras"."""
         return getattr(self.app, "camera_retry_stopped", False) is True
 
     def retry_cameras(self) -> None:

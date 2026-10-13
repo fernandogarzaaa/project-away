@@ -1,4 +1,4 @@
-"""``away cameras diagnose`` and Settings > Cameras > Diagnose (v0.1.18).
+"""``away cameras diagnose`` and Settings > Cameras > Diagnose (v0.1.19).
 
 For each camera and each capture backend (Windows: DirectShow, Media Foundation, WinRT MediaCapture; elsewhere
 OpenCV's default backend) list the native formats where the backend can say (WinRT can; OpenCV cannot list
