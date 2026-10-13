@@ -733,6 +733,17 @@ class AgentLinkHost:
             file_github_issue(self.cfg().agent_link.github_repo, f"[auto] {name} on v{__version__}", body, token)
 
     # -------------------------------------------------------------- server
+    def tunnel_hosts(self) -> list[str]:
+        """v0.1.23: hostnames of the active secure link and backup link (the only non-local Host headers accepted)."""
+        from away.agentlink.api import hostname_of
+
+        out = []
+        for t in (getattr(self, "tunnel", None), getattr(self, "relay", None)):
+            h = hostname_of(getattr(t, "url", None)) if t is not None else ""
+            if h:
+                out.append(h)
+        return out
+
     def ensure_server(self) -> int:
         with self._lock:
             if self.server is not None and self.server.running:
@@ -749,6 +760,7 @@ class AgentLinkHost:
                 local_ttl_s=lambda: float(self.cfg().agent_link.local_ttl_days) * 86400.0,
                 rate=(float(s.rate_per_s), int(s.rate_burst)),
                 access_log=self.data_dir / "logs" / "agent-access.log",
+                tunnel_hosts=self.tunnel_hosts,
             )
             mcp = mcp_tools.build(
                 api.LocalBackend(self.core.service), screen_fps=lambda: float(self.cfg().agent_link.screen_fps)

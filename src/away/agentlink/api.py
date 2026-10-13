@@ -17,6 +17,7 @@ Needs ``starlette``/``uvicorn``/``mcp`` (the ``[agent]`` extra).
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
 import json
 import re
@@ -163,8 +164,10 @@ class Gate:
         rate: tuple[float, int] = (10.0, 40),
         access_log: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        tunnel_hosts: Callable[[], Any] = lambda: (),
     ) -> None:
         self.service = service
+        self.tunnel_hosts = tunnel_hosts  # v0.1.23: hostnames of the active secure / backup link (Host check)
         self.registry = registry
         self.local_key = local_key
         self.remote_ttl_s = remote_ttl_s
@@ -256,6 +259,73 @@ class Gate:
         return agent, token
 
 
+# ------------------------------------------------------------------ browser guard (v0.1.23)
+# The local server only listens on 127.0.0.1, but a web page in the person's browser can still try to reach it:
+# by DNS rebinding (evil.example resolves to 127.0.0.1, so the browser sends ``Host: evil.example``) or by a
+# cross-site POST (``Origin: https://evil.example``, or the opaque ``Origin: null`` of sandboxed iframes and
+# ``file:`` pages). Ported from the console guard of github.com/fernandogarzaaa/ghost-chimera-rs (MIT).
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+STATE_CHANGING = ("POST", "PUT", "PATCH", "DELETE")
+JSON_BODY = ("POST", "PUT", "PATCH")
+
+
+def host_without_port(value: str) -> str:
+    """The host part of a ``Host`` header (``host``, ``host:port``, ``[v6]:port``, bare ``v6``), lower case."""
+    v = str(value or "").strip().lower()
+    if v.startswith("["):
+        return v[1:].split("]", 1)[0]
+    if v.count(":") == 1:
+        return v.split(":", 1)[0]
+    return v
+
+
+def hostname_of(url: str | None) -> str:
+    """``https://abc.lhr.life/x`` -> ``abc.lhr.life`` ("" when there is none)."""
+    if not url:
+        return ""
+    rest = str(url).strip().split("://", 1)[-1]
+    authority = rest.split("/", 1)[0].rsplit("@", 1)[-1]
+    return host_without_port(authority)
+
+
+def host_allowed(value: str, extra: Any = ()) -> bool:
+    """A ``Host`` header naming this PC (localhost, 127.0.0.1, [::1], any port) or an active tunnel hostname."""
+    h = host_without_port(value)
+    if not h:
+        return False
+    return h in LOOPBACK_HOSTS or h in {str(x).strip().lower() for x in extra if x}
+
+
+def origin_allowed(origin: str, host: str, extra: Any = ()) -> bool:
+    """An ``Origin`` is accepted only when it is this server itself: ``http(s)://<the Host header>``, for an allowed
+    host. ``null`` and every other site are refused."""
+    o = str(origin or "").strip().lower()
+    if not o.startswith(("http://", "https://")):
+        return False  # "null", "file://", anything opaque
+    authority = o.split("://", 1)[1].split("/", 1)[0]
+    if "@" in authority or not host:
+        return False
+    return authority == str(host).strip().lower() and host_allowed(authority, extra)
+
+
+def is_json(content_type: str) -> bool:
+    ct = str(content_type or "").split(";", 1)[0].strip().lower()
+    return ct == "application/json" or (ct.startswith("application/") and ct.endswith("+json"))
+
+
+def browser_guard(method: str, headers: dict[str, str], extra_hosts: Any = ()) -> str | None:
+    """Why a request must be refused ("host", "origin", "content-type"), or None. ``headers``: lower-case names."""
+    extra = list(extra_hosts or ())
+    host = headers.get("host", "")
+    if "host" in headers and not host_allowed(host, extra):
+        return "host"
+    if method in STATE_CHANGING and "origin" in headers and not origin_allowed(headers["origin"], host, extra):
+        return "origin"
+    if method in JSON_BODY and not is_json(headers.get("content-type", "")):
+        return "content-type"
+    return None
+
+
 def _json(data: Any, status: int = 200) -> Any:
     from starlette.responses import JSONResponse
 
@@ -294,8 +364,18 @@ class AuthMiddleware:
             if g.stopped.is_set():
                 await reply(503, "Agent Link is off")
                 return
-            if method != "GET" and headers.get("origin") and not headers.get("origin", "").startswith("null"):
+            extra: Any = ()
+            with contextlib.suppress(Exception):
+                extra = tuple(g.tunnel_hosts() or ())
+            why = browser_guard(method, headers, extra)
+            if why == "host":  # v0.1.23: DNS rebinding
+                await reply(403, "unknown Host; Agent Link only answers on this PC or its own secure link")
+                return
+            if why == "origin":  # v0.1.23: cross-site and Origin: null
                 await reply(403, "browser requests are not accepted")
+                return
+            if why == "content-type":  # v0.1.23: no form / text/plain posts
+                await reply(415, "send JSON (Content-Type: application/json)")
                 return
             if g.lockout.locked():
                 await reply(429, "too many failed attempts; wait a minute")

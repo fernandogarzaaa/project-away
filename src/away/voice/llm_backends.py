@@ -103,8 +103,15 @@ def _open(req: urllib.request.Request | str, timeout: float) -> Any:
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def user_agent() -> str:
+    """v0.1.23: ``ProjectAway/<version>``. Some OpenAI-compatible hosts (Groq) answer 403 to a request without one."""
+    from away import __version__
+
+    return f"ProjectAway/{__version__}"
+
+
 def _post_json(url: str, body: dict[str, Any], timeout: float, headers: dict[str, str] | None = None) -> Any:
-    h = {"Content-Type": "application/json", **(headers or {})}
+    h = {"Content-Type": "application/json", "User-Agent": user_agent(), **(headers or {})}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=h)
     with _open(req, timeout) as r:
         return json.loads(r.read())
