@@ -153,6 +153,7 @@ def test_absolute_dead_zone_keeps_asymmetric_position():
 
 def test_relative_axes_are_not_swapped():
     cfg = CursorConfig(gain=1.0, acceleration=1.0, dead_zone=0.0, min_cutoff=1e6, d_cutoff=1e6)
+    cfg.autocenter.enabled = False  # exact numbers: no v0.1.19 soft-recenter gain off-centre
     m = CursorMapper((1000, 600), cfg)
     assert m.update(0.0, 0.1, 0.7) == (500, 300)
     assert m.update(0.1, 0.12, 0.7) == (520, 300)

@@ -1,4 +1,9 @@
-"""MediaPipe Face Landmarker (Tasks API) with blendshapes. Needs the [face] extra."""
+"""MediaPipe Face Landmarker (Tasks API) with blendshapes. Needs the [face] extra.
+
+v0.1.19: the landmarker also outputs the facial transformation matrix (head pose, no extra model), and each
+:class:`FaceObs` carries the head pose (:mod:`away.face.headpose`), the screen-aligned nose offsets and the
+iris-based gaze features (:mod:`away.face.gaze`). Computing them is a few dozen arithmetic operations.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +43,29 @@ class FaceObs:
     box: tuple[float, float, float]  # cx, cy, size (normalized)
     blendshapes: dict[str, float]
     frontal: bool | None = None  # looks roughly at the camera (None = unknown)
+    pose: tuple[float, float, float] | None = None  # yaw, pitch, roll degrees (matrix convention, unaligned)
+    proxy: tuple[float, float] | None = None  # screen-aligned nose offsets (headpose.nose_offsets)
+    gaze: Any = None  # iris gaze feature vector (np.ndarray) or None
+
+
+def observe_face(xs: Any, ys: Any, blendshapes: dict[str, float], matrix: Any = None) -> FaceObs:
+    """Everything the app needs from one face mesh (pure; used by the landmarker and the tests)."""
+    from away.face.gaze import gaze_features
+    from away.face.headpose import nose_offsets, pose_from_matrix, pose_from_points
+
+    box = (float(np.mean(xs)), float(np.mean(ys)), float(max(np.ptp(xs), np.ptp(ys))))
+    hp = pose_from_matrix(matrix) if matrix is not None else None
+    if hp is None:
+        hp = pose_from_points(xs, ys)
+    pose = (hp.yaw, hp.pitch, hp.roll) if hp is not None else None
+    return FaceObs(
+        box,
+        blendshapes,
+        frontal_from_points(xs, ys),
+        pose,
+        nose_offsets(xs, ys),
+        gaze_features(xs, ys, pose, box),
+    )
 
 
 class FaceLandmarker:  # pragma: no cover - needs mediapipe + images
@@ -51,6 +79,7 @@ class FaceLandmarker:  # pragma: no cover - needs mediapipe + images
             running_mode=vision.RunningMode.VIDEO,
             num_faces=max_faces,
             output_face_blendshapes=True,
+            output_facial_transformation_matrixes=True,  # head pose for head tracking / gaze (v0.1.19)
         )
         self.landmarker = vision.FaceLandmarker.create_from_options(opts)
         self._last_ms = -1
@@ -61,12 +90,12 @@ class FaceLandmarker:  # pragma: no cover - needs mediapipe + images
         img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         res = self.landmarker.detect_for_video(img, ms)
         out = []
+        mats = getattr(res, "facial_transformation_matrixes", None) or []
         for i, lms in enumerate(res.face_landmarks):
             xs = np.array([p.x for p in lms])
             ys = np.array([p.y for p in lms])
-            box = (float(xs.mean()), float(ys.mean()), float(max(np.ptp(xs), np.ptp(ys))))
             bs = {c.category_name: float(c.score) for c in res.face_blendshapes[i]} if res.face_blendshapes else {}
-            out.append(FaceObs(box, bs, frontal_from_points(xs, ys)))
+            out.append(observe_face(xs, ys, bs, mats[i] if i < len(mats) else None))
         return out
 
     def close(self) -> None:

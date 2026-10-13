@@ -89,6 +89,9 @@ Tips for smooth control:
 - Touching your real mouse or keyboard pauses gestures automatically. They come back after a second or two of not touching them.
 - **F9** turns gesture control on or off at any time. The tray menu does the same.
 - Several monitors? The cursor covers all of them. Say **"next monitor"**, **"previous monitor"** or **"monitor two"** to jump.
+- **Your hand stays in view on its own** (auto-centering): the camera frame quietly nudges your resting hand back
+  toward the middle, and a quick swing back from the edge of the camera's view doesn't drag the cursor back (like
+  lifting a mouse). Lost the cursor? Say **"center"** to put it in the middle of the screen you're on.
 
 ### 4. Voice
 
@@ -96,13 +99,27 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 
 - **Punctuation:** say "comma", "period", "question mark", "new line", "new paragraph".
 - **Mistake?** Say **"scratch that"** to remove the sentence you just said.
-- **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening", "use left hand", "use right hand", "use either hand".
+- **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening", "use left hand", "use right hand", "use either hand", "center" (cursor to the middle of this screen), "look here" (cursor to where you're looking, after gaze calibration).
 - **Shortcuts:** `Ctrl+Alt+Space` pauses/resumes listening, `Ctrl+Alt+M` mutes the mic, `Ctrl+Alt+E` lets you edit selected text by voice.
 - **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
 - **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
 - Speech is processed on your PC and never saved or uploaded.
 
-### 5. If something goes wrong
+### 5. Head and eye tracking (optional, off until you set it up)
+
+- **Head pointer:** with your hands busy, turn your head to move the cursor and click with a wink, smile or
+  eyebrow raise (turn those on in the face settings). Set `hands.cursor.head_assist: pointer`.
+- **Head + hand:** `head_assist: coarse` makes the cursor jump to the part of the screen you turn toward; your
+  hand does the fine aiming.
+- **Eye tracking ("where am I looking?"):** Settings → Performance → **Calibrate gaze…** (or `away gaze calibrate`).
+  Look at the dots on each screen until they vanish (about 2 seconds each). Afterwards Project Away knows where
+  your screens are and roughly where on them you look: when you start moving your hand after resting it, the
+  cursor first jumps to where you're looking, then your hand fine-tunes. Webcams are only good for "which screen
+  and which area" (roughly a hand-width on the screen), not for small buttons.
+- **Optional gaze model:** a learned eye-gaze network can be downloaded in Settings → Performance → Models. Its
+  weights are for **research use only** (see below), so it is never installed automatically.
+
+### 6. If something goes wrong
 
 - **Models didn't finish downloading:** reopen the app (see Installing above). It resumes.
 - **Cursor doesn't move:** check another app isn't using the camera (Zoom, Teams, the Camera app), then restart Project Away from the tray.
@@ -215,6 +232,8 @@ Every control is a **trigger → action** binding you can change without touchin
 | `voice:"next monitor"` / `"previous monitor"` | `cursor:next_monitor` / `cursor:prev_monitor` |
 | `voice:"monitor one"` / `"monitor two"` / `"monitor three"` | `cursor:monitor 1` / `2` / `3` |
 | `voice:"use left hand"` / `"use right hand"` / `"use either hand"` | `hands:left` / `hands:right` / `hands:auto` |
+| `voice:"center"` / `"centre"` / `"center cursor"` | `cursor:center` (middle of the current monitor, re-anchors the hand) |
+| `voice:"look here"` | `cursor:gaze` (jump to the gaze point; needs `away gaze calibrate`) |
 
 **Triggers:** the gestures above plus your own (record with `away record --custom --label wave`, then
 `away calibrate`), any spoken phrase (matched ignoring case and punctuation), `face:brow_raise`,
@@ -229,6 +248,9 @@ two_finger_scroll / four_finger_scroll) ·
 `shell:command` (**off unless** `bindings.allow_shell: true`) · `dictation:toggle|start|stop` ·
 `mic:toggle|on|off` · `voice:command_mode|dictation_mode|toggle_mode` · `pause:toggle|on|off` ·
 `cursor:next_monitor|prev_monitor|primary_monitor|monitor N` (jump to the centre of a monitor) ·
+`cursor:center` (centre of the current monitor + re-anchor; bind it to a gesture or hotkey, e.g.
+`away bindings set hotkey:ctrl+alt+c cursor:center` or `away bindings set gesture:palm_tap cursor:center`) ·
+`cursor:gaze` (jump to where you look) ·
 `hands:auto|right|left|any` (which hand is the pointer until the app restarts).
 
 ### Multiple monitors
@@ -287,6 +309,8 @@ away update [--yes]                          # download, verify SHA-256, install
 away hardware [--json]                       # detected CPU/RAM/GPU + the performance profile and why
 away gpu install | status | remove           # NVIDIA GPU pack (cuBLAS 12) for Whisper on CUDA
 away iphone listen | compare [--seconds N]   # experimental iPhone face source (docs/iphone.md)
+away gaze calibrate | test [--seconds N] | clear [--all] | status    # eye tracking + the screen map
+away gaze model status | install l2cs|mobilegaze [--accept-license] | remove NAME   # optional gaze network
 ```
 
 Invalid configs fail with every problem listed and its YAML path, e.g.
@@ -683,6 +707,90 @@ releases its claim within 5 s). The Cameras tab lists the default camera in sing
 the one the app is using. If a camera still cannot be opened, you are told it is in use by Project Away
 or another app instead of a bare "permission denied".
 
+## Auto-centering, head tracking and eye tracking (v0.1.19)
+
+All of it reuses what already runs: the hand landmarks and the Face Landmarker (whose facial transformation
+matrix and iris points are now read too). No new model is needed; the optional gaze network is an opt-in
+download. Everything is pure logic with unit tests (`tests/test_autocenter.py`, `test_headpose.py`,
+`test_gaze.py`, `test_gaze_models.py`, `test_headgaze.py`).
+
+**Auto-centering** (`hands.cursor.autocenter.*`, on by default):
+
+- *Soft recenter* (relative mode): strokes away from the target get up to `soft_strength` (12 %) more gain at the
+  frame edge, strokes back the same less, so over many out-and-back strokes the resting hand drifts toward the
+  middle of the camera frame. The cursor never jumps.
+- *Comfort zone*: an EMA (`comfort_tau_s`) of where the hand rests (slower than `rest_speed`). Absolute mode
+  centres its active region there, applied only when the hand re-anchors so a resting hand never drifts the
+  cursor; `target: comfort` makes it the soft-recenter target in relative mode too.
+- *Edge re-anchor*: in the `edge_margin` band of the frame, a swing back faster than `edge_return_speed` is a
+  "lift": the cursor stays put and re-anchors when the hand slows down or is back in the inner frame.
+- *Center*: voice "center", or `cursor:center` on any gesture/hotkey.
+
+**Head tracking** (`hands.cursor.head_assist: off|coarse|pointer`, `hands.cursor.head.*`, off by default):
+yaw/pitch/roll from the facial transformation matrix (One Euro filtered; the sign is aligned with the on-screen
+nose movement so a mirrored camera cannot invert it). `pointer`: head-turn deltas move the cursor while no hand
+points (Gameface-style; click with the existing wink/smile/brow/mouth triggers). `coarse`: the head picks one
+of `coarse_cols` x `coarse_rows` zones per monitor (hysteresis `coarse_hysteresis`, dwell `coarse_dwell_s`) and
+the cursor jumps there; the hand refines. `monitor_switch: true` (needs the screen map): a head turn held
+`switch_dwell_s` and `switch_margin` degrees closer to another monitor moves the cursor there; glances do not.
+The speech gate also uses the head pose: a face turned toward the screens (the calibrated pose range, or the
+user's usual pose within `gate_tolerance` degrees) counts as facing them even when an off-axis webcam sees it
+turned.
+
+**Eye tracking and the screen map** (`gaze.*`; nothing acts until `away gaze calibrate` ran for the current
+camera and monitor layout): features are the iris centres (Face Landmarker points 468-477) relative to the eye
+corners, eyelid opening, head yaw/pitch/roll and face position/size, plus the optional network's yaw/pitch.
+Calibration shows `points_per_monitor` (9) dots on every selected monitor and fits a ridge regression with
+quadratic terms (`ridge_alpha`) to virtual-desktop pixels, stored per camera name in
+`gaze-calibration.json` in the config folder, with its leave-one-dot-out error. **The screen map is the
+calibration**: it knows which monitor and roughly where. Expect about 2-4 degrees with a webcam (a few hundred
+pixels at arm's length), so it is for "which screen / which area", never for small targets.
+
+- *Look-to-jump* (MAGIC pointing, `look_to_jump`): when the hand starts moving after resting `jump_idle_s`
+  (0.6 s) and the gaze point is more than `jump_min_px` away, the cursor warps there first, then the hand
+  refines. `jump_across_monitors_only: true` limits it to looking at another monitor.
+- *Drift correction* (`drift_correction`): every click nudges the model's offset by `drift_rate` toward the
+  click (you look where you click), bounded by `drift_max_px` and ignored beyond `drift_max_err_px`; the offset
+  is saved with the calibration when the app exits.
+- The app reloads the calibration file by itself (Settings runs `away gaze calibrate` in its own process); a
+  changed monitor layout disables it until you recalibrate.
+
+**Optional learned gaze model** (`gaze.model: auto|iris|l2cs|mobilegaze`; `auto` = `l2cs` when downloaded and
+onnxruntime offers a GPU provider, else `mobilegaze` when downloaded, else `iris`): an L2CS-Net-style network
+(90-bin yaw/pitch classifier, 448x448 face crop) from github.com/yakhyo/gaze-estimation, run with onnxruntime on
+the Face Landmarker's face box at most `gaze.model_rate_hz` (10) times a second, CUDA first when available. Its
+yaw/pitch become two extra features of the same calibration, so recalibrate after installing one; the running
+app picks a newly downloaded model up without a restart.
+
+| Model | File | Size | Measured cost per run |
+|---|---|---|---|
+| `l2cs` | ResNet-18 (`resnet18_gaze.onnx`) | 45 MB | ~117 ms on 2 CPU cores (ARM Neoverse-V2); GPU untested |
+| `mobilegaze` | MobileOne-S0 (`mobileone_s0_gaze.onnx`) | 5 MB | ~21 ms on 2 CPU cores |
+
+**License notice:** the code is MIT, but both networks were trained on the
+[Gaze360](https://github.com/erkil1452/gaze360/blob/master/LICENSE.md) dataset, whose license is **research use
+only** and excludes models trained on it from commercial applications. They are therefore an explicit opt-in
+(`away gaze model install NAME --accept-license`, or the confirm dialog in Settings → Performance → Models),
+downloaded from the author's GitHub release with a pinned SHA-256 (resumable, through the same downloader as
+Whisper), and **never bundled in the installers**. Setup only mentions them.
+
+```yaml
+hands:
+  cursor:
+    autocenter: {enabled: true, soft_recenter: true, soft_strength: 0.12, target: frame,
+                 comfort_zone: true, comfort_tau_s: 20, edge_reanchor: true, edge_margin: 0.08}
+    head_assist: "off"          # off | coarse | pointer
+    head: {monitor_switch: false, switch_dwell_s: 0.6, switch_margin: 4, gate_tolerance: 25}
+gaze:
+  enabled: true                 # still needs `away gaze calibrate`
+  model: auto                   # auto | iris | l2cs | mobilegaze
+  look_to_jump: true
+  jump_idle_s: 0.6
+  jump_min_px: 250
+  jump_across_monitors_only: false
+  drift_correction: true
+```
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -752,7 +860,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1387 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | TESTCOUNT tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -797,9 +905,20 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Frozen bundle with every feature (`away selftest`: torch, onnx, onnxruntime, MediaPipe, OpenCV, faster-whisper + Silero VAD, PortAudio, tkinter, pynput, pystray) | All 13 checks pass in the dev venv (Linux aarch64). The frozen build with the new bundle was **not completed in the sandbox** (too slow on its filesystem). Windows/macOS/Linux x86_64: **CI-verified on tag only** (the release workflow fails if any check fails) |
 | Windows `.exe` installer, macOS `.dmg` | **CI-built and smoke-tested on tag only; untested on real hardware** |
 | Auto-update (`away update`, tray item) | Version compare, asset choice, SHA-256 verify, command lines and AppImage replace unit-tested with no network (`tests/test_updater.py`); real installs on each OS **untested** |
+| Auto-centering (v0.1.19) | Soft-recenter gain and its closed-trip drift, comfort-zone EMA, region shift, edge clutch on every edge, mapper integration (relative and absolute) and `cursor:center` unit-tested with synthetic hand paths; **untested with a live webcam**: the default strength/margins are not tuned on a real hand |
+| Head tracking (v0.1.19) | Matrix → yaw/pitch/roll round trips, the matrix output switched on and read from a real MediaPipe Face Landmarker run on a portrait photo (mirrored and not; MediaPipe 1.1.0 on Linux aarch64), sign alignment, filters, pointer, coarse zones, monitor-switch hysteresis/dwell and the face-gate use unit-tested; **untested with a live webcam**: pointer feel, coarse zones and the switch thresholds are not tuned |
+| Eye tracking + screen map (v0.1.19) | Iris features (invariant to face position, size and roll), ridge fit/predict with leave-one-dot-out error, calibration session, per-camera storage, layout check, look-to-jump, drift correction and the pipeline wiring tested with a synthetic user (head + eyes) on two monitors; iris points read from the real Face Landmarker on a photo; **the Tk calibration screens, `away gaze test` and real accuracy are untested** (no camera or display with a person in the sandbox), so the 2-4 degree figure is the literature value for webcam gaze, not a measurement |
+| Optional gaze networks (v0.1.19) | Real downloads through fastdl with the pinned SHA-256, both ONNX files run with onnxruntime 1.31 on a real face crop (CPU, 2 ARM cores); decoding, crop, rate limit, auto resolution, license opt-in, Settings Models list (rendered under Xvfb) and CLI tested with a fake session; **CUDA/DirectML untested; whether the network improves the screen map on a real user is untested** |
 | iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
+
+## Changes since v0.1.18 (unreleased)
+
+**Auto-centering, head tracking, eye tracking and the screen map**, plus an opt-in learned gaze model and a Models
+list in Settings → Performance. See "Auto-centering, head tracking and eye tracking (v0.1.19)" above. New voice
+commands: "center", "look here". New CLI: `away gaze calibrate|test|clear|status`, `away gaze model
+install|status|remove`.
 
 ## Changes in v0.1.18
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import sys
@@ -1028,6 +1029,159 @@ def cmd_iphone(args: argparse.Namespace, webcam: Any = None) -> int:
     return 0 if summary["iphone_face_rows"] else 1
 
 
+def _gaze_monitors(cfg: cfgmod.AppConfig) -> tuple[Any, ...]:
+    from away.control import monitors
+
+    return monitors.select_monitors(monitors.enumerate_monitors(), cfg.hands.cursor.monitors)
+
+
+def gaze_status_lines(cfg: cfgmod.AppConfig, models_dir: Path, mons: Any = None) -> list[str]:
+    """``away gaze status``: calibrations per camera, the gaze backend in use and the optional models."""
+    import time as _time
+
+    from away.app import optional_models as om
+    from away.face import gaze as gz
+    from away.face.headgaze import calibration_camera
+
+    cam = calibration_camera(cfg)
+    lines = [f"camera: {cam}"]
+    cals = gz.list_calibrations()
+    if not cals:
+        lines.append("screen map: not calibrated (run `away gaze calibrate`); gaze features stay off")
+    for name, c in cals.items():
+        when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(c.created))
+        acc = c.accuracy_px()
+        mark = " (current camera)" if name == cam else ""
+        layout = ""
+        if mons is not None and name == cam and not c.matches_layout(mons):
+            layout = " - monitor layout changed since: recalibrate"
+        lines.append(
+            f"screen map for {name!r}{mark}: {when}, {c.n_dots} dots on {len(c.monitors)} monitor(s), "
+            f"~{acc:.0f} px typical error (leave-one-dot-out)"
+            + (f", with {c.net_model}" if c.net_model else "")
+            + layout
+            if acc is not None
+            else f"screen map for {name!r}{mark}: {when}"
+        )
+    lines.append(f"gaze.model: {cfg.gaze.model} -> {om.resolve_gaze_model(cfg.gaze.model, models_dir)}")
+    lines += [s.line() for s in om.status(models_dir, kind="gaze")]
+    return lines
+
+
+def cmd_gaze(args: argparse.Namespace) -> int:
+    """``away gaze calibrate | test | clear | status | model install|status|remove``."""
+    from away.app import optional_models as om
+    from away.face import gaze as gz
+    from away.face.headgaze import calibration_camera
+
+    cfg, _ = cfgmod.load(_cfg_path(args))
+    mdir = _models_dir(cfg)
+    action = args.action
+    if action == "model":
+        sub = args.name or "status"
+        if sub == "status":
+            for line in gaze_status_lines(cfg, mdir)[-len(om.MODELS) :]:
+                print(line)
+            return 0
+        if sub not in ("install", "remove"):
+            return _fail("usage: away gaze model install NAME [--accept-license] | remove NAME | status")
+        key = args.model
+        if not key:
+            return _fail(f"which model? {', '.join(m.key for m in om.MODELS)}")
+        try:
+            m = om.get(key)
+        except KeyError as exc:
+            return _fail(exc)
+        if sub == "remove":
+            print(f"removed {m.name}" if om.remove(key, mdir) else f"{m.name} was not installed")
+            return 0
+        accepted = bool(args.accept_license)
+        if m.restricted and not accepted:
+            from away.app.frozen import stdin_usable
+
+            print(m.notice)
+            if not stdin_usable():
+                return _fail("pass --accept-license to download a research-only model")
+            accepted = input("Accept these terms and download? [y/N] ").strip().lower() in ("y", "yes")
+            if not accepted:
+                return _fail("not downloaded (license not accepted)")
+        print(f"downloading {m.name} ({m.size_mb:.1f} MB) ...")
+        try:
+            path = om.install(key, mdir, accept_license=accepted, write=_progress_writer())
+        except Exception as exc:
+            return _fail(f"download failed: {exc} (run it again to resume)")
+        print(f"\ninstalled {path}; gaze.model auto uses it ({om.resolve_gaze_model(cfg.gaze.model, mdir)} now)")
+        print("recalibrate (`away gaze calibrate`) so the screen map uses its features")
+        return 0
+    cam = str(args.camera) if args.camera else calibration_camera(cfg)
+    if action == "status":
+        mons = None
+        with contextlib.suppress(Exception):  # monitor detection failed: still show what is saved
+            mons = _gaze_monitors(cfg)
+        for line in gaze_status_lines(cfg, mdir, mons):
+            print(line)
+        return 0
+    if action == "clear":
+        gone = gz.clear_calibration(None if args.all else cam)
+        print(("cleared" if gone else "nothing to clear") + (" (all cameras)" if args.all else f" for {cam!r}"))
+        return 0
+    return _gaze_camera_command(args, cfg, mdir, cam)  # pragma: no cover - needs a camera and a display
+
+
+def _progress_writer() -> Any:
+    def write(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    return write
+
+
+def _gaze_camera_command(
+    args: argparse.Namespace, cfg: cfgmod.AppConfig, mdir: Path, cam: str
+) -> int:  # pragma: no cover - needs a camera, mediapipe and a display
+    from away.app import gaze_ui
+    from away.app.camera_share import borrowed_cameras, confirm_handover
+    from away.face import gaze as gz
+
+    if not (mdir / "face_landmarker.task").exists():
+        return _fail("the face model is missing: run `away setup` first")
+    mons = _gaze_monitors(cfg)
+    with borrowed_cameras(timeout=CALIBRATE_LEASE_S, who="gaze") as lease:
+        confirm_handover(lease, say=lambda m: print(m, flush=True))
+        if lease.app_running and not lease.handed_over:
+            return _fail("Project Away is using the camera and did not hand it over in time - pause or quit it")
+        if args.action == "calibrate":
+            print(f"calibrating {len(mons)} monitor(s), {cfg.gaze.points_per_monitor} dots each, camera {cam!r}")
+            try:
+                cal = gaze_ui.calibrate(cfg, mdir, mons, cam)
+            except ValueError as exc:
+                return _fail(exc)
+            if cal is None:
+                return 1
+            path = gz.save_calibration(cal)
+            acc = cal.accuracy_px()
+            print(f"saved the screen map to {path}")
+            if acc is not None:
+                print(
+                    f"typical error ~{acc:.0f} px (leave-one-dot-out). Webcam gaze is good for 'which monitor and "
+                    "roughly where' (about 2-4 degrees), not for small buttons."
+                )
+            _status_file_write(args, {"done": True, "rc": 0, "accuracy_px": acc})
+            return 0
+        cal = gz.load_calibration(cam)
+        if cal is None:
+            return _fail(f"no screen map for camera {cam!r}: run `away gaze calibrate` first")
+        print("a red ring follows your gaze; Esc or the time limit ends the test")
+        return gaze_ui.live_test(cfg, mdir, cal, float(args.seconds))
+
+
+def _status_file_write(args: argparse.Namespace, data: dict[str, Any]) -> None:
+    path = getattr(args, "status_file", None)
+    if path:
+        with contextlib.suppress(OSError):
+            Path(path).write_text(json.dumps(data), encoding="utf-8")
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
@@ -1269,6 +1423,21 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--all", action="store_true", help="compare: log all 51 shared blendshapes, not just the key ones")
     ip.add_argument("--config")
     ip.set_defaults(fn=cmd_iphone)
+
+    gz = sub.add_parser(
+        "gaze",
+        help="calibrate | test | clear | status | model install|status|remove: eye tracking + the screen map",
+    )
+    gz.add_argument("action", choices=["calibrate", "test", "clear", "status", "model"])
+    gz.add_argument("name", nargs="?", help="model: install | status | remove")
+    gz.add_argument("model", nargs="?", help="model name for install/remove (l2cs, mobilegaze)")
+    gz.add_argument("--camera", help="calibration for this camera name (default: the configured camera)")
+    gz.add_argument("--all", action="store_true", help="clear: every camera's calibration")
+    gz.add_argument("--seconds", type=float, default=30.0, help="test: how long to show the gaze dot")
+    gz.add_argument("--accept-license", action="store_true", help="model install: accept research-only terms")
+    gz.add_argument("--config", help=argparse.SUPPRESS)
+    gz.add_argument("--status-file", help=argparse.SUPPRESS)
+    gz.set_defaults(fn=cmd_gaze)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")

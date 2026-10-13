@@ -114,7 +114,9 @@ INT_TUNABLES = {
     "hands.cursor.click_rewind_ms",
     "app.auto_pause_idle_ms",
     "voice.numbers_min_value",
+    *cfgmod.TRACKING_INT_TUNABLES,  # auto-centering / head / gaze (v0.1.19)
 }
+TUNABLE_LABELS.update(cfgmod.TRACKING_TUNABLE_LABELS)
 VOICE_FIELDS = {
     "hands.roles.mode": ROLE_MODES,
     "hands.cursor.curve": ("sigmoid", "power"),
@@ -2190,6 +2192,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.pack_rm = ttk.Button(pack_row, text="Remove GPU pack", command=self._perf_remove)
         self.pack_rm.pack(side="right", padx=4)
         self._perf_refresh()
+        from away.app import models_panel  # optional models + eye tracking (v0.1.19), isolated in its own module
+
+        models_panel.build(self, f)
 
     def _perf_refresh(self) -> None:
         try:

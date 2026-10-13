@@ -19,6 +19,48 @@ from away.control.keys import KeyComboError, canonical
 
 
 @dataclass
+class AutoCenterConfig:
+    """Keep the hand inside the camera frame without thinking about it (v0.1.19, ``hands.cursor.autocenter``)."""
+
+    enabled: bool = True  # master switch for the three helpers below
+    # relative mode: moves away from the target get a little more gain and moves back a little less, so over
+    # many strokes the hand's resting spot drifts toward the target without the cursor ever jumping
+    soft_recenter: bool = True
+    soft_strength: float = 0.12  # 0..0.5: +-12% gain at the frame edge, scaled down toward the target
+    target: str = "frame"  # frame (camera centre) | comfort (the learned resting spot, kept inside the frame)
+    # learned comfort zone: an EMA of where the hand rests; absolute mode centres its active region there
+    comfort_zone: bool = True
+    comfort_tau_s: float = 20.0  # seconds of resting for the EMA to move ~63% of the way
+    rest_speed: float = 0.08  # hand slower than this (frame widths/s) counts as resting
+    # edge re-anchor: a quick swing back from the frame edge does not drag the cursor back (like lifting a mouse)
+    edge_reanchor: bool = True
+    edge_margin: float = 0.08  # edge band, fraction of the frame
+    edge_return_speed: float = 0.5  # inward speed (frame widths/s) that counts as a swing back
+
+
+@dataclass
+class HeadConfig:
+    """Head tracking from the Face Landmarker's facial transformation matrix (``hands.cursor.head``)."""
+
+    min_cutoff: float = 1.0  # One Euro filter on yaw/pitch/roll (degrees)
+    beta: float = 0.05
+    pointer_gain: float = 0.012  # pointer mode: primary-monitor widths per degree of head turn
+    pointer_dead_zone: float = 0.15  # degrees per frame below which head motion is ignored (tremor)
+    pointer_acceleration: float = 1.4  # power curve exponent on the per-frame head delta
+    coarse_cols: int = 3  # coarse mode: zones per monitor (columns x rows)
+    coarse_rows: int = 3
+    coarse_yaw_span: float = 30.0  # coarse mode without a screen map: +- degrees across the whole desktop
+    coarse_pitch_span: float = 15.0
+    coarse_hysteresis: float = 0.25  # fraction of a zone the head must go past the border to change zone
+    coarse_dwell_s: float = 0.35  # the new zone must be held this long before the cursor jumps
+    # head-turn monitor switch: needs the screen map (`away gaze calibrate`), off by default
+    monitor_switch: bool = False
+    switch_margin: float = 4.0  # degrees closer to the other monitor's direction than to the current one
+    switch_dwell_s: float = 0.6  # held this long (a glance does not switch)
+    gate_tolerance: float = 25.0  # face gate: degrees from the usual screen-facing pose that still count
+
+
+@dataclass
 class CursorConfig:
     mode: str = "relative"  # "relative" (trackpad) or "absolute"
     dead_zone: float = 0.004  # normalized hand units below which motion is ignored
@@ -51,6 +93,11 @@ class CursorConfig:
     # Enlarge the system cursor while gesture control is active (users sit far from the screen); it shrinks back
     # on pause, so the size also shows the state. 0 = off, 1..5 = 1.5x, 2x, 3x, 4x, 6x (Windows only)
     big_cursor_size: int = 2
+    autocenter: AutoCenterConfig = field(default_factory=AutoCenterConfig)
+    # off | coarse (the head moves the cursor in big steps between zones, the hand refines) | pointer (head-only
+    # pointer while no hand points, for when the hands are busy; clicks with the face triggers)
+    head_assist: str = "off"
+    head: HeadConfig = field(default_factory=HeadConfig)
 
 
 @dataclass
@@ -265,6 +312,35 @@ class FaceConfig:
     iphone: IPhoneFaceConfig = field(default_factory=IPhoneFaceConfig)
 
 
+GAZE_MODELS = ("auto", "iris", "l2cs", "mobilegaze")
+
+
+@dataclass
+class GazeConfig:
+    """Eye tracking + the spatial screen map (``away gaze calibrate``). Nothing here acts until calibrated."""
+
+    enabled: bool = True  # master switch (still needs a calibration for the current camera)
+    # iris: iris landmarks + head pose only (no extra model) | l2cs / mobilegaze: also a learned gaze network
+    # (optional download, research-only weights) | auto: l2cs when downloaded and a GPU is usable, else
+    # mobilegaze when downloaded, else iris
+    model: str = "auto"
+    model_rate_hz: float = 10.0  # the learned gaze network runs at most this often
+    min_cutoff: float = 0.4  # One Euro filter on the predicted gaze point (pixels)
+    beta: float = 0.004
+    ridge_alpha: float = 1.0  # calibration regression regularisation
+    points_per_monitor: int = 9  # calibration dots per monitor (9 = 3x3; 5 = corners + centre)
+    # look-to-jump (MAGIC pointing): the hand starts moving after resting -> warp to where you look
+    look_to_jump: bool = True
+    jump_idle_s: float = 0.6
+    jump_min_px: float = 250.0  # only when the gaze point is at least this far from the cursor
+    jump_across_monitors_only: bool = False  # only warp when you look at another monitor
+    # drift correction: each click nudges the model toward where you clicked (you look where you click)
+    drift_correction: bool = True
+    drift_rate: float = 0.1
+    drift_max_px: float = 150.0  # the learned offset never exceeds this
+    drift_max_err_px: float = 350.0  # clicks further from the gaze point are ignored (not looking there)
+
+
 @dataclass
 class WifiConfig:
     enabled: bool = False
@@ -324,6 +400,7 @@ class AppConfig:
     hands: HandsConfig = field(default_factory=HandsConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     face: FaceConfig = field(default_factory=FaceConfig)
+    gaze: GazeConfig = field(default_factory=GazeConfig)
     wifi: WifiConfig = field(default_factory=WifiConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
@@ -532,6 +609,7 @@ def validate(cfg: AppConfig) -> None:
     r = c.monitor_refresh_s
     if isinstance(r, bool) or not isinstance(r, (int, float)) or not 0 <= float(r) <= 300:
         raise ValueError(f"hands.cursor.monitor_refresh_s must be seconds in [0, 300] (0 = off), got {r!r}")
+    validate_tracking(cfg)
     if cfg.hands.roles.mode not in ROLE_MODES:
         raise ValueError(f"hands.roles.mode must be {'|'.join(ROLE_MODES)}, got {cfg.hands.roles.mode!r}")
     ps = cfg.hands.palm_scroll
@@ -594,6 +672,42 @@ def validate(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be a number in [{lo}, {hi}], got {value!r}")
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
+
+
+HEAD_ASSIST_MODES = ("off", "coarse", "pointer")
+AUTOCENTER_TARGETS = ("frame", "comfort")
+
+
+def validate_tracking(cfg: AppConfig) -> None:
+    """hands.cursor.autocenter / head_assist / head and gaze: the enums and switches (numbers are in
+    :func:`tunable_ranges`)."""
+    c = cfg.hands.cursor
+    ac, hd, gz = c.autocenter, c.head, cfg.gaze
+    if c.head_assist is False:  # YAML 1.1 reads a bare `off` as false
+        c.head_assist = "off"
+    if c.head_assist not in HEAD_ASSIST_MODES:
+        raise ValueError(f"hands.cursor.head_assist must be {'|'.join(HEAD_ASSIST_MODES)}, got {c.head_assist!r}")
+    if ac.target not in AUTOCENTER_TARGETS:
+        raise ValueError(f"hands.cursor.autocenter.target must be {'|'.join(AUTOCENTER_TARGETS)}, got {ac.target!r}")
+    if gz.model not in GAZE_MODELS:
+        raise ValueError(f"gaze.model must be {'|'.join(GAZE_MODELS)}, got {gz.model!r}")
+    for path, obj, names in (
+        ("hands.cursor.autocenter", ac, ("enabled", "soft_recenter", "comfort_zone", "edge_reanchor")),
+        ("hands.cursor.head", hd, ("monitor_switch",)),
+        ("gaze", gz, ("enabled", "look_to_jump", "jump_across_monitors_only", "drift_correction")),
+    ):
+        for name in names:
+            if not isinstance(getattr(obj, name), bool):
+                raise ValueError(f"{path}.{name} must be true or false, got {getattr(obj, name)!r}")
+    for path, val in (
+        ("hands.cursor.head.coarse_cols", hd.coarse_cols),
+        ("hands.cursor.head.coarse_rows", hd.coarse_rows),
+        ("gaze.points_per_monitor", gz.points_per_monitor),
+    ):
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ValueError(f"{path} must be an integer, got {val!r}")
+    if gz.points_per_monitor not in (5, 9, 16):
+        raise ValueError(f"gaze.points_per_monitor must be 5, 9 or 16, got {gz.points_per_monitor!r}")
 
 
 def validate_camera_device(path: str, device: Any) -> None:
@@ -705,6 +819,76 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.palm_scroll.dead_zone", cfg.hands.palm_scroll.dead_zone, 0.0, 0.5),
         ("hands.palm_scroll.friction", cfg.hands.palm_scroll.friction, 0.5, 20.0),
         ("hands.min_camera_fps", cfg.hands.min_camera_fps, 1.0, 60.0),
+        *tracking_tunables(cfg),
+    ]
+
+
+# Tuning-tab labels for :func:`tracking_tunables` (merged into the Settings window's label table)
+TRACKING_TUNABLE_LABELS = {
+    "hands.cursor.autocenter.soft_strength": "Auto-center: soft recenter strength",
+    "hands.cursor.autocenter.comfort_tau_s": "Auto-center: comfort zone learning time (s)",
+    "hands.cursor.autocenter.rest_speed": "Auto-center: resting hand speed",
+    "hands.cursor.autocenter.edge_margin": "Auto-center: camera edge band",
+    "hands.cursor.autocenter.edge_return_speed": "Auto-center: swing-back speed at the edge",
+    "hands.cursor.head.min_cutoff": "Head: smoothing (min cutoff)",
+    "hands.cursor.head.beta": "Head: smoothing (speed response)",
+    "hands.cursor.head.pointer_gain": "Head pointer: speed",
+    "hands.cursor.head.pointer_dead_zone": "Head pointer: dead zone (degrees)",
+    "hands.cursor.head.pointer_acceleration": "Head pointer: acceleration",
+    "hands.cursor.head.coarse_cols": "Head coarse: zone columns per monitor",
+    "hands.cursor.head.coarse_rows": "Head coarse: zone rows per monitor",
+    "hands.cursor.head.coarse_yaw_span": "Head coarse: head turn across the desktop (deg)",
+    "hands.cursor.head.coarse_pitch_span": "Head coarse: head tilt across the desktop (deg)",
+    "hands.cursor.head.coarse_hysteresis": "Head coarse: zone hysteresis",
+    "hands.cursor.head.coarse_dwell_s": "Head coarse: dwell before a jump (s)",
+    "hands.cursor.head.switch_margin": "Head monitor switch: margin (degrees)",
+    "hands.cursor.head.switch_dwell_s": "Head monitor switch: dwell (s)",
+    "hands.cursor.head.gate_tolerance": "Face gate: head turn still facing the screen (deg)",
+    "gaze.model_rate_hz": "Gaze: learned model rate (Hz)",
+    "gaze.min_cutoff": "Gaze: smoothing (min cutoff)",
+    "gaze.beta": "Gaze: smoothing (speed response)",
+    "gaze.ridge_alpha": "Gaze: calibration regularisation",
+    "gaze.jump_idle_s": "Look-to-jump: hand rest before a jump (s)",
+    "gaze.jump_min_px": "Look-to-jump: minimum distance (px)",
+    "gaze.drift_rate": "Gaze drift correction: rate per click",
+    "gaze.drift_max_px": "Gaze drift correction: maximum offset (px)",
+    "gaze.drift_max_err_px": "Gaze drift correction: ignore clicks further than (px)",
+}
+TRACKING_INT_TUNABLES = frozenset({"hands.cursor.head.coarse_cols", "hands.cursor.head.coarse_rows"})
+
+
+def tracking_tunables(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
+    """Auto-centering, head tracking and gaze (v0.1.19): appended to :func:`tunable_ranges`."""
+    ac, hd, gz = cfg.hands.cursor.autocenter, cfg.hands.cursor.head, cfg.gaze
+    return [
+        ("hands.cursor.autocenter.soft_strength", ac.soft_strength, 0.0, 0.5),
+        ("hands.cursor.autocenter.comfort_tau_s", ac.comfort_tau_s, 1.0, 600.0),
+        ("hands.cursor.autocenter.rest_speed", ac.rest_speed, 0.005, 1.0),
+        ("hands.cursor.autocenter.edge_margin", ac.edge_margin, 0.0, 0.3),
+        ("hands.cursor.autocenter.edge_return_speed", ac.edge_return_speed, 0.05, 5.0),
+        ("hands.cursor.head.min_cutoff", hd.min_cutoff, 0.05, 10.0),
+        ("hands.cursor.head.beta", hd.beta, 0.0, 2.0),
+        ("hands.cursor.head.pointer_gain", hd.pointer_gain, 0.001, 0.1),
+        ("hands.cursor.head.pointer_dead_zone", hd.pointer_dead_zone, 0.0, 3.0),
+        ("hands.cursor.head.pointer_acceleration", hd.pointer_acceleration, 1.0, 3.0),
+        ("hands.cursor.head.coarse_cols", hd.coarse_cols, 1, 8),
+        ("hands.cursor.head.coarse_rows", hd.coarse_rows, 1, 8),
+        ("hands.cursor.head.coarse_yaw_span", hd.coarse_yaw_span, 5.0, 90.0),
+        ("hands.cursor.head.coarse_pitch_span", hd.coarse_pitch_span, 3.0, 60.0),
+        ("hands.cursor.head.coarse_hysteresis", hd.coarse_hysteresis, 0.0, 0.49),
+        ("hands.cursor.head.coarse_dwell_s", hd.coarse_dwell_s, 0.0, 3.0),
+        ("hands.cursor.head.switch_margin", hd.switch_margin, 0.0, 30.0),
+        ("hands.cursor.head.switch_dwell_s", hd.switch_dwell_s, 0.0, 5.0),
+        ("hands.cursor.head.gate_tolerance", hd.gate_tolerance, 5.0, 90.0),
+        ("gaze.model_rate_hz", gz.model_rate_hz, 1.0, 30.0),
+        ("gaze.min_cutoff", gz.min_cutoff, 0.01, 10.0),
+        ("gaze.beta", gz.beta, 0.0, 1.0),
+        ("gaze.ridge_alpha", gz.ridge_alpha, 0.0001, 1000.0),
+        ("gaze.jump_idle_s", gz.jump_idle_s, 0.1, 5.0),
+        ("gaze.jump_min_px", gz.jump_min_px, 0.0, 5000.0),
+        ("gaze.drift_rate", gz.drift_rate, 0.0, 1.0),
+        ("gaze.drift_max_px", gz.drift_max_px, 0.0, 1000.0),
+        ("gaze.drift_max_err_px", gz.drift_max_err_px, 10.0, 5000.0),
     ]
 
 
