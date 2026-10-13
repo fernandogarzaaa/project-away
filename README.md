@@ -1837,6 +1837,70 @@ Config (`macros:` in config.yaml, all optional):
 | `use_ui_automation` | `true` | Windows: remember and find controls by name |
 | `store_dir` | `""` | shortcut folder (`""` = `<data dir>/macros`) |
 
+## Newer models (optional) (v0.1.24)
+
+Project Away keeps the models it has always used. Nothing changes until you ask for it. In **Settings → Performance →
+Newer models (optional)** you can try the 2026 models, which are faster or more accurate. Every one of them is an
+optional download, and you can go back with one click.
+
+### Test my PC
+
+Press **Test my PC**. It downloads nothing. It times the newer models you have already downloaded on your own
+computer: how long each takes to load, how fast it runs, how busy it keeps the processor and how much graphics memory
+it uses. Then it tells you which preset fits, in one sentence, for example "Recommended: Light - Moonshine keeps up on
+the processor". **Use it** switches to that preset. If anything later fails or runs slower than what it replaced, that
+one job switches back by itself and the tray says why (`models_next.auto_rollback`, on by default). If the test does
+not pass, nothing is changed. Agents can do the same through Agent Link: the `model_bench` domain has `run`, `apply`
+and `restore`. The v0.1.24 self-test can show the result as "Newer models" through `model_bench.SELFTEST_HOOK`.
+
+### The presets in plain words
+
+| Preset | What it is for | Graphics memory (estimate) |
+|---|---|---|
+| **Light** | Any computer, no graphics card needed for speech. Moonshine v2 Small turns speech into text on the processor, Qwen3.5 0.8B tidies it, and the Windows voice speaks. | about 0.7 GB (only if Smart cleanup runs on the graphics card) |
+| **Balanced** | A computer with an NVIDIA graphics card. Nemotron 3.5 streaming speech (experimental) and Qwen3.5 2B on the card, the Kokoro voice. | about 2.7 GB |
+| **Best** | A graphics card with room to spare (about 5 GB free, e.g. a 6 GB card). Same as Balanced, but the 8-bit Qwen3.5 2B, Kokoro in half precision on the card, and speech-to-text double-checks the wake word. | about 3.9 GB |
+
+All three also use Silero VAD v6.2 (it hears when you start and stop talking) and, once you have trained one for your
+name, a small wake-word model, so speech-to-text only runs after "Hey &lt;name&gt;". The memory figures are estimates
+(file size plus runtime overhead), not measurements on a real card. Test my PC measures the real numbers, and it only
+recommends a preset when your card has that much free memory plus 1 GB to spare. A model that is not downloaded yet
+leaves that job as it is. The preset buttons list what is still missing (and how many MB) before anything is
+downloaded.
+
+**Advanced** (closed by default) lists every newer model by job (hands, speech to text, cleanup, voice, speech
+detection, wake word) with its licence and size, and has **Go back to the standard models**. Experimental choices:
+RTMPose hands on the graphics card (A/B against MediaPipe on your own camera; switched only when it is at least as
+steady and as fast) and Kyutai pocket-tts, an instant voice for short replies.
+
+Optional pip extras (not part of the installers or `[all]`): `pip install "project-away[moonshine]"`,
+`"project-away[wakeword]"` (Python 3.11 or newer) and `"project-away[pocket]"` (pulls in PyTorch). Settings can also
+download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
+
+### Licences
+
+* **espeak-ng and Piper are GPL-3.0.** They are never bundled with Project Away. Kokoro uses espeak-ng for
+  pronunciation, and both stay separate, optional downloads, exactly as in v0.1.23.
+* **Nemotron 3.5 ASR Streaming is OpenMDW-1.1.** It is permissive but needs attribution: keep the licence text that
+  is downloaded with the model, and credit NVIDIA if you pass the model on.
+* **Kyutai pocket-tts weights are CC-BY-4.0.** Credit Kyutai. The code is MIT. Only clone a voice with the speaker's
+  consent.
+* Moonshine v2 and moonshine-voice: MIT. Qwen3.5, livekit-wakeword, NeMo-Speech.cpp, RTMPose/RTMDet and Kokoro:
+  Apache-2.0. Silero VAD: MIT. openWakeWord's own pre-trained models (CC BY-NC-SA) are never shipped or downloaded.
+
+### Verified vs untested (newer models)
+
+| What | Status |
+|---|---|
+| Engines and downloads | Tested with fakes: pinned archive per OS and CPU, sha256 mismatch rejected and removed, path traversal in zip/tar refused, only the package folder unpacked from a wheel, start-up check failure removes the engine, one click fetches files plus engine (`tests/test_v0124_engines_fetch.py`). **No real engine download was run for this PR.** |
+| Moonshine / Nemotron speech | Tested with a fake moonshine transcriber, a fake `nemo-speech serve` (a real local HTTP server started through a fake process), a fake realtime WebSocket and a real one on 127.0.0.1, including the switch to Whisper when Nemotron fails (`tests/test_v0124_asr_ws.py`). Earlier build notes report a CPU run of Nemotron through `nemo-speech serve` on Linux (0.6 s using the live stream's final text vs 6.6 s for a second request). That run was not repeated for this PR. **Untested on Windows and on any GPU (the CUDA and Vulkan builds).** |
+| Silero VAD v6.2, wake-word gate, Qwen3.5 cleanup | Tested with a fake ONNX session, a fake wake-word model and session, and a fake llama.cpp backend (`<think>` stripping, falling back to Qwen2.5) (`tests/test_v0124_voice_next.py`). Earlier build notes report Qwen3.5-0.8B Q4_K_M loading in llama-cpp-python 0.3.36 on Linux aarch64 (CPU), about 2 s per sentence. **No wake-word model has been trained, and nothing has been heard through a real microphone.** |
+| Voices (Kokoro fp16, pocket-tts) | Engine choice and the long-text hand-off are tested with fakes. **Not heard on real speakers. Kokoro fp16 has not run on a GPU.** |
+| RTMPose hands and the A/B | SimCC decoding, crop geometry and whole frames tested through fake ONNX sessions. Jitter, pinch flicker, found rate and the recommendation rule tested on synthetic hands (`tests/test_v0124_hands_next.py`). **Not run with a real camera or a real graphics card.** |
+| Test my PC, rollback, presets | The recommendation rules, the saved report, the self-test hook, the Agent Link `model_bench` domain, per-job rollback and the gating of presets are tested. Older apps see no change: the v0.1.23 catalog keys stay empty, and the newer models are only read under `models_next` / `presets_next` (`tests/test_v0124_bench_registry.py`). **Has not been run on a real PC with the real models.** |
+| Newer models panel | The logic is tested headless. The panel was rendered under Xvfb on Linux, on its own and inside Settings → Performance, with Advanced opened. That run found and fixed clipped preset buttons, a doubled "(experimental)" label and pocket-tts shown as ready when it was not installed. **Untested on a real Windows desktop.** |
+| Windows, macOS, GPU | **Nothing in this section has been tested on Windows or on a GPU.** CI runs the fake-based tests on Ubuntu, Windows and macOS. |
+
 ## Verified vs untested
 
 | Area | Status |
@@ -1945,6 +2009,7 @@ Config (`macros:` in config.yaml, all optional):
 | Model registry, Settings → Models, catalog (v0.1.23) | Validation, catalog SHA-256 check (tampered / bad entries ignored), local models, switch / enable / modes with undo, Try-it rollback and the agent op tested; the Models tab rendered and driven under Xvfb on Linux; **untested on Windows**, and Try-it has no real benchmark wired to the GUI yet (agent op and API only) |
 | Which app holds the camera, busiest programs (v0.1.23) | ConsentStore parsing with a fake registry, NVIDIA Broadcast's source from a fake settings file, messages, psutil aggregation with a fake psutil; **untested on the user's PC** (the real ConsentStore keys and Broadcast's settings file layout are assumptions) |
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
+| Newer models (optional, v0.1.25) | Tested with fakes on every CI OS; **nothing tested on Windows or on a GPU**. See [Newer models: verified vs untested](#verified-vs-untested-newer-models) |
 | Parakeet, Wayland | **Untested** |
 | Stop everything / one action engine (v0.1.24) | Every mouse move, click, key press and typed character Project Away sends (gestures, voice, dictation, shortcut replays, Agent Link computer control, the Check my PC echo probe) goes through `away.actions_engine`; a test fails the build if any other module sends OS input. Stop everything (tray, hotkey, open palm, "stop") cancelling a drag, a shortcut replay, dictation and a paste and letting go of held buttons and keys, the user winning over an agent mid-action, pause / resume / shutdown and the one audit log tested with fake backends and threads in `tests/test_actions_engine.py`. **Untested on a real desktop**: real pynput input through the engine, and Stop everything pressed during a real drag or replay |
 | Self-test (v0.1.24) | Every check's pass / warn / fail rule, the time limit and crash handling, redaction, delivery to every agent, the service and the CLI tested with a fake PC environment; the optional model-benchmark hook tested with a fake module (absent: no extra line). **Untested on the user's PC**: the real environment (`away.selftest.env.RealEnv`: real cameras, microphone, speech, voices, pop-ups, link), the window and its fix buttons |
