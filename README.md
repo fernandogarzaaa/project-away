@@ -1534,6 +1534,99 @@ CPUs) and says why; the tray offers *Install GPU pack* (one notification, then a
 `voice.asr_model: large-v3-turbo` written by v0.1.4's setup is migrated to `auto` (configs now carry
 `config_version: 2`; a model you pick from now on is kept). Details: [docs/INSTALL.md](docs/INSTALL.md#hardware-auto-tuning-and-the-nvidia-gpu).
 
+## Self-test (v0.1.24)
+
+One click checks the whole PC and says, in plain words, what works and what does not, each with a fix button
+where one exists. Start it from the tray (**Run self-test**), from *Settings* (**Run self-test**), or from a
+terminal:
+
+```
+away selftest                    # every check, printed in plain words
+away selftest --window           # the same in a small window with fix buttons, Copy report, Save as file
+away selftest --only cameras,mic # some checks only
+away selftest --save report.json # write the (redacted) report as JSON
+```
+
+When the app is running, the self-test runs inside it, so the cameras are not taken away from it. The checks:
+cameras (opens each one, measures its real frame rate, names the app holding a busy camera and offers to close
+it), hand tracking speed, the graphics card (see *GPU tracking* below), the smooth pointer's update rate, the
+big pointer, that only one copy is running, the microphone level, speech to text on a short phrase, the speaking
+voices, pop-up messages, Agent Link, PC load and the models. A check that crashes or runs past its time limit
+becomes a "could not run" line; it never breaks the report.
+
+Where the report goes: to **every** connected agent (its inbox, its wake-up address when one is set, and the
+`selftest.completed` event), and it is always readable as `away://selftest/latest` (MCP) or
+`GET /v1/selftest/latest` (REST). Agents can also start one (`selftest` action / `POST /v1/selftest`). Before
+it leaves the app the report is redacted: tokens, your user name and paths outside Project Away's own folders are
+removed. With no agent connected it stays on this PC.
+
+`away selftest --json FILE` / `--bundle` is still the installer bundle check that the release workflow runs.
+When the model benchmark (`away.app.model_bench`) is part of the build, its last result appears as one more
+line ("Newer models"); the self-test only reads that result and never starts a benchmark by itself.
+
+## GPU tracking (v0.1.24)
+
+`hands.compute: auto | gpu | cpu` (*Settings > Models*, "Tracking runs on") chooses where hand and face
+tracking run:
+
+| Path | Where | Notes |
+|---|---|---|
+| MediaPipe on the processor | every OS | the default and the fallback for anything that fails |
+| ONNX Runtime + DirectML | Windows, any DirectX 12 card (NVIDIA, AMD, Intel) | needs `onnxruntime-directml`; MediaPipe itself has no GPU support on Windows |
+| ONNX Runtime + CUDA | NVIDIA | needs `onnxruntime-gpu`; preferred over DirectML when both exist |
+
+The ONNX models are Google's MediaPipe hand and face models converted to ONNX (Apache-2.0, like the
+originals), a one-time download of about 23 MB checked against pinned SHA-256 sums. `auto` uses the graphics
+card only when a GPU runtime is present **and** the models are already downloaded, so it never downloads by
+itself; `gpu` downloads them when needed; `cpu` never touches the card. If the GPU path fails to start, tracking
+stays on the processor and the tray, *Settings* and the self-test say why.
+
+**The installers still ship plain `onnxruntime` (CPU)**, so on an installed copy `auto` stays on the processor
+until a GPU runtime is added. Pip installs: `pip install onnxruntime-directml` (Windows) or `onnxruntime-gpu`.
+
+Honest numbers. Everything below was measured in the Linux aarch64 build sandbox, **on the CPU only**; there is no
+graphics card there:
+
+| Per frame (one hand) | Time |
+|---|---|
+| MediaPipe on the processor | about 13 ms |
+| The same models through ONNX Runtime on the processor | about 25 ms |
+| Everything around the model (anchors, NMS, crop, projection, in numpy) | about 0.5 ms |
+
+So on a CPU the ONNX path is about twice as slow as MediaPipe, and the gain has to come from the graphics card.
+**How much a real card saves is not measured yet.** The point of moving tracking off the processor is to leave
+it free for speech to text and the rest of the PC; whether that pays off on a given PC is what the self-test's
+"Graphics card" line shows.
+
+## A link that survives restarts (v0.1.24)
+
+Before v0.1.24 a remote agent had to pair again whenever Project Away restarted, the PC rebooted or the network
+dropped, because the free link gets a new random address every time and the agent's access ended. Now:
+
+* **Refresh tokens.** At pairing an agent gets a long-lived refresh token next to its short access token
+  (`POST /v1/token/refresh`; each refresh hands out a new one; only its SHA-256 is kept on the PC). It lasts
+  `agent_link.refresh_ttl_days` (default 30) after its last use. Disconnecting the agent in *Settings* revokes it.
+* **`agent_link.keep_link: true`** (default). When Away starts, or the link drops, while a remote agent can still
+  reconnect, the link is started again by itself.
+* **Telling agents the new address**: through the agent's wake-up address (a `link.moved` POST), its
+  inbox, and a **rendezvous** topic (`agent_link.rendezvous: ntfy`, default; `off` turns it off). Each agent gets
+  its own random topic on `https://ntfy.sh` and its own signing key at pairing; every message is signed
+  (HMAC-SHA256), so nobody can send an agent to a fake address. A stranger who guessed a topic would only learn the
+  current address, which grants nothing without a token. `scripts/agent_link_client.py` follows a move and
+  refreshes in one call.
+* **A named tunnel** for an address that never changes (below).
+
+| Link | Cost and setup | Address after a restart | What the agent does |
+|---|---|---|---|
+| Standard (Cloudflare quick tunnel) | free, no account | new random address every start | refresh token + reads the new address from rendezvous / inbox / wake-up address |
+| Backup (localhost.run or Pinggy over SSH) | free, no account, no Cloudflare | new address every start (Pinggy's free links also end after an hour) | same as standard |
+| Named (your own Cloudflare tunnel) | free Cloudflare account and a domain on Cloudflare; one-time setup | **never changes** | refresh token only |
+
+Set up a named tunnel: create a tunnel in the Cloudflare dashboard (Zero Trust > Networks > Tunnels), add a
+public hostname whose service is HTTP `http://127.0.0.1:47615` (or your `agent_link.port`), then run `away agent named-tunnel away.example.com`
+(it asks for the tunnel token and keeps it in the system keyring, never in `config.yaml`; `away agent
+named-tunnel clear` removes it), or use *Settings > Agent Link > Advanced*.
+
 ## Updates
 
 The installed app checks GitHub Releases when the tray starts and every 24 hours. When a new version is out
@@ -1757,6 +1850,9 @@ Config (`macros:` in config.yaml, all optional):
 | Which app holds the camera, busiest programs (v0.1.23) | ConsentStore parsing with a fake registry, NVIDIA Broadcast's source from a fake settings file, messages, psutil aggregation with a fake psutil; **untested on the user's PC** (the real ConsentStore keys and Broadcast's settings file layout are assumptions) |
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
 | Parakeet, Wayland | **Untested** |
+| Self-test (v0.1.24) | Every check's pass / warn / fail rule, the time limit and crash handling, redaction, delivery to every agent, the service and the CLI tested with a fake PC environment; the optional model-benchmark hook tested with a fake module (absent: no extra line). **Untested on the user's PC**: the real environment (`away.selftest.env.RealEnv`: real cameras, microphone, speech, voices, pop-ups, link), the window and its fix buttons |
+| GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; GitHub's runners have no real card, so DirectML runs on its software adapter there. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
+| A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
 ## Changes in v0.1.23
 
