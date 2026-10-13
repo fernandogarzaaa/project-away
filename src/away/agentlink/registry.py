@@ -657,6 +657,41 @@ def cameras_apply(cfg: Any, op: Op) -> Applied:
     return Applied(op, None, op.op, inv, text, True)
 
 
+# ---------------------------------------------------------------------------- models (v0.1.23)
+def models_list(cfg: Any) -> list[dict[str, Any]]:
+    from away.app.model_registry import Registry
+
+    return Registry().rows(cfg)
+
+
+def models_apply(cfg: Any, op: Op) -> Applied:
+    """``{"domain": "models", "op": "switch", "key": "stt", "value": "whisper-small-cpu"}`` | ``enable`` /
+    ``disable`` (key = slot) | ``mode`` (key = light | balanced | best). Low risk and undoable."""
+    from away.app.model_registry import SLOT_TITLES, Registry
+
+    reg = Registry()
+    slot = str(op.key or "")
+    try:
+        if op.op == "switch":
+            before = reg.switch(cfg, slot, str(op.value or ""))
+            text = f"{SLOT_TITLES.get(slot, slot)}: now {reg.get(str(op.value)).title}"
+        elif op.op in ("enable", "disable"):
+            before = reg.set_enabled(cfg, slot, op.op == "enable")
+            text = f"{SLOT_TITLES.get(slot, slot)}: {'on' if op.op == 'enable' else 'off'}"
+        elif op.op == "mode":
+            before = reg.apply_mode(cfg, slot)
+            text = f"Performance mode: {slot}"
+        elif op.op == "restore":
+            before = {k: _get(cfg, k) for k in dict(op.value or {})}
+            reg.restore(cfg, dict(op.value or {}))
+            text = "Models: put back as before"
+        else:
+            raise ChangeError("models support switch, enable, disable and mode")
+    except (KeyError, ValueError) as exc:
+        raise ChangeError(str(exc).strip("'\"")) from None
+    return Applied(op, before, op.value, [Op("models", "restore", slot, before)], text, True)
+
+
 def domains(store: PresetStore | None = None) -> dict[str, Domain]:
     from away.agentlink import integrations
 
@@ -675,6 +710,13 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
         ),
         "profiles": Domain(
             "profiles", "Per-app profiles", profiles_list, profiles_apply, ops=("create", "delete", "set")
+        ),
+        "models": Domain(
+            "models",
+            "Models (speech, voice, eye tracking...)",
+            models_list,
+            models_apply,
+            ops=("switch", "enable", "disable", "mode"),
         ),
         "cameras": Domain(
             "cameras", "Cameras (turn one off or on)", cameras_list, cameras_apply, ops=("disable", "enable")
