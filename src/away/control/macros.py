@@ -72,7 +72,10 @@ class MacrosConfig:
     default_speed: str = "1x"  # 1x | 2x | instant, for newly recorded shortcuts
     max_delay_s: float = 3.0  # recorded pauses longer than this are shortened to it
     min_gap_s: float = 0.05  # at "instant" speed, still wait this long between steps so apps keep up
-    record_away_input: bool = False  # also record clicks/keys Project Away itself produced (gestures, voice)
+    # also record the clicks/keys Project Away itself produced (gesture clicks, voice commands). On by default
+    # since v0.1.20: a hands-free user records shortcuts WITH gestures, so those clicks must count. A shortcut
+    # being replayed is never recorded into a new one, and password boxes stay excluded either way.
+    record_away_input: bool = True
     # off = typed characters are not recorded where password boxes cannot be detected (macOS/Linux, or Windows
     # without UI Automation); keys like enter, tab and ctrl+c are still recorded
     record_text_without_password_check: bool = False

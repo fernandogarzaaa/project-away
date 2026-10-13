@@ -359,9 +359,9 @@ def test_recorder_threaded_worker_processes_events():
     assert [s.type for s in m.steps] == ["click"]
 
 
-def test_recorder_leaves_out_away_own_input_and_own_windows():
+def test_recorder_leaves_out_away_own_input_and_own_windows_when_switched_off():
     w = FakeWin([win("away.exe", (0, 0, 50, 50), pid=999), win("chrome.exe", (0, 0, 900, 900))])
-    rec, marker, clock = recorder(w)
+    rec, marker, clock = recorder(w, record_away_input=False)
     with marker.busy():  # a gesture click Away sent
         rec.feed("down", {"x": 300, "y": 300})
         rec.feed("up", {"x": 300, "y": 300})
@@ -375,6 +375,21 @@ def test_recorder_leaves_out_away_own_input_and_own_windows():
     m = rec.stop()
     assert len(m.steps) == 1 and m.steps[0].target.x == 400
     assert rec.dropped_own == 3
+
+
+def test_recorder_includes_gesture_clicks_by_default():
+    """v0.1.20: record_away_input defaults to true, so a hands-free user can record a shortcut with gestures."""
+    assert MacrosConfig().record_away_input is True
+    w = FakeWin([win("away.exe", (0, 0, 50, 50), pid=999), win("chrome.exe", (0, 0, 900, 900))])
+    rec, marker, _ = recorder(w)
+    with marker.busy():  # a gesture click Away sent
+        rec.feed("down", {"x": 300, "y": 300})
+        rec.feed("up", {"x": 300, "y": 300})
+    rec.feed("down", {"x": 10, "y": 10})  # Away's own windows (Settings, the recording bar) still never count
+    rec.feed("up", {"x": 10, "y": 10})
+    m = rec.stop()
+    assert len(m.steps) == 1 and m.steps[0].target.x == 300
+    assert rec.dropped_own == 0
 
 
 def test_recorder_can_include_away_input_when_asked():

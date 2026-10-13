@@ -923,7 +923,12 @@ def test_settings_window_shows_the_three_switches_and_they_work(tmp_path: Any) -
         assert len(frames) == 1
         checks = {x.cget("text"): x for x in walk(frames[0]) if x.winfo_class() == "TCheckbutton"}
         assert list(checks) == ["Snap to buttons", "Click things by saying their name", "Smoother cursor"]
-        texts = " ".join(str(x.cget("text")) for x in walk(frames[0]) if x.winfo_class() == "TLabel")
+        labels = [x for x in walk(frames[0]) if x.winfo_class() == "TLabel"]
+        # the status line is a textvariable label, so read the variable too (cget("text") is empty there)
+        texts = " ".join(
+            str(root.getvar(str(x.cget("textvariable")))) if str(x.cget("textvariable")) else str(x.cget("text"))
+            for x in labels
+        )
         assert "need Windows" in texts and "Tuning tab > Advanced" in texts  # Linux: a calm, plain explanation
         assert checks["Snap to buttons"].instate(["disabled"])  # Windows-only switches are greyed out here
         smooth = checks["Smoother cursor"]

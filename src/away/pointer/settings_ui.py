@@ -200,6 +200,7 @@ def build_section(gui: Any, parent: Any, row: int) -> int:  # pragma: no cover -
         gui.vvars[t.path] = _ToggleVar(var, t.key)
         r += 2
     status = tk.StringVar(value=h.message)
+    gui.pointer_status = status  # keep a reference: a collected StringVar blanks the label
     line = ttk.Frame(box)
     line.grid(row=r, column=0, sticky="w", pady=(4, 0))
     ttk.Label(line, textvariable=status, foreground="#2e7d32" if h.ok else "#b26a00", wraplength=440).pack(side="left")

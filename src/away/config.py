@@ -17,10 +17,10 @@ from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
 from away.comfort.settings import AttentionConfig, ComfortConfig, comfort_tunables, validate_comfort
 from away.control.keys import KeyComboError, canonical
-from away.pointer.config import MagnetConfig, PredictiveConfig, pointer_tunables, validate_pointer
-from away.voice.cleanup_config import CleanupConfig, DictionaryConfig, validate_cleanup
 from away.control.macros import MacrosConfig, validate_macros_config
+from away.pointer.config import MagnetConfig, PredictiveConfig, pointer_tunables, validate_pointer
 from away.studio.settings import StudioConfig, ZonesConfig
+from away.voice.cleanup_config import CleanupConfig, DictionaryConfig, validate_cleanup
 
 
 @dataclass
