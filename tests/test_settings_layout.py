@@ -101,7 +101,8 @@ def test_settings_window_bottom_bar_visible_and_tabs_scroll(tmp_path: Path) -> N
             b = labels[name]
             assert b.winfo_ismapped() and b.winfo_rooty() + b.winfo_height() <= root.winfo_rooty() + root.winfo_height()
             assert b.winfo_height() >= b.winfo_reqheight()  # not squashed: the label is never clipped
-        assert len(w._scrollers) == 6  # every tab scrolls
+        nb = next(c for c in root.winfo_children() if c.winfo_class() == "TNotebook")
+        assert len(w._scrollers) == len(nb.tabs()) >= 7  # every tab scrolls (v0.1.20: + Shortcuts)
         assert w.status.get().startswith("Config file: ")
     finally:
         root.destroy()
