@@ -14,7 +14,8 @@ Engagement combines up to four checks, each one optional:
 Hysteresis so it never flickers: once engaged, the hand may sink 0.05 lower and the head turn 5° further, and any
 failing check is forgiven for ``grace_s`` before gestures stop. v0.1.23: the same lower threshold already holds
 while arming, and arming only falls back to idle after the checks failed for ``MIN_DWELL_S`` (0.5 s): a hand
-hovering right at the line (0.42-0.45 of the picture) used to toggle arming/idle every second. Voice commands (``gate_voice``) only need the
+hovering right at the line (0.42-0.45 of the picture) used to toggle arming/idle every second.
+Voice commands (``gate_voice``) only need the
 facing/gaze part: nobody raises a hand to speak.
 """
 

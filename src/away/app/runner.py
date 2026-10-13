@@ -1480,9 +1480,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
     def _camera_backoff(self, specs: list[Any], base_s: float | None = None) -> Any:
         """v0.1.23: one back-off per set of failing cameras that lasts across camera-session restarts (it used to
         start over every time, so a camera that never works was re-tried every few minutes)."""
-        store = getattr(self, "_camera_backoffs", None)
+        store: dict[tuple[str, ...], Any] | None = getattr(self, "_camera_backoffs", None)
         if store is None:
-            store = self._camera_backoffs = {}
+            store = {}
+            self._camera_backoffs = store
         key = tuple(sorted(str(getattr(s, "device", s)) for s in specs))
         if key not in store:
             store[key] = self._retry_backoff(base_s)

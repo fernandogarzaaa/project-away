@@ -355,7 +355,6 @@ def update_menu_items(
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
-    import contextlib
     import logging
     import threading
 
