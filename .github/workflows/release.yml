@@ -1,8 +1,10 @@
 name: Release
 
 # Builds the one-click native installers when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0).
-# Everything here is free: GitHub-hosted runners, PyInstaller, Inno Setup, appimagetool, hdiutil.
-# Nothing is code-signed (no paid certificates): see docs/INSTALL.md for the one-time OS prompts.
+# Everything here is free: GitHub-hosted runners, PyInstaller, Inno Setup, appimagetool, hdiutil, makeappx.
+# Windows code signing is free through SignPath Foundation and switches itself on once the SIGNPATH_* secrets and
+# variables exist (docs/SIGNING-AND-STORE.md); until then the Windows files ship unsigned, exactly as before.
+# The Windows job also builds the Microsoft Store upload (.msixupload) and, when signing is set up, a signed .msix.
 #
 # Every installer bundles every runtime feature: [all] + [train] (CPU-only torch, onnx), tkinter,
 # PortAudio, MediaPipe/Whisper/Silero assets. AWAY_SPEC_STRICT=1 fails the PyInstaller build if a
@@ -105,7 +107,12 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read  # SignPath's action downloads the unsigned workflow artifacts
     env:
+      # true only on a version tag once SignPath is set up; otherwise every signing step is skipped
+      SIGNPATH_ENABLED: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNPATH_API_TOKEN != '' && secrets.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_PROJECT_SLUG != '' && vars.SIGNPATH_POLICY_SLUG != '' }}
       AWAY_DATA_DIR: ${{ github.workspace }}\smoke\data
       AWAY_CONFIG_DIR: ${{ github.workspace }}\smoke\config
       AWAY_LOG_FILE: ${{ github.workspace }}\smoke\away.log
@@ -164,6 +171,46 @@ jobs:
           Run-Away @("cleanup-engine", "install")
           Run-Away @("cleanup-engine", "check")
           Run-Away @("cleanup-engine", "remove")
+      - name: Release version (empty when this is not a tag build)
+        id: ver
+        shell: pwsh
+        run: |
+          $v = ""
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) { $v = "${{ github.ref_name }}".TrimStart("v") }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "signing: $env:SIGNPATH_ENABLED  version: '$v'"
+      # ---- SignPath 1/2: sign ProjectAway.exe itself, before it goes into the installer and the MSIX
+      - name: "SignPath: upload the unsigned ProjectAway.exe"
+        id: unsigned-app
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signpath-unsigned-app
+          path: dist/ProjectAway/ProjectAway.exe
+          retention-days: 1
+      - name: "SignPath: sign ProjectAway.exe (approve the request on signpath.io)"
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_APP_CONFIG_SLUG || 'app-exe' }}
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: ${{ vars.SIGNPATH_WAIT_SECONDS || '3600' }}
+          output-artifact-directory: signed/app
+          parameters: |
+            version: "${{ steps.ver.outputs.version }}"
+      - name: "SignPath: use the signed ProjectAway.exe"
+        if: env.SIGNPATH_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature signed\app\ProjectAway.exe
+          if ($sig.Status -ne 'Valid') { throw "signed ProjectAway.exe is not valid: $($sig.Status) $($sig.StatusMessage)" }
+          Copy-Item signed\app\ProjectAway.exe dist\ProjectAway\ProjectAway.exe -Force
+          Write-Host "ProjectAway.exe signed by $($sig.SignerCertificate.Subject)"
       - name: Build installer with Inno Setup (preinstalled on windows-latest)
         shell: pwsh
         run: |
@@ -185,10 +232,70 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python scripts/check_selftest.py --max-size-mb 1900 $setup
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: MSIX packages (Store upload always; a sideload .msix too once signing is set up)
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+          MSIX_SIDELOAD_PUBLISHER: ${{ env.SIGNPATH_ENABLED == 'true' && vars.MSIX_SIDELOAD_PUBLISHER || '' }}
+        run: |
+          $a = @("scripts/build_msix.py", "--input", "dist\ProjectAway", "--out", "dist")
+          if ("${{ steps.ver.outputs.version }}") { $a += @("--version", "${{ steps.ver.outputs.version }}") }
+          python @a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pk = (Get-ChildItem dist\*.msixupload, dist\*-windows-x64.msix -ErrorAction SilentlyContinue).FullName
+          python scripts/check_selftest.py --max-size-mb 1900 $pk
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      # ---- SignPath 2/2: sign the installer and the sideload MSIX (both already contain the signed exe)
+      - name: "SignPath: upload the unsigned installer and sideload MSIX"
+        id: unsigned-release
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signpath-unsigned-release
+          path: |
+            dist/*-setup.exe
+            dist/*-windows-x64.msix
+          retention-days: 1
+      - name: "SignPath: sign the installer and MSIX (approve the request on signpath.io)"
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_RELEASE_CONFIG_SLUG || 'release' }}
+          github-artifact-id: ${{ steps.unsigned-release.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: ${{ vars.SIGNPATH_WAIT_SECONDS || '3600' }}
+          output-artifact-directory: signed/release
+          parameters: |
+            version: "${{ steps.ver.outputs.version }}"
+      - name: "SignPath: use the signed installer and MSIX"
+        if: env.SIGNPATH_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem signed\release -File) {
+            if ($f.Extension -eq ".exe") {
+              $sig = Get-AuthenticodeSignature $f.FullName
+              if ($sig.Status -ne 'Valid') { throw "$($f.Name) is not validly signed: $($sig.Status)" }
+            } else {
+              python -c "import sys, zipfile; sys.exit(0 if 'AppxSignature.p7x' in zipfile.ZipFile(sys.argv[1]).namelist() else 1)" $f.FullName
+              if ($LASTEXITCODE -ne 0) { throw "$($f.Name) has no AppxSignature.p7x" }
+            }
+            Copy-Item $f.FullName dist\ -Force
+            Write-Host "signed: $($f.Name)"
+          }
+      # uploaded after signing, so the release (and SHA256SUMS.txt, made from these files) has the signed copies
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: dist/*-setup.exe
+          path: |
+            dist/*-setup.exe
+            dist/*.msixupload
+            dist/*-windows-x64.msix
 
   macos:
     runs-on: macos-14  # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`
@@ -238,7 +345,10 @@ jobs:
         with:
           path: out
           merge-multiple: true
+          # the release artifacts only: signpath-unsigned-* hold the UNSIGNED copies sent to SignPath
+          pattern: "{python-dist,linux-installers,windows-installer,macos-dmg}"
       - name: SHA256SUMS.txt for every asset (the in-app updater verifies downloads against it)
+        # hashes the files exactly as published, i.e. the SignPath-signed Windows files when signing is on
         run: |
           set -e
           cd out

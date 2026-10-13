@@ -1,0 +1,33 @@
+# winget default locale manifest. Replace "{{VERSION}}" first.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: FernandoGarza.ProjectAway
+PackageVersion: "{{VERSION}}"
+PackageLocale: en-US
+Publisher: Fernando Garza
+PublisherUrl: https://github.com/fernandogarzaaa
+PublisherSupportUrl: https://github.com/fernandogarzaaa/project-away/issues
+PrivacyUrl: https://github.com/fernandogarzaaa/project-away/blob/main/PRIVACY.md
+Author: Fernando Garza
+PackageName: Project Away
+PackageUrl: https://github.com/fernandogarzaaa/project-away
+License: MIT
+LicenseUrl: https://github.com/fernandogarzaaa/project-away/blob/main/LICENSE
+ShortDescription: Control your PC and your AI agents with your hands, face and voice. Processed on your PC.
+Description: |-
+  Project Away turns your webcam and microphone into a hands-free way to use your computer: point to move the
+  pointer, pinch to click, talk to type. It also connects to the AI agent you already use (Claude, ChatGPT, Cursor
+  and others) so the agent can ask you quick questions you answer with a gesture. Camera and microphone are
+  processed on your PC; nothing is sent anywhere unless you connect an agent and allow it.
+Moniker: project-away
+Tags:
+  - accessibility
+  - gesture-control
+  - hand-tracking
+  - dictation
+  - speech-to-text
+  - hands-free
+  - ai-agent
+  - mcp
+ReleaseNotesUrl: https://github.com/fernandogarzaaa/project-away/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

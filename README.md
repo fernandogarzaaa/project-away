@@ -13,6 +13,9 @@ it, tune Project Away to how you like it, and even use your computer while you w
 Nothing leaves your machine unless you connect an agent and press **Allow** on your own screen (or point the
 optional LLM cleanup at an endpoint yourself).
 
+[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy) · Microsoft Store and signing setup:
+[docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md)
+
 ## User guide (no technical knowledge needed)
 
 ### 1. Installing
@@ -2163,6 +2166,22 @@ stays opt-in after calibrate:** `away calibrate` prints the metrics but no longe
 5. Live AX210 CSI capture and a learned swipe/push-pull classifier.
 6. Phone-as-second-camera / IMU fusion.
 7. Real-hardware tuning of multi-camera fusion; parallel per-camera landmark inference.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+(Being set up: until SignPath Foundation approves the project, the Windows files are unsigned; see "Installing" above.) Signed files are built only by this repository's GitHub Actions release workflow from the
+tagged source, and every signing request is approved by hand.
+
+* Committers and reviewers: [Fernando Garza](https://github.com/fernandogarzaaa) (repository owner); pull requests
+  from anyone else are reviewed by him before merging.
+* Approvers: [Fernando Garza](https://github.com/fernandogarzaaa).
+* Privacy: see the [privacy policy](PRIVACY.md). This program will not transfer any information to other networked
+  systems unless specifically requested by the user or the person installing or operating it, apart from the
+  anonymous update check and model downloads described there (both can be turned off or skipped).
+
+The Microsoft Store package (MSIX) is signed by Microsoft. Setup steps: [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
 
 ## Development
 

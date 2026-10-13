@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "app-exe" (slug: app-exe): the app itself, signed BEFORE it goes into the
+  installer and the MSIX. release.yml uploads dist\ProjectAway\ProjectAway.exe as a zip and passes
+  version = the release version (e.g. 0.1.23). Paste this into SignPath > Project > Artifact configurations.
+  product-name / product-version are the metadata restrictions SignPath Foundation requires; the values come
+  from the exe's version resource (packaging/pyinstaller/away.spec).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="ProjectAway.exe" product-name="Project Away" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
