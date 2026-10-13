@@ -5,8 +5,9 @@
 * **time with the arm raised**: seconds the wrist has been above ``raised_height`` without a rest
   (dips shorter than ``rest_s`` pause the clock, they do not reset it);
 * **sinking hand**: the hand's height now (5 s average) versus where it was during the first 10 s with the arm up;
-* **rising tremor**: the high-frequency shake of the hand *while it is held still*, versus the shake measured
-  during the first 10 s (webcam landmarks always shake a little, so only the ratio counts).
+* **rising tremor**: the frame-to-frame shake of the hand (second difference of its position, which is zero for a
+  steady movement, so a slow drift or a deliberate move is not shake) *while it is held fairly still*, versus the
+  shake measured during the first 10 s (webcam landmarks always shake a little, so only the ratio counts).
 
 ``score = raised_s / raised_limit_s + 0.5 * sinking + 0.5 * tremor`` with ``sinking`` and ``tremor`` scaled to
 0..1 (full at ``height_drop`` and ``jitter_ratio``). The arm counts as tired when the score reaches 1 and it has
@@ -32,7 +33,6 @@ from away.hands.landmarks import MIDDLE_MCP, WRIST
 BASELINE_S = 10.0  # the first seconds of a raised-arm session give the reference height and tremor
 HEIGHT_TAU_S = 5.0  # the "height now" average
 JITTER_TAU_S = 3.0  # tremor energy average
-SMOOTH_TAU_S = 0.12  # the low-pass the tremor is measured against (residual = position - this)
 STILL_SPEED = 1.5  # palm lengths per second: slower than this counts as holding still (tremor is measured)
 JITTER_FLOOR = 0.004  # palm lengths: the reference tremor is never taken as smaller than this
 MAX_DT = 0.5  # gaps longer than this restart the filters
@@ -65,8 +65,8 @@ class FatigueMonitor:
         self._base_h: list[float] = []
         self._base_j: list[float] = []
         self._h_avg: float | None = None
-        self._smooth: Any = None
         self._prev: Any = None
+        self._prev2: Any = None
         self._j_energy: float | None = None
 
     @property
@@ -81,17 +81,15 @@ class FatigueMonitor:
         arr = np.asarray(lm, dtype=float)
         palm = max(1e-6, float(hand_size(arr) or 0.0))
         pos = (arr[WRIST, :2] + arr[MIDDLE_MCP, :2]) / 2.0 / palm
-        if self._smooth is None or self._prev is None or dt <= 0:
-            self._smooth, self._prev = pos.copy(), pos.copy()
+        if self._prev is None or dt <= 0:
+            self._prev, self._prev2 = pos.copy(), None  # a gap: restart the difference chain
         else:
             speed = float(np.linalg.norm(pos - self._prev)) / dt
-            self._prev = pos.copy()
-            a_s = 1.0 - math.exp(-dt / SMOOTH_TAU_S)
-            self._smooth = self._smooth + a_s * (pos - self._smooth)
-            if speed < STILL_SPEED:
-                res2 = float(np.sum((pos - self._smooth) ** 2))
+            if self._prev2 is not None and speed < STILL_SPEED:
+                res2 = float(np.sum((pos - 2.0 * self._prev + self._prev2) ** 2))
                 a_j = 1.0 - math.exp(-dt / JITTER_TAU_S)
                 self._j_energy = res2 if self._j_energy is None else self._j_energy + a_j * (res2 - self._j_energy)
+            self._prev2, self._prev = self._prev, pos.copy()
         jitter = math.sqrt(self._j_energy) if self._j_energy is not None else None
         if r.raised_s <= BASELINE_S:
             self._base_h.append(height)
