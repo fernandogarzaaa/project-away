@@ -75,6 +75,23 @@ optional("pystray", data=False, subs=True, hidden_mods=[f"pystray.{m}" for m in 
 optional("PIL", data=False)
 optional("pyperclip", data=False)
 optional("tkinter", data=False, hidden_mods=["tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"])
+if sys.platform == "win32":
+    # v0.1.18: the WinRT MediaCapture camera backend (away.multicam.winrt_capture imports pywinrt lazily, so
+    # PyInstaller never sees it). "winrt" is a namespace package: name every module and bundle its .pyd/.dll.
+    _winrt_ns = [
+        "winrt.system",
+        "winrt.runtime",
+        "winrt.windows.foundation",
+        "winrt.windows.foundation.collections",
+        "winrt.windows.devices.enumeration",
+        "winrt.windows.media",
+        "winrt.windows.media.capture",
+        "winrt.windows.media.capture.frames",
+        "winrt.windows.media.mediaproperties",
+        "winrt.windows.graphics.imaging",
+        "winrt.windows.storage.streams",
+    ]
+    optional("winrt", data=False, libs=True, subs=True, hidden_mods=_winrt_ns + ["winrt._winrt", "typing_extensions"])
 
 if sys.platform.startswith("linux"):
     # Linux sounddevice uses the system PortAudio; bundle one too (used when the system has none,

@@ -132,7 +132,8 @@ away autostart on # start the tray app at login
 ```
 
 Extras if you want less: `[hands]`, `[face]`, `[voice]`, `[control]`, `[tray]`, `[train]` (PyTorch, only for
-`away calibrate` / `away train`), `[parakeet]` (NVIDIA NeMo ASR, large).
+`away calibrate` / `away train`), `[parakeet]` (NVIDIA NeMo ASR, large), `[winrt]` (Windows only: the WinRT
+MediaCapture camera backend, the API the Windows Camera app uses; included in `[all]`, installs nothing elsewhere).
 
 `away doctor` prints which extras, models and folders it can see.
 

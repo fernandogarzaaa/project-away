@@ -578,6 +578,7 @@ def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester
 
     path = _cfg_path(args)
     cfg, _ = cfgmod.load(path)
+    capture.configure(cfg.hands)
     cams = list(cfg.hands.cameras)
     if not cams:
         return _fail("no cameras in hands.cameras; add them with `away cameras add NAME` (two for multi-camera)")
@@ -599,7 +600,8 @@ def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester
             )
         else:
             run = tester
-        report = run(cams, float(args.seconds), progress=lambda m: print(m, flush=True))
+        seconds = 10.0 if getattr(args, "seconds", None) is None else float(args.seconds)
+        report = run(cams, seconds, progress=lambda m: print(m, flush=True))
     for line in report.lines():
         print(line)
     offer = report.save_offer(cams)
@@ -614,6 +616,43 @@ def cmd_cameras_test(args: argparse.Namespace, lease_factory: Any = None, tester
         else:
             print("run `away cameras test --save` to save the combination that works")
     return 0 if report.works else 1
+
+
+def cmd_cameras_diagnose(
+    args: argparse.Namespace, lease_factory: Any = None, runner: Any = None, lister: Any = None
+) -> int:
+    """``away cameras diagnose [DEVICE] [--seconds 1]`` (v0.1.18): every camera on every backend (DirectShow,
+    Media Foundation, WinRT): its native formats where the backend lists them, and whether each mode opens and
+    how fast it streams. The cameras are borrowed from the running app first."""
+    from away.app.camera_share import borrowed_cameras, confirm_handover
+    from away.multicam import capture, diagnose
+
+    cfg, _ = cfgmod.load(_cfg_path(args))
+    capture.configure(cfg.hands)
+    spec = cfg.hands.cameras[0] if cfg.hands.cameras else None
+    perf_w = int(getattr(getattr(cfg, "performance", None), "camera_width", 0) or 0)
+    perf_h = int(getattr(getattr(cfg, "performance", None), "camera_height", 0) or 0)
+    width, height = (spec.width, spec.height) if spec is not None else (perf_w or 640, perf_h or 480)
+    fps = spec.fps if spec is not None else 30
+    device = args.device
+    if isinstance(device, str) and device.isdigit():
+        device = int(device)
+    borrow = lease_factory or (lambda: borrowed_cameras(timeout=CALIBRATE_LEASE_S, who="camera-diagnose"))
+    with borrow() as lease:
+        confirm_handover(lease, say=lambda m: print(m, flush=True))
+        if lease.app_running and not lease.handed_over:
+            return _fail("Project Away is using the cameras and did not hand them over in time - pause or quit it")
+        if lease.handed_over:
+            print("Project Away released the cameras for the diagnosis; they are handed back afterwards.")
+        devs = (lister or diagnose.diagnose_devices)(device)
+        if not devs:
+            return _fail(f"camera {device!r} not found (see `away cameras list`)" if device else "no cameras found")
+        seconds = diagnose.MEASURE_S if args.seconds is None else float(args.seconds)
+        print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
+        (runner or diagnose.run_diagnose)(
+            devs, width=width, height=height, fps=fps, measure_s=seconds, out=lambda m: print(m, flush=True)
+        )
+    return 0
 
 
 def pick_camera(arg: str, devs: list[Any]) -> tuple[int | str, int | None]:
@@ -700,6 +739,9 @@ def cmd_calibrate_cameras(args: argparse.Namespace) -> int:
         )
         return 0
     cfg, _ = cfgmod.load(Path(args.config) if args.config else None)
+    from away.multicam import capture as _capture
+
+    _capture.configure(cfg.hands)
     status = getattr(args, "status_file", None)
     if len(cfg.hands.cameras) < 2:
         msg = "calibration needs two cameras in hands.cameras (see `away cameras list` / `away cameras add`)"
@@ -1182,21 +1224,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     cm = sub.add_parser(
         "cameras",
-        help="list | use NAME (single camera) | add NAME | remove DEVICE | test [--save]: choose and test cameras",
+        help="list | use NAME (single camera) | add NAME | remove DEVICE | test [--save] | diagnose [NAME]: "
+        "choose, test and diagnose cameras",
     )
-    cm.add_argument("action", choices=["list", "use", "add", "remove", "test"], nargs="?", default="list")
+    cm.add_argument("action", choices=["list", "use", "add", "remove", "test", "diagnose"], nargs="?", default="list")
     cm.add_argument("device", nargs="?", help="camera name (or part of it), index from `away cameras list`, or path")
     cm.add_argument("--role", choices=["primary", "secondary"])
     cm.add_argument("--probe", action="store_true", help="open each camera to check it delivers frames")
     cm.add_argument("--json", action="store_true")
-    cm.add_argument("--seconds", type=float, default=10.0, help="test: how long to stream (default 10)")
+    cm.add_argument(
+        "--seconds", type=float, default=None, help="test: how long to stream (default 10); diagnose: per mode (1)"
+    )
     cm.add_argument("--save", action="store_true", help="test: save the camera settings that worked together")
     cm.add_argument("--config")
     cm.set_defaults(
         fn=lambda a: (
             cmd_cameras(a)
             if a.action == "list"
-            else (cmd_cameras_test(a) if a.action == "test" else cmd_cameras_edit(a))
+            else (
+                cmd_cameras_test(a)
+                if a.action == "test"
+                else (cmd_cameras_diagnose(a) if a.action == "diagnose" else cmd_cameras_edit(a))
+            )
         )
     )
 

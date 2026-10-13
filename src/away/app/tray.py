@@ -157,6 +157,15 @@ class TrayController:
         return bool(on)
 
     # GPU pack ---------------------------------------------------------------
+    def camera_retry_stopped(self) -> bool:
+        """The app gave up re-probing a failed camera (v0.1.18): the tray then offers "Retry cameras"."""
+        return getattr(self.app, "camera_retry_stopped", False) is True
+
+    def retry_cameras(self) -> None:
+        fn = getattr(self.app, "retry_cameras", None)
+        if fn is not None:
+            fn()
+
     def gpu_pack_offer(self) -> str | None:
         """Why to offer the NVIDIA GPU pack (GPU present, pack missing), or None."""
         try:
@@ -339,13 +348,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             visible=lambda _i: bool(gpu_offer["text"]),
             enabled=lambda _i: not gpu_offer["installing"],
         ),
+        pystray.MenuItem(
+            "Retry cameras",
+            lambda _icon, _item: ctl.retry_cameras(),
+            visible=lambda _i: ctl.camera_retry_stopped(),
+        ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
-    for topic in ("voice.state", "app.paused", "gesture.clutch"):
+    for topic in ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))

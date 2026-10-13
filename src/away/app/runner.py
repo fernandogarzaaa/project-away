@@ -50,8 +50,8 @@ from away.wifi.features import window_features
 MULTICAM_PROBE_S = 45.0
 HANDOVER_FREE_S = 15.0  # a hand-over waits at most this long for this process's cameras to be closed
 SPEED_CHECK_S = 5.0  # after this long streaming, each camera's measured frame rate is logged (ok / too slow)
-MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones this often
-MULTICAM_RETRY_MAX_S = 600.0  # back-off ceiling when the full set keeps failing right after a good probe
+MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones (default hands.camera_retry_s)
+MULTICAM_RETRY_MAX_S = 900.0  # back-off ceiling (default hands.camera_retry_max_s; v0.1.18: 15 min)
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
 
 
@@ -533,6 +533,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         atexit.register(self._restore_cursor)
         self._camera_episode = 0  # bumps when the cameras recover, so a new failure is notified again
+        # v0.1.18: camera retries back off and stop after hands.camera_retry_limit failures; "Retry cameras"
+        # (tray, or Settings through a request file) sets this to probe again at once
+        self._camera_retry_now = threading.Event()
+        self.camera_retry_stopped = False
+        with contextlib.suppress(Exception):
+            from away.multicam import capture as _capture
+
+            _capture.configure(cfg.hands)
         self.bus.subscribe("cameras.degraded", self._on_cameras_degraded)
         self.bus.subscribe("cameras.restored", self._on_cameras_restored)
         self.bus.subscribe("camera.error", self._on_camera_error)
@@ -1095,9 +1103,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             return None
 
     # ------------------------------------------------------------------------------ multi-camera
-    def _start_cameras(self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any) -> list[Any]:
+    def _start_cameras(
+        self, specs: list[Any], pairer: Any, session: threading.Event, open_lock: Any, skip_held: bool = False
+    ) -> list[Any]:
         """Start one capture thread per camera (overridden in tests with simulated cameras): the shared
-        :func:`~away.multicam.capture.start_camera_threads` (also used by Settings and the CLI)."""
+        :func:`~away.multicam.capture.start_camera_threads` (also used by Settings and the CLI). ``skip_held``
+        (background re-probes): never reopen a camera this process already has open."""
         from away.multicam.capture import start_camera_threads
 
         return start_camera_threads(
@@ -1108,6 +1119,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             serial=open_lock is not None,
             virtual_fallback=bool(self.cfg.hands.virtual_fallback),
             min_fps=float(self.cfg.hands.min_camera_fps),
+            skip_held=skip_held,
         )
 
     def _use_mode_store(self) -> None:
@@ -1142,7 +1154,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         session = threading.Event()
         pairer = FramePairer(len(specs), 0, 1.0, 1.0)
         lock = threading.Lock() if self._serial_open() else None
-        threads = self._start_cameras(list(specs), pairer, session, lock)
+        import inspect
+
+        # v0.1.18: a re-probe never reopens (or re-sweeps) the camera that is tracking right now
+        extra = {"skip_held": True} if "skip_held" in inspect.signature(self._start_cameras).parameters else {}
+        threads = self._start_cameras(list(specs), pairer, session, lock, **extra)
         try:
             # a lease from Settings / calibration ends the probe at once (the device is let go right away)
             stop = _ProbeStop(self.stop_event, self.camera_share, None)
@@ -1150,31 +1166,140 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         finally:
             self._end_cameras(session, threads)
 
+    # camera retries (v0.1.18) ---------------------------------------------------
+    def retry_cameras(self) -> None:
+        """ "Retry cameras" (tray menu): probe the failed cameras again now and restart the back-off."""
+        self.camera_retry_stopped = False
+        self._retry_event().set()
+        self.bus.publish("cameras.retry_requested", {})
+
+    def _retry_event(self) -> threading.Event:
+        ev = getattr(self, "_camera_retry_now", None)
+        if ev is None:  # an app built without __init__ (tests)
+            ev = self._camera_retry_now = threading.Event()
+        return ev
+
+    def _manual_retry(self) -> bool:
+        """True (once) when "Retry cameras" was pressed here (tray) or in Settings (a request file)."""
+        from away.app.camera_loop import take_retry_request
+
+        ev = self._retry_event()
+        if ev.is_set():
+            ev.clear()
+            return True
+        folder = self._retry_folder()
+        if folder is None:
+            return False
+        try:
+            return take_retry_request(folder)
+        except Exception:
+            return False
+
+    def _retry_folder(self) -> Any:
+        """Where the retry request / status files live (the camera-share folder; tests use a temp one)."""
+        return getattr(self.camera_share, "folder", None)
+
+    def _retry_backoff(self, base_s: float | None = None) -> Any:
+        from away.app.camera_loop import RetryBackoff
+
+        h = self.cfg.hands
+        base = float(h.camera_retry_s if base_s is None else base_s)
+        return RetryBackoff(base, max(base, float(h.camera_retry_max_s)), int(h.camera_retry_limit))
+
+    def _retry_status(self, status: dict[str, Any] | None) -> None:
+        from away.app.camera_loop import write_retry_status
+
+        folder = self._retry_folder()
+        if folder is not None:
+            with contextlib.suppress(Exception):
+                write_retry_status(status, folder)
+
+    def _retries_stopped(self, labels: dict[str, str], attempts: int) -> None:
+        """The back-off ran out: tell the user once (tray notification + Settings) and wait for Retry cameras."""
+        self.camera_retry_stopped = True
+        names = ", ".join(labels) or "a camera"
+        msg = (
+            f"stopped retrying {names} after {attempts} failed attempts. Fix or remove it in Settings > Cameras, "
+            "then use Retry cameras (tray menu or Settings > Cameras)."
+        )
+        logging.getLogger("away.cameras").warning("%s", msg)
+        self._retry_status({"stopped": True, "attempts": attempts, "failed": labels})
+        self.bus.publish("cameras.retry_stopped", {"failed": labels, "attempts": attempts, "message": msg})
+        episode = getattr(self, "_camera_episode", 0)
+        if hasattr(self, "_notices"):
+            self.notice("Project Away: camera retries stopped", msg, key=f"cameras-retry-stopped:{episode}")
+        else:  # an app built without __init__ (tests)
+            self.bus.publish("app.notice", {"title": "Project Away: camera retries stopped", "message": msg})
+
+    def _wait_none_retry(self, backoff: Any, labels: dict[str, str]) -> None:
+        """No camera works: wait before the next try of the whole set (backing off; after the limit until
+        "Retry cameras")."""
+        from away.app.camera_loop import wait_for_retry
+
+        backoff.failed()
+        if backoff.exhausted and not getattr(self, "camera_retry_stopped", False):
+            self._retries_stopped(labels, backoff.failures)
+        delay = float("inf") if backoff.exhausted else backoff.delay()
+        if not backoff.exhausted:
+            self._retry_status({"stopped": False, "attempts": backoff.failures, "failed": labels, "next_s": delay})
+        never = threading.Event()
+        if wait_for_retry(delay, never, self.stop_event, self._manual_retry) == "manual":
+            backoff.reset()
+            self.camera_retry_stopped = False
+
     def _single_until_retry(
         self, run_single: Any, device: Any, failed_specs: list[Any], every_s: float, probe_s: float
     ) -> None:
-        """Track on ``device`` alone; every ``every_s`` probe the failed cameras in the background and return
-        (to retry the full multi-camera set) once they all deliver frames. Tracking is never interrupted by a
-        probe that still fails."""
-        from away.app.camera_loop import retry_labels
+        """Track on ``device`` alone and probe the failed cameras in the background: first after ``every_s``,
+        then after twice as long each time (capped at hands.camera_retry_max_s); return (to retry the full
+        multi-camera set) once they all deliver frames. After hands.camera_retry_limit failed probes it stops
+        probing and says so until "Retry cameras" is pressed (v0.1.18). Tracking is never interrupted by a probe
+        that still fails, and the working camera is never reopened by a probe (``_probe_specs``)."""
+        from away.app.camera_loop import retry_labels, wait_for_retry
 
         ready = threading.Event()
         done = threading.Event()
+        backoff = self._retry_backoff(every_s)
 
         def prober() -> None:
-            while not done.wait(every_s):
-                if self.stop_event.is_set():
+            labels = {str(getattr(s, "device", s)): "" for s in failed_specs}
+            while True:
+                delay = float("inf") if backoff.exhausted else backoff.delay()
+                if not backoff.exhausted:
+                    self._retry_status(
+                        {"stopped": False, "attempts": backoff.failures, "failed": labels, "next_s": delay}
+                    )
+                why = wait_for_retry(delay, done, self.stop_event, self._manual_retry)
+                if why == "done":
                     return
+                if why == "manual":
+                    backoff.reset()
+                    self.camera_retry_stopped = False
+                    logging.getLogger("away.cameras").info("cameras: retrying now (Retry cameras)")
                 if self.camera_share.requested():  # Settings is using the cameras: do not grab them
                     continue
                 try:
                     bad = self._probe_specs(failed_specs, probe_s)
                 except Exception as exc:
                     bad = {0: f"probe error: {exc}"}
-                self.bus.publish("cameras.retry", {"ok": not bad, "failed": retry_labels(failed_specs, bad)})
+                labels = retry_labels(failed_specs, bad) or labels
+                if bad:
+                    backoff.failed()
+                self.bus.publish(
+                    "cameras.retry",
+                    {
+                        "ok": not bad,
+                        "failed": retry_labels(failed_specs, bad),
+                        "attempt": backoff.failures,
+                        "next_s": None if (not bad or backoff.exhausted) else backoff.delay(),
+                    },
+                )
                 if not bad and not done.is_set():
+                    self._retry_status(None)
                     ready.set()
                     return
+                if backoff.exhausted:
+                    self._retries_stopped(labels, backoff.failures)
 
         th = threading.Thread(target=prober, name="camera-retry", daemon=True)
         th.start()
@@ -1239,7 +1364,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         faces: Any,
         run_single: Any = None,
         probe_s: float = MULTICAM_PROBE_S,
-        retry_s: float = MULTICAM_RETRY_S,
+        retry_s: float | None = None,
         none_retry_s: float = MULTICAM_NONE_RETRY_S,
         trackers: list[Any] | None = None,
     ) -> None:
@@ -1247,10 +1372,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         * Start-up probe: a camera fails only when its thread dies with an error, or it sends no frame within
           ``probe_s`` (Windows webcams are slow to open; on Windows they open one after another).
-        * One camera left: track on it alone (``run_single``) and re-probe the failed cameras every
-          ``retry_s`` without touching the working one; when they deliver again, go back to fusion (backing off
-          up to MULTICAM_RETRY_MAX_S if the set keeps failing right after a good probe).
-        * No camera works: nothing is claimed; the whole set is retried every ``none_retry_s``.
+        * One camera left: track on it alone (``run_single``) and re-probe the failed cameras without touching
+          the working one, after ``retry_s`` (default hands.camera_retry_s) and then twice as long each time up
+          to hands.camera_retry_max_s, stopping after hands.camera_retry_limit failures until "Retry cameras"
+          (v0.1.18); when they deliver again, go back to fusion (the first wait also doubles if the set keeps
+          failing right after a good probe).
+        * No camera works: nothing is claimed; the whole set is retried after ``none_retry_s``, backing off and
+          stopping the same way.
         * The captures restart after a hand-over to Settings (camera_share) without restarting the app.
         """
         from away.app.camera_loop import degrade_plan, is_shutdown_error, probe_cameras
@@ -1284,8 +1412,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         share = self.camera_share
         timeout = self._probe_timeout(len(cams), probe_s)
         degraded = False
+        if retry_s is None:
+            retry_s = float(self.cfg.hands.camera_retry_s)
+        retry_max = max(float(retry_s), float(self.cfg.hands.camera_retry_max_s))
         backoff = retry_s
         after_retry = False
+        none_backoff = self._retry_backoff(none_retry_s)
         try:
             while not self.stop_event.is_set():
                 # every attempt: bare indices from older versions are pinned to camera names (a virtual camera at
@@ -1311,7 +1443,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     continue
                 working = len(cams) - len(failed)
                 if working < 2 and after_retry:  # the set failed again right after a good probe: back off
-                    backoff = min(backoff * 2.0, MULTICAM_RETRY_MAX_S)
+                    backoff = min(backoff * 2.0, retry_max)
                 after_retry = False
                 retry_every = none_retry_s if working == 0 else (backoff if working == 1 else None)
                 mode, device, why = degrade_plan(devices, primary, failed, retry_every)
@@ -1323,7 +1455,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     share.clear_owner()
                     degraded = True
                     if mode == "none" or run_single is None:
-                        self.stop_event.wait(none_retry_s)
+                        self._wait_none_retry(none_backoff, {str(d): "" for d in devices})
                         continue
                     self._single_until_retry(
                         run_single, device, [run_cams[i] for i in sorted(failed)], backoff, probe_s
@@ -1331,6 +1463,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     after_retry = True
                     continue
                 backoff = retry_s
+                none_backoff.reset()
+                self._retry_status(None)
                 if degraded:
                     degraded = False
                     self.bus.publish(
