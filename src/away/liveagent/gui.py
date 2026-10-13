@@ -6,7 +6,7 @@ Plain words, defaults that work, advanced settings folded away:
 * **Use free models (opencode)** - one click: finds opencode or downloads it (progress, size, MIT license note),
   checks a free model answers, turns the live agent on. If that fails: **Use a free key instead** (Gemini or Groq,
   with a link to get the key) or Ollama when it runs on this PC;
-* **Add my API key** - provider, key (saved in Windows Credential Manager, never in a file), optional model, Test;
+* **Add my API key** - provider, key (saved in the OS vault, never in a file), optional model, Test;
 * **Preferred model**, the wake name, and what it may do (look at the screen, use mouse and keyboard, change
   settings);
 * **Advanced** (folded): which model does which job, the daily limit for paid keys, Jev, privacy note;
@@ -347,7 +347,7 @@ def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; sm
     ttk.Entry(grid, textvariable=model_v, width=30).grid(row=2, column=1, sticky="w", padx=4)
     url_lbl = ttk.Label(grid, text="Address")
     url_ent = ttk.Entry(grid, textvariable=url_v, width=44)
-    kmsg = tk.StringVar(value="Keys are kept in Windows Credential Manager, never in a file.")
+    kmsg = tk.StringVar(value=f"Keys are kept in {keys.vault_name()}, never in a file.")
 
     def kind() -> str:
         return next(c[0] for c in choices if c[1] == prov.get())

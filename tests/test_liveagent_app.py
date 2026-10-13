@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -590,3 +591,28 @@ def test_settings_panel_keys_test_remove(tmp_path, monkeypatch) -> None:
     assert panel.remove("groq") == "Removed" and ks.get("groq") == "" and not panel.s.providers
     assert plain_error(HttpError(429, "x")).startswith("too many") and panel.recent_turns() == []
     assert "60 MB" in panel.engine_text() or "opencode" in panel.engine_text()
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")), reason="needs an X display (Xvfb)"
+)
+def test_settings_live_agent_tab_renders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tk = pytest.importorskip("tkinter")
+    monkeypatch.setenv("AWAY_DATA_DIR", str(tmp_path / "data"))
+    from away.app import settings_gui as G
+
+    try:
+        root = tk.Tk()
+    except Exception as exc:  # pragma: no cover - no Tk
+        pytest.skip(f"Tk unavailable: {exc}")
+    try:
+        w = G.SettingsWindow(root, G.SettingsModel(path=tmp_path / "config.yaml"))
+        root.update()
+        assert "Live agent" in [w.nb.tab(t, "text") for t in w.nb.tabs()]
+        panel = getattr(w, "live_agent_panel", None)
+        assert panel is not None and not panel.s.enabled  # off by default
+        w.select_tab("Live agent")
+        root.update()
+        assert "Use free models" in panel.status_line()
+    finally:
+        root.destroy()

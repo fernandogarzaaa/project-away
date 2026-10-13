@@ -13,6 +13,18 @@ from typing import Any, Protocol
 SERVICE = "ProjectAway-LiveAgent"
 
 
+def vault_name(platform: str | None = None) -> str:
+    """Where keys are kept on this system, in plain words (Settings shows it under the key box)."""
+    import sys
+
+    plat = platform or sys.platform
+    if plat.startswith("win"):
+        return "Windows Credential Manager"
+    if plat == "darwin":
+        return "the macOS Keychain"
+    return "your system keyring (Secret Service)"
+
+
 class Backend(Protocol):
     def get_password(self, service: str, username: str) -> str | None: ...
     def set_password(self, service: str, username: str, password: str) -> None: ...

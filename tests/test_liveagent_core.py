@@ -455,3 +455,9 @@ def test_funnel_is_thread_safe_enough_for_parallel_turns() -> None:
         t.join()
     assert out == ["one two three."] * 5
     assert json.dumps(f.ledger.summary())
+
+
+def test_vault_name_is_plain_and_per_platform() -> None:
+    assert keys.vault_name("win32") == "Windows Credential Manager"
+    assert keys.vault_name("darwin") == "the macOS Keychain"
+    assert "keyring" in keys.vault_name("linux")
