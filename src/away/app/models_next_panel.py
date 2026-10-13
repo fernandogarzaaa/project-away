@@ -235,7 +235,11 @@ def build(win: Any, parent: Any) -> NextModelsPanel:  # pragma: no cover - Tk wi
                 msg = panel.use_preset(mode)
                 return msg + (" Not downloaded: " + "; ".join(errs) if errs else "")
 
-            in_bg(work, lambda res: (status.set(str(res)), head.set(panel.headline())))
+            def finish(res: Any) -> None:
+                status.set(str(res))
+                head.set(panel.headline())
+
+            in_bg(work, finish)
 
         ttk.Button(row, text=f"{p['title']} ({p['vram']})", command=pick).pack(side="left", padx=4)
     ttk.Label(box, textvariable=status, wraplength=640, foreground="#444").pack(anchor="w", padx=6, pady=2)
