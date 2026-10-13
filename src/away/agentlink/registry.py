@@ -60,6 +60,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "speech.volume": cfgmod.SPEECH_VOLUMES,
 }
 SWITCHES = (
+    "hands.virtual_fallback",  # v0.1.23: use NVIDIA Broadcast's camera when a camera is busy
     "hands.dwell.enabled",
     "hands.cursor.click_freeze",
     "hands.gestures.autoscroll_enabled",
@@ -627,6 +628,35 @@ def placeholder(name: str, title: str, todo: str) -> Domain:
     return Domain(name, title, lambda _cfg: [], None, available=False, note=f"not available in this version ({todo})")
 
 
+# ---------------------------------------------------------------------------- cameras (v0.1.23)
+def cameras_list(cfg: Any) -> list[dict[str, Any]]:
+    from away.app.camera_switch import listing
+
+    return listing(cfg)
+
+
+def cameras_apply(cfg: Any, op: Op) -> Applied:
+    """``{"domain": "cameras", "op": "disable"|"enable", "key": "<camera name>"}``: turn a failing camera off (it is
+    kept with its settings and never opened while off) or back on. Undoable; the last camera can't be turned off."""
+    from away.app.camera_switch import CameraSwitchError, turn_off, turn_on
+
+    name = str(op.key or op.value or "").strip()
+    if not name:
+        raise ChangeError("give the camera's name as key (settings list cameras shows them)")
+    try:
+        if op.op in ("disable", "off", "turn_off"):
+            text = turn_off(cfg, name)
+            inv = [Op("cameras", "enable", name)]
+        elif op.op in ("enable", "on", "turn_on"):
+            text = turn_on(cfg, name)
+            inv = [Op("cameras", "disable", name)]
+        else:
+            raise ChangeError("cameras support 'disable' and 'enable'")
+    except CameraSwitchError as exc:
+        raise ChangeError(str(exc)) from None
+    return Applied(op, None, op.op, inv, text, True)
+
+
 def domains(store: PresetStore | None = None) -> dict[str, Domain]:
     from away.agentlink import integrations
 
@@ -646,6 +676,7 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
         "profiles": Domain(
             "profiles", "Per-app profiles", profiles_list, profiles_apply, ops=("create", "delete", "set")
         ),
+        "cameras": Domain("cameras", "Cameras (turn one off or on)", cameras_list, cameras_apply, ops=("disable", "enable")),
         "gestures": integrations.gestures_domain(),
         "macros": integrations.macros_domain(),
     }

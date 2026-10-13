@@ -144,6 +144,8 @@ def error_status(exc: BaseException) -> tuple[int, str]:
         return 404, str(exc).strip("'\"")
     if isinstance(exc, RuntimeError):
         return 409, str(exc)
+    if isinstance(exc, AttributeError):  # v0.1.23: a wrongly shaped argument, never "internal error"
+        return 400, "an argument had the wrong shape (see the tool's description for the expected form)"
     return 500, f"internal error: {type(exc).__name__}"
 
 

@@ -58,6 +58,9 @@ MULTICAM_PROBE_S = 45.0
 HANDOVER_FREE_S = 15.0  # a hand-over waits at most this long for this process's cameras to be closed
 SPEED_CHECK_S = 5.0  # after this long streaming, each camera's measured frame rate is logged (ok / too slow)
 MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones (default hands.camera_retry_s)
+HAND_QUIET_S = 20.0  # v0.1.23: no background camera probe while a hand was tracked this recently
+MAX_DEFER_S = 1800.0  # ...but a probe is not put off longer than this
+DEVICE_CHECK_S = 30.0  # v0.1.23: how often a waiting camera retry checks whether the camera list changed
 MULTICAM_RETRY_MAX_S = 900.0  # back-off ceiling (default hands.camera_retry_max_s; v0.1.19: 15 min)
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
 
@@ -685,6 +688,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         # (tray, or Settings through a request file) sets this to probe again at once
         self._camera_retry_now = threading.Event()
         self.camera_retry_stopped = False
+        self.camera_unavailable: dict[str, Any] | None = None  # v0.1.23: "Internal camera unavailable ..." for the tray
         with contextlib.suppress(Exception):
             from away.multicam import capture as _capture
 
@@ -1218,6 +1222,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
                 self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
+                if fr.n_hands:
+                    self._last_hand_t = time.monotonic()  # v0.1.23: probes wait while a hand is tracked
                 self.pipeline.on_hand(
                     t,
                     fr.landmarks,
@@ -1346,7 +1352,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             session,
             open_lock=open_lock,
             serial=open_lock is not None,
-            virtual_fallback=bool(self.cfg.hands.virtual_fallback),
+            # v0.1.23: a background re-probe never opens NVIDIA Broadcast's virtual camera: Broadcast reads the
+            # working camera, so the probe dragged it from 30 down to 4-10 fps and looked like a success at 1 fps
+            virtual_fallback=bool(self.cfg.hands.virtual_fallback) and not skip_held,
             min_fps=float(self.cfg.hands.min_camera_fps),
             skip_held=skip_held,
         )
@@ -1433,7 +1441,78 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         h = self.cfg.hands
         base = float(h.camera_retry_s if base_s is None else base_s)
-        return RetryBackoff(base, max(base, float(h.camera_retry_max_s)), int(h.camera_retry_limit))
+        # v0.1.23: 5 min, 15 min, 60 min, then stop until Retry (or the camera list changes)
+        return RetryBackoff(
+            base, max(base, float(h.camera_retry_max_s)), int(h.camera_retry_limit), factor=3.0, last_max=True
+        )
+
+    def _camera_backoff(self, specs: list[Any], base_s: float | None = None) -> Any:
+        """v0.1.23: one back-off per set of failing cameras that lasts across camera-session restarts (it used to
+        start over every time, so a camera that never works was re-tried every few minutes)."""
+        store = getattr(self, "_camera_backoffs", None)
+        if store is None:
+            store = self._camera_backoffs = {}
+        key = tuple(sorted(str(getattr(s, "device", s)) for s in specs))
+        if key not in store:
+            store[key] = self._retry_backoff(base_s)
+        return store[key]
+
+    def _probe_would_disturb(self, now: float | None = None) -> bool:
+        """v0.1.23: opening another camera takes USB bandwidth from the one that tracks; while your hand is being
+        tracked (seen in the last HAND_QUIET_S seconds) a background probe waits."""
+        last = getattr(self, "_last_hand_t", None)
+        if last is None:
+            return False
+        t = time.monotonic() if now is None else now
+        return t - float(last) < HAND_QUIET_S
+
+    def _devices_changed(self, now: float | None = None) -> bool:
+        """v0.1.23: True (once) when the OS camera list changed (plugged in / unplugged / a driver came back):
+        a stopped retry starts again by itself. Checked at most every DEVICE_CHECK_S seconds."""
+        t = time.monotonic() if now is None else now
+        last = getattr(self, "_dev_check_t", None)
+        if last is None:
+            self._dev_check_t = t
+            return False
+        if t - float(last) < DEVICE_CHECK_S:
+            return False
+        self._dev_check_t = t
+        listed = self._camera_list()
+        if listed is None:
+            return False
+        sig = tuple(sorted(str(getattr(d, "name", d)) for d in listed))
+        old = getattr(self, "_dev_sig", None)
+        self._dev_sig = sig
+        return old is not None and old != sig
+
+    def _turned_off(self, specs: list[Any]) -> bool:
+        """v0.1.23: every failing camera was turned off (Turn off / an agent): stop probing them."""
+        off = {str(c.device) for c in getattr(self.cfg.hands, "disabled_cameras", [])}
+        return bool(off) and all(str(getattr(s, "device", s)) in off for s in specs)
+
+    def turn_off_camera(self, device: Any) -> str:
+        """ "Turn off" next to a failing camera (tray / Settings > Cameras): saved to the config file."""
+        from away import config as cfgmod
+        from away.app.camera_switch import turn_off
+
+        msg = turn_off(self.cfg, str(device))
+        with contextlib.suppress(Exception):
+            cfgmod.save(self.cfg, getattr(self, "config_path", None) or cfgmod.config_path())
+        self._retry_status(None)
+        self.camera_retry_stopped = False
+        self._retry_event().set()  # wake the prober so it notices
+        self.bus.publish("cameras.turned_off", {"device": str(device), "message": msg})
+        return msg
+
+    def _headline(self, labels: dict[str, str]) -> str:
+        from away.app.camera_loop import unavailable_text
+
+        listed = None
+        with contextlib.suppress(Exception):
+            listed = self._camera_list() if hasattr(self, "_camera_list") else None
+        broadcast = any("nvidia broadcast" in str(getattr(d, "name", d)).lower() for d in (listed or []))
+        name, why = next(iter(labels.items()), ("", ""))
+        return unavailable_text(name, why, broadcast)
 
     def _retry_status(self, status: dict[str, Any] | None) -> None:
         from away.app.camera_loop import write_retry_status
@@ -1447,13 +1526,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """The back-off ran out: tell the user once (tray notification + Settings) and wait for Retry cameras."""
         self.camera_retry_stopped = True
         names = ", ".join(labels) or "a camera"
+        headline = self._headline(labels)
         msg = (
-            f"stopped retrying {names} after {attempts} failed attempts. Fix or remove it in Settings > Cameras, "
-            "then use Retry cameras (tray menu or Settings > Cameras)."
+            f"{headline}. Stopped retrying {names} after {attempts} failed attempts. Retry / Turn off: tray menu "
+            "or Settings > Cameras (Retry cameras)."
         )
         logging.getLogger("away.cameras").warning("%s", msg)
-        self._retry_status({"stopped": True, "attempts": attempts, "failed": labels})
-        self.bus.publish("cameras.retry_stopped", {"failed": labels, "attempts": attempts, "message": msg})
+        self.camera_unavailable = {"headline": headline, "devices": list(labels)}
+        self._retry_status({"stopped": True, "attempts": attempts, "failed": labels, "headline": headline})
+        self.bus.publish(
+            "cameras.retry_stopped",
+            {"failed": labels, "attempts": attempts, "message": msg, "headline": headline},
+        )
         episode = getattr(self, "_camera_episode", 0)
         if hasattr(self, "_notices"):
             self.notice("Project Away: camera retries stopped", msg, key=f"cameras-retry-stopped:{episode}")
@@ -1488,7 +1572,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         ready = threading.Event()
         done = threading.Event()
-        backoff = self._retry_backoff(every_s)
+        backoff = self._camera_backoff(failed_specs, every_s)
+        changed = {"devices": False}
+
+        def asked() -> bool:
+            if self._turned_off(failed_specs):
+                return True
+            if self._manual_retry():
+                return True
+            if self._devices_changed():
+                changed["devices"] = True
+                return True
+            return False
 
         def prober() -> None:
             labels = {str(getattr(s, "device", s)): "" for s in failed_specs}
@@ -1498,15 +1593,29 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     self._retry_status(
                         {"stopped": False, "attempts": backoff.failures, "failed": labels, "next_s": delay}
                     )
-                why = wait_for_retry(delay, done, self.stop_event, self._manual_retry)
+                why = wait_for_retry(delay, done, self.stop_event, asked)
                 if why == "done":
+                    return
+                if self._turned_off(failed_specs):  # v0.1.23: turned off: back to the outer loop (new config)
+                    self._retry_status(None)
+                    self.camera_unavailable = None
+                    ready.set()
                     return
                 if why == "manual":
                     backoff.reset()
                     self.camera_retry_stopped = False
-                    logging.getLogger("away.cameras").info("cameras: retrying now (Retry cameras)")
+                    self.camera_unavailable = None
+                    reason = "the camera list changed" if changed["devices"] else "Retry cameras"
+                    changed["devices"] = False
+                    logging.getLogger("away.cameras").info("cameras: retrying now (%s)", reason)
                 if self.camera_share.requested():  # Settings is using the cameras: do not grab them
                     continue
+                waited = 0.0
+                while self._probe_would_disturb() and not done.is_set() and waited < MAX_DEFER_S:
+                    done.wait(5.0)  # v0.1.23: your hand is being tracked: probe when it is quiet
+                    waited += 5.0
+                if done.is_set():
+                    return
                 try:
                     bad = self._probe_specs(failed_specs, probe_s)
                 except Exception as exc:
@@ -1730,6 +1839,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     continue
                 backoff = retry_s
                 none_backoff.reset()
+                with contextlib.suppress(Exception):
+                    self._camera_backoffs.clear()  # v0.1.23: every camera works again: a new failure starts over
                 self._retry_status(None)
                 if degraded:
                     degraded = False

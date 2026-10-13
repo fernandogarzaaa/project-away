@@ -227,9 +227,11 @@ class HandsConfig:
     # v0.1.19: a camera that failed while another one tracks is re-probed after camera_retry_s, then after twice
     # as long each time (capped at camera_retry_max_s); after camera_retry_limit failed probes in a row the app
     # stops retrying and says so (tray / Settings > Cameras > Retry cameras starts again). 0 = never stop.
-    camera_retry_s: float = 45.0
-    camera_retry_max_s: float = 900.0
-    camera_retry_limit: int = 8
+    # v0.1.23: 5 min, then 15 min, then 60 min (each wait 3x the last, the last one the full max), then it stops
+    # until Retry or the camera list changes; probes never open NVIDIA Broadcast and wait while a hand is tracked
+    camera_retry_s: float = 300.0
+    camera_retry_max_s: float = 3600.0
+    camera_retry_limit: int = 3
     max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
     # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
     roles: RolesConfig = field(default_factory=RolesConfig)
@@ -239,6 +241,9 @@ class HandsConfig:
     gestures: GestureConfig = field(default_factory=GestureConfig)
     dwell: DwellConfig = field(default_factory=DwellConfig)
     cameras: list[CameraSpec] = field(default_factory=list)  # 2+ entries turn on multi-camera fusion
+    # v0.1.23: cameras you (or an agent) turned off ("Turn off" next to a failing camera); kept here with their
+    # settings so "Turn on" puts them back exactly. They are never opened or retried while off.
+    disabled_cameras: list[CameraSpec] = field(default_factory=list)
     multicam: MultiCamConfig = field(default_factory=MultiCamConfig)
 
 
@@ -446,6 +451,12 @@ class AgentLinkConfig:
     # go to that agent's inbox instead of being typed
     talk_enabled: bool = True
     default_agent: str = ""  # the agent "Hey agent" and the summon gesture go to ("" = every connected agent)
+    # v0.1.23: say "Sent to <agent>" (or "<agent> isn't connected right now...") aloud after a spoken message
+    talk_confirm_aloud: bool = True
+    # v0.1.23 backup link: standard = Cloudflare quick tunnel; backup = an SSH relay (no Cloudflare, no account)
+    link_type: str = "standard"
+    backup_relay: str = "localhost.run"  # localhost.run | pinggy
+    ssh_path: str = ""  # use this ssh program for the backup link ("" = the system's)
 
 
 SPEECH_RATES = ("slow", "normal", "fast")
@@ -476,6 +487,10 @@ def validate_speech(s: SpeechConfig) -> None:
 def validate_agent_link(a: AgentLinkConfig) -> None:
     if not isinstance(a.default_agent, str) or len(a.default_agent) > 60:
         raise ValueError("agent_link.default_agent must be an agent's name (at most 60 characters) or empty")
+    if a.link_type not in ("standard", "backup"):
+        raise ValueError(f"agent_link.link_type must be standard|backup, got {a.link_type!r}")
+    if a.backup_relay not in ("localhost.run", "pinggy"):
+        raise ValueError(f"agent_link.backup_relay must be localhost.run|pinggy, got {a.backup_relay!r}")
     if a.autofix not in AUTOFIX_MODES:
         raise ValueError(f"agent_link.autofix must be {'|'.join(AUTOFIX_MODES)}, got {a.autofix!r}")
     for name, lo, hi in (
@@ -615,7 +630,7 @@ def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> A
         if isinstance(current, BindingsConfig):
             setattr(obj, key, parse_bindings(value, prefix + key))
             continue
-        if key == "cameras" and isinstance(obj, HandsConfig):
+        if key in ("cameras", "disabled_cameras") and isinstance(obj, HandsConfig):
             setattr(obj, key, _parse_cameras(value, prefix + key, unknown))
             continue
         if is_dataclass(current) and isinstance(value, dict):
@@ -764,6 +779,10 @@ def validate(cfg: AppConfig) -> None:
     validate_camera_device("hands.camera_index", cfg.hands.camera_index)
     validate_hint("hands.camera_hint", cfg.hands.camera_hint)
     validate_cameras(cfg.hands.cameras)
+    if not isinstance(cfg.hands.disabled_cameras, list) or len(cfg.hands.disabled_cameras) > 16:
+        raise ValueError("hands.disabled_cameras must be a list of at most 16 cameras")
+    for i, cam in enumerate(cfg.hands.disabled_cameras):
+        validate_camera_device(f"hands.disabled_cameras[{i}].device", cam.device)
     cfg.hands.camera_fourcc = validate_fourcc("hands.camera_fourcc", cfg.hands.camera_fourcc)
     h = cfg.hands
     if h.camera_backend not in CAMERA_BACKENDS:

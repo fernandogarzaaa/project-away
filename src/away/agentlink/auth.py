@@ -33,6 +33,9 @@ from away.agentlink import perms
 TOKEN_PREFIX = "pa_"
 CODE_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"  # no 0/o/1/l
 NAME_RE = re.compile(r"[^\w .,'()+-]", re.UNICODE)
+# v0.1.23: an agent whose access ended (expired or disconnected) is remembered this long without any token, so
+# pairing again under the same name keeps its wake word, default-agent choice and inbox instead of a duplicate
+REMEMBER_S = 30 * 86400.0
 
 
 def new_token() -> str:
@@ -80,6 +83,7 @@ class Agent:
     # "wake me" address a message is POSTed to (set by the person in Settings > Agent Link; off by default)
     wake_word: str = ""
     wake_url: str = ""
+    paired_again: int = 0  # v0.1.23: times this agent paired again under the same name (settings kept)
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -152,12 +156,27 @@ class AgentRegistry:
         except Exception:
             self.agents = {}  # a corrupt file means everyone pairs again; never crash the app over it
 
+    @staticmethod
+    def _ended(a: Agent) -> float:
+        return a.expires  # revoke() moves expires to the moment it was disconnected
+
+    def _forget_old(self, now: float) -> None:
+        for aid in [i for i, a in self.agents.items() if not a.active(now) and now - self._ended(a) > REMEMBER_S]:
+            del self.agents[aid]
+
     def save(self) -> None:
         if self.path is None:
             return
         with self._lock:
             now = self.clock()
-            keep = [asdict(a) for a in self.agents.values() if a.active(now)]
+            self._forget_old(now)
+            keep = []
+            for a in self.agents.values():
+                d = asdict(a)
+                if not a.active(now):  # remembered for its settings only: no token or link survives
+                    d["token_hash"] = ""
+                    d["link_hash"] = ""
+                keep.append(d)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"agents": keep}, indent=1), encoding="utf-8")
@@ -177,6 +196,24 @@ class AgentRegistry:
     ) -> tuple[Agent, str]:
         token = new_token()
         now = self.clock()
+        cname = clean_name(name)
+        with self._lock:
+            old = self._same_name(cname, kind, now)
+            if old is not None:  # v0.1.23: pairing again under the same name keeps its id and settings
+                if old.revoked:
+                    old.always_allow = []  # the person disconnected it: risky actions are asked again
+                old.revoked = False
+                old.kind = kind
+                old.scopes = perms.to_list(perms.normalize(list(scopes)))
+                old.token_hash = digest(token)
+                old.expires = now + float(ttl_s)
+                old.last_seen = now
+                old.link_hash = digest(link_code) if link_code else ""
+                old.client = dict(client or {})
+                old.paired_again += 1
+        if old is not None:
+            self.save()
+            return old, token
         a = Agent(
             id=uuid.uuid4().hex[:12],
             name=clean_name(name),
@@ -226,6 +263,22 @@ class AgentRegistry:
             found.last_seen = now
         return found
 
+    def _same_name(self, name: str, kind: str, now: float) -> Agent | None:
+        """The agent a new pairing under ``name`` continues: same name (any case) and kind, or the same name with
+        no access right now (never an active agent of another kind: Claude Desktop and Claude.ai stay two)."""
+        want = name.strip().lower()
+        hits = [a for a in self.agents.values() if a.name.strip().lower() == want]
+        for a in sorted(hits, key=lambda x: (x.kind != kind, not x.active(now), -x.last_seen)):
+            if a.kind == kind or not a.active(now):
+                return a
+        return None
+
+    def known(self) -> builtins.list[Agent]:
+        """Every agent with access now plus the remembered ones (access ended within :data:`REMEMBER_S`)."""
+        now = self.clock()
+        with self._lock:
+            return [a for a in self.agents.values() if a.active(now) or now - self._ended(a) <= REMEMBER_S]
+
     def get(self, agent_id: str) -> Agent | None:
         return self.agents.get(agent_id)
 
@@ -256,6 +309,7 @@ class AgentRegistry:
             if a is None or a.revoked:
                 return False
             a.revoked = True
+            a.expires = min(a.expires, self.clock())
         self.save()
         return True
 
@@ -265,6 +319,7 @@ class AgentRegistry:
             for a in self.agents.values():
                 if not a.revoked:
                     a.revoked = True
+                    a.expires = min(a.expires, self.clock())
                     n += 1
             for p in self.pairings:
                 p.used = True

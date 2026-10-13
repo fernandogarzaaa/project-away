@@ -30,7 +30,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
     },
     "settings": {
         "list": GroupAction("list_settings", ("domain",)),
-        "change": GroupAction("change_settings", ("changes", "why"), {"changes": "ops"}),
+        "change": GroupAction("change_settings", ("changes", "ops", "why"), {"changes": "ops"}),
         "undo": GroupAction("undo_changes", ("what",)),
         "history": GroupAction("change_history", ("limit",)),
         "config": GroupAction("get_config"),
