@@ -98,6 +98,9 @@ class CursorConfig:
     # Enlarge the system cursor while gesture control is active (users sit far from the screen); it shrinks back
     # on pause, so the size also shows the state. 0 = off, 1..5 = 1.5x, 2x, 3x, 4x, 6x (Windows only)
     big_cursor_size: int = 2
+    # v0.1.23: the cursor moves this many times a second, gliding between hand frames (smooth even when the camera
+    # is slow); 0 = move once per hand frame (as before v0.1.23)
+    output_hz: int = 120
     autocenter: AutoCenterConfig = field(default_factory=AutoCenterConfig)
     # off | coarse (the head moves the cursor in big steps between zones, the hand refines) | pointer (head-only
     # pointer while no hand points, for when the hands are busy; clicks with the face triggers)
@@ -473,6 +476,11 @@ class SpeechConfig:
     rate: str = "normal"  # slow | normal | fast
     volume: str = "normal"  # quiet | normal | loud
     voice: str = ""  # part of a voice's name ("Zira", "Samantha"); "" = the system's default voice
+    # v0.1.23 natural voices: auto (Natural (Kokoro) when downloaded, then Light (Piper), then Windows natural,
+    # then the classic voice) | kokoro | piper | windows | classic. Downloads: Settings > Voice & input > Voice.
+    engine: str = "auto"
+    kokoro_voice: str = "af_heart"  # af_heart | af_bella | am_michael | bf_emma | bm_george
+    piper_voice: str = "lessac"  # lessac | amy
 
 
 def validate_speech(s: SpeechConfig) -> None:
@@ -480,6 +488,14 @@ def validate_speech(s: SpeechConfig) -> None:
         raise ValueError(f"speech.rate must be {'|'.join(SPEECH_RATES)}, got {s.rate!r}")
     if s.volume not in SPEECH_VOLUMES:
         raise ValueError(f"speech.volume must be {'|'.join(SPEECH_VOLUMES)}, got {s.volume!r}")
+    if s.engine not in ("auto", "kokoro", "piper", "windows", "classic"):
+        raise ValueError(f"speech.engine must be auto|kokoro|piper|windows|classic, got {s.engine!r}")
+    if s.kokoro_voice not in ("af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"):
+        raise ValueError(
+            f"speech.kokoro_voice must be af_heart|af_bella|am_michael|bf_emma|bm_george, got {s.kokoro_voice!r}"
+        )
+    if s.piper_voice not in ("lessac", "amy"):
+        raise ValueError(f"speech.piper_voice must be lessac|amy, got {s.piper_voice!r}")
     if not isinstance(s.voice, str) or len(s.voice) > 60:
         raise ValueError("speech.voice must be text (part of a voice's name), at most 60 characters")
 
@@ -773,6 +789,9 @@ def validate(cfg: AppConfig) -> None:
     mh = cfg.hands.max_hands
     if isinstance(mh, bool) or not isinstance(mh, int) or not 1 <= mh <= 4:
         raise ValueError(f"hands.max_hands must be an integer in [1, 4], got {mh!r}")
+    oh = c.output_hz
+    if isinstance(oh, bool) or not isinstance(oh, int) or not (oh == 0 or 30 <= oh <= 240):
+        raise ValueError(f"hands.cursor.output_hz must be 0 (off) or an integer in [30, 240], got {oh!r}")
     bc = c.big_cursor_size
     if isinstance(bc, bool) or not isinstance(bc, int) or not 0 <= bc <= 5:
         raise ValueError(f"hands.cursor.big_cursor_size must be an integer in [0, 5] (0 = off), got {bc!r}")

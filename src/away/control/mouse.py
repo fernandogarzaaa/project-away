@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -161,6 +162,8 @@ class MouseController:
         # v0.1.20 smart pointer (away.pointer.smart.SmartPointer): ``refine(x, y)`` adjusts the mapped position
         # (magnetic targets), ``resync(pos)`` follows a direct cursor placement
         self.refiner: Any = None
+        # v0.1.23: fixed-rate output (away.pointer.glide.Glide): a move sets the target, the output thread moves
+        self.glide: Any = None
 
     # ------------------------------------------------------------ steady click
     def observe_pinch(self, t: float, ratio: float, pinch_on: float, pinched: bool, dragging: bool) -> None:
@@ -183,7 +186,7 @@ class MouseController:
         x, y = round(pos[0]), round(pos[1])
         if (x, y) != (round(self.mapper.pos[0]), round(self.mapper.pos[1])):
             self.mapper.set_position(pos[0], pos[1])
-            self.backend.move(x, y)
+            self._jump_to(x, y)
             if self.refiner is not None:
                 self.refiner.resync((float(x), float(y)))
 
@@ -192,8 +195,12 @@ class MouseController:
             self.enabled = not bool(ev.data.get("paused"))
             if not self.enabled:
                 self._release_if_down()
+                if self.glide is not None:
+                    self.glide.stop()
             return
         if ev.kind == "hand_lost":
+            if self.glide is not None:
+                self.glide.stop()
             self.mapper.reset()
             if self.stabilizer is not None:
                 self.stabilizer.reset()
@@ -209,7 +216,10 @@ class MouseController:
             )
             if self.refiner is not None:
                 x, y = self.refiner.refine(x, y)
-            self.backend.move(x, y)
+            if self.glide is not None:
+                self.glide.on_target(time.monotonic(), float(x), float(y))
+            else:
+                self.backend.move(x, y)
             if self.stabilizer is not None:
                 self.stabilizer.record(ev.t, self.mapper.pos if self.refiner is None else (float(x), float(y)))
         elif ev.kind in ("click", "double_click"):
@@ -264,7 +274,7 @@ class MouseController:
                 to = self.mapper.warp(pt[0], pt[1])
             if self.stabilizer is not None:
                 self.stabilizer.reset()
-            self.backend.move(*to)
+            self._jump_to(*to)
             return True
         target = {"next_monitor": "next", "prev_monitor": "prev", "primary_monitor": "primary"}.get(arg)
         if target is None and arg.startswith("monitor "):
@@ -277,8 +287,14 @@ class MouseController:
             return False
         if self.stabilizer is not None:
             self.stabilizer.reset()
-        self.backend.move(*pos)
+        self._jump_to(*pos)
         return True
+
+    def _jump_to(self, x: int, y: int) -> None:
+        """A direct placement: the output glide (when on) continues from here instead of gliding back."""
+        if self.glide is not None:
+            self.glide.jump(float(x), float(y), time.monotonic())
+        self.backend.move(x, y)
 
     def _release_if_down(self) -> None:
         if self.button_down:

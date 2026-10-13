@@ -895,6 +895,22 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self._restart_hotkeys()
             self.bus.publish("config.reloaded", {"path": str(path)})
 
+    def _start_glide(self) -> None:
+        """v0.1.23: the fixed-rate cursor output (hands.cursor.output_hz). Only pointer moves run on it."""
+        hz = int(getattr(self.cfg.hands.cursor, "output_hz", 0) or 0)
+        if self.dry_run or hz <= 0 or not self.cfg.hands.enabled:
+            return
+        from away.pointer.glide import Glide, GlideRunner
+
+        mouse = self.pipeline.mouse
+        mouse.glide = Glide()
+        self.glide_runner = GlideRunner(
+            mouse.glide,
+            mouse.backend.move,
+            hz,
+            active=lambda: bool(mouse.enabled) and not self.pipeline.output_paused(),
+        ).start()
+
     def _cursor_stuck(self, ev: Any) -> None:
         """v0.1.23: a restore did not take: one friendly notice (the tray menu has "Reset cursor size")."""
         with contextlib.suppress(Exception):
@@ -2090,6 +2106,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.threads.append(threading.Thread(target=self._watch_monitors, daemon=True, name="monitors"))
         for th in self.threads:
             th.start()
+        self._start_glide()
         with contextlib.suppress(Exception):
             self.pipeline.smart.start()  # low-rate UI Automation element cache (Windows; no-op elsewhere)
         if self.guard is not None:
