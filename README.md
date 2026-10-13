@@ -159,6 +159,12 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Shortcuts:** `Ctrl+Alt+Space` pauses/resumes listening, `Ctrl+Alt+M` mutes the mic, `Ctrl+Alt+E` lets you edit selected text by voice.
 - **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
 - **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
+- **Videos and other people aren't typed (v0.1.22).** Words count as yours when the camera sees your mouth move.
+  If it barely moved, only a very clear recognition is typed, and while another app plays sound (a YouTube video,
+  a call) your mouth must be seen moving. The computer's own voice (an agent speaking to you) is never typed.
+- **Talk to your AI agent (v0.1.22):** say **"Hey"** and your agent's name, for example **"Hey Claude, remind me to
+  call Mom at five"**, and the words go to that agent instead of being typed. You see **"Sent to Claude"**. Say
+  "Hey Claude" on its own and then your message, or use the summon gesture and speak. See *Talk to your agent*.
 - Speech is processed on your PC and never saved or uploaded.
 - **Click things by name (Windows):** say **"click Save"**, **"double click Photos"** or **"focus Search"**. Look at
   something (or point at it) and say **"click that"**. If two things have the same name, numbers appear next to
@@ -248,6 +254,34 @@ under **Advanced** there, and in **Settings → Tuning**; you never need to touc
 Then just talk to your agent: *"What can you see in Project Away?"*, *"The cursor is too fast, fix it"*,
 *"Ask me with a thumbs up before you send the email"*.
 
+**Link stopped working? Press "New link".** ChatGPT or Claude.ai sometimes cannot reach one particular link
+(Cloudflare blocks that agent's servers on that address, and every request fails). **New link** in Settings →
+Agent Link makes a fresh address and copies it; paste it into your AI app again. Nobody is disconnected, and agents
+on this PC (Claude Desktop, Cursor) are not affected.
+
+### Talk to your agent (v0.1.22)
+
+Say **"Hey"** and an agent's name, then what you want: **"Hey Claude, what's on my calendar?"**. Your words go to
+that agent only, instead of being typed, and a small **"Sent to Claude"** shows on screen. The agent answers on
+your screen and out loud.
+
+* **Every connected agent answers to "Hey <its name>"** automatically. Give one its own wake word (for example
+  "Jarvis") with **Wake word** next to the agent in Settings → Agent Link; the agent row shows what to say.
+* **"Hey agent"** or the **summon gesture** (then say your message) goes to your **default agent**, chosen under
+  *Talk to your agent* in Settings → Agent Link. With no default it goes to every connected agent.
+* Say only "Hey Claude" and pause: you have about 8 seconds to say the message.
+* It needs always-on listening (the default). The same rules as dictation apply, so a video playing in the
+  background does not send messages.
+* **Wake-up address (optional, off by default).** Some agents can be woken up by a web address (a "webhook"). If
+  your agent gives you one, paste it under **Wake word** → *Wake-up address*; each message to that agent is then
+  sent there too. Only `https://` addresses (or an address on this PC) are accepted.
+
+For agents: messages arrive as a `user.message` event only the addressed agent sees, and in the `inbox` tool
+(`list`, `read`, `reply`), `GET /v1/inbox`, `GET /v1/inbox/read?id=`, `POST /v1/inbox/reply {id, text, speak}` and
+the `away://inbox` resource. A reply is shown and read aloud (like `notify_user` with `speak=true`). The wake-up
+POST body is `{"event": "user.message", "id", "text", "agent", "t", "source", "how_to_reply"}`. Messages are kept
+in memory only (the newest 200), never written to disk.
+
 | Permission | What it means | Default |
 |---|---|---|
 | ☝ See my gestures | your gestures, whether you are at the screen, what you said to Project Away, its settings and health | always on |
@@ -320,19 +354,20 @@ async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") 
 or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
 `ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
 
-**Tools (15, v0.1.21).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
+**Tools (16; 15 in v0.1.21, `inbox` added in v0.1.22).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
 
 | Tool | Actions / arguments | Permission |
 |---|---|---|
 | `get_status`, `get_context` | (none) | see my gestures |
+| `inbox` | `list` (`unread_only`), `read` (`id`), `reply` (`id`, `text`, `speak`) - what the person said to you | always (only your own messages) |
 | `events` | `poll` (`since`, `landmarks`), `wait` (`since`, `timeout_s`, `topics`) | see my gestures |
 | `settings` | `list` (`domain`), `change` (`changes`, `why`), `undo` (`what`), `history` (`limit`), `config` | change my settings (`list`/`history`/`config`: see my gestures) |
 | `preferences` | `list`, `add` (`text`), `remove` (`number`) | change my settings to add/remove |
 | `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`logs`: see my gestures) |
 | `look` | `camera` | see my camera when I allow |
 | `get_screen` | `scale`, `monitor`, `region`, `elements` (see below) | see my screen when I allow |
-| `ask_user` | `question`, `options`, `timeout_s`, `urgency`, `speak` | always |
-| `notify_user` | `text`, `level`, `speak` | always |
+| `ask_user` | `question` (or `message`), `options`, `timeout_s`, `urgency`, `speak` | always |
+| `notify_user` | `text` (or `message`), `level`, `speak` | always |
 | `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always) |
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
@@ -354,7 +389,8 @@ plus metadata listing every monitor (`index` 1..N left to right, `x`, `y`, `w`, 
 and the scale used. Then zoom in:
 
 * `scale` 0.1-1.0: the share of the area's real pixels (1.0 to read small text);
-* `monitor=N`: one display;
+* `monitor=N`: one display, numbered from 1 (`monitor=0` is an error that lists the valid numbers; leave
+  `monitor` out for the whole desktop);
 * `region={x, y, width, height}` (also `"x,y,w,h"` or `[x, y, w, h]`) in screen coordinates, which are negative left
   of or above the main display; clipped to the desktop.
 
@@ -1635,6 +1671,35 @@ Config (`macros:` in config.yaml, all optional):
 | Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
 | Parakeet, Wayland | **Untested** |
+
+## Changes in v0.1.22
+
+v0.1.22 fixes what Agent Link showed on the user's real PC after v0.1.21, and adds talking to your agent.
+
+* **Videos are not typed any more.** Lines from a YouTube video in the background were typed ("It runs in the
+  blood.", confidence 0.47, mouth never seen moving). When the mouth moved in less than a quarter of the
+  utterance (`voice.strict_motion_ratio`, 0.25), the words need a confidence of 0.7 (`voice.strict_confidence`) at
+  any length. On Windows Project Away also sees when another app is playing sound (the per-app audio meter, through
+  pycaw); then your mouth must be seen moving, however clear the words are (`voice.other_audio_needs_mouth`).
+* **The agent's voice is not typed.** "Can you hear me now?", spoken by the agent, was transcribed and typed. The
+  microphone now ignores everything while the computer speaks and for 0.7 s after.
+* **No typing while the camera is borrowed.** The "no face frames during speech (CPU busy?)" allowance now only
+  applies when the camera really kept delivering frames and nobody else had it. While a camera check or Settings
+  has the camera, speech is not typed and a notice says why (`face.gate_when_camera_busy: allow` types anyway;
+  Settings → Voice).
+* **Readable camera checks.** NVIDIA Broadcast's `[VCAMDS]` driver messages are collapsed into one line ("hid 812
+  camera-driver messages"), virtual cameras are skipped unless you name one (or pass `--include-virtual`), and the
+  whole check stops after 60 seconds (`--budget`).
+* **`get_screen monitor=0`** used to return the whole desktop silently; it is now an error that lists the monitors
+  (they are numbered from 1).
+* **`notify_user` / `ask_user` accept `message`** as another name for `text` / `question`.
+* **New link** in Settings → Agent Link starts a fresh secure link without disconnecting anyone, for when Cloudflare
+  blocks one agent on one address (it answers 403 to everything).
+* **Talk to your agent.** "Hey <agent name>, ..." or the summon gesture sends your words to that agent's inbox,
+  with per-agent wake words, a default agent, an optional wake-up webhook per agent and a "Sent to Claude"
+  confirmation (see *Talk to your agent*). New `inbox` MCP tool, `/v1/inbox` and `away://inbox`.
+* **Old crash notices can be dismissed.** Settings shows "an unexpected error was logged last time" with **Open
+  the log** and **Dismiss**; agents get the crash.log tail from `diagnostics action="logs"` (`crash_log`).
 
 ## Changes in v0.1.21
 
