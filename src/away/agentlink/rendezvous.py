@@ -26,6 +26,7 @@ Trade-offs of the link types (README "A link that survives restarts" has the ful
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -215,7 +216,7 @@ class LinkAnnouncer:
                     "signed": msg,
                     "how_to_reconnect": "POST <url>/v1/token/refresh with your refresh token",
                 }
-                jobs.append(self._sender(row, "webhook", lambda w=wake, p=payload: self.post(w, p)))
+                jobs.append(self._sender(row, "webhook", functools.partial(self.post, wake, payload)))
             if moved and self.inbox is not None:
                 with contextlib.suppress(Exception):
                     self.inbox.add(
@@ -225,10 +226,10 @@ class LinkAnnouncer:
                         wake=False,
                     )
                     row["inbox"] = True
-            if rdv_on and getattr(a, "rdv_id", ""):
+            if rdv_on and bool(getattr(a, "rdv_id", "")):
                 body = json.dumps(msg).encode("utf-8")
                 dest = f"{server}/{topic(a.rdv_id)}"
-                jobs.append(self._sender(row, "rendezvous", lambda d=dest, b=body: self.post_raw(d, b)))
+                jobs.append(self._sender(row, "rendezvous", functools.partial(self.post_raw, dest, body)))
             else:
                 row["rendezvous"] = "off" if not rdv_on else "none"
             results.append(row)

@@ -50,7 +50,7 @@ def ssd_anchors(
             count += 2  # aspect ratio 1.0 + interpolated_scale_aspect_ratio 1.0
             last += 1
         stride = strides[layer]
-        fm = int(math.ceil(input_size / stride))
+        fm = -(-input_size // stride)  # ceil
         for y in range(fm):
             for x in range(fm):
                 c = ((x + offset) / fm, (y + offset) / fm)
@@ -128,7 +128,7 @@ def letterbox(image: NDArray[np.uint8], size: int) -> tuple[NDArray[np.uint8], t
 
     h, w = image.shape[:2]
     scale = size / max(h, w)
-    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    nw, nh = max(1, int(np.floor(w * scale + 0.5))), max(1, int(np.floor(h * scale + 0.5)))
     resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
     out = np.zeros((size, size, 3), np.uint8)
     x0, y0 = (size - nw) // 2, (size - nh) // 2
@@ -194,7 +194,7 @@ def rect_from_points(points: NDArray[Any], img_w: int, img_h: int, rotation: flo
     c, s = math.cos(-rotation), math.sin(-rotation)
     rx = (px - cx0) * c - (py - cy0) * s
     ry = (px - cx0) * s + (py - cy0) * c
-    mnx, mxx, mny, mxy = float(rx.min()), float(rx.max()), float(ry.min()), float(ry.max())
+    mnx, mxx, mny, mxy = float(np.min(rx)), float(np.max(rx)), float(np.min(ry)), float(np.max(ry))
     mcx, mcy = (mnx + mxx) / 2, (mny + mxy) / 2
     c2, s2 = math.cos(rotation), math.sin(rotation)
     cx = cx0 + mcx * c2 - mcy * s2

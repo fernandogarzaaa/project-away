@@ -307,9 +307,12 @@ def test_pairing_hands_out_a_refresh_token_and_refresh_works_over_rest(tmp_path:
         core.service, core.registry, local_key="k" * 43, rate=(100.0, 100),
         link_info=lambda: {"url": "https://now.trycloudflare.com", "rendezvous": "ntfy", "rendezvous_server": "https://ntfy.sh"},
     )  # fmt: skip
-    gate.pair = lambda p, name, client, bind, kind="remote": core.registry.approve(  # type: ignore[method-assign]
-        p if core.registry.mark_pending(p, name, client) else p, 3600
-    )
+
+    def approve(p: Any, name: str, client: Any, bind: bool, kind: str = "remote") -> Any:
+        core.registry.mark_pending(p, name, client)
+        return core.registry.approve(p, 3600)
+
+    gate.pair = approve  # type: ignore[method-assign]
     client = TestClient(api.create_app(core.service, gate, mcp_tools.build(api.LocalBackend(core.service))))
     assert client.get("/v1/ping").status_code == 200
     p = core.registry.new_pairing(["read", "diagnose"])

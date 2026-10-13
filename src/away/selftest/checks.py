@@ -50,7 +50,7 @@ class Env(Protocol):  # every method may raise; see away.selftest.env.RealEnv fo
     def models(self) -> dict[str, Any]: ...
 
 
-def _r(id: str, title: str, status: str, summary: str, fix: Fix | None = None, **details: Any) -> Result:
+def _r(id: str, title: str, status: str, summary: str, fix: Fix | None = None, /, **details: Any) -> Result:
     return Result(id, title, status, summary, {k: v for k, v in details.items() if v is not None}, fix)
 
 

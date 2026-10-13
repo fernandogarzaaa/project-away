@@ -44,7 +44,7 @@ class HandResult:
     handedness: list[list[Category]] = field(default_factory=list)
 
 
-def session(path: Path, providers: list[str]) -> Any:
+def session(path: Path | str, providers: list[str]) -> Any:
     import onnxruntime as ort
 
     opts = ort.SessionOptions()
@@ -117,7 +117,7 @@ class OnnxHandLandmarker:
             got = self._landmarks(rgb, r)
             if got is None:
                 continue
-            lm, presence, handed = got
+            lm, _presence, handed = got
             nr = mp.hand_rect_from_landmarks(lm, w, h)
             if any(_overlap(nr, t, w, h) > SAME_HAND_IOU for t in nxt):
                 continue  # two regions found the same hand

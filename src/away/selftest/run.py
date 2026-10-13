@@ -7,6 +7,8 @@ through ``away://selftest/latest`` and ``GET /v1/selftest/latest``).
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import sys
@@ -73,13 +75,11 @@ def run(
         rep = Report(__version__, _platform(), clock(), trigger=trigger, id=uuid.uuid4().hex[:10])
         for i, (cid, label, fn) in enumerate(todo):
             if progress is not None:
-                try:
+                with contextlib.suppress(Exception):
                     progress(label, i, len(todo))
-                except Exception:
-                    pass
             t0 = time.monotonic()
             try:
-                res = _call_with_limit(lambda f=fn: f(env), float(lim.get(cid, DEFAULT_LIMIT_S)))
+                res = _call_with_limit(functools.partial(fn, env), float(lim.get(cid, DEFAULT_LIMIT_S)))
             except Exception as exc:
                 status = WARN if isinstance(exc, TimeoutError) else FAIL
                 res = [
@@ -98,10 +98,8 @@ def run(
             rep.results.extend(res)
         rep.finished = clock()
         if progress is not None:
-            try:
+            with contextlib.suppress(Exception):
                 progress("done", len(todo), len(todo))
-            except Exception:
-                pass
         return rep
     finally:
         _lock.release()

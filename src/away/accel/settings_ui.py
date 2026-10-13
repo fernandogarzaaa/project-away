@@ -71,7 +71,12 @@ def build(win: Any, parent: Any) -> None:  # pragma: no cover - Tk widgets; smok
                 msg = None
             except Exception as exc:
                 msg = str(exc)
-            parent.after(0, lambda: (win._report(msg, "downloaded"), refresh()))
+
+            def done() -> None:
+                win._report(msg, "downloaded")
+                refresh()
+
+            parent.after(0, done)
 
         threading.Thread(target=work, daemon=True).start()
 

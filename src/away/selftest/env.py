@@ -379,8 +379,10 @@ class RealEnv:
                 play = getattr(eng, "play", None)
                 if callable(play):  # natural voices: time to the first audio chunk exactly
 
-                    def timed(*a: Any, _p: Callable[..., Any] = play, **k: Any) -> Any:
-                        first.setdefault("t", time.perf_counter())
+                    def timed(
+                        *a: Any, _p: Callable[..., Any] = play, _first: dict[str, float] = first, **k: Any
+                    ) -> Any:
+                        _first.setdefault("t", time.perf_counter())
                         return _p(*a, **k)
 
                     eng.play = timed
@@ -504,9 +506,10 @@ def app_processes(psutil_mod: Any = None, me: int | None = None) -> list[int]:
 
 def gpu_load(run: Callable[..., str | None] | None = None) -> dict[str, Any]:
     """NVIDIA load through nvidia-smi ({} when there is none)."""
-    if run is None:
-        from away.app.hardware import run_cmd as run
-    txt = run(
+    from away.app.hardware import run_cmd
+
+    runner = run or run_cmd
+    txt = runner(
         ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,name", "--format=csv,noheader,nounits"]
     )
     if not txt:

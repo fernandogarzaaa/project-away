@@ -212,9 +212,8 @@ def test_a_crashing_or_stuck_check_never_breaks_the_report() -> None:
 def test_only_some_checks_and_one_at_a_time() -> None:
     rep = runmod.run(FakeEnv(), only=["mic", "glide"])
     assert {r.id for r in rep.results} == {"mic", "glide"}
-    with runmod._lock:
-        with pytest.raises(runmod.Busy):
-            runmod.run(FakeEnv())
+    with runmod._lock, pytest.raises(runmod.Busy):
+        runmod.run(FakeEnv())
 
 
 # ------------------------------------------------------------------------------------------------ redaction

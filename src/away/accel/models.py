@@ -42,13 +42,13 @@ class OnnxModel:
 
 SETS: dict[str, tuple[OnnxModel, ...]] = {
     "hands": (
-        OnnxModel("palm_detector", "onnx/hand/palm_detector.onnx", "939e53b8c438bdbdcaaf2e5589c8204cb6c92d383a6fe87c939ca3bb52f605c7", 4589448),
-        OnnxModel("hand_landmark", "onnx/hand/hand_landmark.onnx", "716f2d75eb41cbb8f222cda9099eb617ec0a3248ecb96e77c0dc916759b5bb1c", 10903281),
+        OnnxModel("palm_detector", "onnx/hand/palm_detector.onnx", "939e53b8c438bdbdcaaf2e5589c8204cb6c92d383a6fe87c939ca3bb52f605c7", 4589448),  # noqa: E501
+        OnnxModel("hand_landmark", "onnx/hand/hand_landmark.onnx", "716f2d75eb41cbb8f222cda9099eb617ec0a3248ecb96e77c0dc916759b5bb1c", 10903281),  # noqa: E501
     ),
     "face": (
-        OnnxModel("face_detector", "onnx/face/face_detector.onnx", "0acb84ef882f18005675b14b3d8021038fab9fc2d2e6365fc73787022d7dda48", 418530),
-        OnnxModel("face_landmark", "onnx/face/face_landmark.onnx", "38ea4d75bffea5a72cb93ec027ddeaf31763049ffa57ec944fa3840119083bec", 4921071),
-        OnnxModel("face_blendshape", "onnx/face/face_blendshape.onnx", "4d97c181a04c1ac1778daa7ffbd9ae1e80b65300750078a7edbcf456d29b53c3", 1883864),
+        OnnxModel("face_detector", "onnx/face/face_detector.onnx", "0acb84ef882f18005675b14b3d8021038fab9fc2d2e6365fc73787022d7dda48", 418530),  # noqa: E501
+        OnnxModel("face_landmark", "onnx/face/face_landmark.onnx", "38ea4d75bffea5a72cb93ec027ddeaf31763049ffa57ec944fa3840119083bec", 4921071),  # noqa: E501
+        OnnxModel("face_blendshape", "onnx/face/face_blendshape.onnx", "4d97c181a04c1ac1778daa7ffbd9ae1e80b65300750078a7edbcf456d29b53c3", 1883864),  # noqa: E501
     ),
 }  # fmt: skip
 

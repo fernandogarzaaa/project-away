@@ -8,6 +8,7 @@ addresses stay (agents need them); rendezvous keys never appear in a report in t
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import os
 import re
@@ -30,14 +31,10 @@ def _user_names() -> list[str]:
     for v in (os.environ.get("USERNAME"), os.environ.get("USER"), os.environ.get("LOGNAME")):
         if v:
             names.add(v)
-    try:
+    with contextlib.suppress(Exception):
         names.add(getpass.getuser())
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         names.add(Path.home().name)
-    except Exception:
-        pass
     return sorted(
         (n for n in names if n and len(n) >= 2 and n.lower() not in ("root", "user", "admin")), key=len, reverse=True
     )

@@ -52,7 +52,7 @@ def test_setting_is_validated_and_shown() -> None:
     cfg = C.AppConfig()
     assert cfg.hands.compute == "auto"
     cfg.hands.compute = "tpu"
-    with pytest.raises(ValueError, match="hands.compute"):
+    with pytest.raises(ValueError, match=r"hands\.compute"):
         C.validate(cfg)
     from away.accel.settings_ui import LABELS, label_to_value, status_line
 
@@ -208,10 +208,10 @@ class FakeSession:
         self.fn, self.calls, self.provider = fn, 0, provider
 
     def get_inputs(self) -> list[Any]:
-        class I:
+        class Input:
             name = "input_1"
 
-        return [I()]
+        return [Input()]
 
     def get_providers(self) -> list[str]:
         return [self.provider, "CPUExecutionProvider"]
