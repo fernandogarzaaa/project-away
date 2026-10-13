@@ -141,6 +141,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         note: str | None = None,
         path: str | None = None,
         lines: int | None = None,
+        wait: bool | None = None,
+        only: list[str] | None = None,
     ) -> Any:
         """Find out what is wrong. run/job need "Run camera and speed checks"; record, bundle, files, download
         and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
@@ -150,7 +152,11 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
-          (base64). action="logs": the app log tail (`lines`)."""
+          (base64). action="logs": the app log tail (`lines`).
+        - action="selftest": run the one-click PC self-test (cameras, hand tracking, pointer, microphone, speech,
+          voices, pop-ups, link, PC load, models); `wait`=true returns the report, otherwise it arrives as the event
+          selftest.completed, in your inbox and as away://selftest/latest. action="selftest_latest": the newest
+          report. Every result is pass/warn/fail in plain words with the fix the person can press."""
         if action == "download":
             data = await group(ctx, "diagnostics", action="download", path=path)
             raw = data if isinstance(data, bytes) else base64.b64decode(data["b64"])
@@ -165,6 +171,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             job_id=job_id,
             note=note,
             lines=lines,
+            wait=wait,
+            only=only,
         )
 
     # ------------------------------------------------------------------- see
@@ -325,6 +333,11 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     async def inbox_res() -> str:
         """Messages the person spoke to you (newest first)."""
         return json.dumps(await call(_ctx(mcp), "inbox_list"), default=str)
+
+    @mcp.resource("away://selftest/latest", mime_type="application/json")
+    async def selftest_res() -> str:
+        """v0.1.24: the newest self-test report (pass/warn/fail per check, plain words, fix buttons)."""
+        return json.dumps(await call(_ctx(mcp), "selftest_latest"), default=str)
 
     @mcp.resource("away://context", mime_type="application/json")
     async def context_res() -> str:

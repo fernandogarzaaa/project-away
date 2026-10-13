@@ -90,6 +90,13 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds} (diagnose)"),
     "get_job": ("json", "GET", "/v1/jobs", "A check's state (?job_id=) (diagnose)"),
     "record_session": ("json", "POST", "/v1/record", "Record landmarks {seconds, note} (share_logs)"),
+    "run_selftest": (
+        "json",
+        "POST",
+        "/v1/selftest",
+        "Run the PC self-test {wait, only}; the report goes to every connected agent (diagnose)",
+    ),
+    "selftest_latest": ("json", "GET", "/v1/selftest/latest", "The newest self-test report (redacted)"),
     "get_bundle": ("json", "POST", "/v1/bundle", "Build a diagnostics bundle (share_logs)"),
     "list_files": ("json", "GET", "/v1/files", "Downloadable bundles/recordings/logs (share_logs)"),
     "read_file": ("bytes", "GET", "/v1/file", "Download ?rel=diagnostics/... (share_logs)"),

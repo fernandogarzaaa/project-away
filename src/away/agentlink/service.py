@@ -44,6 +44,8 @@ EVENT_TOPICS = (
     "notify",
     "user.message",  # v0.1.22: the person spoke to you (only the agents it was sent to see it)
     "inbox",
+    "selftest",  # v0.1.24: selftest.completed (the report reached every connected agent)
+    "link",  # v0.1.24: link.moved (the public address changed)
 )
 MAX_RECORD_S = 120.0
 
@@ -174,6 +176,7 @@ class Service:
         self._watchers: set[str] = set()
         self.watching = watching
         self._listening: dict[str, int] = {}  # v0.1.23: agent id -> open event waits (a live connection)
+        self.selftest: Any = None  # v0.1.24: away.selftest.service.SelftestService (set by the app's host)
         self._listen_lock = threading.Lock()
 
     # ------------------------------------------------------------- helpers
@@ -366,6 +369,39 @@ class Service:
         if key in (None, ""):
             raise ValueError("give the check's id: job_id (as returned by run_diagnose)")
         return self.jobs.lookup(key).public()
+
+    def run_selftest(self, agent: Agent, wait: bool = False, only: Any = None) -> dict[str, Any]:
+        """v0.1.24: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
+        The report goes to *every* connected agent (inbox, wake-up address, event selftest.completed) and is
+        readable as away://selftest/latest. ``wait``: block until it is done (at most 3 minutes) and return it."""
+        self.require(agent, perms.DIAGNOSE)
+        st = self.selftest
+        if st is None:
+            raise NotAvailable("the self-test runs inside the Project Away app; start the app and try again")
+        checks = [str(c) for c in only] if isinstance(only, (list, tuple)) else None
+        from away.selftest.run import Busy
+
+        try:
+            started = st.start(trigger=agent.name, only=checks)
+        except Busy:
+            started = {"state": "running", "note": "a self-test was already running; its report will reach you too"}
+        if not wait:
+            return started
+        st.wait(180.0)
+        return {"state": "done", "report": st.latest()}
+
+    def selftest_latest(self, agent: Agent) -> dict[str, Any]:
+        """v0.1.24: the newest self-test report (redacted), or a hint to run one."""
+        st = self.selftest
+        rep = st.latest() if st is not None else None
+        if rep is None:
+            from away.selftest.run import load_latest
+
+            rep = load_latest(self.data_dir)
+        if rep is None:
+            raise NotAvailable("no self-test has run yet; run one with diagnostics action=selftest")
+        running = bool(st is not None and st.state.get("running"))
+        return dict(rep, running_now=running)
 
     def record_session(self, agent: Agent, seconds: float = 10.0, note: str = "") -> dict[str, Any]:
         """Record the next ``seconds`` of landmarks + events (no video) to ``recordings/agent/<time>.awayrec``."""

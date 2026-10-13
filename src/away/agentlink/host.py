@@ -291,6 +291,28 @@ class AgentLinkHost:
         self._link_failures = 0
         self._link_starting = False
         self.named: Any = None  # v0.1.24 your own named Cloudflare tunnel (stable address)
+        self.selftest = self._make_selftest()  # v0.1.24 one-click self-test, reported to every connected agent
+        self.core.service.selftest = self.selftest
+
+    def _make_selftest(self) -> Any:
+        from away.agentlink.inbox import post_json
+        from away.selftest.env import RealEnv
+        from away.selftest.service import SelftestService
+
+        def done(report: dict[str, Any], delivery: dict[str, Any]) -> None:
+            who = ", ".join(r["agent"] for r in delivery.get("agents", [])) or "this PC only"
+            self._notice("Project Away self-test", f"{report.get('headline', '')} (sent to {who})")
+
+        return SelftestService(
+            self.data_dir,
+            lambda interactive: RealEnv(app=self.app, host=self, interactive=interactive),
+            agents=self.core.registry.reconnectable,
+            inbox=self.core.service.inbox,
+            events=self.core.events,
+            post=post_json,
+            keep_dirs=[self.data_dir],
+            on_done=done,
+        )
 
     # --------------------------------------------------------------- config
     def cfg(self) -> Any:
@@ -1170,6 +1192,19 @@ class AgentLinkHost:
                 note="requested by you",
             )
             return {"path": f"diagnostics/{path.name}"}
+        if a == "selftest":  # v0.1.24: Settings / `away selftest` while the app runs
+            from away.selftest.run import Busy
+
+            try:
+                return self.selftest.start(trigger=str(req.get("trigger") or "you"), only=req.get("only"))
+            except Busy as exc:
+                return {"state": "running", "note": str(exc)}
+        if a == "selftest_state":
+            return {"state": dict(self.selftest.state), "latest": self.selftest.latest()}
+        if a == "selftest_fix":  # v0.1.24: a fix button in the report window
+            from away.selftest import fixes
+
+            return fixes.apply(str(req.get("fix") or ""), app=self.app, host=self)
         if a == "want_health":
             self._health_until = time.monotonic() + HEALTH_WANT_S
             return {}
