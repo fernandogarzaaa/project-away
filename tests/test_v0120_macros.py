@@ -8,7 +8,7 @@ import argparse
 import json
 import os
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -109,7 +109,7 @@ class FakeBackend:
 
 
 class FakeListener:
-    instances: list[FakeListener] = []
+    instances: ClassVar[list[FakeListener]] = []
 
     def __init__(self, sink: Any) -> None:
         self.sink = sink
@@ -365,6 +365,7 @@ def test_recorder_leaves_out_away_own_input_and_own_windows():
     with marker.busy():  # a gesture click Away sent
         rec.feed("down", {"x": 300, "y": 300})
         rec.feed("up", {"x": 300, "y": 300})
+    clock.t += 1
     rec.feed("key_down", {"key": "a", "char": "a"}, True)  # Windows says: injected
     rec.feed("down", {"x": 10, "y": 10})  # the Settings window (own pid)
     rec.feed("up", {"x": 10, "y": 10})
@@ -531,8 +532,13 @@ def test_modifiers_and_buttons_are_released_even_when_input_fails():
     assert res.stopped == "error" and res.fix == "edit_steps" and "input blocked" in res.message
     assert p.backend.calls[-1] == ("key_up", "ctrl")
     drag = Macro("d", steps=[Step("drag", target=Target(10, 10), path=[(5, 0), (50, 0)], duration=0.2)])
-    p2 = player(backend=FakeBackend(fail_on="move"))
-    p2.run(drag)
+
+    def fail_mid_drag(name: str, a: tuple[Any, ...]) -> None:
+        if name == "move" and a == (15, 10):
+            raise OSError("input blocked")
+
+    p2 = player(backend=FakeBackend(on_call=fail_mid_drag))
+    assert p2.run(drag).stopped == "error"
     assert p2.backend.calls[-1] == ("release", "left")
     p3 = player(backend=FakeBackend(fail_on="key_down"))
     p3.run(Macro("k", steps=[Step("key", keys="ctrl+s")]))
