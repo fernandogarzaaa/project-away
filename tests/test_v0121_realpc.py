@@ -44,7 +44,8 @@ from away.app import selftest
 from away.voice import speech, weak_speech
 from away.voice.weak_speech import confidence_of, is_filler, should_drop, weak_evidence
 
-GROUPED_TOOLS = {
+GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools)
+    "inbox",
     "get_status",
     "get_context",
     "events",
@@ -745,18 +746,19 @@ STRONG = {
 
 
 def test_the_exact_log_cases_are_dropped() -> None:
-    assert should_drop("uh", WEAK, 0.9) == "only a filler sound"
+    # strict_ratio=0: the v0.1.21 rules on their own (v0.1.22 adds the barely-moving-mouth rule, tested elsewhere)
+    assert should_drop("uh", WEAK, 0.9, strict_ratio=0) == "only a filler sound"
     assert should_drop("Uh.", STRONG, 0.99) == "only a filler sound"  # filler is never typed
-    why = should_drop("Dikontak", WEAK, None)
+    why = should_drop("Dikontak", WEAK, None, strict_ratio=0)
     assert "mouth not seen moving" in why and "unknown" in why
-    assert "need 0.75" in should_drop("Dikontak", WEAK, 0.41)
+    assert "need 0.75" in should_drop("Dikontak", WEAK, 0.41, strict_ratio=0)
 
 
 def test_real_speech_is_still_typed() -> None:
     assert should_drop("Dikontak", STRONG, None) == ""  # the mouth moved: trust the gate
-    assert should_drop("Dikontak", WEAK, 0.9) == ""  # weak evidence but a confident recognition
-    assert should_drop("please send the report to Maria today", WEAK, None) == ""
-    assert "need 0.45" in should_drop("please send the report to Maria today", WEAK, 0.3)
+    assert should_drop("Dikontak", WEAK, 0.9, strict_ratio=0) == ""  # weak evidence but a confident recognition
+    assert should_drop("please send the report to Maria today", WEAK, None, strict_ratio=0) == ""
+    assert "need 0.45" in should_drop("please send the report to Maria today", WEAK, 0.3, strict_ratio=0)
     assert should_drop("hello there", None, None) == ""  # no gate: unchanged
 
 
@@ -816,7 +818,7 @@ def test_always_on_drops_uh_and_dikontak_but_runs_short_commands() -> None:
     r3 = s.process(Utterance(audio, 4.0, 5.0))
     r4 = s.process(Utterance(audio, 6.0, 7.0))
     assert r1.decision.kind == "ignore" and "filler" in r1.decision.reason
-    assert r2.decision.kind == "ignore" and "mouth not seen moving" in r2.decision.reason
+    assert r2.decision.kind == "ignore" and "mouth" in r2.decision.reason  # v0.1.22: "mouth barely moved"
     assert r3.decision.kind == "command" and ran and ran[0][0].arg == "scroll_down"  # a command, unsure or not
     assert r4.decision.kind == "type"  # a confident recognition is typed
     assert sink.items and "Dikontak" in sink.items[-1] and "uh" not in " ".join(sink.items).lower().split()
@@ -1017,7 +1019,7 @@ def test_mcp_lists_exactly_15_grouped_tools(core) -> None:
 def test_about_explains_wide_shot_then_zoom_and_the_grouped_tools(core) -> None:
     for name in GROUPED_TOOLS:
         assert name in INSTRUCTIONS
-    assert "Tools (15)" in INSTRUCTIONS and "action" in INSTRUCTIONS
+    assert "Tools (16)" in INSTRUCTIONS and "action" in INSTRUCTIONS
     assert "wide shot first" in INSTRUCTIONS.lower() and "monitor=N" in INSTRUCTIONS and "region=" in INSTRUCTIONS
     a, _ = core.registry.issue("Agent", ["read"], 3600)
     text = briefing(a, core.service.get_context(a), {"active": False}, "ask")
@@ -1133,10 +1135,10 @@ def test_speaker_drops_the_oldest_waiting_messages() -> None:
 
 
 def test_weak_speech_thresholds_are_adjustable() -> None:
-    assert should_drop("open mail", WEAK, 0.6, min_confidence=0.5) == ""
-    assert should_drop("open mail", WEAK, 0.6) != ""
-    assert should_drop("open the mail app", WEAK, 0.6, max_words=4) != ""
-    assert should_drop("open the mail app", WEAK, 0.6, max_words=4, min_confidence=0.55) == ""
+    assert should_drop("open mail", WEAK, 0.6, min_confidence=0.5, strict_ratio=0) == ""
+    assert should_drop("open mail", WEAK, 0.6, strict_ratio=0) != ""
+    assert should_drop("open the mail app", WEAK, 0.6, max_words=4, strict_ratio=0) != ""
+    assert should_drop("open the mail app", WEAK, 0.6, max_words=4, min_confidence=0.55, strict_ratio=0) == ""
 
 
 def test_live_view_keeps_its_zoom_and_smaller_cap(core) -> None:

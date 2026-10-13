@@ -375,8 +375,9 @@ class AmbientSession:
             with contextlib.suppress(Exception):
                 gi = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
         other = False
-        if self.other_audio is not None and self.other_audio_needs_mouth:
-            other = _safe(lambda: self.other_audio(u.t0, u.t1))
+        oa = self.other_audio
+        if oa is not None and self.other_audio_needs_mouth:
+            other = _safe(lambda: oa(u.t0, u.t1))
         if not dropped and self.talk is not None and self.listening:
             msg = self._talk(raw, gate, gi, conf, other, seconds, app)
             if msg is not None:

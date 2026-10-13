@@ -772,7 +772,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def _on_utterance(self, ev: Any) -> None:
         data = ev.data or {}
-        gi = data.get("gate") if isinstance(data.get("gate"), dict) else {}
+        gi: dict[str, Any] = data["gate"] if isinstance(data.get("gate"), dict) else {}
         if data.get("decision") == "ignore" and gi.get("camera_busy") and not gi.get("allowed", False):
             self.notice(
                 "Project Away: speech not typed",
