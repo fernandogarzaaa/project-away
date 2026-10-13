@@ -210,7 +210,8 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
         return True
 
     assert asyncio.run(_mcp(f"{live['base']}/mcp", {"Authorization": f"Bearer {tok}"}, body))
-    assert any("Claude: hello" in t for _l, t in live["core"].prompts.ui.toasts)
+    ui = live["core"].prompts.ui
+    assert any(t == "hello" for _l, t in ui.toasts) and "Message from Claude" in ui.titles
 
 
 def test_mcp_without_token_is_refused(live) -> None:

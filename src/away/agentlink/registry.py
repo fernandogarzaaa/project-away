@@ -168,7 +168,17 @@ def ranges(cfg: Any) -> dict[str, tuple[float, float, Any]]:
     return {p: (float(lo), float(hi), v) for p, v, lo, hi in cfgmod.tunable_ranges(cfg)}
 
 
+# v0.1.21: plain titles for settings that are not sliders (the speech section)
+TITLES = {
+    "speech.rate": "How fast agents speak (slow, normal, fast)",
+    "speech.volume": "How loud agents speak (quiet, normal, loud)",
+    "speech.read_messages_aloud": "Read every agent message aloud",
+}
+
+
 def title_for(key: str) -> str:
+    if key in TITLES:
+        return TITLES[key]
     try:
         from away.app.tunables import describe
 

@@ -155,7 +155,8 @@ class CameraLoop:
 
         self.share.clear_owner()
         self.share.ack_released(self.cameras)
-        who = self.share.requester() or "settings"
+        req = getattr(self.share, "requester", None)
+        who = (req() if callable(req) else None) or "settings"
         self.in_use_by = borrower_label(who)
         self.publish(
             "camera.handover",
@@ -169,7 +170,8 @@ class CameraLoop:
         )
         share = self.share
         # v0.1.21: a request that seems gone is read once more before the camera is reopened (see still_requested)
-        while not self.stop.is_set() and share.still_requested(self.stop.wait):
+        still = getattr(share, "still_requested", None)
+        while not self.stop.is_set() and (still(self.stop.wait) if callable(still) else share.requested()):
             self.stop.wait(self.check_s)
             share.ack_released(self.cameras)  # keep the acknowledgement fresh (it goes stale after 5 s)
         share.clear_released()

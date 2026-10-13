@@ -1554,7 +1554,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._wait_devices_free()
         share.clear_owner()
         share.ack_released(devices)
-        who = share.requester() or "settings"
+        who = _requester(share)
         self.camera_in_use_by = borrower_label(who)  # v0.1.21: tray + Agent Link say who has the camera
         self.bus.publish(
             "camera.handover",
@@ -1566,10 +1566,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 "status": in_use_status(who),
             },
         )
-        while not self.stop_event.is_set() and share.still_requested(self.stop_event.wait):
+        while not self.stop_event.is_set() and _still_requested(share, self.stop_event.wait):
             self.stop_event.wait(0.5)
             share.ack_released(devices)  # keep the acknowledgement fresh (it goes stale after 5 s)
-            now_who = share.requester()
+            now_who = _requester(share, "")
             if now_who and now_who != who:  # another Settings tool took over the lease
                 who = now_who
                 self.camera_in_use_by = borrower_label(who)
@@ -1969,3 +1969,17 @@ class _ProbeStop:
                 self.share.publish_owner(self.devices)
             return bool(self.share.requested())
         return False
+
+
+def _requester(share: Any, default: str = "settings") -> str:
+    fn = getattr(share, "requester", None)
+    try:
+        return str(fn() or default) if callable(fn) else default
+    except Exception:
+        return default
+
+
+def _still_requested(share: Any, wait: Any) -> bool:
+    """``share.still_requested`` (v0.1.21: a vanished request is read once more), or plain ``requested``."""
+    fn = getattr(share, "still_requested", None)
+    return bool(fn(wait)) if callable(fn) else bool(share.requested())
