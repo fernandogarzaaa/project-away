@@ -1075,3 +1075,125 @@ def test_job_82557239_round_trips_over_http(core, live, monkeypatch) -> None:
     core.service.jobs._expired["87654321"] = 0.0
     st, body = _http(live, "GET", "/v1/jobs?job_id=87654321", tok)
     assert st == 410 and "expired" in body["error"]
+
+
+# ===================================================================================== more coverage of the same fixes
+ACK_SCRIPT = (
+    "import json, sys; spec = json.load(open(sys.argv[1], encoding='utf-8')); "
+    "open(spec['ack'], 'w', encoding='utf-8').write(json.dumps({'shown': True, 'title': spec['title']}))"
+)
+
+
+def test_message_window_process_acknowledges_and_is_reported_shown(tmp_path: Path) -> None:
+    ui = prompts.SubprocessUI(tmp_path / "ui", command=lambda args: [sys.executable, "-c", ACK_SCRIPT, args[-1]])
+    ui.ack_s = 30.0
+    assert ui.toast("Build finished", title="Message from Claude") == {"shown": True, "via": "window"}
+    assert not list((tmp_path / "ui").glob("toast-*.json"))  # spec and ack cleaned up
+
+
+def test_message_window_that_exits_or_cannot_start_is_reported_not_shown(tmp_path: Path) -> None:
+    ui = prompts.SubprocessUI(tmp_path / "ui", command=lambda args: [sys.executable, "-c", "raise SystemExit(2)"])
+    ui.ack_s = 30.0
+    res = ui.toast("hi")
+    assert res["shown"] is False and "exit code 2" in res["reason"]
+    missing = prompts.SubprocessUI(tmp_path / "ui2", command=lambda args: [str(tmp_path / "no-such-away.exe")])
+    res = missing.toast("hi")
+    assert res["shown"] is False and res["reason"].startswith("could not start the message window")
+
+
+def test_service_notify_user_and_ask_user_report_speech(core) -> None:
+    eng = FakeEngine()
+    core.prompts.tts = speech.Speaker(lambda: _cfg(), [("fake", lambda: eng)])
+    a, _ = core.registry.issue("Claude", ["read"], 3600)
+    res = core.service.notify_user(a, "Tests passed", speak=True)
+    assert res["shown"] is True and res["spoken"] is True and core.prompts.tts.wait(5)
+    assert eng.said[-1][0] == "Tests passed" and core.prompts.ui.titles[-1] == "Message from Claude"
+    core.prompts.tts = speech.Speaker(lambda: _cfg(enabled=False), [("fake", lambda: eng)])
+    assert core.service._speech_allowed() is False
+
+
+def test_speaker_drops_the_oldest_waiting_messages() -> None:
+    gate = threading.Event()
+
+    class Slow(FakeEngine):
+        def speak(self, text: str, v: speech.Voice) -> None:
+            gate.wait(5)
+            super().speak(text, v)
+
+    eng = Slow()
+    sp = speech.Speaker(lambda: None, [("slow", lambda: eng)])
+    sp.say("first")
+    time.sleep(0.2)  # the worker is now speaking "first"
+    for i in range(speech.MAX_QUEUE + 3):
+        sp.say(f"m{i}")
+    gate.set()
+    assert sp.wait(10)
+    said = [t for t, _ in eng.said]
+    assert said[0] == "first" and len(said) == 1 + speech.MAX_QUEUE and said[-1] == f"m{speech.MAX_QUEUE + 2}"
+
+
+def test_weak_speech_thresholds_are_adjustable() -> None:
+    assert should_drop("open mail", WEAK, 0.6, min_confidence=0.5) == ""
+    assert should_drop("open mail", WEAK, 0.6) != ""
+    assert should_drop("open the mail app", WEAK, 0.6, max_words=4) != ""
+    assert should_drop("open the mail app", WEAK, 0.6, max_words=4, min_confidence=0.55) == ""
+
+
+def test_live_view_keeps_its_zoom_and_smaller_cap(core) -> None:
+    from PIL import Image
+
+    core.service.screen_grab = lambda: Image.new("RGB", (5206, 1080))
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    res = core.service.screen_watch(a, True, scale=0.8, monitor=2)
+    assert res["watching"] and res["view"] == {"scale": 0.8, "monitor": 2}
+    _, meta = core.service.get_screen(a, quiet=True)
+    assert meta["showing"] == "monitor 2" and meta["image"]["width"] == 1536
+    core.service.screen_watch(a, True)  # no options: the live view keeps what it had
+    _, meta = core.service.get_screen(a, quiet=True)
+    assert meta["showing"] == "monitor 2"
+    core.service.screen_watch(a, False)
+    _, meta = core.service.get_screen(a, quiet=True)
+    assert meta["showing"] == "desktop" and max(meta["image"]["width"], meta["image"]["height"]) <= 1600
+
+
+def test_size_first_sets_size_before_and_after_the_fourcc() -> None:
+    clock = Clock()
+    cv2 = JoyCV2(clock, mjpg=True, rate=yuy2_slow_at_720p)
+    cap = cv2.VideoCapture(0, DSHOW)
+    got = capture.apply_mode_size_first(cap, CaptureMode(1280, 720, 30, "MJPG"), cv2, "JoyCam")
+    assert got == "MJPG" and cap.order[:6] == [W, H, FOURCC, W, H, FPS]
+    plain = cv2.VideoCapture(0, DSHOW)
+    assert capture.apply_mode(plain, CaptureMode(1280, 720, 30, "MJPG"), cv2, "JoyCam") == "YUY2"
+
+
+def test_too_many_finished_jobs_become_expired_not_unknown(tmp_path: Path) -> None:
+    clock = Clock()
+    r = _runner(tmp_path, clock)
+    for i in range(jobs.MAX_JOBS + 5):
+        jid = f"{i:08d}"
+        r.jobs[jid] = jobs.Job(jid, "benchmark", clock(), state="done", finished=clock())
+    r.get("00000000")  # any read prunes
+    assert len(r.jobs) == jobs.MAX_JOBS
+    with pytest.raises(jobs.JobLookupError) as e:
+        r.lookup("00000001")
+    assert e.value.reason == "expired"
+
+
+def test_grouped_mcp_tool_calls_reach_the_old_methods() -> None:
+    pytest.importorskip("mcp")
+    from away.agentlink import mcp_tools
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Recorder:
+        def call(self, ctx: Any, method: str, **kw: Any) -> Any:
+            calls.append((method, kw))
+            return {"ok": True}
+
+    mcp = mcp_tools.build(Recorder())
+    asyncio.run(mcp.call_tool("pointer", {"action": "click", "x": 5, "y": 6}))
+    asyncio.run(mcp.call_tool("diagnostics", {"action": "job", "job_id": "82557239"}))
+    asyncio.run(mcp.call_tool("settings", {"action": "change", "changes": [{"key": "k", "value": 1}], "why": "w"}))
+    assert calls[0] == ("act", {"action": "click", "x": 5, "y": 6})
+    assert calls[1] == ("get_job", {"job_id": "82557239"})
+    assert calls[2] == ("change_settings", {"ops": [{"key": "k", "value": 1}], "why": "w"})
