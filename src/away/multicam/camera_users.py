@@ -176,7 +176,7 @@ def explain(camera: str, users: list[CameraUser], broadcast_from: str = "") -> d
     elif names:
         who = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
         msg = f"{label} is being used by {who}. Close it, then Retry."
-        actions = [f"close:{u.path}" for u in users if not u.packaged][:1] + ["retry"]
+        actions = [*[f"close:{u.path}" for u in users if not u.packaged][:1], "retry"]
     else:
         msg = f"{label} could not be opened and no other app seems to be using it right now."
         actions = ["retry"]

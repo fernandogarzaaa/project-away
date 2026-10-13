@@ -580,7 +580,7 @@ def native_modes(
 
         out: list[CaptureMode] = []
         for f in ranked_formats(formats, width, height, fps):
-            m = CaptureMode(int(f.width), int(f.height), int(round(f.fps)), f.fourcc())
+            m = CaptureMode(int(f.width), int(f.height), round(f.fps), f.fourcc())
             if m not in out:
                 out.append(m)
         return out[:limit]

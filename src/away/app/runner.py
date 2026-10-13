@@ -680,9 +680,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
         self.bus.subscribe("camera.handover", self._on_handover)
-        from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
-
         from away.app import instance
+        from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
 
         # v0.1.23: only the one app holding the single-instance lock changes the system cursor size
         owns_cursor = not dry_run and instance.owned()

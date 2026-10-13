@@ -115,8 +115,10 @@ def build(win: Any, parent: Any, row: int) -> int:  # pragma: no cover - Tk widg
                 spk = sp_holder.get("s") or Speaker(lambda: cfg.speech)
                 sp_holder["s"] = spk
                 res = spk.say(natural.preview_text(cfg.speech.engine), force=True)
-                text = f"Speaking with: {res.get('voice') or res.get('engine')}" if res.get("spoken") else res.get(
-                    "reason", ""
+                text = (
+                    f"Speaking with: {res.get('voice') or res.get('engine')}"
+                    if res.get("spoken")
+                    else res.get("reason", "")
                 )
             except Exception as exc:
                 text = f"Could not play a preview ({exc})"

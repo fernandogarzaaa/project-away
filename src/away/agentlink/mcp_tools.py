@@ -112,8 +112,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
           "value": 1.8}, ...] or simply {"hands.cursor.gain": 1.8} (bindings: key "gesture:pinch", value
           "mouse:click"; presets: op "apply"; a failing camera: {"domain": "cameras", "op": "disable", "key":
           "<camera name>"}, undoable; models: {"domain": "models", "op": "switch", "key": "stt", "value":
-          "whisper-small-cpu"} or op "mode" with key light|balanced|best), `why` = the reason, citing the person's preference. By default the person
-          approves a before/after first.
+          "whisper-small-cpu"} or op "mode" with key light|balanced|best), `why` = the reason, citing the
+          person's preference. By default the person approves a before/after first.
         - action="undo": `what` = "last" | "today" | a change id. action="history": recent changes (`limit`).
         - action="config": the whole configuration (secrets redacted)."""
         return await group(

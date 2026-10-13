@@ -31,15 +31,16 @@ def acquire(name: str = "app", folder: Path | None = None, platform: str | None 
         return True
     plat = platform or sys.platform
     if plat.startswith("win"):
+        mutex = MUTEX_NAME if name == "app" else f"{MUTEX_NAME}.{name}"
         try:
             if kernel32 is None:  # pragma: no cover - Windows only
                 import ctypes
 
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-                h = kernel32.CreateMutexW(None, False, MUTEX_NAME if name == "app" else f"{MUTEX_NAME}.{name}")
-                err = ctypes.get_last_error()
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+                h = kernel32.CreateMutexW(None, False, mutex)
+                err = ctypes.get_last_error()  # type: ignore[attr-defined]
             else:
-                h = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+                h = kernel32.CreateMutexW(None, False, mutex)
                 err = kernel32.GetLastError()
         except Exception:
             return True  # cannot tell: never stop the app over the lock
