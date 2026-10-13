@@ -64,6 +64,10 @@ MAX_DEFER_S = 1800.0  # ...but a probe is not put off longer than this
 DEVICE_CHECK_S = 30.0  # v0.1.23: how often a waiting camera retry checks whether the camera list changed
 MULTICAM_RETRY_MAX_S = 900.0  # back-off ceiling (default hands.camera_retry_max_s; v0.1.19: 15 min)
 MULTICAM_NONE_RETRY_S = 10.0  # no camera works at all: retry the whole set this often
+# v0.1.23: with no camera working there is nothing a probe could disturb, so the "no camera" retry keeps the
+# v0.1.19 schedule (twice as long each time up to 15 min, 8 tries) instead of the slow 5/15/60 min one
+NONE_RETRY_MAX_S = 900.0
+NONE_RETRY_LIMIT = 8
 
 
 def effective_ambient_fallback(cfg: AppConfig) -> str:
@@ -1551,6 +1555,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             base, max(base, float(h.camera_retry_max_s)), int(h.camera_retry_limit), factor=3.0, last_max=True
         )
 
+    def _none_backoff(self, base_s: float) -> Any:
+        """v0.1.23: the back-off while no camera works at all (see NONE_RETRY_MAX_S)."""
+        from away.app.camera_loop import RetryBackoff
+
+        base = float(base_s)
+        return RetryBackoff(base, max(base, NONE_RETRY_MAX_S), NONE_RETRY_LIMIT)
+
     def _camera_backoff(self, specs: list[Any], base_s: float | None = None) -> Any:
         """v0.1.23: one back-off per set of failing cameras that lasts across camera-session restarts (it used to
         start over every time, so a camera that never works was re-tried every few minutes)."""
@@ -1907,7 +1918,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         retry_max = max(float(retry_s), float(self.cfg.hands.camera_retry_max_s))
         backoff = retry_s
         after_retry = False
-        none_backoff = self._retry_backoff(none_retry_s)
+        none_backoff = self._none_backoff(none_retry_s)
         try:
             while not self.stop_event.is_set():
                 if [str(c.device) for c in self.cfg.hands.cameras] != [str(c.device) for c in cams]:

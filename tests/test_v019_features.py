@@ -115,12 +115,12 @@ def test_restore_ignores_debounce(tmp_path):
 
 def test_stale_marker_from_a_crash_is_restored_at_startup(tmp_path):
     marker = tmp_path / "big_cursor.json"
-    marker.write_text(json.dumps({"original": 48, "applied": 128, "pid": 1}))
+    marker.write_text(json.dumps({"original": 40, "applied": 128, "pid": 1}))
     be = FakeCursor(size=128)
     seen = []
     big = BC.BigCursor(be, 2, marker, publish=lambda t, d: seen.append((t, d)))
     assert big.recover()
-    assert be.sets == [48] and not marker.exists()
+    assert be.sets == [40] and not marker.exists()
     assert seen[0][0] == "cursor.size_recovered"
     assert not big.recover()  # nothing left
 
@@ -175,8 +175,10 @@ def test_gestures_active_follows_every_kind_of_pause():
     assert not p.gestures_active()
     Guard.active = False
     p.on_hand(0.1, None)
+    assert not p.gestures_active()  # v0.1.23: auto-pause ends after AUTO_PAUSE_DWELL_S of quiet
+    p.on_hand(0.7, None)
     assert p.gestures_active()
-    t = 0.2
+    t = 0.8
     for _ in range(20):  # open-palm clutch
         t += 0.05
         p.on_hand(t, pose("palm"))

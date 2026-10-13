@@ -52,6 +52,15 @@ def nf(w: int, h: int, fps: float, sub: str = "MJPG", i: int = 0) -> NativeForma
 
 
 # =============================================================================== 1. native format choice
+
+
+@pytest.fixture
+def external_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.1.23: NVIDIA Broadcast is never a fallback for the built-in camera (opening it makes Broadcast take the
+    built-in camera). These older tests check the fallback mechanics, which still apply to an external camera."""
+    monkeypatch.setattr(capture, "broadcast_fallback_allowed", lambda _name: True)
+
+
 def test_30fps_beats_the_exact_size_and_720p_is_allowed_for_it() -> None:
     fmts = [nf(640, 480, 15, i=0), nf(1280, 720, 30, i=1), nf(1920, 1080, 30, i=2)]
     got = choose_format(fmts, 640, 480, 30)
@@ -561,7 +570,7 @@ def test_slow_winrt_still_lets_the_sweep_find_a_fast_mode(monkeypatch: pytest.Mo
     got.cap.release()
 
 
-def test_broadcast_fallback_only_after_winrt_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_broadcast_fallback_only_after_winrt_failed(monkeypatch: pytest.MonkeyPatch, external_camera: None) -> None:
     clock = Clock()
     cv2 = FakeCV2({**DEAD_BUILTIN, (2, DSHOW): (True, 30.0)}, clock)
     _winrt(monkeypatch, cv2, opens=False)

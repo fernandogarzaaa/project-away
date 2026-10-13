@@ -185,7 +185,7 @@ def test_speaker_speaks_on_its_own_thread_with_the_settings() -> None:
     eng = FakeEngine()
     sp = speech.Speaker(lambda: _cfg(rate="fast", volume="loud", voice="Zira"), [("fake voice", lambda: eng)])
     res = sp.say("  Your   build \n finished  ")
-    assert res == {"spoken": True, "engine": "fake voice", "queued": True}
+    assert res == {"spoken": True, "engine": "fake voice", "voice": "fake voice", "queued": True}
     assert sp.wait(5)
     assert eng.said == [("Your build finished", speech.Voice("fast", "loud", "Zira"))]
     assert sp.spoken == ["Your build finished"] and sp.engine_name == "fake voice"

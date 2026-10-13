@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import types
@@ -188,6 +189,15 @@ def _windows_and_clean(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 # =============================================================================== 2. the slow camera, up to speed
+
+
+@pytest.fixture
+def external_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.1.23: NVIDIA Broadcast is never a fallback for the built-in camera (opening it makes Broadcast take the
+    built-in camera). These older tests check the fallback mechanics, which still apply to an external camera."""
+    monkeypatch.setattr(capture, "broadcast_fallback_allowed", lambda _name: True)
+
+
 def test_slow_camera_reaches_30fps_only_in_mjpg_on_media_foundation(caplog: Any, tmp_path: Path) -> None:
     clock = Clock()
     cv2 = TimedCV2(
@@ -300,7 +310,7 @@ def _always_slow(broadcast_rate: float) -> dict[Any, TimedCam]:
     }
 
 
-def test_always_slow_camera_falls_back_to_broadcast_and_is_not_kept_open(caplog: Any) -> None:
+def test_always_slow_camera_falls_back_to_broadcast_and_is_not_kept_open(caplog: Any, external_camera: None) -> None:
     clock = Clock()
     cv2 = TimedCV2(_always_slow(30.0), clock)
     with caplog.at_level(logging.INFO, logger="away.cameras"):
@@ -320,7 +330,9 @@ def test_always_slow_camera_falls_back_to_broadcast_and_is_not_kept_open(caplog:
     got.cap.release()
 
 
-def test_open_capture_reports_the_fallback_to_the_camera_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_capture_reports_the_fallback_to_the_camera_thread(
+    monkeypatch: pytest.MonkeyPatch, external_camera: None
+) -> None:
     clock = Clock()
     cv2 = TimedCV2(_always_slow(30.0), clock)
     monkeypatch.setattr(capture, "camera_devices", _devs)
@@ -342,7 +354,7 @@ def test_open_capture_reports_the_fallback_to_the_camera_thread(monkeypatch: pyt
     assert th.measured_fps is not None and th.measured_fps >= 10
 
 
-def test_broadcast_must_reach_the_minimum_itself() -> None:
+def test_broadcast_must_reach_the_minimum_itself(external_camera: None) -> None:
     clock = Clock()
     cv2 = TimedCV2(_always_slow(5.0), clock)
     got = _open(cv2, clock, virtual_fallback=True)
@@ -352,7 +364,7 @@ def test_broadcast_must_reach_the_minimum_itself() -> None:
     got.cap.release()
 
 
-def test_broadcast_is_offered_when_virtual_fallback_is_off() -> None:
+def test_broadcast_is_offered_when_virtual_fallback_is_off(external_camera: None) -> None:
     clock = Clock()
     cv2 = TimedCV2(_always_slow(30.0), clock)
     got = _open(cv2, clock, virtual_fallback=False)
@@ -616,7 +628,9 @@ def test_crash_log_faulthandler_and_hooks(crash_env: Any, caplog: Any) -> None:
     sysm.excepthook = lambda *a: prev_calls.append(a)
     assert _install(crash_env) is None
     path = folder / "crash.log"
-    assert fh.enabled and fh.enabled[0]["all_threads"] is True and fh.enabled[0]["file"].name == str(path)
+    # v0.1.23: faulthandler writes to its own per-process file, folded into crash.log later (handled codes tagged)
+    native = folder / f"crash-native-{os.getpid()}.log"
+    assert fh.enabled and fh.enabled[0]["all_threads"] is True and fh.enabled[0]["file"].name == str(native)
     head = path.read_text(encoding="utf-8")
     assert "] tray started (pid " in head and "Project Away 0.1.16" in head and head.startswith("[20")
     assert _install(crash_env, "settings") is None and len(fh.enabled) == 1  # idempotent
@@ -694,7 +708,7 @@ def test_crash_log_rotates_and_can_be_turned_off(crash_env: Any, monkeypatch: py
 def test_every_entry_point_installs_the_crash_log(monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(__file__).resolve().parents[1]
     entry = (root / "packaging" / "pyinstaller" / "away_entry.py").read_text()
-    assert 'crashlog.install("frozen")' in entry
+    assert "crashlog.install(crashlog.entry_label(sys.argv[1:]))" in entry  # v0.1.23: labelled entries
     assert 'crashlog.install("tray")' in (root / "src" / "away" / "app" / "tray.py").read_text()
     assert 'crashlog.install("settings")' in (root / "src" / "away" / "app" / "settings_gui.py").read_text()
     seen: list[str] = []
