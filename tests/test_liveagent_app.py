@@ -616,3 +616,31 @@ def test_settings_live_agent_tab_renders(tmp_path: Path, monkeypatch: pytest.Mon
         assert "Use free models" in panel.status_line()
     finally:
         root.destroy()
+
+
+def test_voice_order_prefers_fast_models_that_do_not_think_first() -> None:
+    from away.liveagent.runtime import voice_order
+
+    def m(mid: str, fast: bool, reasoning: bool) -> catalog.ModelInfo:
+        info = catalog.guess("opencode_free", mid, free=True, may_keep_prompts=True)
+        info.fast, info.reasoning = fast, reasoning
+        return info
+
+    models = [m("big-pickle", False, True), m("lightning-think", True, True), m("cat-jam-free", True, False)]
+    assert [x.id for x in voice_order(models)] == ["cat-jam-free", "lightning-think", "big-pickle"]
+
+
+def test_cli_ask_reports_every_attempt_when_no_model_answers(tmp_path, monkeypatch, capsys) -> None:
+    from away.liveagent import __main__ as cli
+    from away.liveagent import runtime
+    from away.liveagent.router import NoModel
+
+    class DeadFunnel:
+        def stream(self, *_a: Any, **_k: Any) -> Any:
+            raise NoModel("every model is unavailable right now", [("opencode_free/x", "rate_limit: 429 Free usage")])
+            yield ""  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(runtime.Runtime, "funnel", lambda self, s: DeadFunnel())
+    assert cli.main(["--data-dir", str(tmp_path), "ask", "hi"]) == 1
+    err = capsys.readouterr().err
+    assert "No model answered" in err and "opencode_free/x: rate_limit: 429 Free usage" in err

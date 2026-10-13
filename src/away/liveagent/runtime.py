@@ -253,6 +253,13 @@ def add_provider(
     return cfg
 
 
+def voice_order(models: list[catalog.ModelInfo]) -> list[catalog.ModelInfo]:
+    """Which free model to try first for spoken answers: fast ones, and among those the ones that do not think first
+    (checked live 2026-10-14: a fast "thinking" free model took about 7 s to its first word, a non-thinking one
+    about 1 s), then Big Pickle."""
+    return sorted(models, key=lambda m: (not m.fast, m.reasoning, m.id != "big-pickle"))
+
+
 def use_free_models(
     rt: Runtime,
     s: st.LiveSettings,
@@ -285,7 +292,7 @@ def use_free_models(
 
     tell("Checking a free model answers...")
     problems: list[str] = []
-    for m in sorted(free, key=lambda m: (not m.fast, m.id != "big-pickle"))[:6]:
+    for m in voice_order(free)[:6]:
         t0 = time.monotonic()
         try:
             text = strip_reasoning("".join(server.chat_stream(m.id, "Reply with the single word: ready", timeout=30)))

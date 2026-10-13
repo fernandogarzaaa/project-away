@@ -79,10 +79,18 @@ def main(argv: list[str] | None = None) -> int:
             t0 = time.monotonic()
             msgs = [{"role": "system", "content": chat_system(s.name)}, {"role": "user", "content": a.text}]
             first = None
-            for sentence in sentences(f.stream("chat", msgs, rec, max_tokens=300)):
-                if first is None:
-                    first = time.monotonic() - t0
-                print(f"[{time.monotonic() - t0:5.2f}s] {sentence}")
+            from away.liveagent.router import NoModel
+
+            try:
+                for sentence in sentences(f.stream("chat", msgs, rec, max_tokens=300)):
+                    if first is None:
+                        first = time.monotonic() - t0
+                    print(f"[{time.monotonic() - t0:5.2f}s] {sentence}")
+            except NoModel as exc:
+                print(f"No model answered: {exc}", file=sys.stderr)
+                for ref, outcome in exc.attempts:
+                    print(f"  {ref}: {outcome}", file=sys.stderr)
+                return 1
             print(
                 json.dumps(
                     {
