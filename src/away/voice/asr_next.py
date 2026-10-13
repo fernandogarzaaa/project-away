@@ -544,17 +544,18 @@ def nemotron_plan(
 
 def build_next(
     backend: str,
-    voice: Any,
+    opts: Any,
+    sample_rate: int = 16000,
     data_dir: Path | None = None,
     reg: Any = None,
 ) -> Any:
-    """Build the Moonshine / Nemotron backend from ``voice`` settings. Raises with a plain reason."""
+    """Build the Moonshine / Nemotron backend from ``opts`` (``cfg.models_next``). Raises with a plain reason."""
     from away.app import engines, model_fetch
     from away.app.model_registry import Registry
 
     reg = reg or Registry(data_dir)
     if backend == "moonshine":
-        size = str(getattr(voice, "moonshine_model", "small") or "small")
+        size = str(getattr(opts, "moonshine_model", "small") or "small")
         m = reg.get(MOONSHINE_IDS.get(size, MOONSHINE_IDS["small"]))
         if not model_fetch.have(m, data_dir):
             raise RuntimeError(f"{m.title} is not downloaded yet (Settings > Models)")
@@ -562,12 +563,12 @@ def build_next(
             raise RuntimeError("the Moonshine engine is not installed (Settings > Models > Download)")
         folder = model_fetch.model_dir(m.id, data_dir)
         cfg = model_fetch.find(folder, "streaming_config.json")
-        return MoonshineASR(cfg.parent if cfg else folder, size, sample_rate=int(getattr(voice, "sample_rate", 16000)))
+        return MoonshineASR(cfg.parent if cfg else folder, size, sample_rate=sample_rate)
     if backend == "nemotron":
         m = reg.get(NEMOTRON_ID)
         if not model_fetch.have(m, data_dir):
             raise RuntimeError(f"{m.title} is not downloaded yet (Settings > Models)")
-        plan = nemotron_plan(str(getattr(voice, "nemotron_device", "auto")), data_dir)
+        plan = nemotron_plan(str(getattr(opts, "nemotron_device", "auto")), data_dir)
         a = engines.archive_for("nemo-speech", plan["variant"])
         exe = engines.binary(a, data_dir) if a is not None and engines.installed(a, data_dir) else None
         if exe is None:
@@ -575,9 +576,9 @@ def build_next(
         gguf = model_fetch.find(model_fetch.model_dir(m.id, data_dir), NEMOTRON_FILE)
         if gguf is None:
             raise RuntimeError(f"{m.title} is incomplete; download it again")
-        srv = NemoServer(exe, gguf, plan["device"], int(getattr(voice, "nemotron_chunk_ms", 560) or 560))
+        srv = NemoServer(exe, gguf, plan["device"], int(getattr(opts, "nemotron_chunk_ms", 560) or 560))
         srv.start()
-        asr = NemotronASR(srv, int(getattr(voice, "sample_rate", 16000)), bool(getattr(voice, "stream_partials", True)))
+        asr = NemotronASR(srv, sample_rate, bool(getattr(opts, "stream_partials", True)))
         asr.transcribe(np.zeros(16000, dtype=np.float32))  # warm-up: a CUDA problem shows here, not mid-dictation
         return asr
     raise ValueError(f"unknown speech backend {backend!r}")
@@ -585,16 +586,17 @@ def build_next(
 
 def make_next_asr(
     backend: str,
-    voice: Any,
+    opts: Any,
     build_whisper: Callable[[], Any],
     on_fallback: Callable[[str], object] | None = None,
     data_dir: Path | None = None,
     builder: Callable[..., Any] = build_next,
+    sample_rate: int = 16000,
 ) -> Any:
     """The new backend wrapped in :class:`NextFallbackASR`; Whisper (with the reason) when it cannot start."""
     label = {"moonshine": "Moonshine speech", "nemotron": "Nemotron speech (experimental)"}.get(backend, backend)
     try:
-        primary = builder(backend, voice, data_dir)
+        primary = builder(backend, opts, sample_rate, data_dir)
     except Exception as exc:
         if on_fallback is not None:
             extra = f" {EXPERIMENTAL_NOTE}." if backend == "nemotron" else ""

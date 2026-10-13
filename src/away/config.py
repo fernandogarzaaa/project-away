@@ -510,6 +510,63 @@ class SpeechConfig:
     piper_voice: str = "lessac"  # lessac | amy
 
 
+NEXT_STT = ("whisper", "moonshine", "nemotron")
+
+
+@dataclass
+class ModelsNextConfig:
+    """v0.1.24 model refresh: the optional 2026-10 models. Every default below keeps v0.1.23's behaviour; nothing
+    changes until you pick one of these models, or a preset after "Test my PC" (away.app.model_bench) passes.
+    (Kept in its own section so an older Project Away still reads this settings file.)"""
+
+    # classic: Light / Balanced / Best pick the v0.1.23 models | next: they pick the 2026-10 models
+    # (set by a passing benchmark, or by you in Settings > Models > Advanced)
+    presets: str = "classic"
+    auto_rollback: bool = True  # a new model that fails or runs slower than the one before is switched back
+    rollback_tolerance: float = 0.15  # "slower" = more than 15 % worse than the model before it
+    stt: str = "whisper"  # whisper (voice.asr_*) | moonshine (CPU) | nemotron (graphics card, experimental)
+    moonshine_model: str = "small"  # small | medium
+    nemotron_device: str = "auto"  # auto (NVIDIA -> cuda) | cuda | vulkan | cpu
+    nemotron_chunk_ms: int = 560  # 80 | 160 | 320 | 560 | 1120: smaller = faster partials, a little less accurate
+    stream_partials: bool = True  # show the words while you speak (voice.partial)
+    vad: str = "bundled"  # bundled (voice.vad as before) | silero6 (Silero VAD v6.2)
+    wake_engine: str = "asr"  # asr (speech-to-text listens for "Hey <name>") | livekit (a small wake-word model)
+    wake_model: str = ""  # the livekit-wakeword .onnx for your name (Settings > Models > Wake word)
+    wake_threshold: float = 0.6
+    wake_verify: str = "auto"  # auto (on in the Best preset) | on | off: speech-to-text confirms the wake word
+    kokoro_precision: str = "auto"  # auto (fp16 on a graphics card, int8 otherwise) | int8 | fp16
+    instant_voice: bool = False  # Kyutai pocket-tts speaks short replies (optional install, experimental)
+    hands_landmarker: str = "mediapipe"  # mediapipe | rtmpose (experimental A/B on the graphics card)
+
+
+def validate_models_next(m: ModelsNextConfig) -> None:
+    choices = {
+        "presets": ("classic", "next"),
+        "stt": NEXT_STT,
+        "moonshine_model": ("small", "medium"),
+        "nemotron_device": ("auto", "cuda", "vulkan", "cpu"),
+        "vad": ("bundled", "silero6"),
+        "wake_engine": ("asr", "livekit"),
+        "wake_verify": ("auto", "on", "off"),
+        "kokoro_precision": ("auto", "int8", "fp16"),
+        "hands_landmarker": ("mediapipe", "rtmpose"),
+    }
+    for name, ok in choices.items():
+        if getattr(m, name) not in ok:
+            raise ValueError(f"models_next.{name} must be {'|'.join(ok)}, got {getattr(m, name)!r}")
+    if m.nemotron_chunk_ms not in (80, 160, 320, 560, 1120):
+        raise ValueError(f"models_next.nemotron_chunk_ms must be 80|160|320|560|1120, got {m.nemotron_chunk_ms!r}")
+    for name, lo, hi in (("rollback_tolerance", 0.0, 1.0), ("wake_threshold", 0.05, 0.99)):
+        v = getattr(m, name)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ValueError(f"models_next.{name} must be a number in [{lo}, {hi}], got {v!r}")
+    if not isinstance(m.wake_model, str) or len(m.wake_model) > 400:
+        raise ValueError("models_next.wake_model must be a file path")
+    for name in ("auto_rollback", "stream_partials", "instant_voice"):
+        if not isinstance(getattr(m, name), bool):
+            raise ValueError(f"models_next.{name} must be true or false")
+
+
 def validate_speech(s: SpeechConfig) -> None:
     if s.rate not in SPEECH_RATES:
         raise ValueError(f"speech.rate must be {'|'.join(SPEECH_RATES)}, got {s.rate!r}")
@@ -597,6 +654,7 @@ class AppConfig:
     comfort: ComfortConfig = field(default_factory=ComfortConfig)  # v0.1.20 arm fatigue + break reminders
     agent_link: AgentLinkConfig = field(default_factory=AgentLinkConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)  # v0.1.21: agents can talk to you
+    models_next: ModelsNextConfig = field(default_factory=ModelsNextConfig)  # v0.1.24: optional 2026-10 models
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -894,6 +952,7 @@ def validate(cfg: AppConfig) -> None:
     validate_macros_config(cfg.macros)
     validate_agent_link(cfg.agent_link)
     validate_speech(cfg.speech)
+    validate_models_next(cfg.models_next)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:
