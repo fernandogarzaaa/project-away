@@ -529,3 +529,70 @@ def test_models_agent_op_is_undoable() -> None:
     with pytest.raises(AR.ChangeError):
         AR.models_apply(cfg, AR.Op("models", "explode", "stt"))
     assert "models" in AR.domains()
+
+
+# ============================================================================ Settings > Models tab
+def test_models_tab_logic(tmp_path: Path) -> None:
+    from away.app import models_tab as MT
+
+    reg = MR.Registry(tmp_path)
+    cfg = C.AppConfig()
+    rows = MT.rows(reg, cfg)
+    assert [r["slot"] for r in rows] == list(MR.SLOTS)
+    stt = next(r for r in rows if r["slot"] == "stt")
+    assert "Whisper small on the processor" in stt["labels"]
+    gaze = next(r for r in rows if r["slot"] == "gaze")
+    assert "L2CS (best gaze)" not in gaze["labels"]  # research-only weights are not offered
+    assert MT.choose(reg, cfg, "stt", "Whisper small on the processor").startswith("Speech to text: Whisper small")
+    assert cfg.voice.asr_model == "small"
+    with pytest.raises(ValueError):
+        MT.choose(reg, cfg, "stt", "L2CS (best gaze)")
+    assert "off" in MT.toggle(reg, cfg, "face", False) and cfg.face.enabled is False
+    assert MT.apply_mode(reg, cfg, "Light").startswith("Performance mode: Light") and cfg.voice.asr_model == "base"
+    assert MT.voice_engine(reg.get("voice-kokoro")) == "kokoro" and MT.voice_engine(reg.get("voice-classic")) == ""
+    assert MT.download_hint(reg.get("cleanup-qwen-0.5b")).startswith("Download: Settings")
+    assert MT.download_hint(reg.get("mediapipe-hands")) == ""
+    cfg.voice.asr_model = "tiny.en"  # a setting no listed model matches
+    stt = next(r for r in MT.rows(reg, cfg) if r["slot"] == "stt")
+    assert stt["label"] == "custom" and stt["labels"][0] == "custom"
+
+
+def test_models_tab_builds_and_reacts_under_a_display(tmp_path: Path) -> None:
+    tk = pytest.importorskip("tkinter")
+    from tkinter import ttk
+
+    from away.app import models_tab as MT
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    try:
+        saved: list[int] = []
+        cfg = C.AppConfig()
+        win = type(
+            "Win",
+            (),
+            {
+                "tk": tk,
+                "ttk": ttk,
+                "m": type("M", (), {"cfg": cfg, "save": lambda self: saved.append(1)})(),
+                "_ui": type("U", (), {"post": lambda self, fn: fn()})(),
+            },
+        )()
+        nb = ttk.Notebook(root)
+        nb.pack()
+        frame = MT.build(win, nb, data_dir=tmp_path)
+        root.update()
+        assert [nb.tab(t, "text") for t in nb.tabs()] == ["Models"]
+        combos = [w for w in frame.winfo_children()[1].winfo_children() if isinstance(w, ttk.Combobox)]
+        assert len(combos) == len(MR.SLOTS)
+        mode = next(w for w in frame.winfo_children()[0].winfo_children() if isinstance(w, ttk.Combobox))
+        mode.set("Light")
+        mode.event_generate("<<ComboboxSelected>>")
+        root.update()
+        assert saved and cfg.voice.asr_model == "base"
+        stt = combos[MR.SLOTS.index("stt")]
+        assert stt.get() == "Whisper base on the processor (lightest)"  # the rows follow the mode
+    finally:
+        root.destroy()
