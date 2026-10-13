@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import collections
 import contextlib
-import logging
 import copy
+import logging
 import math
 import os
 import queue
