@@ -22,8 +22,9 @@ import numpy as np
 
 
 class LiveSpeech:
-    def __init__(self, speaker: Any, enabled: Callable[[], bool] = lambda: True,
-                 stop_audio: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self, speaker: Any, enabled: Callable[[], bool] = lambda: True, stop_audio: Callable[[], None] | None = None
+    ) -> None:
         self.speaker = speaker  # away.voice.speech.Speaker (or anything with say(text, force=...))
         self.enabled = enabled
         self.stop_audio = stop_audio or _stop_sounddevice

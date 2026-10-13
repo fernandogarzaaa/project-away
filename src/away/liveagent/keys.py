@@ -7,6 +7,7 @@ only remembers *that* a provider has a key (``has_key``). The backend is injecta
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Protocol
 
 SERVICE = "ProjectAway-LiveAgent"
@@ -88,10 +89,8 @@ class KeyStore:
             raise KeyStoreError(f"could not save the key in the system vault: {type(exc).__name__}") from None
 
     def delete(self, provider_id: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.backend.delete_password(self.service, str(provider_id))
-        except Exception:
-            pass
 
 
 def mask(key: str) -> str:

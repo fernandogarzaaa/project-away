@@ -62,7 +62,12 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         note="Free key, no card. Google may use free-tier prompts to improve its products.",
     ),
     ProviderSpec(
-        "openai", "OpenAI", "openai", "https://api.openai.com/v1", "gpt-5-mini", key_url="https://platform.openai.com/api-keys"
+        "openai",
+        "OpenAI",
+        "openai",
+        "https://api.openai.com/v1",
+        "gpt-5-mini",
+        key_url="https://platform.openai.com/api-keys",
     ),
     ProviderSpec(
         "anthropic",
@@ -92,11 +97,19 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         key_url="https://opencode.ai/auth",
     ),
     ProviderSpec(
-        "deepseek", "DeepSeek", "openai", "https://api.deepseek.com/v1", "deepseek-chat",
+        "deepseek",
+        "DeepSeek",
+        "openai",
+        "https://api.deepseek.com/v1",
+        "deepseek-chat",
         key_url="https://platform.deepseek.com/api_keys",
     ),
     ProviderSpec(
-        "mistral", "Mistral", "openai", "https://api.mistral.ai/v1", "mistral-small-latest",
+        "mistral",
+        "Mistral",
+        "openai",
+        "https://api.mistral.ai/v1",
+        "mistral-small-latest",
         key_url="https://console.mistral.ai/api-keys",
     ),
     ProviderSpec(
@@ -107,8 +120,12 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         key_url="https://api.together.ai/settings/api-keys",
     ),
-    ProviderSpec("ollama", "Ollama (on this PC)", "openai", "http://127.0.0.1:11434/v1", "", needs_key=False, local=True),
-    ProviderSpec("lmstudio", "LM Studio (on this PC)", "openai", "http://127.0.0.1:1234/v1", "", needs_key=False, local=True),
+    ProviderSpec(
+        "ollama", "Ollama (on this PC)", "openai", "http://127.0.0.1:11434/v1", "", needs_key=False, local=True
+    ),
+    ProviderSpec(
+        "lmstudio", "LM Studio (on this PC)", "openai", "http://127.0.0.1:1234/v1", "", needs_key=False, local=True
+    ),
     ProviderSpec("custom", "Other (OpenAI-compatible)", "openai", "", "", needs_key=False),
 )
 BY_ID = {p.id: p for p in PROVIDERS}

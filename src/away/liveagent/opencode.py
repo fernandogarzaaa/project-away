@@ -74,7 +74,7 @@ def find_cli(
 ) -> list[str] | None:
     """The command for an opencode the person installed themselves, or None."""
     plat = platform or sys.platform
-    for name in (("opencode.exe", "opencode.cmd", "opencode") if plat == "win32" else ("opencode",)):
+    for name in ("opencode.exe", "opencode.cmd", "opencode") if plat == "win32" else ("opencode",):
         p = which(name)
         if p:
             return command_for(p, plat)
@@ -182,8 +182,12 @@ def pick_asset(release: dict[str, Any], names: list[str]) -> Asset:
 
 # ------------------------------------------------------------------------------------------------ download
 def download(
-    url: str, dest: Path, progress: Callable[[int, int], None] | None = None, total: int = 0,
-    timeout: float = 60.0, cancel: threading.Event | None = None,
+    url: str,
+    dest: Path,
+    progress: Callable[[int, int], None] | None = None,
+    total: int = 0,
+    timeout: float = 60.0,
+    cancel: threading.Event | None = None,
 ) -> str:  # pragma: no cover - network (tests inject their own downloader)
     """Streams ``url`` to ``dest``; returns the SHA-256 of what arrived."""
     import urllib.request
@@ -224,7 +228,7 @@ def _safe_extract(archive: Path, dest: Path) -> None:
                 target = (dest / member.name).resolve()
                 if not str(target).startswith(str(dest)) or member.issym() or member.islnk():
                     raise EngineError("the download contains an unsafe file path")
-            t.extractall(dest)  # noqa: S202 - every member checked above
+            t.extractall(dest)
 
 
 def install(
@@ -302,8 +306,9 @@ def _newer(a: str, b: str) -> bool:
     return key(a) > key(b)
 
 
-def check_update(data_dir: Path | None = None, client: Client | None = None, apply: bool = True,
-                 **kw: Any) -> dict[str, Any]:
+def check_update(
+    data_dir: Path | None = None, client: Client | None = None, apply: bool = True, **kw: Any
+) -> dict[str, Any]:
     """Called when Away checks for updates. Only updates a copy Away downloaded itself (never your own CLI)."""
     cur = installed_engine(data_dir)
     if cur is None:
@@ -450,7 +455,9 @@ class OpenCodeServer:
         last = ""
         while self.clock() < deadline:
             if self.proc is not None and self.proc.poll() is not None:
-                raise EngineError(f"opencode stopped while starting (exit code {self.proc.returncode}); see {self.log_path}")
+                raise EngineError(
+                    f"opencode stopped while starting (exit code {self.proc.returncode}); see {self.log_path}"
+                )
             try:
                 sid = self.client.post_json(f"{self.url}/session", {"title": "away-ready"}, self._auth(), 5)
                 if isinstance(sid, dict) and sid.get("id"):
@@ -474,8 +481,12 @@ class OpenCodeServer:
             if p.poll() is None:
                 if sys.platform == "win32":  # pragma: no cover - Windows: the whole process tree
                     with contextlib.suppress(Exception):
-                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True,
-                                       creationflags=CREATE_NO_WINDOW, timeout=10)
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                            capture_output=True,
+                            creationflags=CREATE_NO_WINDOW,
+                            timeout=10,
+                        )
                 else:
                     p.terminate()
                 try:
@@ -510,8 +521,10 @@ class OpenCodeServer:
         props = ev.get("properties") or {}
         if t.startswith("permission") or t.startswith("question"):
             threading.Thread(target=self.reject_pending, daemon=True).start()
-        sid = props.get("sessionID") or (props.get("info") or {}).get("sessionID") or (props.get("part") or {}).get(
-            "sessionID"
+        sid = (
+            props.get("sessionID")
+            or (props.get("info") or {}).get("sessionID")
+            or (props.get("part") or {}).get("sessionID")
         )
         if sid and sid in self._subs:
             self._subs[sid].put(ev)
@@ -522,7 +535,9 @@ class OpenCodeServer:
         with contextlib.suppress(Exception):
             for pr in self.client.get_json(f"{self.url}/permission", self._auth(), 5) or []:
                 with contextlib.suppress(Exception):
-                    self.client.post_json(f"{self.url}/permission/{pr['id']}/reply", {"reply": "reject"}, self._auth(), 5)
+                    self.client.post_json(
+                        f"{self.url}/permission/{pr['id']}/reply", {"reply": "reject"}, self._auth(), 5
+                    )
                     n += 1
         with contextlib.suppress(Exception):
             for q in self.client.get_json(f"{self.url}/question", self._auth(), 5) or []:
@@ -612,7 +627,9 @@ class OpenCodeServer:
                     err = props.get("error")
                     if err:
                         raise _error_from(err)
-                elif t == "session.idle" or (t == "session.status" and (props.get("status") or {}).get("type") == "idle"):
+                elif t == "session.idle" or (
+                    t == "session.status" and (props.get("status") or {}).get("type") == "idle"
+                ):
                     break
             if not got_text:
                 for piece in self._final_text(sid, auth):

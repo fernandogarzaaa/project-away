@@ -109,8 +109,12 @@ class Breakers:
     def public(self) -> dict[str, dict[str, Any]]:
         now = self.clock()
         return {
-            k: {"open": now < b.open_until, "rest_s": max(0, int(b.open_until - now)), "reason": b.reason,
-                "failures": b.failures}
+            k: {
+                "open": now < b.open_until,
+                "rest_s": max(0, int(b.open_until - now)),
+                "reason": b.reason,
+                "failures": b.failures,
+            }
             for k, b in self.state.items()
         }
 
@@ -158,8 +162,13 @@ class Router:
             from away.liveagent.catalog import guess
 
             p = self.providers[pid]
-            return guess(pid, mid, free=bool(getattr(p, "free", False)), local=bool(getattr(p, "local", False)),
-                         may_keep_prompts=bool(getattr(p, "may_keep_prompts", False)))
+            return guess(
+                pid,
+                mid,
+                free=bool(getattr(p, "free", False)),
+                local=bool(getattr(p, "local", False)),
+                may_keep_prompts=bool(getattr(p, "may_keep_prompts", False)),
+            )
         return None
 
     def candidates(self, task: str) -> list[Candidate]:
@@ -252,8 +261,15 @@ class Funnel:
         self.clock = clock
         self.sleep = sleep
 
-    def _producer(self, cand: Candidate, model: str, messages: list[dict[str, Any]], q: queue.Queue[Any],
-                  kw: dict[str, Any], stop: threading.Event) -> None:
+    def _producer(
+        self,
+        cand: Candidate,
+        model: str,
+        messages: list[dict[str, Any]],
+        q: queue.Queue[Any],
+        kw: dict[str, Any],
+        stop: threading.Event,
+    ) -> None:
         try:
             for piece in cand.provider.stream(model, messages, **kw):
                 if stop.is_set():
@@ -285,11 +301,14 @@ class Funnel:
             if self.breakers.is_open(pid):
                 rec.attempts.append((cand.ref, f"resting ({self.breakers.get(pid).reason})"))
                 continue
-            if cand.paid:
-                if not self.ledger.can_spend():
-                    rec.attempts.append((cand.ref, "skipped: daily limit reached" if self.ledger.limit_usd > 0
-                                         else "skipped: paid models are off"))
-                    continue
+            if cand.paid and not self.ledger.can_spend():
+                rec.attempts.append(
+                    (
+                        cand.ref,
+                        "skipped: daily limit reached" if self.ledger.limit_usd > 0 else "skipped: paid models are off",
+                    )
+                )
+                continue
             prep = privacy.prepare(messages, cand.info.may_keep_prompts, allow_images=cand.info.vision)
             if task == "vision" and prep.dropped_images:
                 rec.attempts.append((cand.ref, "skipped: pictures stay private"))
@@ -297,14 +316,21 @@ class Funnel:
             rec.redacted = rec.redacted or prep.redacted
             rec.dropped_images += prep.dropped_images
             reasoning = cand.info.reasoning
-            kw = {"max_tokens": max(max_tokens, 1200) if reasoning else max_tokens, "json_mode": json_mode,
-                  "timeout": self.turn_timeout}
+            kw = {
+                "max_tokens": max(max_tokens, 1200) if reasoning else max_tokens,
+                "json_mode": json_mode,
+                "timeout": self.turn_timeout,
+            }
             for attempt in (1, 2):
                 q: queue.Queue[Any] = queue.Queue()
                 stop = threading.Event()
                 t0 = self.clock()
-                th = threading.Thread(target=self._producer, args=(cand, cand.info.id, prep.messages, q, kw, stop),
-                                      daemon=True, name="liveagent-call")
+                th = threading.Thread(
+                    target=self._producer,
+                    args=(cand, cand.info.id, prep.messages, q, kw, stop),
+                    daemon=True,
+                    name="liveagent-call",
+                )
                 th.start()
                 try:
                     first = q.get(timeout=self.first_token_timeout)
@@ -317,7 +343,12 @@ class Funnel:
                     kind = classify(first)
                     ra = getattr(first, "retry_after", None)
                     rec.attempts.append((cand.ref, f"{kind}: {str(first)[:80]}"))
-                    if attempt == 1 and kind in ("rate_limit", "server") and ra is not None and ra <= self.max_retry_wait:
+                    if (
+                        attempt == 1
+                        and kind in ("rate_limit", "server")
+                        and ra is not None
+                        and ra <= self.max_retry_wait
+                    ):
                         self.sleep(ra)
                         continue
                     self.breakers.fail(pid, kind, ra)
@@ -369,6 +400,5 @@ class Funnel:
         rec.total_s = self.clock() - t_start
         raise NoModel("every model is unavailable right now", rec.attempts)
 
-    def complete(self, task: str, messages: list[dict[str, Any]], record: CallRecord | None = None,
-                 **kw: Any) -> str:
+    def complete(self, task: str, messages: list[dict[str, Any]], record: CallRecord | None = None, **kw: Any) -> str:
         return "".join(self.stream(task, messages, record, **kw))

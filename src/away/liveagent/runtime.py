@@ -134,8 +134,13 @@ class Runtime:
             if not mid:
                 continue
             keep = sp.may_keep_prompts if cfg.may_keep_prompts is None else bool(cfg.may_keep_prompts)
-            info = catalog.guess(cfg.id, mid, free=sp.local or mid.endswith(":free"), local=sp.local,
-                                 may_keep_prompts=keep or mid.endswith(":free"))
+            info = catalog.guess(
+                cfg.id,
+                mid,
+                free=sp.local or mid.endswith(":free"),
+                local=sp.local,
+                may_keep_prompts=keep or mid.endswith(":free"),
+            )
             info.price_in, info.price_out = catalog.price_for(md, sp.id, mid)
             out.append(info)
         return out
@@ -158,8 +163,12 @@ class Runtime:
 
         def complete(system: str, user: str) -> str:
             f = self.funnel(s)
-            return f.complete("decide", [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                              max_tokens=200, json_mode=True)
+            return f.complete(
+                "decide",
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                max_tokens=200,
+                json_mode=True,
+            )
 
         return Decider(jev, ChatDecider(complete), self.clock)
 
@@ -185,12 +194,23 @@ class Runtime:
             "wake_phrase": f"Hey {s.name}",
             "preferred": s.preferred,
             "providers": [
-                {"id": p.id, "kind": p.kind, "title": p.title or catalog.spec(p.kind).title, "model": p.model,
-                 "enabled": p.enabled, "has_key": bool(p.has_key), "error": self.errors.get(p.id, "")}
+                {
+                    "id": p.id,
+                    "kind": p.kind,
+                    "title": p.title or catalog.spec(p.kind).title,
+                    "model": p.model,
+                    "enabled": p.enabled,
+                    "has_key": bool(p.has_key),
+                    "error": self.errors.get(p.id, ""),
+                }
                 for p in s.providers
             ],
-            "allow": {"screen": s.allow_screen, "camera": s.allow_camera, "control": s.allow_control,
-                      "settings": s.allow_settings},
+            "allow": {
+                "screen": s.allow_screen,
+                "camera": s.allow_camera,
+                "control": s.allow_control,
+                "settings": s.allow_settings,
+            },
             "budget": self.ledger.summary(),
             "breakers": self.breakers.public(),
             "engine": engine_status(self.data_dir),
@@ -216,8 +236,9 @@ def engine_status(data_dir: Path | None = None) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------------------------------ one-click setups
-def add_provider(s: st.LiveSettings, kind: str, model: str = "", base_url: str = "", has_key: bool = False,
-                 pid: str = "") -> st.ProviderConfig:
+def add_provider(
+    s: st.LiveSettings, kind: str, model: str = "", base_url: str = "", has_key: bool = False, pid: str = ""
+) -> st.ProviderConfig:
     sp = catalog.spec(kind)
     pid = pid or (kind if not s.provider(kind) or kind != "custom" else f"custom-{len(s.providers) + 1}")
     cfg = s.provider(pid)
@@ -286,7 +307,9 @@ def fallback_options(data_dir: Path | None = None, client: Client | None = None)
         data = c.get_json("http://127.0.0.1:11434/api/tags", timeout=1.5)
         names = [str(m.get("name")) for m in (data or {}).get("models", []) if m.get("name")]
         if names:
-            out.append({"kind": "ollama", "title": "Ollama (on this PC)", "key_url": "", "note": f"{len(names)} model(s)"})
+            out.append(
+                {"kind": "ollama", "title": "Ollama (on this PC)", "key_url": "", "note": f"{len(names)} model(s)"}
+            )
     except Exception:
         pass
     return out

@@ -65,8 +65,9 @@ class Answer:
 
 
 class JevClient:
-    def __init__(self, key: str = "", client: Client | None = None, endpoint: str = ENDPOINT,
-                 timeout: float = 6.0) -> None:
+    def __init__(
+        self, key: str = "", client: Client | None = None, endpoint: str = ENDPOINT, timeout: float = 6.0
+    ) -> None:
         self.key = key
         self.client = client or Client()
         self.endpoint = endpoint
@@ -140,8 +141,9 @@ class Decider:
     """Jev first, then the chat model, then rules. Each step's failure is remembered for a minute so a broken Jev
     never slows every turn down."""
 
-    def __init__(self, jev: JevClient | None, chat: ChatDecider | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, jev: JevClient | None, chat: ChatDecider | None = None, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         self.jev = jev
         self.chat = chat
         self.clock = clock
@@ -196,8 +198,11 @@ class Decider:
 
     # 3. post-action success check
     def succeeded(self, goal: str, after_text: str) -> Answer:
-        a = self._try("noul", {"goal": goal, "screen_after": after_text[:3000]},
-                      "Does the screen show that the goal was achieved?")
+        a = self._try(
+            "noul",
+            {"goal": goal, "screen_after": after_text[:3000]},
+            "Does the screen show that the goal was achieved?",
+        )
         if a is None:
             self.last_source = "rules"
             return Answer(True, 0.0, {}, "rules")  # unknown: do not claim failure

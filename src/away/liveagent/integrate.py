@@ -128,7 +128,7 @@ class LiveAgentHost:
         talk.enabled = enabled
 
     def _generic_is_mine(self) -> bool:
-        """"Hey agent" goes to the live agent when nobody else would get it."""
+        """ "Hey agent" goes to the live agent when nobody else would get it."""
         svc = self.service
         if svc is None:
             return True
@@ -311,7 +311,7 @@ def register_domain(host: Any) -> None:
 
 # ------------------------------------------------------------------------------------------------ tray
 def menu_items(pystray: Any, app: Any, open_settings: Any = None) -> list[Any]:
-    """"Live agent: on (Big Pickle)" - click to turn it on or off (opens Settings > Live agent when it has never
+    """ "Live agent: on (Big Pickle)" - click to turn it on or off (opens Settings > Live agent when it has never
     been set up)."""
 
     def text(_i: Any) -> str:

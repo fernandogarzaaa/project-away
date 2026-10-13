@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -86,10 +86,8 @@ class Response:
 
     def close(self) -> None:
         if self._close is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._close()
-            except Exception:
-                pass
             self._close = None
 
 
@@ -115,13 +113,11 @@ class UrllibTransport:
             resp = opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             text = ""
-            try:
+            with contextlib.suppress(Exception):
                 text = exc.read().decode("utf-8", "replace")
-            except Exception:
-                pass
             ra = parse_retry_after(exc.headers.get("Retry-After")) if exc.headers else None
             raise HttpError(exc.code, short_error(text) or str(exc.reason), text, ra) from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise HttpError(0, f"could not connect: {reason}") from None
         return Response(int(resp.status), dict(resp.headers.items()), iter(resp), resp.close)

@@ -40,7 +40,12 @@ class Provider:
         self.last_usage = Usage()
 
     def stream(
-        self, model: str, messages: list[dict[str, Any]], *, max_tokens: int = 400, json_mode: bool = False,
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 400,
+        json_mode: bool = False,
         timeout: float = 60.0,
     ) -> Iterator[str]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -133,7 +138,12 @@ class OpenAICompatProvider(Provider):
         return self.kind == "openai" and (model.startswith(("o1", "o3", "o4", "gpt-5")))
 
     def stream(
-        self, model: str, messages: list[dict[str, Any]], *, max_tokens: int = 400, json_mode: bool = False,
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 400,
+        json_mode: bool = False,
         timeout: float = 60.0,
     ) -> Iterator[str]:
         body: dict[str, Any] = {"model": model, "messages": self.convert(messages), "stream": True}
@@ -180,8 +190,15 @@ class OpenAICompatProvider(Provider):
 class AnthropicProvider(Provider):
     VERSION = "2023-06-01"
 
-    def __init__(self, pid: str, api_key: str, base_url: str = "https://api.anthropic.com/v1", *,
-                 title: str = "Anthropic", client: Client | None = None) -> None:
+    def __init__(
+        self,
+        pid: str,
+        api_key: str,
+        base_url: str = "https://api.anthropic.com/v1",
+        *,
+        title: str = "Anthropic",
+        client: Client | None = None,
+    ) -> None:
         super().__init__()
         self.id = pid
         self.title = title
@@ -206,15 +223,28 @@ class AnthropicProvider(Provider):
                     if p.get("type") == "text":
                         blocks.append({"type": "text", "text": str(p.get("text", ""))})
                     elif p.get("type") == "image":
-                        blocks.append({"type": "image", "source": {"type": "base64",
-                                       "media_type": p.get("mime", "image/jpeg"), "data": _b64(p.get("data", b""))}})
+                        blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": p.get("mime", "image/jpeg"),
+                                    "data": _b64(p.get("data", b"")),
+                                },
+                            }
+                        )
                 out.append({"role": m["role"], "content": blocks})
             else:
                 out.append({"role": m["role"], "content": str(c or "")})
         return system, out
 
     def stream(
-        self, model: str, messages: list[dict[str, Any]], *, max_tokens: int = 400, json_mode: bool = False,
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 400,
+        json_mode: bool = False,
         timeout: float = 60.0,
     ) -> Iterator[str]:
         system, msgs = self.convert(messages)
@@ -247,8 +277,12 @@ class AnthropicProvider(Provider):
 class OpenCodeProvider(Provider):
     """opencode's free models, through the private server (:class:`away.liveagent.opencode.OpenCodeServer`)."""
 
-    def __init__(self, server_factory: Callable[[], Any], pid: str = "opencode_free",
-                 catalog_fn: Callable[[], list[catalog.ModelInfo]] | None = None) -> None:
+    def __init__(
+        self,
+        server_factory: Callable[[], Any],
+        pid: str = "opencode_free",
+        catalog_fn: Callable[[], list[catalog.ModelInfo]] | None = None,
+    ) -> None:
         super().__init__()
         self.id = pid
         self.title = "Free models (opencode)"
@@ -258,7 +292,12 @@ class OpenCodeProvider(Provider):
         self.catalog_fn = catalog_fn
 
     def stream(
-        self, model: str, messages: list[dict[str, Any]], *, max_tokens: int = 400, json_mode: bool = False,
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 400,
+        json_mode: bool = False,
         timeout: float = 60.0,
     ) -> Iterator[str]:
         server = self.server_factory()
@@ -302,7 +341,12 @@ class FakeProvider(Provider):
         self.last_usage = Usage()
 
     def stream(
-        self, model: str, messages: list[dict[str, Any]], *, max_tokens: int = 400, json_mode: bool = False,
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 400,
+        json_mode: bool = False,
         timeout: float = 60.0,
     ) -> Iterator[str]:
         self.calls.append({"model": model, "messages": messages, "max_tokens": max_tokens, "json": json_mode})
@@ -326,8 +370,13 @@ class FakeProvider(Provider):
 
 
 # ------------------------------------------------------------------------------------------------ factory
-def build(cfg: Any, key: str, client: Client | None = None, opencode_server: Callable[[], Any] | None = None,
-          free_catalog: Callable[[], list[catalog.ModelInfo]] | None = None) -> Provider:
+def build(
+    cfg: Any,
+    key: str,
+    client: Client | None = None,
+    opencode_server: Callable[[], Any] | None = None,
+    free_catalog: Callable[[], list[catalog.ModelInfo]] | None = None,
+) -> Provider:
     """A provider from a :class:`away.liveagent.settings.ProviderConfig` and its key."""
     sp = catalog.spec(cfg.kind)
     keep = sp.may_keep_prompts if cfg.may_keep_prompts is None else bool(cfg.may_keep_prompts)

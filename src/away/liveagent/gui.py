@@ -39,8 +39,9 @@ AUTO = "Automatic"
 
 
 class LivePanel:
-    def __init__(self, data_dir: Path | None = None, keystore: keys.KeyStore | None = None,
-                 runtime: Runtime | None = None) -> None:
+    def __init__(
+        self, data_dir: Path | None = None, keystore: keys.KeyStore | None = None, runtime: Runtime | None = None
+    ) -> None:
         if data_dir is None:
             from away import paths
 
@@ -77,7 +78,9 @@ class LivePanel:
         model = ""
         with contextlib.suppress(Exception):
             model = self.runtime.current_model(self.s)
-        bad = [f"{p.title or p.id}: {e}" for p, e in ((p, self.runtime.errors.get(p.id)) for p in self.s.providers) if e]
+        bad = [
+            f"{p.title or p.id}: {e}" for p, e in ((p, self.runtime.errors.get(p.id)) for p in self.s.providers) if e
+        ]
         line = f'{state}. Say "Hey {self.s.name}".' + (f" Answers with {model}." if model else "")
         return line + (f" Problem: {bad[0]}" if bad else "")
 
@@ -92,8 +95,11 @@ class LivePanel:
             return f"opencode {e.get('version')} (downloaded by Away, MIT license)."
         return "Using the opencode you installed."
 
-    def use_free(self, progress: Callable[[str, int, int], None] | None = None,
-                 installer: Callable[..., dict[str, Any]] = opencode.install) -> tuple[bool, str]:
+    def use_free(
+        self,
+        progress: Callable[[str, int, int], None] | None = None,
+        installer: Callable[..., dict[str, Any]] = opencode.install,
+    ) -> tuple[bool, str]:
         try:
             msg = use_free_models(self.runtime, self.s, progress, installer)
             self.save()
@@ -288,10 +294,12 @@ def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; sm
             row = ttk.Frame(fb)
             row.pack(anchor="w", pady=2)
             if o["key_url"]:
-                ttk.Button(row, text=f"Get a free {o['title']} key",
-                           command=lambda u=o["key_url"]: webbrowser.open(u)).pack(side="left")
-                ttk.Button(row, text="I have it: add it below",
-                           command=lambda k=o["kind"]: pick_provider(k)).pack(side="left", padx=4)
+                ttk.Button(
+                    row, text=f"Get a free {o['title']} key", command=lambda u=o["key_url"]: webbrowser.open(u)
+                ).pack(side="left")
+                ttk.Button(row, text="I have it: add it below", command=lambda k=o["kind"]: pick_provider(k)).pack(
+                    side="left", padx=4
+                )
             else:
                 ttk.Button(row, text=f"Use {o['title']}", command=lambda k=o["kind"]: use_local(k)).pack(side="left")
             ttk.Label(row, text=o.get("note", ""), foreground="#555").pack(side="left", padx=6)
@@ -397,12 +405,20 @@ def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; sm
 
             def t(pid: str = p.id, v: Any = res) -> None:
                 v.set("Testing...")
-                bg(lambda: panel.test(pid), lambda r, v=v: v.set(r[1]))
+
+                def done(r: Any, v: Any = v) -> None:
+                    v.set(r[1])
+
+                bg(lambda: panel.test(pid), done)
 
             ttk.Button(row, text="Test", command=t).pack(side="left")
-            ttk.Button(row, text="Remove",
-                       command=lambda pid=p.id: (panel.remove(pid), refresh_providers(), refresh_models())).pack(
-                side="left", padx=4)
+
+            def rm(pid: str = p.id) -> None:
+                panel.remove(pid)
+                refresh_providers()
+                refresh_models()
+
+            ttk.Button(row, text="Remove", command=rm).pack(side="left", padx=4)
             ttk.Label(row, textvariable=res).pack(side="left")
 
     # --- preferred model, name, permissions
@@ -527,8 +543,17 @@ def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; sm
         tree.delete(*tree.get_children())
         for t in panel.recent_turns():
             first = t.get("first_spoken_s") or t.get("first_token_s")
-            tree.insert("", "end", values=(t.get("time", ""), t.get("text", ""), t.get("model", ""),
-                                           f"{first:.1f} s" if first else "-", t.get("outcome", "")))
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    t.get("time", ""),
+                    t.get("text", ""),
+                    t.get("model", ""),
+                    f"{first:.1f} s" if first else "-",
+                    t.get("outcome", ""),
+                ),
+            )
         spent.set(f"Spent today: ${panel.runtime.ledger.spent_today():.2f}")
 
     ttk.Button(tf, text="Refresh", command=refresh_turns).pack(anchor="w", pady=2)

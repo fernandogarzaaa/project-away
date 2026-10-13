@@ -15,6 +15,7 @@ Anything read from the screen is fenced as untrusted data before it reaches a mo
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -87,8 +88,8 @@ class ToolBox:
         s = self.settings()
         if not s.allow_screen:
             raise ToolError("I'm not allowed to look at the screen (Settings > Live agent)")
-        uia = getattr(svc, "uia", None)
-        if not getattr(uia, "available", False):
+        uia: Any = getattr(svc, "uia", None)
+        if uia is None or not getattr(uia, "available", False):
             return [], untrusted.fence("(this system cannot list on-screen elements)", "screen")
         tree = uia.tree(3, limit)
         names: list[str] = []
@@ -115,9 +116,9 @@ class ToolBox:
 
     def focused_password(self) -> bool:
         svc = self.service
-        uia = getattr(svc, "uia", None) if svc is not None else None
+        uia: Any = getattr(svc, "uia", None) if svc is not None else None
         try:
-            el = uia.focused() if getattr(uia, "available", False) else None
+            el = uia.focused() if uia is not None and getattr(uia, "available", False) else None
             return bool(el is not None and el.is_password)
         except Exception:
             return False
@@ -138,21 +139,26 @@ class ToolBox:
             if risk.value:
                 if self.ask is None:
                     raise ToolError("that action may not be undoable and I can't ask you on screen, so I stopped")
-                res = self.ask(
+                ans = self.ask(
                     f"{agent.name} wants to {action.replace('_', ' ')} '{target[:60]}'",
                     ["Allow", "Deny"],
                     title="Are you sure?",
                     agent=agent.name,
-                    details=["This may not be undoable (send, pay, delete...)."] + ([f"Why: {why[:150]}"] if why else []),
+                    details=["This may not be undoable (send, pay, delete...)."]
+                    + ([f"Why: {why[:150]}"] if why else []),
                     timeout_s=60.0,
                     urgency="high",
                     kind="confirm",
                 )
-                if res.get("answer") != "Allow":
+                if ans.get("answer") != "Allow":
                     raise ToolError(f"you did not allow '{target[:60]}'")
         if svc.control.grant is None or svc.control.grant.agent_id != AGENT_ID:
             svc.request_control(agent, why=why or "a request you just made", minutes=5)
-        if action in ("click", "double_click", "right_click", "move") and kw.get("element") and self.decider is not None:
+        if (
+            action in ("click", "double_click", "right_click", "move")
+            and kw.get("element")
+            and self.decider is not None
+        ):
             try:
                 names, _ = self.elements()
             except ToolError:
@@ -161,8 +167,11 @@ class ToolBox:
                 pick = self.decider.pick_element(str(kw["element"]), names)
                 if pick is not None:
                     kw["element"] = pick.value
-        args = {k: v for k, v in kw.items() if k in ("x", "y", "element", "text", "keys", "name", "url", "dx", "dy",
-                                                       "amount", "direction")}
+        args = {
+            k: v
+            for k, v in kw.items()
+            if k in ("x", "y", "element", "text", "keys", "name", "url", "dx", "dy", "amount", "direction")
+        }
         res: dict[str, Any] = svc.act(agent, action, **args)
         self.log.append({"t": time.time(), "action": action, "target": target[:80]})
         return res
@@ -170,10 +179,8 @@ class ToolBox:
     def finish(self) -> None:
         svc = self.service
         if svc is not None:
-            try:
+            with contextlib.suppress(Exception):
                 svc.stop_control(self.agent())
-            except Exception:
-                pass
 
     # ------------------------------------------------------------ settings
     def change_settings(self, ops: Any, why: str = "") -> dict[str, Any]:
