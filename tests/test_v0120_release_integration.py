@@ -266,3 +266,41 @@ def test_record_away_input_is_on_by_default() -> None:
     assert C.AppConfig().macros.record_away_input is True
     cfg, unknown = C.from_dict({"macros": {"record_away_input": False}})
     assert unknown == [] and cfg.macros.record_away_input is False
+
+
+# ------------------------------------------------------------------------------------------- Settings tabs
+class FakeNotebook:
+    def __init__(self, titles: list[str]) -> None:
+        self._tabs = [f".t{i}" for i in range(len(titles))]
+        self._text = dict(zip(self._tabs, titles))
+
+    def tabs(self) -> list[str]:
+        return list(self._tabs)
+
+    def tab(self, tab_id: str, option: str) -> str:
+        return self._text[tab_id]
+
+    def insert(self, pos: int, tab_id: str) -> None:
+        self._tabs.remove(tab_id)
+        self._tabs.insert(pos, tab_id)
+
+
+def test_settings_tabs_start_with_getting_started_and_end_with_the_expert_pages() -> None:
+    from away.app.settings_gui import TAB_ORDER, order_tabs
+
+    built = [
+        "Bindings",
+        "Shortcuts",
+        "Tuning",
+        "Voice & input",
+        "Cameras",
+        "Performance",
+        "Gesture Studio",
+        "Agent Link",
+        "Getting started",
+        "Something new",
+    ]
+    got = order_tabs(FakeNotebook(built), TAB_ORDER)
+    assert got[0] == "Getting started" and got[1:4] == ["Bindings", "Gesture Studio", "Shortcuts"]
+    assert got[-3:] == ["Tuning", "Performance", "Something new"]  # an unnamed tab keeps a place at the end
+    assert sorted(got) == sorted(built)

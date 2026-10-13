@@ -16,7 +16,7 @@ import os
 import queue
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -1430,6 +1430,33 @@ def scroll_window_height(canvas_h: int, content_h: int) -> int:
     return max(int(canvas_h), int(content_h))
 
 
+# v0.1.20 tab order, for someone who is not technical: Getting started first, then what people use every day
+# (their controls, their own gestures, shortcuts, voice, AI agents), then hardware and the expert pages.
+TAB_ORDER = (
+    "Getting started",
+    "Bindings",
+    "Gesture Studio",
+    "Shortcuts",
+    "Voice & input",
+    "Agent Link",
+    "Cameras",
+    "Tuning",
+    "Performance",
+)
+
+
+def order_tabs(nb: Any, order: Sequence[str]) -> list[str]:
+    """Move the notebook's tabs into ``order`` (by title); tabs not named keep their order after them."""
+    pos = 0
+    for title in order:
+        for tab_id in nb.tabs():
+            if str(nb.tab(tab_id, "text")) == title:
+                nb.insert(pos, tab_id)
+                pos += 1
+                break
+    return [str(nb.tab(t, "text")) for t in nb.tabs()]
+
+
 class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb only
     def __init__(self, root: Any, model: SettingsModel, tab: str | None = None, teach_gesture: bool = False) -> None:
         import tkinter as tk
@@ -1502,7 +1529,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.app.macro_panel import build_shortcuts_tab
 
         self.shortcuts = build_shortcuts_tab(self, nb)  # v0.1.20: record a shortcut, bind it to a gesture/phrase
-        self._build_tuning(nb)
+        self._build_tuning(nb)  # built before Voice & input: it creates the shared slider maps
         self._build_voice(nb)
         self._build_cameras(nb)
         self._build_performance(nb)
@@ -1513,7 +1540,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             agent_gui.build_tab(self, nb)
         from away.comfort.settings_tab import build_tab
 
-        build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches (first tab)
+        build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
+        order_tabs(nb, TAB_ORDER)
+        nb.select(0)
         self.nb = nb
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
