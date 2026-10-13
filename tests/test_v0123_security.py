@@ -110,6 +110,7 @@ def guarded(tmp_path: Path) -> Any:
     inner = Starlette(routes=[Route("/v1/{rest:path}", ok, methods=["GET", "POST", "DELETE"])])
     client = TestClient(api.AuthMiddleware(inner, gate), base_url="http://127.0.0.1:8765")
     p = core.registry.new_pairing(["read", "tune"])
+    assert core.registry.mark_pending(p, "Test agent")
     _agent, token = core.registry.approve(p, 3600.0)
     return types.SimpleNamespace(client=client, token=token, links=links, gate=gate)
 
