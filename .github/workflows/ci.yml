@@ -53,6 +53,29 @@ jobs:
           AWAY_NET_TESTS: "1"  # v0.1.20: download + load the pinned Smart cleanup engine on every OS
         run: pytest -p no:warnings --cov=away --cov-report=term-missing:skip-covered
 
+  gpu-windows:
+    # v0.1.24: GPU hand/face tracking through ONNX Runtime + DirectML. Allowed to fail while it settles: GitHub's
+    # Windows runners have no real graphics card, so DirectML runs on its software (WARP) adapter there. This proves
+    # the provider loads and the pinned models run through it, not that a real card is faster. The installer still
+    # ships plain onnxruntime (unchanged on purpose).
+    name: GPU tracking (Windows, onnxruntime-directml, allowed to fail)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]" opencv-python-headless onnxruntime-directml
+      - run: python -c "import onnxruntime as o; print(o.__version__, o.get_available_providers())"
+      - name: GPU tracking tests (real model download + DirectML session)
+        env:
+          AWAY_NET_TESTS: "1"
+          AWAY_EXPECT_DML: "1"
+        run: pytest tests/test_v0124_gpu.py -p no:warnings -v -s
+
   train:
     name: train/export (torch CPU)
     runs-on: ubuntu-latest
