@@ -128,6 +128,8 @@ VOICE_FIELDS = {
     "performance.mode": PERFORMANCE_MODES,
     "hands.camera_backend": CAMERA_BACKENDS,
 }
+# Tuning tab glyphs, escaped: some tests read this file with the Windows default code page
+OPEN_MARK, CLOSED_MARK, RESET_MARK, RECORDING_MARK = "\u25be ", "\u25b8 ", "\u21ba", "\u25cf"
 PERFORMANCE_LABELS = {"auto": "Auto (detect)", "cpu": "CPU only", "gpu": "GPU (NVIDIA CUDA)"}
 
 
@@ -148,6 +150,13 @@ class Tunable:
     hi: float
     value: float
     is_int: bool
+    # Settings > Tuning (away.app.tunables): the section, a plain-language title, what raising / lowering does,
+    # the unit and the shipped default
+    group: str = "Other"
+    title: str = ""
+    help: str = ""
+    unit: str = ""
+    default: float | None = None
 
     @property
     def resolution(self) -> float:
@@ -298,10 +307,31 @@ class SettingsModel:
 
     # ------------------------------------------------------------- tunables
     def tunables(self) -> list[Tunable]:
-        return [
-            Tunable(p, TUNABLE_LABELS.get(p, p), float(lo), float(hi), float(v), p in INT_TUNABLES)
-            for p, v, lo, hi in cfgmod.tunable_ranges(self.cfg)
-        ]
+        """Every slider, from :func:`away.config.tunable_ranges`; a tunable added there shows up on the Tuning tab
+        in its section automatically (:func:`away.app.tunables.describe`, unknown ones under "Other")."""
+        from away.app.tunables import cached_defaults, describe
+
+        defaults = cached_defaults()
+        out = []
+        for p, v, lo, hi in cfgmod.tunable_ranges(self.cfg):
+            label = TUNABLE_LABELS.get(p, p)
+            meta = describe(p, label)
+            out.append(
+                Tunable(
+                    p,
+                    label,
+                    float(lo),
+                    float(hi),
+                    float(v),
+                    p in INT_TUNABLES or (isinstance(v, int) and not isinstance(v, bool) and isinstance(lo, int)),
+                    meta.group,
+                    meta.title,
+                    meta.help,
+                    meta.unit,
+                    defaults.get(p),
+                )
+            )
+        return out
 
     def set_tunable(self, path: str, value: float) -> str | None:
         spec = {t.path: t for t in self.tunables()}.get(path)
@@ -1612,40 +1642,470 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ).grid(row=3, column=2, columnspan=3, sticky="w")
 
     def _build_tuning(self, nb: Any) -> None:
+        """Settings > Tuning: presets + master sensitivity + undo + per-app profile, a live view, auto-tune, then
+        one collapsible section per area (sections and sliders come from the tunables, see away.app.tunables)."""
+        from away.app.tunables import PRESETS, TuningController, sensitivity_to_slider
+        from away.hands.autotune import AUTOTUNE_SPECS
+
         tk, ttk = self.tk, self.ttk
         f = self._scroll_tab(nb, "Tuning", 6)
+        f.columnconfigure(0, weight=1)
+        scale = 1.0
+        with contextlib.suppress(Exception):
+            scale = ui_scale(float(self.root.winfo_fpixels("1i")))
+        self._tune_scale = scale
+        self.tuning = TuningController(self.m)
         self.scales: dict[str, tuple[Any, Any]] = {}
-        for i, t in enumerate(self.m.tunables()):
-            ttk.Label(f, text=t.label).grid(row=i, column=0, sticky="w", padx=4, pady=1)
-            var = tk.DoubleVar(value=t.value)
-            sc = tk.Scale(
-                f,
-                from_=t.lo,
-                to=t.hi,
-                resolution=t.resolution,
-                orient="horizontal",
-                length=320,
-                variable=var,
-                showvalue=True,
-                command=lambda v, p=t.path: self._on_scale(p, float(v)),
-            )
-            sc.grid(row=i, column=1, sticky="we")
-            self.scales[t.path] = (var, sc)
         self.tvars: dict[str, Any] = {}
-        r = len(self.scales)
+        self._tune_rows: dict[str, tuple[Any, Any, Any]] = {}  # path -> (value label, reset button, Tunable)
+        self._tune_sections: dict[str, tuple[Any, dict[str, bool], Any]] = {}
+        self._tune_sync_pending = False
+
+        bar = ttk.Frame(f)
+        bar.grid(row=0, column=0, sticky="we")
+        ttk.Label(bar, text="Preset:").pack(side="left")
+        for name in PRESETS:
+            ttk.Button(bar, text=name, command=lambda n=name: self._tune_preset(n)).pack(side="left", padx=2)
+        ttk.Label(bar, text="Sensitivity:").pack(side="left", padx=(12, 2))
+        self.sens_var = tk.DoubleVar(value=sensitivity_to_slider(self.tuning.sensitivity()))
+        tk.Scale(
+            bar,
+            from_=0,
+            to=100,
+            resolution=1,
+            orient="horizontal",
+            length=int(150 * scale),
+            showvalue=False,
+            variable=self.sens_var,
+            command=lambda v: self._tune_sensitivity(float(v)),
+        ).pack(side="left")
+        self.sens_note = tk.StringVar()
+        ttk.Label(bar, textvariable=self.sens_note, width=12).pack(side="left", padx=4)
+        bar2 = ttk.Frame(f)
+        bar2.grid(row=1, column=0, sticky="we", pady=(2, 0))
+        self.undo_btn = ttk.Button(bar2, text="Undo", command=self._tune_undo, state="disabled")
+        self.undo_btn.pack(side="left")
+        ttk.Button(bar2, text="Save as profile...", command=self._tune_save_profile).pack(side="left", padx=4)
+        self.preset_note = tk.StringVar()
+        ttk.Label(bar2, textvariable=self.preset_note, foreground="#555").pack(side="left", padx=6)
+
+        # ---- live view
+        live = self._tune_section(f, 2, "Live view: why did a gesture (not) fire?", False)
+        self._live_q: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._live_cmd: queue.Queue[Any] = queue.Queue()
+        self._live_stop = threading.Event()
+        self._live_thread: threading.Thread | None = None
+        self.live_canvas = tk.Canvas(
+            live, width=int(200 * scale), height=int(170 * scale), background="#111", highlightthickness=0
+        )
+        self.live_canvas.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 8))
+        self.gauge_canvas = tk.Canvas(
+            live, width=int(380 * scale), height=int(170 * scale), background="#fafafa", highlightthickness=0
+        )
+        self.gauge_canvas.grid(row=0, column=1, sticky="nw")
+        lrow = ttk.Frame(live)
+        lrow.grid(row=1, column=1, sticky="w", pady=4)
+        self.live_btn = ttk.Button(lrow, text="Start live view", command=self._live_toggle)
+        self.live_btn.pack(side="left")
+        self.live_status = tk.StringVar(value="Shows your hand and the measurements each gesture compares.")
+        ttk.Label(lrow, textvariable=self.live_status, foreground="#555").pack(side="left", padx=6)
+        self._live_draw(None)
+
+        # ---- auto-tune
+        auto = self._tune_section(f, 3, "Auto-tune a gesture", False)
+        ttk.Label(
+            auto,
+            text="Do the gesture 5 times, then something else 5 times; the threshold that best tells them apart "
+            "is suggested. The recordings are saved for `away calibrate`.",
+            foreground="#555",
+            wraplength=int(560 * scale),
+            justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        self.at_var = tk.StringVar(value=next(iter(AUTOTUNE_SPECS.values())).title)
+        ttk.Combobox(
+            auto,
+            textvariable=self.at_var,
+            values=[s.title for s in AUTOTUNE_SPECS.values()],
+            state="readonly",
+            width=32,
+        ).grid(row=1, column=0, sticky="w", pady=4)
+        self.at_start_btn = ttk.Button(auto, text="Start", command=self._at_start)
+        self.at_start_btn.grid(row=1, column=1, padx=4)
+        self.at_apply_btn = ttk.Button(auto, text="Apply", command=self._at_apply, state="disabled")
+        self.at_apply_btn.grid(row=1, column=2, padx=2)
+        ttk.Button(auto, text="Cancel", command=self._at_cancel).grid(row=1, column=3, padx=2)
+        self.at_prompt = tk.StringVar(value="")
+        tk.Label(
+            auto,
+            textvariable=self.at_prompt,
+            font=("TkDefaultFont", 12, "bold"),
+            fg="#1b5e9f",
+            wraplength=int(560 * scale),
+            justify="left",
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
+        self.at_result = tk.StringVar(value="")
+        ttk.Label(auto, textvariable=self.at_result, wraplength=int(560 * scale), justify="left").grid(
+            row=3, column=0, columnspan=4, sticky="w"
+        )
+        self._at_session: Any = None
+        self._at_res: Any = None
+        self._at_meta: tuple[str, float] = ("Right", 30.0)
+
+        # ---- one section per area
+        row = 4
+        switches_done = False
+        for group, items in self.tuning.groups():
+            body = self._tune_section(
+                f, row, group, group in ("Cursor", "Clicks"), reset=lambda g=group: self._tune_reset_group(g)
+            )
+            body.columnconfigure(1, weight=1)
+            r = 0
+            for t in items:
+                self._tune_slider(body, r, t)
+                r += 2
+            if group == "Scroll":
+                self._tune_switches(body, r)
+                switches_done = True
+            row += 1
+        if not switches_done:
+            self._tune_switches(self._tune_section(f, row, "Palm scroll switches", False), 0)
+        self._tune_sync()
+
+    def _tune_section(self, parent: Any, row: int, title: str, open_: bool, reset: Any = None) -> Any:
+        """A collapsible section: a header button (triangle + title) and an optional "Reset section" button."""
+        ttk = self.ttk
+        box = ttk.Frame(parent)
+        box.grid(row=row, column=0, sticky="we", pady=(6, 0))
+        head = ttk.Frame(box)
+        head.pack(fill="x")
+        body = ttk.Frame(box, padding=(16, 2, 2, 4))
+        state = {"open": open_}
+        btn = ttk.Button(head, text=(OPEN_MARK if open_ else CLOSED_MARK) + title)
+
+        def toggle() -> None:
+            state["open"] = not state["open"]
+            if state["open"]:
+                body.pack(fill="x")
+            else:
+                body.pack_forget()
+            btn.configure(text=(OPEN_MARK if state["open"] else CLOSED_MARK) + title)
+
+        btn.configure(command=toggle)
+        btn.pack(side="left")
+        if reset is not None:
+            ttk.Button(head, text="Reset section", command=reset).pack(side="right")
+        ttk.Separator(box, orient="horizontal").pack(fill="x", pady=(2, 0))
+        if open_:
+            body.pack(fill="x")
+        self._tune_sections[title] = (body, state, btn)
+        return body
+
+    def _tune_slider(self, body: Any, r: int, t: Any) -> None:
+        """One slider row: plain title, slider, value with units, reset; the help line under it."""
+        tk, ttk = self.tk, self.ttk
+        s = self._tune_scale
+        ttk.Label(body, text=t.title).grid(row=r, column=0, sticky="w", padx=(0, 6))
+        var = tk.DoubleVar(value=t.value)
+        sc = tk.Scale(
+            body,
+            from_=t.lo,
+            to=t.hi,
+            resolution=t.resolution,
+            orient="horizontal",
+            length=int(240 * s),
+            variable=var,
+            showvalue=False,
+            command=lambda v, p=t.path: self._on_scale(p, float(v)),
+        )
+        sc.grid(row=r, column=1, sticky="we")
+        val = ttk.Label(body, width=16, anchor="w")
+        val.grid(row=r, column=2, sticky="w", padx=4)
+        rb = ttk.Button(body, text=RESET_MARK, width=3, command=lambda p=t.path: self._tune_reset(p))
+        rb.grid(row=r, column=3)
+        ttk.Label(body, text=t.help, foreground="#666", wraplength=int(560 * s), justify="left").grid(
+            row=r + 1, column=0, columnspan=4, sticky="w", pady=(0, 4)
+        )
+        self.scales[t.path] = (var, sc)
+        self._tune_rows[t.path] = (val, rb, t)
+
+    def _tune_switches(self, body: Any, r: int) -> None:
+        tk, ttk = self.tk, self.ttk
         for path, label in PALM_SCROLL_SWITCHES:
             bvar = tk.BooleanVar(value=bool(self.m.voice_value(path)))
             ttk.Checkbutton(
-                f, text=label, variable=bvar, command=lambda p=path, v=bvar: self._report(self.m.set_voice(p, v.get()))
-            ).grid(row=r, column=0, columnspan=2, sticky="w", padx=4)
+                body,
+                text=label,
+                variable=bvar,
+                command=lambda p=path, v=bvar: self._report(self.m.set_voice(p, v.get())),
+            ).grid(row=r, column=0, columnspan=4, sticky="w")
             self.tvars[path] = bvar
             r += 1
 
     def _on_scale(self, path: str, value: float) -> None:
+        self._tune_schedule_sync()
         cur = float(self.m.voice_value(path))
         step = {t.path: t.resolution for t in self.m.tunables()}[path]
         if abs(value - cur) >= step / 2:  # ignore the callback Tk fires when refresh() sets the variable
-            self._report(self.m.set_tunable(path, value))
+            tuning = getattr(self, "tuning", None)
+            self._report(tuning.set(path, value) if tuning is not None else self.m.set_tunable(path, value))
+
+    def _tune_schedule_sync(self) -> None:
+        if not getattr(self, "_tune_sync_pending", True):
+            self._tune_sync_pending = True
+            self.root.after_idle(self._tune_sync)
+
+    def _tune_sync(self) -> None:
+        """Sliders, value labels, reset buttons, the master slider, the preset note and Undo from the model."""
+        from away.app.tunables import PRESETS, format_value, sensitivity_to_slider, short_label
+
+        self._tune_sync_pending = False
+        tc = self.tuning
+        for path, (val, rb, t) in self._tune_rows.items():
+            v = tc.value(path)
+            var = self.scales[path][0]
+            if abs(float(var.get()) - v) > 1e-12:
+                var.set(v)
+            val.configure(text=format_value(v, t.unit, t.is_int, t.resolution))
+            rb.configure(state="disabled" if tc.is_default(path) else "normal")
+        pos = round(sensitivity_to_slider(tc.sensitivity()))
+        if abs(float(self.sens_var.get()) - pos) >= 0.5:
+            self.sens_var.set(pos)
+        note = "default" if pos == 50 else ("faster " if pos > 50 else "slower ") + f"{abs(pos - 50) * 2}%"
+        self.sens_note.set(note if tc.sensitivity_matches() else "mixed")
+        preset = tc.preset()
+        self.preset_note.set(
+            f"Preset: {preset} ({PRESETS[preset].blurb})" if preset else "Preset: custom (your own adjustments)"
+        )
+        top = tc.undo_stack.peek()
+        self.undo_btn.configure(
+            state="normal" if top else "disabled", text=f"Undo {short_label(top.label)}" if top else "Undo"
+        )
+
+    def _tune_done(self, err: str | None, ok: str | None = None) -> None:
+        self._report(err, ok)
+        self._tune_sync()
+
+    def _tune_preset(self, name: str) -> None:
+        from away.app.tunables import PRESETS
+
+        self._tune_done(self.tuning.apply_preset(name), f"preset {name}: {PRESETS[name].blurb}")
+
+    def _tune_sensitivity(self, pos: float) -> None:
+        from away.app.tunables import sensitivity_to_slider, slider_to_sensitivity
+
+        if abs(pos - round(sensitivity_to_slider(self.tuning.sensitivity()))) < 0.5:
+            return  # the callback for our own update
+        self._report(self.tuning.set_sensitivity(slider_to_sensitivity(pos)))
+        self._tune_schedule_sync()
+
+    def _tune_reset(self, path: str) -> None:
+        self._tune_done(self.tuning.reset(path))
+
+    def _tune_reset_group(self, group: str) -> None:
+        self._tune_done(self.tuning.reset_group(group), f"{group} back to the defaults")
+
+    def _tune_undo(self) -> None:
+        err, ok = self.tuning.undo()
+        self._tune_done(err, ok)
+
+    def _tune_save_profile(self) -> None:
+        from tkinter import simpledialog
+
+        cur = self.m.profile if self.m.profile != "default" else ""
+        name = simpledialog.askstring(
+            "Save tuning as profile",
+            "Per-app profile name (existing or new). Its hand and face tuning is used while that app is focused:",
+            initialvalue=cur,
+            parent=self.root,
+        )
+        if not name:
+            return
+        apps = ""
+        if name.strip() not in self.m.bindings.profiles:
+            apps = (
+                simpledialog.askstring("Apps", "Apps for the new profile (e.g. chrome, firefox.exe):", parent=self.root)
+                or ""
+            )
+        err, ok = self.tuning.save_as_profile(name, apps)
+        if err is None:
+            self.refresh()
+        self._tune_done(err, ok)
+
+    # ---- live view
+    def _live_running(self) -> bool:
+        return self._live_thread is not None and self._live_thread.is_alive()
+
+    def _live_toggle(self) -> None:
+        if self._live_running():
+            self._live_stop.set()
+            self.live_btn.configure(text="Start live view")
+            return
+        self._live_start()
+
+    def _live_start(self) -> bool:
+        from away.app.tuning_live import tuning_camera_worker
+
+        if self._live_running():
+            return True
+        ok, msg = camera_available()
+        if not ok:
+            self.live_status.set(msg)
+            return False
+        test = getattr(self, "_test_thread", None)
+        if test is not None and test.is_alive():
+            self.live_status.set("stop the camera test (Test gesture tab) first")
+            return False
+        self._live_stop.clear()
+        self._live_q = queue.Queue()
+        self._live_cmd = queue.Queue()
+        self._live_thread = threading.Thread(
+            target=tuning_camera_worker, args=(self.m, self._live_q, self._live_stop, self._live_cmd), daemon=True
+        )
+        self._live_thread.start()
+        self.live_btn.configure(text="Stop live view")
+        self.root.after(100, self._live_poll)
+        return True
+
+    def _live_poll(self) -> None:
+        latest = None
+        while True:
+            try:
+                msg = self._live_q.get_nowait()
+            except queue.Empty:
+                break
+            kind = msg.get("type")
+            if kind == "frame":
+                latest = msg
+            elif kind == "status":
+                self.live_status.set(str(msg.get("text", "")))
+            elif kind in ("countdown", "recording", "trial"):
+                self._at_message(msg)
+            elif kind == "stopped":
+                self.live_btn.configure(text="Start live view")
+                if self._at_session is not None:
+                    self._at_session = None
+                    self.at_prompt.set("auto-tune stopped: the live view ended")
+        if latest is not None:
+            self._live_draw(latest)
+        if self._live_running() or not self._live_q.empty():
+            self.root.after(66, self._live_poll)
+
+    def _live_draw(self, frame: dict[str, Any] | None) -> None:
+        from away.hands.autotune import HAND_CONNECTIONS, skeleton_points
+
+        c, g = self.live_canvas, self.gauge_canvas
+        c.delete("all")
+        g.delete("all")
+        cw, ch = int(c.cget("width")), int(c.cget("height"))
+        hands = [frame.get("lm"), frame.get("helper")] if frame else []
+        if not frame or (frame.get("lm") is None and frame.get("helper") is None):
+            c.create_text(cw // 2, ch // 2, text="no hand", fill="#888")
+        else:
+            present = [h for h in hands if h is not None]
+            colours = ["#4fc3f7" if frame.get("lm") is not None else "#aaa", "#aaa"]
+            for pts, colour in zip(skeleton_points(present, cw, ch), colours):
+                for a, b in HAND_CONNECTIONS:
+                    c.create_line(*pts[a], *pts[b], fill=colour, width=2)
+                for x, y in pts:
+                    c.create_oval(x - 2, y - 2, x + 2, y + 2, fill="white", outline="")
+        gauges = frame.get("gauges", []) if frame else []
+        gw = int(g.cget("width"))
+        row_h = max(30, int(g.cget("height")) // 4)
+        bar_x0, bar_x1 = 8, gw - 8
+        for i, gauge in enumerate(gauges):
+            y = i * row_h + 4
+            g.create_text(bar_x0, y, text=gauge.text(), anchor="nw", fill="#1b7f3b" if gauge.active else "#333")
+            by = y + 16
+            g.create_rectangle(bar_x0, by, bar_x1, by + 8, fill="#e3e3e3", outline="")
+            frac = gauge.fraction
+            if frac is not None:
+                fill = "#43a047" if gauge.active else "#90a4ae"
+                g.create_rectangle(bar_x0, by, bar_x0 + frac * (bar_x1 - bar_x0), by + 8, fill=fill, outline="")
+            tx = bar_x0 + gauge.threshold_fraction * (bar_x1 - bar_x0)
+            g.create_line(tx, by - 3, tx, by + 11, fill="#d32f2f", width=2)
+        if not gauges:
+            g.create_text(8, 8, anchor="nw", fill="#666", text="Start the live view to see the measurements.")
+
+    # ---- auto-tune
+    def _at_start(self) -> None:
+        from away.hands.autotune import AUTOTUNE_SPECS, AutoTuneSession
+
+        spec = next((s for s in AUTOTUNE_SPECS.values() if s.title == self.at_var.get()), None)
+        if spec is None:
+            return
+        if not self._live_start():
+            self.at_prompt.set(f"the live view could not start: {self.live_status.get()}")
+            return
+        self._at_session = AutoTuneSession(spec)
+        self._at_res = None
+        self.at_apply_btn.configure(state="disabled")
+        self.at_result.set("")
+        self._at_next(first=True)
+
+    def _at_next(self, first: bool = False) -> None:
+        sess = self._at_session
+        if sess is None:
+            return
+        step = sess.next_step()
+        if step is None:
+            try:
+                self._at_res = sess.result(self.tuning.values(), self.tuning.bounds)
+            except ValueError as exc:
+                self.at_prompt.set(str(exc))
+                return
+            self.at_prompt.set("Done. Apply the suggestion?")
+            self.at_result.set(self._at_res.summary())
+            self.at_apply_btn.configure(state="normal")
+            return
+        self.at_prompt.set(sess.prompt())
+        long_wait = first or step == ("negative", 1)
+        self._live_cmd.put(
+            {"cmd": "record", "tag": (sess.session_id, step), "seconds": 2.0, "countdown": 3.0 if long_wait else 1.0}
+        )
+
+    def _at_message(self, msg: dict[str, Any]) -> None:
+        sess = self._at_session
+        if sess is None or not isinstance(msg.get("tag"), tuple) or msg["tag"][0] != sess.session_id:
+            return
+        if msg["type"] == "countdown":
+            self.at_prompt.set(f"{sess.prompt()}  ...starting in {msg['left']}")
+        elif msg["type"] == "recording":
+            self.at_prompt.set(f"{sess.prompt()}  " + RECORDING_MARK + " recording")
+        elif msg["type"] == "trial":
+            self._at_meta = (str(msg.get("handedness", "Right")), float(msg.get("fps", 30.0)) or 30.0)
+            err = sess.add_trial(msg.get("frames", []))
+            if err:
+                self.at_result.set(err)
+            self._at_next()
+
+    def _at_apply(self) -> None:
+        from away import paths
+
+        sess, res = self._at_session, self._at_res
+        if sess is None or res is None:
+            return
+        err = self.tuning.apply(res.after, label=f"auto-tune {res.spec.title}")
+        if err:
+            self._tune_done(err)
+            return
+        saved: list[Path] = []
+        note = ""
+        try:
+            saved = sess.save_clips(paths.recordings_dir(), *self._at_meta)
+        except (OSError, ValueError) as exc:
+            note = f" (recordings not saved: {exc})"
+        self._at_session = self._at_res = None
+        self.at_apply_btn.configure(state="disabled")
+        self.at_prompt.set("")
+        self._tune_done(None, f"{res.summary()}; saved {len(saved)} clips for `away calibrate`{note}. Undo reverts it.")
+
+    def _at_cancel(self) -> None:
+        if self._at_session is not None:
+            self._live_cmd.put({"cmd": "cancel"})
+        self._at_session = self._at_res = None
+        self.at_apply_btn.configure(state="disabled")
+        self.at_prompt.set("")
+        self.at_result.set("")
 
     def _build_voice(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
@@ -2459,7 +2919,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         self._test_stop.set()
         self._cam_stop.set()
-        for th in (self._test_thread, self._cam_thread, self._cam_test_thread):  # give the cameras back first
+        self._live_stop.set()  # Tuning tab live view
+        for th in (self._test_thread, self._cam_thread, self._cam_test_thread, self._live_thread):  # cameras back first
             if th is not None and th.is_alive():
                 th.join(timeout=1.5)
         if self.m.dirty and messagebox.askyesno("Unsaved changes", "Save changes before closing?"):

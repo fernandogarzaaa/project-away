@@ -128,6 +128,16 @@ CONTINUOUS_ONLY = {
 }
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+# Settings a per-app profile may override (``tuning:``); the app applies these live when the focused app changes.
+# Voice, camera and app-wide settings stay global.
+PROFILE_TUNING_PREFIXES = (
+    "hands.cursor.",
+    "hands.gestures.",
+    "hands.dwell.",
+    "hands.palm_scroll.",
+    "hands.roles.",
+    "face.",
+)
 
 
 class BindingsError(ValueError):
@@ -240,6 +250,7 @@ class Profile:
     voice: dict[str, Action] = field(default_factory=dict)
     face: dict[str, Action] = field(default_factory=dict)
     hotkeys: dict[str, Action] = field(default_factory=dict)
+    tuning: dict[str, float] = field(default_factory=dict)  # tunable path -> value while this profile is active
 
     def table(self, category: str) -> dict[str, Action]:
         if category not in CATEGORIES:
@@ -390,11 +401,13 @@ class BindingsConfig:
             self.profiles["default"] = default_profile()
             if profile is None:
                 for name in [n for n in self.profiles if n != "default"]:
-                    self.profiles[name] = Profile(name, apps=list(self.profiles[name].apps))
+                    old = self.profiles[name]
+                    self.profiles[name] = Profile(name, apps=list(old.apps), tuning=dict(old.tuning))
         else:
             if profile not in self.profiles:
                 raise ValueError(f"no profile named {profile!r}")
-            self.profiles[profile] = Profile(profile, apps=list(self.profiles[profile].apps))
+            old = self.profiles[profile]
+            self.profiles[profile] = Profile(profile, apps=list(old.apps), tuning=dict(old.tuning))
 
     def new_profile(self, name: str, apps: list[str] | None = None, copy_from: str | None = None) -> Profile:
         if not PROFILE_RE.match(name or ""):
@@ -421,6 +434,8 @@ class BindingsConfig:
                 tbl = p.table(cat)
                 if tbl or name == "default":
                     d[cat] = {k: str(v) for k, v in tbl.items()}
+            if p.tuning:
+                d["tuning"] = dict(p.tuning)
             profiles[name] = d
         return {
             "active_profile": self.active_profile,
@@ -486,6 +501,28 @@ def _check_placement(cat: str, trig: str, act: Action) -> None:
             raise ValueError(f"mouse:{act.arg} is continuous and can only be bound to gesture {need!r}")
 
 
+def _parse_tuning(data: Any, path: str, errors: list[str]) -> dict[str, float]:
+    """A profile's ``tuning:`` mapping (tunable path -> number). Paths and ranges are checked against the tunables
+    by :func:`away.config.validate`; here only the shape and :data:`PROFILE_TUNING_PREFIXES`."""
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        errors.append(f"{path}: must be a mapping of setting -> number, e.g. hands.cursor.gain: 3.0")
+        return {}
+    out: dict[str, float] = {}
+    for key, value in data.items():
+        k = str(key)
+        if not k.startswith(PROFILE_TUNING_PREFIXES):
+            errors.append(
+                f"{path}.{k}: only hand and face settings can differ per app ({', '.join(PROFILE_TUNING_PREFIXES)})"
+            )
+        elif isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+            errors.append(f"{path}.{k}: must be a number, got {value!r}")
+        else:
+            out[k] = float(value)
+    return out
+
+
 def parse_bindings(data: Any, prefix: str = "bindings") -> BindingsConfig:
     """Build a :class:`BindingsConfig` from YAML data. Missing defaults are filled in; all errors are collected."""
     errors: list[str] = []
@@ -537,8 +574,8 @@ def parse_bindings(data: Any, prefix: str = "bindings") -> BindingsConfig:
             continue
         prof = cfg.profiles["default"] if name == "default" else Profile(name)
         for k in pdata:
-            if k not in (*CATEGORIES, "apps"):
-                hint = difflib.get_close_matches(str(k), [*CATEGORIES, "apps"], n=1)
+            if k not in (*CATEGORIES, "apps", "tuning"):
+                hint = difflib.get_close_matches(str(k), [*CATEGORIES, "apps", "tuning"], n=1)
                 errors.append(f"{ppath}.{k}: unknown key" + (f" (did you mean {hint[0]!r}?)" if hint else ""))
         apps = pdata.get("apps") or []
         if name == "default" and apps:
@@ -547,6 +584,10 @@ def parse_bindings(data: Any, prefix: str = "bindings") -> BindingsConfig:
             errors.append(f"{ppath}.apps: must be a list of process names, e.g. [chrome, firefox.exe]")
         else:
             prof.apps = [a.strip() for a in apps]
+        prof.tuning = _parse_tuning(pdata.get("tuning"), f"{ppath}.tuning", errors)
+        if name == "default" and prof.tuning:
+            errors.append(f"{ppath}.tuning: the default profile uses the global settings; tune an app profile instead")
+            prof.tuning = {}
         for cat in CATEGORIES:
             tbl = pdata.get(cat)
             if tbl is None:
@@ -620,6 +661,8 @@ def merge_bindings(current: BindingsConfig, incoming: BindingsConfig, raw: Any) 
         dst = out.profiles[name]
         if isinstance(pdata, dict) and "apps" in pdata and name != "default":
             dst.apps = list(src.apps)
+        if isinstance(pdata, dict) and "tuning" in pdata:
+            dst.tuning = dict(src.tuning)
         for cat in CATEGORIES:
             tbl = pdata.get(cat) if isinstance(pdata, dict) else None
             for trig in tbl or {}:

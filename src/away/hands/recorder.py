@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -31,14 +32,27 @@ def save_clip(
     handedness: str,
     fps: float,
     allow_custom: bool = False,
+    session_id: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
+    """Save one clip as ``<folder>/<label>/<label>_<time>.npz`` (``X`` (T, 21, 3), ``label``, ``handedness``,
+    ``fps``). ``session_id`` groups clips recorded together (the trainer keeps a session on one side of its
+    holdout split); ``extra`` adds more arrays (e.g. the per-frame measurement an auto-tune run recorded)."""
     check_label(label, allow_custom)
     if not frames:
         raise ValueError("no hand frames captured")
     folder = Path(folder) / label
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{label}_{time.strftime('%Y%m%d-%H%M%S')}_{int(time.time() * 1000) % 1000:03d}.npz"
-    np.savez_compressed(path, X=np.stack(frames), label=label, handedness=handedness, fps=fps)
+    stem = f"{label}_{time.strftime('%Y%m%d-%H%M%S')}_{int(time.time() * 1000) % 1000:03d}"
+    path = folder / f"{stem}.npz"
+    n = 1
+    while path.exists():  # several clips saved within one millisecond
+        path = folder / f"{stem}-{n}.npz"
+        n += 1
+    data: dict[str, Any] = dict(extra or {})
+    if session_id:
+        data["session_id"] = str(session_id)
+    np.savez_compressed(path, X=np.stack(frames), label=label, handedness=handedness, fps=fps, **data)
     return path
 
 

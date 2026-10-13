@@ -672,6 +672,20 @@ def validate(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be a number in [{lo}, {hi}], got {value!r}")
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
+    validate_profile_tuning(cfg)
+
+
+def validate_profile_tuning(cfg: AppConfig) -> None:
+    """Per-app profile ``tuning:`` entries name real tunables and stay inside their slider range."""
+    ranges = {p: (lo, hi) for p, _v, lo, hi in tunable_ranges(cfg)}
+    for name, prof in cfg.bindings.profiles.items():
+        for path, value in getattr(prof, "tuning", {}).items():
+            where = f"bindings.profiles.{name}.tuning.{path}"
+            if path not in ranges:
+                raise ValueError(f"{where}: unknown setting")
+            lo, hi = ranges[path]
+            if not lo <= float(value) <= hi:
+                raise ValueError(f"{where} must be a number in [{lo}, {hi}], got {value!r}")
 
 
 HEAD_ASSIST_MODES = ("off", "coarse", "pointer")
