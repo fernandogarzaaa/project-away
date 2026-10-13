@@ -30,7 +30,9 @@ def diagnose_modes(width: int = 640, height: int = 480, fps: int = 30) -> list[C
     w, h = (int(width), int(height)) if width and height else (640, 480)
     f = int(fps or 0) or 30
     modes = [CaptureMode(w, h, f, x) for x in ("MJPG", "YUY2", "NV12", "")]
-    modes += [CaptureMode(1280, 720, f, "MJPG"), CaptureMode(1280, 720, f, ""), CaptureMode(320, 240, f, "MJPG")]
+    modes += [CaptureMode(1280, 720, f, "MJPG"), CaptureMode(1280, 720, f, "")]
+    # v0.1.21: the smaller uncompressed modes that usually reach 30 fps when 720p YUY2 only reaches 10 over USB 2
+    modes += [CaptureMode(960, 540, f, "YUY2"), CaptureMode(640, 480, f, "YUY2"), CaptureMode(320, 240, f, "MJPG")]
     out: list[CaptureMode] = []
     for m in modes:
         if m not in out:
@@ -70,8 +72,19 @@ def _probe(
         note = f"; asked {mode.fourcc}, driver reports {got}"
     elif got:
         note = f"; driver reports {got}"
-    rate = "?" if fps is None else f"{fps:.1f} fps"
-    return True, f"ok {rate}, frames {size}{note}"
+    rate = "?" if fps is None else f"{fps:.1f} fps measured"
+    return True, f"ok {rate}, frames {size}{note}{speed_verdict(fps)}"
+
+
+def speed_verdict(fps: float | None) -> str:
+    """v0.1.21: what the measured rate means for hand tracking, in plain words."""
+    if fps is None:
+        return ""
+    if fps >= capture.TRACKING_FPS:
+        return " - fast enough for smooth tracking"
+    if fps >= capture.MIN_CAMERA_FPS:
+        return f" - works, but slow for tracking (smooth needs {capture.TRACKING_FPS:g}+ fps)"
+    return " - too slow for tracking"
 
 
 def run_diagnose(
@@ -136,6 +149,7 @@ def run_diagnose(
                     emit(f"  {label}: not listed by Media Foundation")
                     continue
             emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
+            best: tuple[float, str] | None = None
             for mode in diagnose_modes(width, height, fps):
                 try:
                     cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
@@ -149,12 +163,30 @@ def run_diagnose(
                     capture.apply_mode(cap, mode, cv2, repr(dev.name))
                     _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
                     emit(f"    {mode.describe()}: {text}")
+                    rate = _rate_of(text)
+                    if _ok and rate is not None and (best is None or rate > best[0]):
+                        best = (rate, mode.describe())
                 except Exception as exc:
                     emit(f"    {mode.describe()}: error {exc}")
                 finally:
                     with contextlib.suppress(Exception):
                         cap.release()
+            if best is not None:
+                emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
+        saved = capture.saved_mode_info().get(dev.name)
+        modes = capture.saved_modes().get(dev.name)
+        if modes is not None:
+            b, m = modes
+            fps_txt = f" ({saved['fps']:.1f} fps measured)" if saved and saved.get("fps") is not None else ""
+            emit(f"  remembered for this camera: {b} {m.describe()}{fps_txt}")
     return lines
+
+
+def _rate_of(text: str) -> float | None:
+    import re
+
+    m = re.search(r"ok ([0-9.]+) fps", text)
+    return float(m.group(1)) if m else None
 
 
 def _winrt(

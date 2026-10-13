@@ -320,12 +320,64 @@ async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") 
 or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
 `ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
 
-**Tools:** `get_status`, `get_context`, `poll_events`, `wait_for_event`, `get_logs`, `get_config`, `list_settings`,
-`set_config`, `undo_change`, `change_history`, `get_preferences`/`add_preference`/`remove_preference`,
-`run_diagnose` (`cameras` | `sweep` | `benchmark`) + `get_job`, `record_session`, `get_bundle`, `download_file`,
-`look`, `get_screen` (`elements=true` adds the Windows UI Automation tree), `ask_user`, `notify_user`,
-`request_control`/`resume_control`/`stop_control`, `move`, `click`, `double_click`, `right_click`, `drag`, `scroll`,
-`type_text`, `press_keys`, `open_app`, `open_url`, `undo_last_action`, `disconnect`.
+**Tools (15, v0.1.21).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
+
+| Tool | Actions / arguments | Permission |
+|---|---|---|
+| `get_status`, `get_context` | (none) | see my gestures |
+| `events` | `poll` (`since`, `landmarks`), `wait` (`since`, `timeout_s`, `topics`) | see my gestures |
+| `settings` | `list` (`domain`), `change` (`changes`, `why`), `undo` (`what`), `history` (`limit`), `config` | change my settings (`list`/`history`/`config`: see my gestures) |
+| `preferences` | `list`, `add` (`text`), `remove` (`number`) | change my settings to add/remove |
+| `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`logs`: see my gestures) |
+| `look` | `camera` | see my camera when I allow |
+| `get_screen` | `scale`, `monitor`, `region`, `elements` (see below) | see my screen when I allow |
+| `ask_user` | `question`, `options`, `timeout_s`, `urgency`, `speak` | always |
+| `notify_user` | `text`, `level`, `speak` | always |
+| `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always) |
+| `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
+| `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
+| `open` | `app` (`name`), `url` (`url`) | use my computer |
+| `disconnect` | (none) | always |
+
+Example: `settings(action="change", changes=[{"key": "hands.cursor.gain", "value": 1.6}], why="you said it is too
+fast")`. **The old names still work** on the REST API and `/v1/rpc/<name>` (`change_settings`, `get_job`, `act`,
+`request_control`, `list_files`, `read_file`...), and the group names work there too:
+`POST /v1/rpc/diagnostics {"action": "job", "job_id": "82557239"}`.
+
+**Check ids** (`diagnostics action="run"` returns one) are strings such as `"82557239"`; `GET /v1/jobs?job_id=...`
+and `?id=...` both work. A finished check is kept 10 minutes after it finished once it has been read (30 minutes if
+nobody read it yet); an id that never existed answers **404 unknown**, one whose result was dropped answers **410 expired**.
+
+**Seeing the screen: wide shot first, then zoom.** `get_screen` with no arguments returns the whole desktop at
+`scale` 0.5 (the longest side is capped at 2560 px, so a 5206x1080 three-monitor desktop comes back at 2560x531)
+plus metadata listing every monitor (`index` 1..N left to right, `x`, `y`, `w`, `h`, `primary`), the area shown
+and the scale used. Then zoom in:
+
+* `scale` 0.1-1.0: the share of the area's real pixels (1.0 to read small text);
+* `monitor=N`: one display;
+* `region={x, y, width, height}` (also `"x,y,w,h"` or `[x, y, w, h]`) in screen coordinates, which are negative left
+  of or above the main display; clipped to the desktop.
+
+`monitor` and `region` cannot be combined. Image coordinates map back with
+`screen_x = origin.x + image_x / scale` (and the same for y); pointer actions with `from_image=true` do this using
+the agent's last screenshot. The live view (`screen_watch`) takes the same options and is capped at 1600 px.
+
+**Speaking (v0.1.21).** `notify_user` and `ask_user` with `speak=true` read the message (or the question and its
+choices) aloud with the computer's own voice: on Windows the built-in Windows voice (SAPI, through comtypes, or
+PowerShell's System.Speech when comtypes is missing), else pyttsx3 when installed, macOS `say`, Linux `spd-say` /
+`espeak-ng` / `espeak`. It never blocks the agent, and the result is truthful: `shown` / `spoken` are only true when
+that happened, with a `reason` / `speech` explaining why not (for example "speaking is turned off"). When the
+message window cannot appear, a tray notification is shown instead (`via: "tray notification"`). Config:
+
+```yaml
+speech:
+  enabled: true              # "Let agents talk to me"
+  read_messages_aloud: false # read every agent message aloud, even without speak=true
+  rate: normal               # slow | normal | fast
+  volume: normal             # quiet | normal | loud
+  voice: ""                  # part of a voice name ("Zira", "Samantha"); "" = the system default
+```
+
 **Resources:** `away://about` (briefing: what Project Away is, your permissions, live context, how to talk to the
 person; also sent as the MCP `instructions`), `away://preferences`, `away://context`, `away://events` and
 `away://screen/live` (both subscribable: `resources/subscribe` → `notifications/resources/updated`),
@@ -1497,6 +1549,14 @@ Config (`macros:` in config.yaml, all optional):
 | Area | Status |
 |---|---|
 | Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2106 tests collected on Linux at v0.1.20 (447 new since v0.1.19): 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Agent messages: truthful `shown`, tray fallback, window start-up options (v0.1.21) | The acknowledgement protocol, timeouts, exit codes, the tray fallback and the Popen options (no CREATE_NO_WINDOW, show-normal, frozen environment reset) unit-tested; a real child process writing the acknowledgement is tested on every CI OS; **untested on the user's Windows desktop**: whether the Tk message window now appears from the installed tray app, and the tray balloon on Windows |
+| Speaking (v0.1.21) | Engine order per OS, the speaker thread and queue, settings, fallbacks between engines, the PowerShell and command-line engines (text never on a command line that a shell reads) and SAPI through a fake COM object unit-tested; the Windows release self-test creates the real `SAPI.SpVoice`, sets rate and volume and synthesizes into memory; **not heard on real speakers**, and macOS `say` / Linux `spd-say` are untested on real desktops |
+| Check ids, shared registry, expiry (v0.1.21) | Unit-tested and round-tripped over a real uvicorn server (`?job_id=82557239`, `?id=`, `/v1/rpc/diagnostics`, 404 vs 410) |
+| Camera reclaim after Settings, who-has-the-camera status (v0.1.21) | Lease idle/stop logic on a fake clock, the stopped-preview hand-back across two "processes", the re-read of a vanished request and the status text tested; **untested with the real JoyCam and Settings on Windows** |
+| JoyCam MJPG size-first retry, 24 fps preference, remembered best mode (v0.1.21) | Tested with a fake DirectShow driver that keeps YUY2 unless the size is set first, and one that never sends MJPG; **untested on the real JoyCam**: whether its driver takes MJPG with the size set first can only be shown there (`away.log` logs every attempt) |
+| Weak-speech filter (v0.1.21) | The exact log cases ("uh", "Dikontak" with `mouth_moving_frames: 0`) and short commands tested through the always-on session with a fake recognizer; **the 0.75 / 0.45 confidence thresholds are not measured on real recordings** |
+| `get_screen` scale / monitor / region (v0.1.21) | Coordinate maths tested on the user's 5206x1080 three-monitor layout and a negative-offset layout (left of and above the main display), the size cap, a half-size capture, JPEG output and the metadata; **untested with real Windows multi-monitor screenshots** (Pillow `ImageGrab` with `all_screens`) |
+| 15 grouped MCP tools (v0.1.21) | The MCP tool list, routing of every group action to its service method, REST/rpc aliases and the OpenAPI enum tested; **untested with Claude Desktop / ChatGPT reading the new list** |
 | Agent Link: auth, pairing, permissions, rate limit, path traversal, snapshot/screen gating | Unit + integration tests: real uvicorn server on 127.0.0.1, REST, MCP Streamable HTTP (bearer and pairing link), resource subscriptions, the stdio bridge launched like Claude Desktop launches it |
 | Agent Link through a real Cloudflare quick tunnel | **Verified from the Linux build sandbox**: pinned cloudflared 2026.10.0 downloaded and SHA-256 checked, quick tunnel started, a remote MCP client and the REST example client paired and called tools through `https://*.trycloudflare.com` |
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
@@ -1575,6 +1635,34 @@ Config (`macros:` in config.yaml, all optional):
 | Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
 | Parakeet, Wayland | **Untested** |
+
+## Changes in v0.1.21
+
+v0.1.21 fixes what the first real-PC run of v0.1.20 showed (three monitors on a 5206x1080 desktop, JoyCam, HD User
+Facing and NVIDIA Broadcast).
+
+* **Agent messages tell the truth.** A message that never appeared on screen used to answer `shown: true`. The
+  message window now starts like a normal window (it was started with a "no window" flag, and from the installed
+  app it inherited PyInstaller's environment), reports back when it is visible, and if it cannot appear a tray
+  notification is shown instead. Problems go to `away.log`.
+* **Agents can talk to you.** Built-in text-to-speech with the computer's own voice (Windows voice, macOS `say`,
+  Linux `spd-say`/`espeak`), a `speech:` section (on/off, read every message, rate, volume, voice) and `speak` on
+  `notify_user` / `ask_user`. The Windows installer's self-test now checks the Windows voice.
+* **Camera checks are found again.** `get_job?job_id=82557239` answered "unknown check": the number arrived as a
+  number and each request had its own list. Ids are strings, the list is shared, results are kept for a while,
+  `id` works as well as `job_id`, and "unknown" (404) is told apart from "expired" (410).
+* **The camera comes back after Settings.** When a Settings preview (Gesture Studio, Tuning, gesture test) stops or
+  freezes, Project Away takes the camera back within seconds instead of leaving gestures paused; the tray and agents
+  say who has the camera ("Settings (Gesture Studio) is using the camera").
+* **JoyCam at full speed.** A camera that keeps YUY2 when asked for MJPG is asked again with the size set first; a
+  mode that only reaches 10 fps (720p YUY2 over USB 2) is used only if no smaller mode reaches 24 fps, and the best
+  mode is remembered for the next start.
+* **No more stray "uh".** Always-on dictation no longer types filler sounds, and when the face gate let speech
+  through without seeing the mouth move, a short transcript ("Dikontak") needs a confident recognition. Voice
+  commands such as "scroll down" still work.
+* **Agents can read your screen.** `get_screen` takes `scale`, `monitor` and `region`, lists the monitors, and
+  `from_image` clicks land correctly in a zoomed view (see "Seeing the screen").
+* **15 agent tools instead of 37**, grouped with an `action`; the old names keep working over REST and `/v1/rpc`.
 
 ## Changes in v0.1.20
 

@@ -110,9 +110,19 @@ class TrayController:
         }.get(state, state)
         text = f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
         text += self.attention_suffix()
+        cam = self.camera_status()
+        text += f" - {cam}" if cam else ""
         badge = self.agent_badge()
         text += f" - {badge}" if badge else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
+
+    def camera_status(self) -> str:
+        """v0.1.21: "Settings is using the camera" while Settings (or a camera check) borrows it."""
+        fn = getattr(self.app, "camera_status", None)
+        try:
+            return str(fn()) if callable(fn) else ""
+        except Exception:
+            return ""
 
     def attention_suffix(self) -> str:
         """v0.1.20: " - waiting for you (raise your hand...)" while the attention gate is on."""
@@ -440,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
     topics = ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested")
     # v0.1.20: the attention gate and connected AI agents change the tray title
-    for topic in (*topics, "attention.state", "agentlink.changed"):
+    for topic in (*topics, "attention.state", "agentlink.changed", "camera.handover"):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))

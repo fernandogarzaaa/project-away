@@ -874,7 +874,7 @@ def test_app_hands_over_cameras_while_still_probing(tmp_path: Path) -> None:
     with CS.CameraLease(ui, timeout=8.0, heartbeat_s=0.05) as lease:
         assert lease.app_running and lease.handed_over
         assert time.monotonic() - t0 < 8.0
-        assert ("camera.handover", {"released": True, "cameras": [0, 1]}) in app.events
+        assert any(t == "camera.handover" and d["released"] is True and d["cameras"] == [0, 1] for t, d in app.events)
     app.stop_event.set()
     th.join(10)
     assert not th.is_alive()

@@ -566,7 +566,7 @@ def camera_session(
     ``{"t", "hand", "face_box", "face_checked", "face_tracking", "brightness", "events": [(kind, data)],
     "image"}``; on failure ``{"error": text}``. Nothing is executed: the practice area only shows what would
     happen. Like Settings > Test gesture, the camera is borrowed from the running app and given back after."""
-    from away.app.camera_share import CameraLease, CameraShare, camera_error_message
+    from away.app.camera_share import LEASE_IDLE_S, CameraLease, CameraShare, camera_error_message
     from away.hands.gestures import GestureStateMachine
 
     h = cfg.hands
@@ -592,7 +592,7 @@ def camera_session(
             model = mdir / "face_landmarker.task"
             return FaceLandmarker(model, max_faces=1) if cfg.face.enabled and model.exists() else None
 
-    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="first-run")
+    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="first-run", idle_s=LEASE_IDLE_S, stop=stop)
     tracker = faces = None
     try:
         lease.open()
@@ -605,6 +605,7 @@ def camera_session(
         for n, (t, rgb) in enumerate(frames(idx, h.mirror)):
             if stop.is_set():
                 break
+            lease.touch()  # v0.1.21: frames are flowing (a stuck preview gives the camera back)
             fr = tracker.process(rgb, t)
             events = [(ev.kind, dict(ev.data)) for ev in sm.update(t, fr.landmarks)]
             checked = faces is not None and n % FACE_EVERY == 0

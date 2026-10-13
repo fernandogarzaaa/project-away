@@ -136,6 +136,8 @@ class ComputerControl:
         self._grace_until = 0.0  # just after the user approved (maybe with a thumbs up): that is not a takeover
         self.platform = hooks.platform or sys.platform
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
+        # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
+        self.views: dict[str, tuple[float, float, float]] = {}
 
     # ---------------------------------------------------------------- events
     def _emit(self, topic: str, data: dict[str, Any]) -> None:
@@ -327,8 +329,13 @@ class ComputerControl:
             raise ControlRefused("give x and y, or an element name")
         fx, fy = float(x), float(y)
         if from_image:
-            s = self.scales.get(agent_id) or 1.0
-            fx, fy = fx / s, fy / s
+            view = self.views.get(agent_id)
+            if view is not None:
+                ox, oy, s = view
+                fx, fy = ox + fx / (s or 1.0), oy + fy / (s or 1.0)
+            else:
+                s = self.scales.get(agent_id) or 1.0
+                fx, fy = fx / s, fy / s
         xi, yi = round(fx), round(fy)
         label = ""
         try:

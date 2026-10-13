@@ -436,6 +436,31 @@ class AgentLinkConfig:
     github_repo: str = "fernandogarzaaa/project-away"
 
 
+SPEECH_RATES = ("slow", "normal", "fast")
+SPEECH_VOLUMES = ("quiet", "normal", "loud")
+
+
+@dataclass
+class SpeechConfig:
+    """Speaking to you (v0.1.21): AI agents can read messages and questions aloud (Agent Link notify_user /
+    ask_user with speak). Uses the computer's own voice (Windows voice, macOS say, Linux spd-say/espeak)."""
+
+    enabled: bool = True  # "Let agents talk to me"
+    read_messages_aloud: bool = False  # read every agent message aloud, even when the agent did not ask to speak
+    rate: str = "normal"  # slow | normal | fast
+    volume: str = "normal"  # quiet | normal | loud
+    voice: str = ""  # part of a voice's name ("Zira", "Samantha"); "" = the system's default voice
+
+
+def validate_speech(s: SpeechConfig) -> None:
+    if s.rate not in SPEECH_RATES:
+        raise ValueError(f"speech.rate must be {'|'.join(SPEECH_RATES)}, got {s.rate!r}")
+    if s.volume not in SPEECH_VOLUMES:
+        raise ValueError(f"speech.volume must be {'|'.join(SPEECH_VOLUMES)}, got {s.volume!r}")
+    if not isinstance(s.voice, str) or len(s.voice) > 60:
+        raise ValueError("speech.voice must be text (part of a voice's name), at most 60 characters")
+
+
 def validate_agent_link(a: AgentLinkConfig) -> None:
     if a.autofix not in AUTOFIX_MODES:
         raise ValueError(f"agent_link.autofix must be {'|'.join(AUTOFIX_MODES)}, got {a.autofix!r}")
@@ -489,6 +514,7 @@ class AppConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)  # v0.1.20 attention gate (away.comfort)
     comfort: ComfortConfig = field(default_factory=ComfortConfig)  # v0.1.20 arm fatigue + break reminders
     agent_link: AgentLinkConfig = field(default_factory=AgentLinkConfig)
+    speech: SpeechConfig = field(default_factory=SpeechConfig)  # v0.1.21: agents can talk to you
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -770,6 +796,7 @@ def validate(cfg: AppConfig) -> None:
     validate_cleanup(cfg.voice.cleanup, cfg.voice.dictionary)
     validate_macros_config(cfg.macros)
     validate_agent_link(cfg.agent_link)
+    validate_speech(cfg.speech)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:

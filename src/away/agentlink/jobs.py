@@ -21,6 +21,29 @@ from typing import Any
 
 KINDS = ("cameras", "sweep", "benchmark")
 DEVICE_RE = re.compile(r"^[\w .:#()\-]{1,80}$", re.UNICODE)
+# v0.1.21: a finished check is kept this long (and at least until an agent has read its result once), so an agent
+# that polls a little late still gets it; then it is "expired" (not "unknown")
+KEEP_S = 600.0
+KEEP_UNREAD_S = 1800.0
+MAX_JOBS = 50
+
+
+class JobLookupError(KeyError):
+    """``get_job`` for an id that never existed here (``unknown``) or whose result was dropped (``expired``)."""
+
+    def __init__(self, job_id: str, reason: str) -> None:
+        self.job_id, self.reason = job_id, reason
+        if reason == "expired":
+            msg = (
+                f"check {job_id} expired: results are kept {KEEP_S / 60:.0f} minutes after it finished; "
+                "start it again with run_diagnose"
+            )
+        else:
+            msg = f"unknown check {job_id}: no check with that id was started (run_diagnose returns the id)"
+        super().__init__(msg)
+
+    def __str__(self) -> str:
+        return str(self.args[0])
 
 
 @dataclass
@@ -32,6 +55,8 @@ class Job:
     output: list[str] = field(default_factory=list)
     result: dict[str, Any] = field(default_factory=dict)
     file: str = ""
+    finished: float | None = None  # time.time() when it ended (None while running)
+    fetched: bool = False  # an agent has read it at least once since it finished
 
     def public(self) -> dict[str, Any]:
         return {
@@ -42,6 +67,7 @@ class Job:
             "output": self.output[-200:],
             "result": self.result,
             "file": self.file,
+            "finished": self.finished,
         }
 
 
@@ -112,6 +138,9 @@ class JobRunner:
         command: Callable[[list[str]], list[str]] | None = None,
         runner: Callable[..., Any] | None = None,
         bench: Callable[[], dict[str, Any]] = benchmark,
+        clock: Callable[[], float] = time.time,
+        keep_s: float = KEEP_S,
+        keep_unread_s: float = KEEP_UNREAD_S,
     ) -> None:
         self.out_dir = Path(out_dir)
         if command is None:
@@ -121,7 +150,10 @@ class JobRunner:
         self.command = command
         self.runner = runner or subprocess.Popen
         self.bench = bench
+        self.clock = clock
+        self.keep_s, self.keep_unread_s = float(keep_s), float(keep_unread_s)
         self.jobs: dict[str, Job] = {}
+        self._expired: dict[str, float] = {}  # ids dropped after keep_s: "expired", not "unknown"
         self._lock = threading.Lock()
 
     def running(self) -> Job | None:
@@ -143,12 +175,10 @@ class JobRunner:
             args += ["--seconds", f"{max(0.3, min(float(seconds or 1.0), 5.0)):g}"]
         elif kind == "sweep":
             args = ["cameras", "test", "--seconds", f"{max(2.0, min(float(seconds or 10.0), 30.0)):g}"]
-        job = Job(uuid.uuid4().hex[:8], kind, time.time())
+        job = Job(_new_id(), kind, self.clock())
         with self._lock:
+            self._prune()
             self.jobs[job.id] = job
-            if len(self.jobs) > 20:
-                for k in list(self.jobs)[:-20]:
-                    self.jobs.pop(k, None)
         threading.Thread(target=self._run, args=(job, args), daemon=True, name=f"agentlink-job-{kind}").start()
         return job
 
@@ -176,10 +206,80 @@ class JobRunner:
             f = self.out_dir / f"cameras-{job.kind}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
             f.write_text("\n".join(job.output) + "\n", encoding="utf-8")
             job.file = f"diagnostics/{f.name}"
+            job.finished = self.clock()
             job.state = "done"
         except Exception as exc:
             job.output.append(f"failed: {exc}")
+            job.finished = self.clock()
             job.state = "failed"
 
-    def get(self, job_id: str) -> Job | None:
-        return self.jobs.get(job_id)
+    def _prune(self) -> None:
+        """Drop finished checks older than ``keep_s`` (``keep_unread_s`` when no agent has read them yet); never a
+        running one. Called with the lock held."""
+        now = self.clock()
+        for k, j in list(self.jobs.items()):
+            if j.state == "running" or j.finished is None:
+                continue
+            age = now - j.finished
+            if age > (self.keep_s if j.fetched else max(self.keep_s, self.keep_unread_s)):
+                self.jobs.pop(k, None)
+                self._expired[k] = now
+        while len(self.jobs) > MAX_JOBS:
+            old = next((k for k, j in self.jobs.items() if j.state != "running"), None)
+            if old is None:
+                break
+            self.jobs.pop(old, None)
+            self._expired[old] = now
+        for k in list(self._expired)[:-500]:
+            self._expired.pop(k, None)
+
+    def get(self, job_id: Any) -> Job | None:
+        """The check ``job_id`` (an int is accepted: ``?job_id=82557239`` used to arrive as a number and never
+        matched the string id), or None. Reading a finished check marks it fetched."""
+        key = normalize_id(job_id)
+        with self._lock:
+            self._prune()
+            j = self.jobs.get(key)
+            if j is not None and j.state != "running":
+                j.fetched = True
+            return j
+
+    def lookup(self, job_id: Any) -> Job:
+        """Like :meth:`get` but raises :class:`JobLookupError` saying ``unknown`` or ``expired``."""
+        j = self.get(job_id)
+        if j is not None:
+            return j
+        key = normalize_id(job_id)
+        with self._lock:
+            reason = "expired" if key in self._expired else "unknown"
+        raise JobLookupError(key, reason)
+
+
+def normalize_id(job_id: Any) -> str:
+    """A check id as given by an agent: ``"82557239"``, ``82557239`` (a query string number), ``" 8255 "``."""
+    if isinstance(job_id, bool) or job_id is None:
+        return ""
+    if isinstance(job_id, float) and job_id.is_integer():
+        job_id = int(job_id)
+    return str(job_id).strip().lower()
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+_shared: dict[str, JobRunner] = {}
+_shared_lock = threading.Lock()
+
+
+def shared_runner(out_dir: Path, command: Callable[[list[str]], list[str]] | None = None) -> JobRunner:
+    """One :class:`JobRunner` per diagnostics folder in this process (v0.1.21): every REST/MCP request and every
+    core built for the same data folder sees the same checks, so a check started by one request is found by the
+    next one."""
+    key = str(Path(out_dir).resolve())
+    with _shared_lock:
+        r = _shared.get(key)
+        if r is None or (command is not None and r.command is not command):
+            r = JobRunner(out_dir, command=command)
+            _shared[key] = r
+        return r

@@ -33,6 +33,7 @@ from away.voice.context import whisper_prompt
 from away.voice.dictation import Cleaner, DictationSession
 from away.voice.hallucination import clean_transcript
 from away.voice.output import TextSink
+from away.voice.weak_speech import should_drop
 
 WAKE_LEADS = ("hey", "ok", "okay", "hi")
 START_ACTIONS = (Action("dictation", "start"), Action("dictation", "toggle"))
@@ -361,7 +362,17 @@ class AmbientSession:
         )
         if dropped:
             d = Decision("ignore", f"dropped: {dropped}")
-        res = AmbientResult(d, raw=raw or heard, seconds=seconds, meta={"app": app, "gate": gate})
+        conf = _confidence(self.asr)
+        gi: dict[str, Any] | None = None
+        if gate is not None and self.gate_info is not None:
+            with contextlib.suppress(Exception):
+                gi = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
+        if d.kind == "type":
+            # v0.1.21: "uh" / "Dikontak" were typed with the gate's "mouth motion weak" allowance (0 moving frames)
+            why = should_drop(d.text, gi, conf)
+            if why:
+                d = Decision("ignore", f"dropped: {why}", phrase=d.phrase)
+        res = AmbientResult(d, raw=raw or heard, seconds=seconds, meta={"app": app, "gate": gate, "confidence": conf})
         if d.kind == "wake":
             self._wake_until = now + self.wake_window
         elif d.kind == "command" and d.action is not None:
@@ -375,11 +386,21 @@ class AmbientSession:
             self._wake_until = -1e9
         self.results.append(res)
         data: dict[str, Any] = {"decision": d.kind, "reason": d.reason, "text": res.typed or d.phrase}
-        if gate is not None and self.gate_info is not None:
-            with contextlib.suppress(Exception):
-                data["gate"] = dict(self.gate_info())  # frames, face/speaking fractions, max mouth score
+        if conf is not None:
+            data["confidence"] = conf
+        if gi is not None:
+            data["gate"] = gi
         self._publish("voice.utterance", data)
         return res
+
+
+def _confidence(asr: Any) -> float | None:
+    """The recognizer's confidence for its last transcript (0..1), None when it does not say."""
+    try:
+        v = getattr(asr, "last_confidence", None)
+    except Exception:
+        return None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 VOICE_STATES = ("muted", "stopped", "listening", "recording", "idle", "off")

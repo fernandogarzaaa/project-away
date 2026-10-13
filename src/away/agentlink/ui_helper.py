@@ -38,10 +38,53 @@ def prompt_texts(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+TOAST_W = 380
+TOAST_MARGIN = 16
+TOAST_SECONDS = 6.0
+
+
+def toast_texts(spec: dict[str, Any]) -> dict[str, str]:
+    """What a message window shows (pure, for tests): "Message from <agent>" over the text."""
+    agent = str(spec.get("agent") or "").strip()
+    title = str(spec.get("title") or "").strip() or (f"Message from {agent}" if agent else "Message from your AI agent")
+    return {"title": title[:80], "text": str(spec.get("text") or "")[:300], "hint": "click to close"}
+
+
+def toast_geometry(work: tuple[int, int, int, int], w: int, h: int, margin: int = TOAST_MARGIN) -> tuple[int, int]:
+    """Top-left corner for a ``w`` x ``h`` window in the bottom-right corner of ``work`` (left, top, right, bottom:
+    the monitor's area without the taskbar), kept inside it."""
+    left, top, right, bottom = (int(v) for v in work)
+    x = max(left, right - w - margin)
+    y = max(top, bottom - h - margin)
+    return x, y
+
+
+def write_ack(path: Path | None, data: dict[str, Any]) -> None:
+    """Tell the app whether the window really showed (``{"shown": true, "x", "y", ...}`` or an ``error``)."""
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-tested under Xvfb
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    if kind == "toast":
+        ack = Path(spec["ack"]) if spec.get("ack") else None
+        try:
+            return _message(spec, ack)
+        except Exception as exc:  # the app reports this instead of "shown": no silent failures
+            import logging
+
+            logging.getLogger("away.agentlink").exception("message window failed")
+            write_ack(ack, {"shown": False, "error": f"{type(exc).__name__}: {exc}"})
+            return 1
     import tkinter as tk
 
-    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
@@ -51,6 +94,137 @@ def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-te
         _toast(root, spec, flash=kind == "flash")
     elif kind == "control":
         _control(root, spec)
+    root.mainloop()
+    return 0
+
+
+def _work_area(root: Any) -> tuple[int, int, int, int]:  # pragma: no cover - desktop
+    """The usable area (no taskbar) of the monitor the mouse pointer is on (Windows); elsewhere the screen with
+    room for a panel or dock at the bottom."""
+    import sys
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            u32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            pt = wintypes.POINT()
+            u32.GetCursorPos(ctypes.byref(pt))
+            u32.MonitorFromPoint.restype = ctypes.c_void_p
+            mon = u32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if mon and u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi)):
+                r = mi.rcWork
+                return int(r.left), int(r.top), int(r.right), int(r.bottom)
+        except Exception:
+            pass
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    return 0, 0, int(sw), int(sh) - 56
+
+
+def _hwnd(win: Any) -> int:  # pragma: no cover - Windows
+    try:
+        frame = win.wm_frame()
+        h = int(str(frame), 16) if str(frame).startswith("0x") else int(frame)
+        if h:
+            return h
+    except Exception:
+        pass
+    import ctypes
+
+    return int(ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id())  # type: ignore[attr-defined]
+
+
+def _pin_on_top(win: Any, x: int, y: int, w: int, h: int) -> dict[str, Any]:  # pragma: no cover - desktop
+    """Keep the window above everything without taking the focus; returns what Windows reports about it."""
+    import sys
+
+    with __import__("contextlib").suppress(Exception):
+        win.attributes("-topmost", True)
+        win.lift()
+    if sys.platform != "win32":
+        return {"visible": bool(win.winfo_viewable())}
+    import ctypes
+
+    u32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    hwnd = _hwnd(win)
+    # HWND_TOPMOST, SWP_NOACTIVATE | SWP_SHOWWINDOW: on top of full-screen apps, the focus stays where it was
+    u32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(-1), x, y, w, h, 0x0010 | 0x0040)
+    ex = int(u32.GetWindowLongW(ctypes.c_void_p(hwnd), -20))  # GWL_EXSTYLE
+    return {"visible": bool(u32.IsWindowVisible(ctypes.c_void_p(hwnd))), "topmost": bool(ex & 0x8), "hwnd": hwnd}
+
+
+def _message(spec: dict[str, Any], ack: Path | None) -> int:  # pragma: no cover - GUI; smoke-tested under Xvfb
+    """The agent's message: a small window in the bottom-right corner of the screen the pointer is on, above every
+    other window (without taking the keyboard focus) for ``seconds`` (6 by default); a click closes it. Writes
+    ``ack`` once the window is really on screen, so ``notify_user`` can say whether it was shown."""
+    import tkinter as tk
+
+    t = toast_texts(spec)
+    cancel = ack.with_name(ack.name + ".cancel") if ack is not None else None
+    if cancel is not None and cancel.exists():  # the app gave up waiting (it showed a tray notification instead)
+        return 0
+    color = COLORS.get(str(spec.get("level")), COLORS["info"])
+    root = tk.Tk()
+    root.withdraw()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg=color, highlightthickness=0)
+    body = tk.Frame(root, bg="white")
+    body.pack(fill="both", expand=True, padx=(6, 0))  # the colored strip on the left says info/warning/error
+    tk.Label(body, text=t["title"], bg="white", fg="#555", font=("Segoe UI", 10, "bold"), anchor="w").pack(
+        fill="x", padx=12, pady=(10, 0)
+    )
+    tk.Label(
+        body,
+        text=t["text"],
+        bg="white",
+        fg="#111",
+        font=("Segoe UI", 12),
+        wraplength=TOAST_W - 40,
+        justify="left",
+        anchor="w",
+    ).pack(fill="x", padx=12, pady=(2, 4))
+    tk.Label(body, text=t["hint"], bg="white", fg="#999", font=("Segoe UI", 8), anchor="e").pack(
+        fill="x", padx=10, pady=(0, 6)
+    )
+    root.update_idletasks()
+    w, h = TOAST_W, max(70, root.winfo_reqheight())
+    x, y = toast_geometry(_work_area(root), w, h)
+    root.geometry(f"{w}x{h}+{x}+{y}")
+    root.deiconify()
+    root.update()
+    for widget in (root, body, *body.winfo_children()):
+        widget.bind("<Button-1>", lambda _e: root.destroy())
+    seconds = float(spec.get("seconds") or TOAST_SECONDS)
+    state: dict[str, Any] = {"acked": False}
+
+    def keep_on_top() -> None:
+        try:
+            info = _pin_on_top(root, x, y, w, h)
+        except Exception as exc:
+            info = {"visible": bool(root.winfo_viewable()), "pin_error": str(exc)}
+        if not state["acked"]:
+            state["acked"] = True
+            shown = bool(info.get("visible", True)) and bool(root.winfo_ismapped())
+            write_ack(ack, {"shown": shown, "x": x, "y": y, "w": w, "h": h, **info})
+            if not shown:
+                root.after(50, root.destroy)
+                return
+        root.after(500, keep_on_top)  # stay above windows that become topmost later (a full-screen video)
+
+    root.after(30, keep_on_top)
+    root.after(int(seconds * 1000), root.destroy)
     root.mainloop()
     return 0
 

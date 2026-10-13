@@ -198,6 +198,14 @@ def _cleanup_runtime() -> str:
     return f"engine deps ok; {offer}; {engine.status_line()}"
 
 
+def _speech() -> str:
+    """v0.1.21 speaking (notify_user / ask_user): on Windows the built-in voice loads through comtypes
+    (SAPI.SpVoice: voice list, rate, volume, a short synthesis into memory); elsewhere which engine would speak."""
+    from away.voice import speech
+
+    return speech.selftest_check()
+
+
 CHECKS: tuple[Check, ...] = (
     Check("hardware", "hardware detection + speech device", _hardware),
     Check("core", "numpy/scipy/yaml", _numpy),
@@ -217,6 +225,7 @@ CHECKS: tuple[Check, ...] = (
     Check("monitors", "multi-monitor cursor (monitor list)", _monitors),
     Check("pystray", "tray icon", _pystray, needs_display=True),
     Check("pyperclip", "paste dictation", _pyperclip),
+    Check("speech", "speaking to you (text-to-speech)", _speech),
 )
 
 

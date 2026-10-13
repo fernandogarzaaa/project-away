@@ -581,6 +581,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.control import monitors
 
         self.camera_share = CameraShare()
+        self.camera_in_use_by: str | None = None  # v0.1.21: "Settings (Gesture Studio)" while it borrows the camera
         backend: MouseBackend
         if dry_run:
             backend = RecordingBackend()
@@ -656,6 +657,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.face_source = FaceSourceSelector(cfg.face.source if self.iphone is not None else "webcam", self.iphone)
         self.bus.subscribe("*", self._log)
         self.bus.subscribe("voice.utterance", self._on_utterance)
+        self.bus.subscribe("camera.handover", self._on_handover)
         from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
 
         self.big_cursor = BigCursor(
@@ -1534,19 +1536,56 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             )
         return free
 
+    def _on_handover(self, ev: Any) -> None:
+        """Who borrowed the camera (both camera loops publish ``camera.handover``): the tray says it in plain words."""
+        data = getattr(ev, "data", {}) or {}
+        self.camera_in_use_by = str(data.get("by_label") or "Settings") if data.get("released") else None
+
+    def camera_status(self) -> str:
+        """ "Settings (Gesture Studio) is using the camera" while it borrows it, else ""."""
+        return f"{self.camera_in_use_by} is using the camera" if self.camera_in_use_by else ""
+
     def _wait_handover(self, devices: list[Any]) -> None:
         """The cameras are closed: make sure none is still held or opening, tell the borrower (Settings,
         calibration) and wait until it is done."""
+        from away.app.camera_share import borrower_label, in_use_status
+
         share = self.camera_share
         self._wait_devices_free()
         share.clear_owner()
         share.ack_released(devices)
-        self.bus.publish("camera.handover", {"released": True, "cameras": devices})
-        while share.requested() and not self.stop_event.is_set():
+        who = _requester(share)
+        self.camera_in_use_by = borrower_label(who)  # v0.1.21: tray + Agent Link say who has the camera
+        self.bus.publish(
+            "camera.handover",
+            {
+                "released": True,
+                "cameras": devices,
+                "by": who,
+                "by_label": self.camera_in_use_by,
+                "status": in_use_status(who),
+            },
+        )
+        while not self.stop_event.is_set() and _still_requested(share, self.stop_event.wait):
             self.stop_event.wait(0.5)
             share.ack_released(devices)  # keep the acknowledgement fresh (it goes stale after 5 s)
+            now_who = _requester(share, "")
+            if now_who and now_who != who:  # another Settings tool took over the lease
+                who = now_who
+                self.camera_in_use_by = borrower_label(who)
+                self.bus.publish(
+                    "camera.handover",
+                    {
+                        "released": True,
+                        "cameras": devices,
+                        "by": who,
+                        "by_label": self.camera_in_use_by,
+                        "status": in_use_status(who),
+                    },
+                )
         share.clear_released()
-        self.bus.publish("camera.handover", {"released": False, "cameras": devices})
+        self.camera_in_use_by = None
+        self.bus.publish("camera.handover", {"released": False, "cameras": devices, "by": who})
 
     def _multicam_loop(
         self,
@@ -1930,3 +1969,17 @@ class _ProbeStop:
                 self.share.publish_owner(self.devices)
             return bool(self.share.requested())
         return False
+
+
+def _requester(share: Any, default: str = "settings") -> str:
+    fn = getattr(share, "requester", None)
+    try:
+        return str(fn() or default) if callable(fn) else default
+    except Exception:
+        return default
+
+
+def _still_requested(share: Any, wait: Any) -> bool:
+    """``share.still_requested`` (v0.1.21: a vanished request is read once more), or plain ``requested``."""
+    fn = getattr(share, "still_requested", None)
+    return bool(fn(wait)) if callable(fn) else bool(share.requested())

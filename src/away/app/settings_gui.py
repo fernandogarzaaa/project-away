@@ -919,7 +919,7 @@ def gesture_test_worker(
     (:class:`~away.app.camera_share.CameraLease`) and given back when the test stops or the window closes.
     """
     from away import paths
-    from away.app.camera_share import CameraLease, CameraShare, camera_error_message
+    from away.app.camera_share import LEASE_IDLE_S, CameraLease, CameraShare, camera_error_message
     from away.hands.gestures import GestureStateMachine
 
     cfg = model.cfg
@@ -941,7 +941,9 @@ def gesture_test_worker(
                 release_s=cfg.hands.roles.release_s,
             )
 
-    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-test")
+    lease = CameraLease(
+        share or CameraShare(), timeout=lease_timeout, who="settings-test", idle_s=LEASE_IDLE_S, stop=stop
+    )
     try:
         lease.open()
         if lease.handed_over:
@@ -957,6 +959,7 @@ def gesture_test_worker(
             for t, rgb in frames(idx, cfg.hands.mirror):
                 if stop.is_set():
                     break
+                lease.touch()  # v0.1.21: frames are flowing (a stuck preview gives the camera back)
                 fr = tracker.process(rgb, t)
                 views.append((t, getattr(fr, "n_hands", 0), getattr(fr, "hands_gap", None)))
                 for ev in sm.update(t, fr.landmarks):
@@ -1445,6 +1448,19 @@ TAB_ORDER = (
 )
 
 
+# v0.1.21: the camera previews in Settings, by the tab that shows them. A preview stops when you switch to another
+# tab or minimize the window, so Project Away gets the camera back (it showed 0 fps for 15 min while a preview
+# kept the camera on a tab nobody was looking at).
+PREVIEW_TABS = {"studio": "Gesture Studio", "tuning": "Tuning", "cameras": "Cameras"}
+
+
+def previews_to_stop(selected_tab: str, minimized: bool = False) -> set[str]:
+    """Which camera previews to stop: every one when the window is minimized, else those whose tab is hidden."""
+    if minimized:
+        return set(PREVIEW_TABS)
+    return {k for k, title in PREVIEW_TABS.items() if title != str(selected_tab)}
+
+
 def order_tabs(nb: Any, order: Sequence[str]) -> list[str]:
     """Move the notebook's tabs into ``order`` (by title); tabs not named keep their order after them."""
     pos = 0
@@ -1546,6 +1562,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.nb = nb
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        nb.bind("<<NotebookTabChanged>>", lambda _e: self._stop_hidden_previews(), add="+")
+        root.bind("<Unmap>", self._on_unmap, add="+")
         self.refresh()
         self._ui.pump(root)
         if tab or teach_gesture:  # `away settings --tab studio [--teach-gesture]` (the guided first run uses it)
@@ -2981,6 +2999,34 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self.indicator.set(latest)
         if self._test_thread is not None and self._test_thread.is_alive():
             self.root.after(100, self._poll_test)
+
+    def _on_unmap(self, event: Any) -> None:
+        if getattr(event, "widget", None) is not self.root:
+            return  # a tab's frame being hidden, not the window
+        with contextlib.suppress(Exception):
+            if str(self.root.state()) == "iconic":  # type: ignore[union-attr]
+                self._stop_hidden_previews(minimized=True)
+
+    def _stop_hidden_previews(self, minimized: bool = False) -> list[str]:
+        """Stop the camera previews nobody can see (another tab is shown, or the window is minimized): the camera
+        goes back to Project Away. Returns what was stopped."""
+        try:
+            title = str(self.nb.tab(self.nb.select(), "text"))
+        except Exception:
+            title = ""
+        stopped: list[str] = []
+        for which in sorted(previews_to_stop(title, minimized)):
+            with contextlib.suppress(Exception):
+                if which == "studio" and getattr(self, "studio", None) is not None and self.studio.running():
+                    self.studio.toggle()
+                    stopped.append(which)
+                elif which == "tuning" and self._live_running():
+                    self._live_toggle()
+                    stopped.append(which)
+                elif which == "cameras" and self._cam_thread is not None and self._cam_thread.is_alive():
+                    self._cam_live()
+                    stopped.append(which)
+        return stopped
 
     def _on_close(self) -> None:
         from tkinter import messagebox

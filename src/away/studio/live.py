@@ -105,7 +105,7 @@ def studio_camera_worker(
     """Camera -> landmarks -> zones + model probabilities + states. With dry run (the default) nothing runs;
     otherwise fired gestures go to ``executor(name)`` (the Settings window passes a real action runner)."""
     from away import paths
-    from away.app.camera_share import CameraLease, CameraShare, camera_error_message
+    from away.app.camera_share import LEASE_IDLE_S, CameraLease, CameraShare, camera_error_message
     from away.hands.gestures import GestureStateMachine
 
     cfg = model.cfg
@@ -141,7 +141,9 @@ def studio_camera_worker(
         rec = StudioRecognizer.load(store.model_dir)
         return rec, "" if rec is not None else "No gestures taught yet. Press 'Teach a new gesture' to start."
 
-    lease = CameraLease(share or CameraShare(), timeout=lease_timeout, who="settings-studio")
+    lease = CameraLease(
+        share or CameraShare(), timeout=lease_timeout, who="settings-studio", idle_s=LEASE_IDLE_S, stop=stop
+    )
     try:
         lease.open()
         if lease.handed_over:
@@ -176,6 +178,7 @@ def studio_camera_worker(
             for t, rgb in frames(idx, cfg.hands.mirror):
                 if stop.is_set():
                     break
+                lease.touch()  # v0.1.21: frames are flowing (a stuck preview gives the camera back)
                 while True:
                     try:
                         cmd = commands.get_nowait()

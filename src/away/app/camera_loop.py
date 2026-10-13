@@ -63,6 +63,7 @@ class CameraLoop:
         # opens none (a background probe may still be opening one); see capture.wait_devices_free
         self.wait_free = wait_free
         self.handovers = 0
+        self.in_use_by: str | None = None  # v0.1.21: "Settings (Gesture Studio)" while it has the camera
         self.open_failures = 0
         self._last_error: str | None = None
 
@@ -150,14 +151,32 @@ class CameraLoop:
         if self.wait_free is not None:
             with contextlib.suppress(Exception):
                 self.wait_free()
+        from away.app.camera_share import borrower_label, in_use_status
+
         self.share.clear_owner()
         self.share.ack_released(self.cameras)
-        self.publish("camera.handover", {"released": True, "cameras": self.cameras})
-        while self._requested() and not self.stop.is_set():
+        req = getattr(self.share, "requester", None)
+        who = (req() if callable(req) else None) or "settings"
+        self.in_use_by = borrower_label(who)
+        self.publish(
+            "camera.handover",
+            {
+                "released": True,
+                "cameras": self.cameras,
+                "by": who,
+                "by_label": self.in_use_by,
+                "status": in_use_status(who),
+            },
+        )
+        share = self.share
+        # v0.1.21: a request that seems gone is read once more before the camera is reopened (see still_requested)
+        still = getattr(share, "still_requested", None)
+        while not self.stop.is_set() and (still(self.stop.wait) if callable(still) else share.requested()):
             self.stop.wait(self.check_s)
-            self.share.ack_released(self.cameras)  # keep the acknowledgement fresh (it goes stale after 5 s)
-        self.share.clear_released()
-        self.publish("camera.handover", {"released": False, "cameras": self.cameras})
+            share.ack_released(self.cameras)  # keep the acknowledgement fresh (it goes stale after 5 s)
+        share.clear_released()
+        self.in_use_by = None
+        self.publish("camera.handover", {"released": False, "cameras": self.cameras, "by": who})
 
 
 class StopFlag(Protocol):

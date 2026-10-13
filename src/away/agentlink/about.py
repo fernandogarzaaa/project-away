@@ -12,23 +12,43 @@ hands, face and voice. It runs on their PC. Through it you can see their gesture
 facing the screen, what they say to it, their camera and screen (only when they allow it), and act on the PC
 (only when they allow it, while they watch).
 
+Tools (15): get_status, get_context, look, get_screen, ask_user, notify_user, disconnect, and grouped tools that
+take an `action`:
+  events(action=poll|wait), settings(action=list|change|undo|history|config),
+  preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
+  control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
+  keyboard(action=type|press), open(action=app|url).
+For example settings action="change", pointer action="click", diagnostics action="job" job_id="82557239" (check ids
+are strings; a result is kept about 10 minutes after the check finished). The older one-purpose names
+(change_settings, get_job, act...) still work over REST and /v1/rpc.
+
 How to work with the human through Project Away:
 - Check get_context before interrupting: prefer moments when they are present, facing the screen and not
   typing or dictating. ask_user and notify_user accept urgency low|normal|high; low/normal prompts wait for a
   polite moment, high shows at once. Use high only when it really cannot wait.
 - Use ask_user for decisions. The person answers with a thumbs up/down, a finger count (option 1-4), a custom
-  gesture, a click or their voice. Keep questions short with 2-4 short options.
-- Use notify_user for short updates (a toast on their screen, optionally spoken).
-- Changing settings: read away://preferences first and cite the preference you are following in `why`. By
-  default every change is shown to the person as before/after and needs their thumbs up; low-risk threshold
-  changes may apply immediately if they chose "Just do it and tell me". Everything can be undone.
-- Using the computer (only with the "use my computer" permission): call request_control and wait for the
+  gesture, a click or their voice. Keep questions short with 2-4 short options. speak=true reads it aloud.
+- Use notify_user for short updates (a message on their screen; speak=true also says it). The result says
+  truthfully whether it was shown and spoken.
+- Seeing the screen: wide shot first, then zoom. Take a wide shot first (get_screen with no arguments: the
+  whole desktop at scale 0.5, longest side at most 2560 px, so a very wide multi-monitor desktop comes back a
+  little smaller; the metadata lists every monitor with index, x, y, w, h and says which scale was used). Do not
+  try to read small text from the wide shot. Then zoom with monitor=N (one display, numbered left to right) or
+  region={x, y, width, height} (screen coordinates, which can be negative left of or above the main display)
+  and scale up to 1.0 to read small text. Screen point = origin + image point / scale; pointer actions accept
+  from_image=true to do this for you, using your last screenshot (wide shot or zoom).
+- Changing settings: read away://preferences (or preferences action="list") first and cite the preference you
+  are following in `why`. By default every change is shown to the person as before/after and needs their
+  thumbs up; low-risk threshold changes may apply immediately if they chose "Just do it and tell me".
+  Everything can be undone.
+- Using the computer (only with the "use my computer" permission): control action="request" and wait for the
   person's approval; act with element names when available (get_screen with elements=true), else coordinates.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
-  resume_control only if you still need to continue. Risky clicks (send, pay, delete, install...) ask the person first.
+  control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
+  the person first.
 - Never ask the person for passwords; you cannot type into password fields and cannot use a shell or files.
-- Subscribe to away://events (or call wait_for_event) for: presence (sat down / left), attention, the summon
-  gesture or "hey agent" phrases, "that was wrong" feedback, auto-detector trips and control pauses.
+- Subscribe to away://events (or call events action="wait") for: presence (sat down / left), attention, the
+  summon gesture or "hey agent" phrases, "that was wrong" feedback, auto-detector trips and control pauses.
 """
 
 
@@ -57,10 +77,23 @@ def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autof
         + (" (PAUSED - the person took over)" if control.get("paused") else ""),
         f"- settings changes: {changes}",
         "",
+        "## Tools",
+        "- get_status, get_context, look, get_screen, ask_user, notify_user, disconnect.",
+        "- Grouped, with an `action`: events, settings, preferences, diagnostics, control, pointer, keyboard, open",
+        '  (e.g. settings action="change", diagnostics action="job" job_id="...").',
+        "",
         "## How to talk to them",
-        "- ask_user for decisions (gesture or voice answers), notify_user for updates.",
+        "- ask_user for decisions (gesture or voice answers), notify_user for updates; speak=true also says it",
+        "  aloud with the computer's own voice when they allow it (the result says whether it was spoken).",
         "- Wait for a polite moment (present, facing the screen, not typing) unless it is urgent.",
         "- Respect the takeover pause: if they move, you stop.",
         "- Read away://preferences before changing settings and say which preference you followed.",
+        "",
+        "## Seeing the screen: orient, then zoom",
+        "- Wide shot first: get_screen with no arguments shows the whole desktop at scale 0.5 (longest side at",
+        "  most 2560 px), plus the list of monitors (index, x, y, w, h, primary). Use it to find things, not to read.",
+        "- Then monitor=N for one display, or region={x, y, width, height} in screen coordinates with scale up",
+        "  to 1.0 to read small text. Screen point = origin + image point / scale (from_image=true does it).",
+        f"- Camera: {context.get('camera_note') or 'delivering pictures'}",
     ]
     return "\n".join(lines) + "\n"

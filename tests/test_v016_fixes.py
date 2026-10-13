@@ -95,7 +95,9 @@ def test_app_hands_camera_to_settings_and_takes_it_back(tmp_path):
     assert ui.owner() is not None
     with CS.CameraLease(ui, timeout=3.0, heartbeat_s=0.05) as lease:
         assert lease.app_running and lease.handed_over
-        assert released == [1] and ("camera.handover", {"released": True, "cameras": [0]}) in events
+        assert released == [1] and any(
+            t == "camera.handover" and d["released"] is True and d["cameras"] == [0] for t, d in events
+        )
     deadline = time.time() + 10  # returns as soon as the app reopened; slow Windows runners need the margin
     while len(opened) < 2 and time.time() < deadline:
         time.sleep(0.01)

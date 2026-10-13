@@ -23,6 +23,7 @@ from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 
 from away.agentlink.about import INSTRUCTIONS
+from away.agentlink.groups import resolve
 
 LIVE_SCREEN = "away://screen/live"
 EVENTS = "away://events"
@@ -56,116 +57,109 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
         return await anyio.to_thread.run_sync(lambda: backend.call(ctx, method, **kw))
 
+    async def group(ctx: Context | None, _group: str, **kw: Any) -> Any:
+        method, args = resolve(_group, kw)
+        return await call(ctx, method, **args)
+
+    # v0.1.21: 15 tools (was 37). Related tools are one tool with an `action` (away.agentlink.groups); every old
+    # name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
     async def get_status(ctx: Context) -> dict:
-        """Project Away's state: version, your permissions, health (fps, latency, CPU/GPU), the person's context,
-        computer-control state and the latest event number."""
+        """Project Away's state: version, your permissions, health (fps per camera and why it is 0, latency,
+        CPU/GPU), the person's context, computer-control state and the latest event number."""
         return await call(ctx, "get_status")
 
     @mcp.tool()
     async def get_context(ctx: Context) -> dict:
         """The person's live context: present or away, attention (facing_screen / looking_away / away), typing,
-        dictating, active app, fatigue mode, and whether now is a polite moment to interrupt."""
+        dictating, active app, fatigue mode, who is using the camera, and whether now is a polite moment."""
         return await call(ctx, "get_context")
 
     @mcp.tool()
-    async def poll_events(ctx: Context, since: int = 0, landmarks: bool = False) -> dict:
-        """Recent gestures and app events after event number `since`, plus health; with landmarks=true also the
-        latest 21 hand landmarks per camera. Call again with the returned `seq` to stream."""
-        return await call(ctx, "poll", since=since, landmarks=landmarks)
-
-    @mcp.tool()
-    async def wait_for_event(
-        ctx: Context, since: int = 0, timeout_s: float = 30.0, topics: list[str] | None = None
+    async def events(
+        ctx: Context,
+        action: str = "wait",
+        since: int = 0,
+        timeout_s: float = 30.0,
+        topics: list[str] | None = None,
+        landmarks: bool = False,
     ) -> dict:
-        """Wait (long-poll, up to 120 s) for user-initiated or app events after `since`: presence, attention,
-        summon, user.look, user.screen, wrong ("that was wrong"), detector, misfire, control, prompt, change."""
-        return await call(ctx, "wait_for_event", since=since, timeout_s=timeout_s, topics=topics)
+        """Events after event number `since`. action="wait": long-poll (up to 120 s) for user/app events
+        (presence, attention, summon, user.look, user.screen, wrong, detector, misfire, control, prompt, change;
+        filter with `topics`). action="poll": return recent gestures/events at once plus health (landmarks=true
+        adds the latest hand landmarks). Call again with the returned `seq`."""
+        if action == "poll":
+            return await group(ctx, "events", action="poll", since=since, landmarks=landmarks)
+        return await group(ctx, "events", action="wait", since=since, timeout_s=timeout_s, topics=topics)
 
     @mcp.tool()
-    async def get_logs(ctx: Context, lines: int = 100) -> dict:
-        """The tail of the app log and recent events."""
-        return await call(ctx, "get_logs", lines=lines)
+    async def settings(
+        ctx: Context,
+        action: str = "list",
+        domain: str | None = None,
+        changes: list[dict] | None = None,
+        why: str | None = None,
+        what: str | None = None,
+        limit: int | None = None,
+    ) -> Any:
+        """Read and change the person's settings (changing needs "Change my settings").
+        - action="list": what can be changed; with `domain` (settings, zones, bindings, custom_gestures,
+          profiles, presets, macros, gestures) its items, current values and allowed ranges.
+        - action="change": `changes` = [{"domain": "settings", "op": "set", "key": "hands.cursor.gain",
+          "value": 1.8}, ...] (bindings: key "gesture:pinch", value "mouse:click"; presets: op "apply"), `why` =
+          the reason, citing the person's preference. By default the person approves a before/after first.
+        - action="undo": `what` = "last" | "today" | a change id. action="history": recent changes (`limit`).
+        - action="config": the whole configuration (secrets redacted)."""
+        return await group(
+            ctx, "settings", action=action, domain=domain, changes=changes, why=why, what=what, limit=limit
+        )
 
     @mcp.tool()
-    async def get_config(ctx: Context) -> dict:
-        """The current configuration (secrets redacted) and the active profile."""
-        return await call(ctx, "get_config")
-
-    @mcp.tool()
-    async def list_settings(ctx: Context, domain: str | None = None) -> dict:
-        """What can be changed. Without `domain`: the kinds (settings, zones, bindings, custom_gestures,
-        profiles, presets, macros...). With a domain: its items with current values and allowed ranges."""
-        return await call(ctx, "list_settings", domain=domain)
-
-    # ------------------------------------------------------------------ tune
-    @mcp.tool()
-    async def set_config(ctx: Context, changes: list[dict], why: str) -> dict:
-        """Change settings, zones, bindings, custom gestures, profiles or presets (needs "Change my settings").
-        `changes`: [{"domain": "settings", "op": "set", "key": "hands.cursor.gain", "value": 1.8}, ...];
-        domains/ops from list_settings (bindings: key "gesture:pinch", value "mouse:click", optional "profile";
-        presets: {"domain":"presets","op":"apply","key":"Precise"}). `why`: the reason, citing the person's
-        preference when there is one. By default the person approves a before/after first. Undoable."""
-        return await call(ctx, "change_settings", ops=changes, why=why)
-
-    @mcp.tool()
-    async def undo_change(ctx: Context, what: str = "last") -> dict:
-        """Undo settings changes: "last" (the newest batch), "today" (everything you changed today), or a change
-        / batch id from change_history."""
-        return await call(ctx, "undo_changes", what=what)
-
-    @mcp.tool()
-    async def change_history(ctx: Context, limit: int = 30) -> list:
-        """Recent settings changes: who, why, what, undone or not."""
-        return await call(ctx, "change_history", limit=limit)
-
-    @mcp.tool()
-    async def get_preferences(ctx: Context) -> dict:
-        """The person's preference notes (plain language). Read before changing anything."""
-        return await call(ctx, "get_preferences")
-
-    @mcp.tool()
-    async def add_preference(ctx: Context, text: str) -> dict:
-        """Remember a preference the person told you (needs "Change my settings")."""
-        return await call(ctx, "add_preference", text=text)
-
-    @mcp.tool()
-    async def remove_preference(ctx: Context, number: int) -> dict:
-        """Remove preference line `number` (1-based, as listed)."""
-        return await call(ctx, "remove_preference", number=number)
+    async def preferences(
+        ctx: Context, action: str = "list", text: str | None = None, number: int | None = None
+    ) -> dict:
+        """The person's preference notes (plain language). action="list" (read them before changing anything),
+        "add" with `text` (something they told you; needs "Change my settings"), "remove" with `number`
+        (1-based, as listed)."""
+        return await group(ctx, "preferences", action=action, text=text, number=number)
 
     # -------------------------------------------------------------- diagnose
     @mcp.tool()
-    async def run_diagnose(
-        ctx: Context, kind: str = "cameras", device: str | None = None, seconds: float | None = None
-    ) -> dict:
-        """Start a check: "cameras" (every camera/backend/mode, optionally one `device`), "sweep" (stream the
-        configured cameras together) or "benchmark" (model speeds). Returns a job; poll get_job."""
-        return await call(ctx, "run_diagnose", kind=kind, device=device, seconds=seconds)
-
-    @mcp.tool()
-    async def get_job(ctx: Context, job_id: str) -> dict:
-        """State and output of a check started with run_diagnose."""
-        return await call(ctx, "get_job", job_id=job_id)
-
-    @mcp.tool()
-    async def record_session(ctx: Context, seconds: float = 10.0, note: str = "") -> dict:
-        """Record the next `seconds` (max 120) of hand landmarks and events (never video) to a file that
-        `away replay` re-runs headless. Returns its path for download_file."""
-        return await call(ctx, "record_session", seconds=seconds, note=note)
-
-    @mcp.tool()
-    async def get_bundle(ctx: Context, note: str = "") -> dict:
-        """Build a diagnostics bundle (logs, redacted config, camera diagnosis, stats, last 30 s of landmarks)."""
-        return await call(ctx, "get_bundle", note=note)
-
-    @mcp.tool()
-    async def download_file(ctx: Context, path: str) -> dict:
-        """Download a bundle, recording or log by the path another tool returned (base64)."""
-        data = await call(ctx, "read_file", rel=path)
-        raw = data if isinstance(data, bytes) else base64.b64decode(data["b64"])
-        return {"path": path, "bytes": len(raw), "base64": base64.b64encode(raw).decode("ascii")}
+    async def diagnostics(
+        ctx: Context,
+        action: str,
+        kind: str | None = None,
+        device: str | None = None,
+        seconds: float | None = None,
+        job_id: str | None = None,
+        note: str | None = None,
+        path: str | None = None,
+        lines: int | None = None,
+    ) -> Any:
+        """Find out what is wrong (needs "Run checks").
+        - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
+          `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
+        - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
+        - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
+        - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
+        - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
+          (base64). action="logs": the app log tail (`lines`)."""
+        if action == "download":
+            data = await group(ctx, "diagnostics", action="download", path=path)
+            raw = data if isinstance(data, bytes) else base64.b64decode(data["b64"])
+            return {"path": path, "bytes": len(raw), "base64": base64.b64encode(raw).decode("ascii")}
+        return await group(
+            ctx,
+            "diagnostics",
+            action=action,
+            kind=kind,
+            device=device,
+            seconds=seconds,
+            job_id=job_id,
+            note=note,
+            lines=lines,
+        )
 
     # ------------------------------------------------------------------- see
     @mcp.tool()
@@ -176,145 +170,106 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         return [Image(data=raw, format="jpeg"), json.dumps(meta)]
 
     @mcp.tool()
-    async def get_screen(ctx: Context, elements: bool = False) -> list:
-        """One low-resolution screenshot plus the focused window (needs "See my screen when I allow"; the person
-        sees a flash). elements=true adds the UI element tree (names you can pass to click etc.). Coordinates in
-        the image divided by `scale` are screen coordinates (or pass from_image=true to actions)."""
-        raw, meta = _image(await call(ctx, "get_screen", elements=elements))
+    async def get_screen(
+        ctx: Context,
+        scale: float | None = None,
+        monitor: int | None = None,
+        region: dict | None = None,
+        elements: bool = False,
+    ) -> list:
+        """A screenshot plus the focused window (needs "See my screen when I allow"; the person sees a flash).
+        Orient, then zoom: first a wide shot (default: the whole desktop at scale 0.5; the metadata lists every
+        monitor with index, x, y, w, h), then `monitor`=N for one display or `region`={x, y, width, height} in
+        screen coordinates to read small text (scale up to 1.0). The longest side is capped at 2560 px.
+        Screen point = origin + image point / scale (or pass from_image=true to pointer actions).
+        elements=true adds the UI element tree (names you can pass to pointer actions)."""
+        raw, meta = _image(
+            await call(ctx, "get_screen", elements=elements, scale=scale, monitor=monitor, region=region)
+        )
         return [Image(data=raw, format="jpeg"), json.dumps(meta, default=str)]
 
     # ------------------------------------------------------------------ human
     @mcp.tool()
     async def ask_user(
-        ctx: Context, question: str, options: list[str] | None = None, timeout_s: float = 60.0, urgency: str = "normal"
+        ctx: Context,
+        question: str,
+        options: list[str] | None = None,
+        timeout_s: float = 60.0,
+        urgency: str = "normal",
+        speak: bool = False,
     ) -> dict:
         """Ask the person on their screen. They answer with thumbs up (first/yes option), thumbs down (last/no),
         a finger count (option N), a custom gesture, a click or by voice. urgency low|normal waits for a polite
-        moment; high shows at once. Returns {answer, method, waited_s}; answer is null on timeout."""
-        return await call(ctx, "ask_user", question=question, options=options, timeout_s=timeout_s, urgency=urgency)
+        moment; high shows at once. speak=true also reads the question aloud. Returns {answer, method,
+        waited_s}; answer is null on timeout."""
+        return await call(
+            ctx, "ask_user", question=question, options=options, timeout_s=timeout_s, urgency=urgency, speak=speak
+        )
 
     @mcp.tool()
     async def notify_user(ctx: Context, text: str, level: str = "info", speak: bool = False) -> dict:
-        """Show a short toast on the person's screen (level info|success|warning|error), optionally spoken."""
+        """Show a short message on the person's screen ("Message from <you>", bottom-right, ~6 s; level
+        info|success|warning|error). speak=true also reads it aloud with the computer's voice (when the person
+        allows agents to talk). Returns {shown, spoken} - each false with a reason when it did not happen."""
         return await call(ctx, "notify_user", text=text, level=level, speak=speak)
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
-    async def request_control(ctx: Context, why: str, minutes: float | None = None) -> dict:
-        """Ask the person to let you use their computer (needs "Let it use my computer"). They approve on the PC;
-        it expires (default 30 min). Any move of their hand, mouse or keyboard pauses you."""
-        return await call(ctx, "request_control", why=why, minutes=minutes)
+    async def control(ctx: Context, action: str, why: str | None = None, minutes: float | None = None) -> Any:
+        """Using the person's computer (needs "Let it use my computer").
+        - action="request": ask to use it (`why`; expires after `minutes`, default 30). Wait for their approval.
+        - action="resume": continue after they took over (any move of their hand, mouse or keyboard pauses you).
+        - action="stop": you are done (removes the border and banner). action="undo": undo your last undoable
+          action. action="log": your recent actions."""
+        return await group(ctx, "control", action=action, why=why, minutes=minutes)
 
     @mcp.tool()
-    async def resume_control(ctx: Context) -> dict:
-        """After the person took over (paused), ask them to let you continue."""
-        return await call(ctx, "resume_control")
-
-    @mcp.tool()
-    async def stop_control(ctx: Context) -> dict:
-        """You are done using the computer: removes the border and banner."""
-        return await call(ctx, "stop_control")
-
-    async def act(ctx: Context, action: str, **kw: Any) -> dict:
-        return await call(ctx, "act", action=action, **{k: v for k, v in kw.items() if v is not None})
-
-    @mcp.tool()
-    async def move(
+    async def pointer(
         ctx: Context,
+        action: str,
         x: float | None = None,
         y: float | None = None,
         element: str | None = None,
         from_image: bool = False,
-    ) -> dict:
-        """Move the pointer to screen x,y or to the element named `element`."""
-        return await act(ctx, "move", x=x, y=y, element=element, from_image=from_image)
-
-    @mcp.tool()
-    async def click(
-        ctx: Context,
-        x: float | None = None,
-        y: float | None = None,
-        element: str | None = None,
-        from_image: bool = False,
-    ) -> dict:
-        """Left click at x,y or on the element named `element` (risky buttons ask the person first)."""
-        return await act(ctx, "click", x=x, y=y, element=element, from_image=from_image)
-
-    @mcp.tool()
-    async def double_click(
-        ctx: Context,
-        x: float | None = None,
-        y: float | None = None,
-        element: str | None = None,
-        from_image: bool = False,
-    ) -> dict:
-        """Double click at x,y or on an element."""
-        return await act(ctx, "double_click", x=x, y=y, element=element, from_image=from_image)
-
-    @mcp.tool()
-    async def right_click(
-        ctx: Context,
-        x: float | None = None,
-        y: float | None = None,
-        element: str | None = None,
-        from_image: bool = False,
-    ) -> dict:
-        """Right click at x,y or on an element."""
-        return await act(ctx, "right_click", x=x, y=y, element=element, from_image=from_image)
-
-    @mcp.tool()
-    async def drag(
-        ctx: Context,
-        x: float | None = None,
-        y: float | None = None,
         x2: float | None = None,
         y2: float | None = None,
-        element: str | None = None,
         to_element: str | None = None,
-        from_image: bool = False,
+        dy: float | None = None,
+        dx: float | None = None,
     ) -> dict:
-        """Drag from x,y (or `element`) to x2,y2 (or `to_element`)."""
-        return await act(
-            ctx, "drag", x=x, y=y, x2=x2, y2=y2, element=element, to_element=to_element, from_image=from_image
+        """Mouse actions (after control action="request" was approved): action = move | click | double_click |
+        right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
+        screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
+        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
+        if action == "scroll" and dy is None and dx is None:
+            dy = -3.0
+        return await group(
+            ctx,
+            "pointer",
+            action=action,
+            x=x,
+            y=y,
+            element=element,
+            from_image=from_image or None,
+            x2=x2,
+            y2=y2,
+            to_element=to_element,
+            dy=dy,
+            dx=dx,
         )
 
     @mcp.tool()
-    async def scroll(
-        ctx: Context,
-        dy: float = -3.0,
-        dx: float = 0.0,
-        x: float | None = None,
-        y: float | None = None,
-        element: str | None = None,
-    ) -> dict:
-        """Scroll (dy > 0 up, dy < 0 down; dx sideways), optionally over x,y or an element first."""
-        return await act(ctx, "scroll", dy=dy, dx=dx, x=x, y=y, element=element)
+    async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
+        """Keyboard actions (after control was approved): action="type" types `text` into the focused field
+        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab"."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys)
 
     @mcp.tool()
-    async def type_text(ctx: Context, text: str) -> dict:
-        """Type text into the focused field (never into password fields or terminals; a newline counts as Enter
-        and asks first in risky contexts)."""
-        return await act(ctx, "type_text", text=text)
-
-    @mcp.tool()
-    async def press_keys(ctx: Context, keys: str) -> dict:
-        """Press a key or a combination, e.g. "enter", "ctrl+s", "alt+tab"."""
-        return await act(ctx, "press_keys", keys=keys)
-
-    @mcp.tool()
-    async def open_app(ctx: Context, name: str) -> dict:
-        """Open an app by name through the Start menu / Spotlight (not terminals or system tools)."""
-        return await act(ctx, "open_app", name=name)
-
-    @mcp.tool()
-    async def open_url(ctx: Context, url: str) -> dict:
-        """Open an http(s) link in the default browser."""
-        return await act(ctx, "open_url", url=url)
-
-    @mcp.tool()
-    async def undo_last_action(ctx: Context) -> dict:
-        """Undo your last undoable computer action (pointer move, scroll, typed text)."""
-        return await call(ctx, "undo_last_action")
+    async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
+        """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
+        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser."""
+        return await group(ctx, "open", action=action, name=name, url=url)
 
     @mcp.tool()
     async def disconnect(ctx: Context) -> dict:

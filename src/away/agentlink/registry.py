@@ -42,13 +42,22 @@ MERGE_TODO: tuple[str, ...] = (
     "a 'zones' op that edits them is not exposed yet",
 )
 
-FORBIDDEN_PREFIXES = ("bindings.allow_shell", "agent_link.", "updates.", "models_dir", "telemetry")
+FORBIDDEN_PREFIXES = (
+    "bindings.allow_shell",
+    "agent_link.",
+    "updates.",
+    "models_dir",
+    "telemetry",
+    "speech.enabled",  # "Let agents talk to me" is the person's switch, never an agent's
+)
 CHOICES: dict[str, tuple[str, ...]] = {
     "hands.cursor.mode": ("relative", "absolute"),
     "hands.cursor.curve": ("power", "sigmoid"),
     "hands.roles.mode": ("auto", "right", "left", "any"),
     "hands.cursor.smoothing": ("one_euro", "predictive"),  # smart pointer: "Smoother cursor"
     "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
+    "speech.rate": cfgmod.SPEECH_RATES,  # v0.1.21: how fast agents speak to you
+    "speech.volume": cfgmod.SPEECH_VOLUMES,
 }
 SWITCHES = (
     "hands.dwell.enabled",
@@ -65,6 +74,7 @@ SWITCHES = (
     "comfort.break_reminders",
     "zones.enabled",  # Gesture Studio zones
     "zones.block_cursor",
+    "speech.read_messages_aloud",  # v0.1.21 (speech.enabled, "Let agents talk to me", stays the person's own)
 )
 ZONE_KEYS = ("hands.cursor.active_region",)
 SAFE_ACTION_KINDS = (
@@ -158,7 +168,17 @@ def ranges(cfg: Any) -> dict[str, tuple[float, float, Any]]:
     return {p: (float(lo), float(hi), v) for p, v, lo, hi in cfgmod.tunable_ranges(cfg)}
 
 
+# v0.1.21: plain titles for settings that are not sliders (the speech section)
+TITLES = {
+    "speech.rate": "How fast agents speak (slow, normal, fast)",
+    "speech.volume": "How loud agents speak (quiet, normal, loud)",
+    "speech.read_messages_aloud": "Read every agent message aloud",
+}
+
+
 def title_for(key: str) -> str:
+    if key in TITLES:
+        return TITLES[key]
     try:
         from away.app.tunables import describe
 

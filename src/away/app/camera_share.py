@@ -27,6 +27,42 @@ OWNER_FILE = "camera-owner.json"
 REQUEST_FILE = "camera-request.json"
 RELEASED_FILE = "camera-released.json"
 
+# v0.1.21: who borrowed the camera, in plain words ("Settings is using the camera" in the tray and for agents)
+BORROWER_LABELS = {
+    "settings-studio": "Settings (Gesture Studio)",
+    "settings-tuning": "Settings (Tuning live view)",
+    "settings-test": "Settings (gesture test)",
+    "settings-confidence": "Settings (Cameras live view)",
+    "settings-camera-test": "Settings (camera test)",
+    "settings-camera-diagnose": "Settings (camera check)",
+    "settings": "Settings",
+    "calibrate": "Camera calibration",
+    "camera-test": "A camera test",
+    "camera-diagnose": "A camera check",
+    "first-run": "The guided first run",
+    "gaze": "Eye-tracking calibration",
+}
+LEASE_IDLE_S = 8.0  # a live preview that delivered no frame this long gives the camera back (v0.1.21)
+LEASE_GRACE_S = 30.0  # ... except while it is still opening the camera (Windows webcams can take a while)
+RECLAIM_CONFIRM_S = 0.3  # the app re-reads a vanished request once after this, so one failed read is not "done"
+
+
+def borrower_label(who: str | None) -> str:
+    """``"settings-studio"`` -> ``"Settings (Gesture Studio)"``; unknown names: ``"Settings"`` for ``settings*``,
+    else "Another Project Away window"."""
+    w = str(who or "").strip()
+    if w in BORROWER_LABELS:
+        return BORROWER_LABELS[w]
+    if w.startswith("settings"):
+        return "Settings"
+    return "Another Project Away window"
+
+
+def in_use_status(who: str | None) -> str:
+    """The plain status line: "Settings (Gesture Studio) is using the camera"."""
+    return f"{borrower_label(who)} is using the camera"
+
+
 IN_USE_MESSAGE = (
     "the camera is in use by Project Away or another app - pause or quit it (or close the other app) and retry"
 )
@@ -115,6 +151,23 @@ class CameraShare:
         req = self._read(REQUEST_FILE)
         return req is not None and req.get("pid") != self.pid
 
+    def requester(self) -> str | None:
+        """Who asked for the cameras (``"settings-studio"``...), None when nobody (alive) did."""
+        req = self._read(REQUEST_FILE)
+        if req is None or req.get("pid") == self.pid:
+            return None
+        return str(req.get("owner") or "settings")
+
+    def still_requested(self, wait: Callable[[float], Any], confirm_s: float = RECLAIM_CONFIRM_S) -> bool:
+        """For the app while it has handed the cameras over: is the request still there? A request that seems gone
+        is read once more after ``confirm_s`` (v0.1.21: on Windows a read can fail for a moment while the borrower
+        rewrites the file; the app then reopened the camera Settings still held and the log alternated
+        "released True/False")."""
+        if self.requested():
+            return True
+        wait(confirm_s)
+        return self.requested()
+
     def ack_released(self, cameras: list[Any]) -> None:
         self._write(RELEASED_FILE, {"cameras": [str(c) for c in cameras]})
 
@@ -173,21 +226,56 @@ class CameraLease:
         who: str = "settings",
         heartbeat_s: float = 1.0,
         sleep: Callable[[float], Any] = time.sleep,
+        idle_s: float | None = None,
+        grace_s: float = LEASE_GRACE_S,
+        stop: threading.Event | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.share = share or CameraShare()
         self.timeout = timeout
         self.who = who
         self.heartbeat_s = heartbeat_s
         self.sleep = sleep
+        # v0.1.21: a live preview (Studio, Tuning, gesture test) passes idle_s and calls touch() per frame; when it
+        # stops delivering frames (stuck, or its window is gone) the request is dropped so the app takes the camera
+        # back within a few seconds instead of keeping gestures paused. ``stop``: the preview's stop flag; once set,
+        # the camera is given back at once, even while the preview is still blocked reading a frame.
+        self.idle_s = idle_s
+        self.grace_s = grace_s
+        self.stop_flag = stop
+        self.clock = clock
         self.app_running = False
         self.handed_over = False
         self.nested = False
+        self.gave_back = ""  # why the lease let go early ("idle", "stopped"), "" while held
+        self._opened_at = clock()
+        self._touched: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def touch(self) -> None:
+        """A frame arrived (live previews call this for every frame)."""
+        self._touched = self.clock()
+        if self.gave_back == "idle":  # frames again: ask for the camera again
+            self.gave_back = ""
+            self.share.request(self.who)
+
+    def wants_camera(self) -> bool:
+        """False once the preview was stopped, or (with ``idle_s``) delivered no frame for ``idle_s`` (``grace_s``
+        before its first frame)."""
+        if self.stop_flag is not None and self.stop_flag.is_set():
+            return False
+        if self.idle_s is None:
+            return True
+        now = self.clock()
+        if self._touched is None:
+            return now - self._opened_at <= max(self.grace_s, self.idle_s)
+        return now - self._touched <= self.idle_s
 
     def open(self) -> CameraLease:
         """Ask for the cameras. The request is kept fresh for the whole lease even when no app holds them
         now (v0.1.15), so an app that starts, or retries its cameras, meanwhile leaves them alone."""
+        self._opened_at = self.clock()
         self.app_running = self.share.owner() is not None
         if not self.app_running and self.share.requested():
             # another live process already holds the cameras for us (Settings runs `away calibrate-cameras`
@@ -207,8 +295,25 @@ class CameraLease:
         return self.app_running and not self.handed_over
 
     def _beat(self) -> None:
-        while not self._stop.wait(self.heartbeat_s):
-            self.share.request(self.who)
+        step = min(self.heartbeat_s, 0.25) if (self.idle_s is not None or self.stop_flag is not None) else None
+        last = self.clock()
+        while not self._stop.wait(step if step is not None else self.heartbeat_s):
+            if not self.wants_camera():
+                if not self.gave_back:
+                    stopped = self.stop_flag is not None and self.stop_flag.is_set()
+                    self.gave_back = "stopped" if stopped else "idle"
+                    self.share.release()  # the app reclaims within its next check (~0.5 s)
+                    import logging
+
+                    logging.getLogger("away.cameras").info(
+                        "camera lease %s: %s; giving the camera back to Project Away",
+                        self.who,
+                        "stopped" if stopped else f"no frames for {self.idle_s:g} s",
+                    )
+                continue
+            if step is None or self.clock() - last >= self.heartbeat_s:
+                last = self.clock()
+                self.share.request(self.who)
 
     def close(self) -> None:
         self._stop.set()

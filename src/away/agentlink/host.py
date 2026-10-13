@@ -33,7 +33,7 @@ from away.agentlink.auth import AgentRegistry
 from away.agentlink.changes import ChangeManager
 from away.agentlink.control import ComputerControl, ControlHooks
 from away.agentlink.detectors import Detectors
-from away.agentlink.jobs import JobRunner
+from away.agentlink.jobs import JobRunner, shared_runner
 from away.agentlink.prefs import Preferences
 from away.agentlink.prompts import NullUI, PromptManager, normalize
 from away.agentlink.recording import RingRecorder
@@ -126,9 +126,11 @@ def build_core(
     watching: Callable[[str, bool], None] = lambda _n, _o: None,
     foreground: Callable[[], Any] = lambda: None,
     uia: Any = None,
-    tts: Callable[[str], None] | None = None,
+    tts: Any = None,
+    notify_fallback: Callable[[str, str], bool] | None = None,
     record_header: Callable[[], dict[str, Any]] | None = None,
     job_command: Callable[[list[str]], list[str]] | None = None,
+    monitors: Callable[[], Any] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> Core:
     from away import config as cfgmod
@@ -151,6 +153,7 @@ def build_core(
         clock=clock,
         tts=tts,
         on_event=emit,
+        fallback=notify_fallback,
     )
     changes = ChangeManager(base, config_path or cfgmod.config_path, on_applied=on_config)
     prefs = Preferences(base / "preferences.md")
@@ -174,7 +177,7 @@ def build_core(
         always_allowed=always,
         allow_always=registry.allow_always,
     )
-    jobs = JobRunner(Path(data_dir) / "diagnostics", command=job_command)
+    jobs = shared_runner(Path(data_dir) / "diagnostics", command=job_command)
     service = Service(
         data_dir=Path(data_dir),
         registry=registry,
@@ -195,6 +198,7 @@ def build_core(
         record_header=record_header,
         events=events,
         watching=watching,
+        monitors=monitors,
     )
     return Core(base, registry, telemetry, recorder, prompts, changes, prefs, control, jobs, events, service)
 
@@ -249,7 +253,9 @@ class AgentLinkHost:
             watching=self._watching,
             foreground=hooks.foreground,
             uia=hooks.uia,
-            tts=_tts(),
+            tts=_tts(lambda: getattr(self.cfg(), "speech", None)),
+            notify_fallback=self._tray_notice,
+            monitors=self._monitors if app is not None else None,
             record_header=self._record_header,
         )
         s = self.cfg().agent_link
@@ -375,6 +381,30 @@ class AgentLinkHost:
             with contextlib.suppress(Exception):
                 self.ui.flash(text)
         self._notice("Project Away", text)
+
+    def _monitors(self) -> Any:
+        """The app's monitor layout (kept current by its MonitorWatcher) for get_screen's monitor/region."""
+        lay = getattr(self.app, "monitor_layout", None)
+        mons = getattr(lay, "monitors", None)
+        if mons:
+            return mons
+        from away.control.monitors import enumerate_monitors
+
+        return enumerate_monitors().monitors
+
+    def _tray_notice(self, title: str, text: str) -> bool:
+        """v0.1.21: when the message window cannot show, the tray's notification balloon (Windows) / desktop
+        notification shows the agent's message instead. True when a tray app took it."""
+        if self.app is None or self.headless:
+            return False
+        try:
+            subs = getattr(self.app.bus, "has_subscribers", None)
+            if callable(subs) and not subs("app.notice"):
+                return False
+            self.app.bus.publish("app.notice", {"title": title, "message": text, "key": None})
+            return True
+        except Exception:
+            return False
 
     def _notice(self, title: str, text: str) -> None:
         if self.app is not None:
@@ -548,7 +578,9 @@ class AgentLinkHost:
         ev = self.core.events
         if arg == "summon":
             ev.publish("summon", {"source": "gesture or voice"})
-            self.core.prompts.notify("Your agents were called", "info")
+            threading.Thread(
+                target=self.core.prompts.notify, args=("Your agents were called", "info"), daemon=True
+            ).start()
         elif arg in ("look", "screen"):
             self._user_capture(arg)
         elif arg == "wrong":
@@ -871,18 +903,15 @@ def friendly_error(exc: BaseException) -> str:
     return text[:200]
 
 
-def _tts() -> Callable[[str], None] | None:
+def _tts(settings: Callable[[], Any] | None = None) -> Any:
+    """v0.1.21: the built-in voice (Windows SAPI, pyttsx3, macOS say, Linux spd-say/espeak); see
+    :mod:`away.voice.speech`. ``settings`` returns the config's ``speech`` section."""
     try:
-        import pyttsx3  # optional
+        from away.voice.speech import Speaker
+
+        return Speaker(settings)
     except Exception:
         return None
-
-    def speak(text: str) -> None:  # pragma: no cover - audio
-        eng = pyttsx3.init()
-        eng.say(text)
-        eng.runAndWait()
-
-    return speak
 
 
 def attach(app: Any) -> AgentLinkHost | None:
