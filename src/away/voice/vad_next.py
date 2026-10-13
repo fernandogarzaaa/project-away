@@ -54,11 +54,11 @@ class SileroV6VAD:
         self.min_speech = int(sample_rate * min_speech_ms / 1000)
         self.min_silence = int(sample_rate * min_silence_ms / 1000)
         if session is None:
-            import onnxruntime as ort
-
             p = path or model_path()
             if not Path(p).is_file():
                 raise FileNotFoundError("Silero VAD v6.2 is not downloaded yet (Settings > Models)")
+            import onnxruntime as ort
+
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = 1
             opts.inter_op_num_threads = 1

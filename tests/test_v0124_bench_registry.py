@@ -308,7 +308,8 @@ def test_old_catalog_keys_stay_empty_so_older_apps_see_no_change():
     assert cat["models"] == [] and cat["modes"] == {} and cat["version"] == 1
     assert {"models_next", "presets_next"} <= set(cat)
     sha = (ROOT / "models" / "catalog.sha256").read_text().split()[0]
-    assert sha == hashlib.sha256(raw).hexdigest()
+    # the published file has LF line ends (a Windows checkout may turn them into CRLF)
+    assert sha == hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
     shipped = json.loads((ROOT / "src" / "away" / "data" / "catalog_next.json").read_text())
     assert shipped["models_next"] == cat["models_next"] and shipped["presets_next"] == cat["presets_next"]
     # the built-in manifest stays the v0.1.23 one: nothing in it needs 0.1.24
