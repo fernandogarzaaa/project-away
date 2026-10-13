@@ -36,6 +36,13 @@ NAME_RE = re.compile(r"[^\w .,'()+-]", re.UNICODE)
 # v0.1.23: an agent whose access ended (expired or disconnected) is remembered this long without any token, so
 # pairing again under the same name keeps its wake word, default-agent choice and inbox instead of a duplicate
 REMEMBER_S = 30 * 86400.0
+REFRESH_PREFIX = "par_"
+REFRESH_GRACE_S = 120.0  # the refresh token before the newest still works this long (a reply lost on the way)
+DEFAULT_REFRESH_TTL_S = 30 * 86400.0
+
+
+class RefreshError(PermissionError):
+    """A refresh token that is unknown, expired or revoked; the message says what to do in plain words."""
 
 
 def new_token() -> str:
@@ -84,12 +91,26 @@ class Agent:
     wake_word: str = ""
     wake_url: str = ""
     paired_again: int = 0  # v0.1.23: times this agent paired again under the same name (settings kept)
+    # v0.1.24 "a link that survives restarts": a long-lived refresh token (only its SHA-256 is kept) renews the
+    # short access token after Away restarts, the PC reboots or the access expires. It lasts refresh_ttl_days after
+    # its last use and is rotated on every use; the one before stays valid for REFRESH_GRACE_S (a lost reply).
+    refresh_hash: str = ""
+    refresh_expires: float = 0.0
+    prev_refresh_hash: str = ""
+    prev_refresh_until: float = 0.0
+    # where the agent looks up a moved address (rendezvous): a random topic and the key that signs announcements
+    rdv_id: str = ""
+    rdv_key: str = ""
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
 
     def active(self, now: float) -> bool:
         return not self.revoked and now < self.expires
+
+    def can_refresh(self, now: float) -> bool:
+        """v0.1.24: not revoked and its refresh token (or, for a connector URL, its link) is still valid."""
+        return not self.revoked and bool(self.refresh_hash or self.link_hash) and now < self.refresh_expires
 
     def public(self, now: float | None = None) -> dict[str, Any]:
         now = time.time() if now is None else now
@@ -109,6 +130,8 @@ class Agent:
             "wake_word": self.wake_word,
             "wake_phrase": self.wake_phrase(),
             "wake_me": bool(self.wake_url),
+            # v0.1.24: until when it can reconnect by itself (0 = it has to pair again once access ends)
+            "stays_connected_until": self.refresh_expires if self.can_refresh(now) else 0.0,
         }
 
     def wake_phrase(self) -> str:
@@ -136,9 +159,17 @@ class Pairing:
 class AgentRegistry:
     """Thread-safe store of agents and pairings. Persists agents (hashes only) to ``path`` when given."""
 
-    def __init__(self, path: Path | None = None, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        clock: Callable[[], float] = time.time,
+        refresh_ttl_s: float = DEFAULT_REFRESH_TTL_S,
+        link_access_s: float = 3600.0,
+    ) -> None:
         self.path = path
         self.clock = clock
+        self.refresh_ttl_s = float(refresh_ttl_s)  # v0.1.24 (agent_link.refresh_ttl_days)
+        self.link_access_s = float(link_access_s)  # access a connector URL gets when it renews itself
         self._lock = threading.RLock()
         self.agents: dict[str, Agent] = {}
         self.pairings: list[Pairing] = []
@@ -161,7 +192,13 @@ class AgentRegistry:
         return a.expires  # revoke() moves expires to the moment it was disconnected
 
     def _forget_old(self, now: float) -> None:
-        for aid in [i for i, a in self.agents.items() if not a.active(now) and now - self._ended(a) > REMEMBER_S]:
+        for aid in [
+            i
+            for i, a in self.agents.items()
+            if not a.active(now)
+            and not a.can_refresh(now)
+            and now - max(self._ended(a), a.refresh_expires) > REMEMBER_S
+        ]:
             del self.agents[aid]
 
     def save(self) -> None:
@@ -173,9 +210,11 @@ class AgentRegistry:
             keep = []
             for a in self.agents.values():
                 d = asdict(a)
-                if not a.active(now):  # remembered for its settings only: no token or link survives
+                if not a.active(now):  # remembered for its settings only: no access token survives
                     d["token_hash"] = ""
-                    d["link_hash"] = ""
+                    if not a.can_refresh(now):  # ... and nothing that could renew it either
+                        d["link_hash"] = ""
+                        d.update(refresh_hash="", prev_refresh_hash="", refresh_expires=0.0, prev_refresh_until=0.0)
                 keep.append(d)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
@@ -211,6 +250,9 @@ class AgentRegistry:
                 old.link_hash = digest(link_code) if link_code else ""
                 old.client = dict(client or {})
                 old.paired_again += 1
+                _drop_refresh(old)  # a new pairing gets a new refresh token (new_refresh)
+                if link_code:
+                    old.refresh_expires = now + self.refresh_ttl_s
         if old is not None:
             self.save()
             return old, token
@@ -225,6 +267,7 @@ class AgentRegistry:
             last_seen=now,
             link_hash=digest(link_code) if link_code else "",
             client=dict(client or {}),
+            refresh_expires=now + self.refresh_ttl_s if link_code else 0.0,  # v0.1.24: connector URLs renew
         )
         with self._lock:
             self.agents[a.id] = a
@@ -258,9 +301,20 @@ class AgentRegistry:
             for a in self.agents.values():
                 if a.link_hash and same(a.link_hash, h) and found is None:
                     found = a
-            if found is None or not found.active(now):
+            if found is None:
                 return None
+            renewed = False
+            if not found.active(now):
+                # v0.1.24: a connector URL cannot send a refresh token; the link itself renews access while its
+                # refresh window lasts (each use moves the window), so a restart does not break it
+                if not found.can_refresh(now) or self.link_access_s <= 0:
+                    return None
+                found.expires = now + self.link_access_s
+                found.refresh_expires = now + self.refresh_ttl_s
+                renewed = True
             found.last_seen = now
+        if renewed:
+            self.save()
         return found
 
     def _same_name(self, name: str, kind: str, now: float) -> Agent | None:
@@ -274,10 +328,78 @@ class AgentRegistry:
         return None
 
     def known(self) -> builtins.list[Agent]:
-        """Every agent with access now plus the remembered ones (access ended within :data:`REMEMBER_S`)."""
+        """Every agent with access now plus the remembered ones (access ended within :data:`REMEMBER_S`, or it can
+        still reconnect with its refresh token)."""
         now = self.clock()
         with self._lock:
-            return [a for a in self.agents.values() if a.active(now) or now - self._ended(a) <= REMEMBER_S]
+            return [
+                a
+                for a in self.agents.values()
+                if a.active(now) or a.can_refresh(now) or now - self._ended(a) <= REMEMBER_S
+            ]
+
+    def reconnectable(self) -> builtins.list[Agent]:
+        """v0.1.24: agents that can reach this PC again without pairing (active, or a valid refresh token / link)."""
+        now = self.clock()
+        with self._lock:
+            return [a for a in self.agents.values() if a.active(now) or a.can_refresh(now)]
+
+    # ------------------------------------------------------------- refresh (v0.1.24)
+    def new_refresh(self, agent_id: str) -> str:
+        """A fresh refresh token for this agent (the old one stops working at once). Also gives the agent its
+        rendezvous topic + signing key the first time."""
+        token = REFRESH_PREFIX + secrets.token_urlsafe(32)
+        now = self.clock()
+        with self._lock:
+            a = self.agents.get(agent_id)
+            if a is None:
+                raise KeyError(f"unknown agent {agent_id!r}")
+            a.refresh_hash = digest(token)
+            a.refresh_expires = now + self.refresh_ttl_s
+            a.prev_refresh_hash, a.prev_refresh_until = "", 0.0
+            if not a.rdv_id:
+                a.rdv_id = new_code(22)
+                a.rdv_key = secrets.token_urlsafe(24)
+        self.save()
+        return token
+
+    def refresh(
+        self, refresh_token: str | None, access_ttl_s: float | Callable[[Agent], float]
+    ) -> tuple[Agent, str, str]:
+        """Exchange a refresh token for a new access token and a new refresh token (rotation). Constant-time over
+        every agent. Raises :class:`RefreshError` with a plain message."""
+        if not refresh_token or not str(refresh_token).startswith(REFRESH_PREFIX):
+            raise RefreshError("missing or malformed refresh token")
+        h = digest(str(refresh_token))
+        now = self.clock()
+        found: Agent | None = None
+        old = False
+        with self._lock:
+            for a in self.agents.values():
+                hit_new = bool(a.refresh_hash) and same(a.refresh_hash, h)
+                hit_old = bool(a.prev_refresh_hash) and same(a.prev_refresh_hash, h)
+                if (hit_new or hit_old) and found is None:
+                    found, old = a, (hit_old and not hit_new)
+            if found is None:
+                raise RefreshError("unknown refresh token; pair again in Project Away > Agent Link")
+            if found.revoked:
+                raise RefreshError("this agent was disconnected on the PC; pair again to reconnect")
+            if old and now > found.prev_refresh_until:
+                raise RefreshError("this refresh token was already used; use the newest one or pair again")
+            if now >= found.refresh_expires:
+                raise RefreshError("the refresh token expired; pair again in Project Away > Agent Link")
+            access = new_token()
+            fresh = REFRESH_PREFIX + secrets.token_urlsafe(32)
+            ttl = access_ttl_s(found) if callable(access_ttl_s) else access_ttl_s
+            found.token_hash = digest(access)
+            found.expires = now + float(ttl)
+            found.last_seen = now
+            if not old:  # the token just used stays valid briefly, in case this reply never arrives
+                found.prev_refresh_hash, found.prev_refresh_until = found.refresh_hash, now + REFRESH_GRACE_S
+            found.refresh_hash = digest(fresh)
+            found.refresh_expires = now + self.refresh_ttl_s
+        self.save()
+        return found, access, fresh
 
     def get(self, agent_id: str) -> Agent | None:
         return self.agents.get(agent_id)
@@ -310,6 +432,7 @@ class AgentRegistry:
                 return False
             a.revoked = True
             a.expires = min(a.expires, self.clock())
+            _drop_refresh(a)
         self.save()
         return True
 
@@ -321,6 +444,7 @@ class AgentRegistry:
                     a.revoked = True
                     a.expires = min(a.expires, self.clock())
                     n += 1
+                _drop_refresh(a)
             for p in self.pairings:
                 p.used = True
         self.save()
@@ -397,3 +521,10 @@ class AgentRegistry:
         now = self.clock()
         with self._lock:
             return [p for p in self.pairings if p.open(now)]
+
+
+def _drop_refresh(a: Agent) -> None:
+    a.refresh_hash = ""
+    a.prev_refresh_hash = ""
+    a.refresh_expires = 0.0
+    a.prev_refresh_until = 0.0

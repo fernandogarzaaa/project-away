@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from away.agentlink import perms
-from away.agentlink.auth import Agent, AgentRegistry, Pairing, clean_name, same
+from away.agentlink.auth import Agent, AgentRegistry, Pairing, RefreshError, clean_name, same
 from away.agentlink.control import ControlRefused
 from away.agentlink.groups import GROUPS
 from away.agentlink.groups import describe as describe_groups
@@ -182,7 +182,9 @@ class Gate:
         access_log: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         tunnel_hosts: Callable[[], Any] = lambda: (),
+        link_info: Callable[[], dict[str, Any]] = lambda: {},
     ) -> None:
+        self.link_info = link_info  # v0.1.24: the current public addresses (GET /v1/link, refresh replies)
         self.service = service
         self.tunnel_hosts = tunnel_hosts  # v0.1.23: hostnames of the active secure / backup link (Host check)
         self.registry = registry
@@ -266,6 +268,24 @@ class Gate:
             waiter.set()
             with self._lock:
                 self._waiting.pop(p.code, None)
+
+    def reconnect_info(self, agent: Agent, refresh_token: str) -> dict[str, Any]:
+        """v0.1.24: what a paired agent keeps so it survives restarts: the refresh token, until when it works, the
+        current addresses and where to look up a moved one (rendezvous topic + the key its announcements are
+        signed with)."""
+        from away.agentlink import rendezvous
+
+        info = dict(self.link_info() or {})
+        rdv = rendezvous.agent_info(agent, str(info.get("rendezvous_server") or "")) if info.get("rendezvous") != "off" else {}
+        return {
+            "refresh_token": refresh_token,
+            "refresh_expires": agent.refresh_expires,
+            "token_expires": agent.expires,
+            "link": info,
+            "rendezvous": rdv,
+            "how_to_reconnect": "POST /v1/token/refresh {refresh_token} on the newest address; if the address "
+            "stopped answering, read the rendezvous topic for the new one (see scripts/agent_link_client.py)",
+        }
 
     def pair_local(self, key: str, name: str, scopes: Any) -> tuple[Agent, str]:
         if not key or not same(key, self.local_key):
@@ -415,8 +435,8 @@ class AuthMiddleware:
             if not g.bucket.allow(ip):
                 await reply(429, "too many requests; slow down")
                 return
-            public = (method == "GET" and path in ("/", "/openapi.json", "/favicon.ico")) or (
-                method == "POST" and path in ("/v1/pair", "/v1/pair/local")
+            public = (method == "GET" and path in ("/", "/openapi.json", "/favicon.ico", "/v1/ping")) or (
+                method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh")
             )
             m = CODE_PATH.match(path)
             agent: Agent | None = None
@@ -548,6 +568,15 @@ def openapi() -> dict[str, Any]:
                 "requestBody": _body({}),
             }
         },
+        "/v1/token/refresh": {
+            "post": {
+                "summary": "Renew access with the refresh token from pairing (rotated on every use; v0.1.24)",
+                "security": [],
+                "requestBody": _body({"refresh_token": "string"}),
+            }
+        },
+        "/v1/link": {"get": {"summary": "The current public addresses and the rendezvous option (v0.1.24)"}},
+        "/v1/ping": {"get": {"summary": "Is Project Away answering here? (no sign-in)", "security": []}},
         "/v1/events/stream": {"get": {"summary": "Server-sent events (?since=)"}},
         "/mcp": {"post": {"summary": "MCP Streamable HTTP endpoint"}},
     }
@@ -697,7 +726,39 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             )
         except Forbidden as exc:
             return _json({"error": str(exc)}, 403)
-        return _json({"token": token, "agent": agent.public(), "mcp_path": "/mcp"})
+        out: dict[str, Any] = {"token": token, "agent": agent.public(), "mcp_path": "/mcp"}
+        try:  # v0.1.24: a refresh token so the agent survives restarts without pairing again
+            out.update(gate.reconnect_info(agent, gate.registry.new_refresh(agent.id)))
+            out["agent"] = agent.public()
+        except Exception:
+            pass
+        return _json(out)
+
+    async def token_refresh(request: Request) -> Any:
+        """v0.1.24: a new access token (and a rotated refresh token) for an agent that paired before."""
+        try:
+            data = await body_args(request)
+        except Exception:
+            return _json({"error": "send JSON"}, 400)
+        try:
+            agent, token, fresh = gate.registry.refresh(
+                str(data.get("refresh_token") or ""),
+                lambda a: gate.local_ttl_s() if a.kind == "local" else gate.remote_ttl_s(),
+            )
+        except RefreshError as exc:
+            gate.lockout.fail()
+            return _json({"error": str(exc)}, 401)
+        service.events.publish("agent.reconnected", {"agent": agent.name})
+        return _json({"token": token, "agent": agent.public(), **gate.reconnect_info(agent, fresh)})
+
+    async def link(request: Request) -> Any:
+        agent_of(request)
+        return _json(dict(gate.link_info() or {}))
+
+    async def ping(request: Request) -> Any:
+        from away import __version__
+
+        return _json({"app": "Project Away", "version": __version__, "t": time.time()})
 
     async def pair_local(request: Request) -> Any:
         try:
@@ -746,6 +807,9 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         Route("/openapi.json", spec),
         Route("/v1/pair", pair, methods=["POST"]),
         Route("/v1/pair/local", pair_local, methods=["POST"]),
+        Route("/v1/token/refresh", token_refresh, methods=["POST"]),
+        Route("/v1/link", link),
+        Route("/v1/ping", ping),
         Route("/v1/rpc/{tool}", rpc, methods=["POST"]),
         Route("/v1/events/stream", stream),
     ]
