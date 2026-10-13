@@ -29,6 +29,9 @@ Actions (what happens) are written ``kind:argument``::
                               jump the cursor to the centre of a monitor (numbers from `away monitors`)
     cursor:center             centre of the current monitor + re-anchor the hand (voice "center")
     cursor:gaze               jump to where you look (needs `away gaze calibrate`; voice "look here")
+    macro:open_mail           run a recorded shortcut (Settings > Shortcuts, `away shortcut`)
+    macro_control:record | stop_recording | toggle_recording | stop
+                              record a shortcut / stop recording / stop a running shortcut
 
 Profiles: ``default`` holds the full map. Any other profile lists the
 ``apps`` (process names, case-insensitive, ``.exe`` optional) it applies to
@@ -91,6 +94,8 @@ _CURSOR_ALIASES = {
     "look": "gaze",
     "look_here": "gaze",
 }
+MACRO_CONTROL_ARGS = ("record", "stop_recording", "toggle_recording", "stop")
+MACRO_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
 ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
@@ -117,6 +122,8 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "pause": ("toggle", "on", "off"),
     "hands": ("auto", "right", "left", "any"),
     "cursor": CURSOR_ARGS,
+    "macro": None,  # free: a saved shortcut's id (away.control.macros.NAME_RE)
+    "macro_control": MACRO_CONTROL_ARGS,
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
 # continuous mouse actions only make sense on the matching continuous gesture
@@ -237,6 +244,12 @@ def parse_action(value: Any, *, allow_shell: bool = False) -> Action:
             arg = canonical(arg)
         except KeyComboError as exc:
             raise ValueError(str(exc)) from None
+    if kind == "macro":
+        arg = "_".join(arg.lower().split())
+        if not MACRO_NAME_RE.match(arg):
+            raise ValueError(
+                f"macro:{arg} is not a shortcut id (lower-case letters, digits and _, e.g. macro:open_mail)"
+            )
     if kind == "shell" and not allow_shell:
         raise ValueError("shell actions are disabled for safety; set bindings.allow_shell: true to enable them")
     return Action(kind, arg)
@@ -307,6 +320,10 @@ def default_profile() -> Profile:
             "use left hand": a("hands:left"),
             "use right hand": a("hands:right"),
             "use either hand": a("hands:auto"),
+            "record shortcut": a("macro_control:record"),
+            "record macro": a("macro_control:record"),
+            "stop recording": a("macro_control:stop_recording"),
+            "stop": a("macro_control:stop"),  # stops a running shortcut (does nothing otherwise)
         },
         face={
             "brow_raise": a("dictation:toggle"),

@@ -19,6 +19,7 @@ from away.comfort.settings import AttentionConfig, ComfortConfig, comfort_tunabl
 from away.control.keys import KeyComboError, canonical
 from away.pointer.config import MagnetConfig, PredictiveConfig, pointer_tunables, validate_pointer
 from away.voice.cleanup_config import CleanupConfig, DictionaryConfig, validate_cleanup
+from away.control.macros import MacrosConfig, validate_macros_config
 
 
 @dataclass
@@ -422,6 +423,7 @@ class AppConfig:
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
     models_dir: str | None = None
     bindings: BindingsConfig = field(default_factory=BindingsConfig)
+    macros: MacrosConfig = field(default_factory=MacrosConfig)  # recorded shortcuts (away.control.macros)
     # what :func:`migrate` changed while loading (not saved); the app re-saves the file when non-empty
     migrations: list[str] = field(default_factory=list, compare=False, repr=False)
 
@@ -689,6 +691,7 @@ def validate(cfg: AppConfig) -> None:
     validate_comfort(cfg)
     validate_profile_tuning(cfg)
     validate_cleanup(cfg.voice.cleanup, cfg.voice.dictionary)
+    validate_macros_config(cfg.macros)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:

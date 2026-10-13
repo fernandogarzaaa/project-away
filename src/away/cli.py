@@ -1458,6 +1458,10 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--config")
     st.set_defaults(fn=cmd_settings)
 
+    from away.control.macro_cli import add_parser as add_shortcut_parser
+
+    add_shortcut_parser(sub)  # v0.1.20: away shortcut ... (alias: away macro)
+
     a = sub.add_parser("autostart", help="start the tray app at login")
     a.add_argument("state", choices=["on", "off"])
     a.set_defaults(fn=cmd_autostart)

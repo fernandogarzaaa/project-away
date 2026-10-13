@@ -183,6 +183,26 @@ class TrayController:
         except Exception:
             return None
 
+    # shortcuts (v0.1.20) -----------------------------------------------------
+    def shortcut_recording(self) -> bool:
+        m = getattr(self.app, "macros", None)
+        return bool(m is not None and m.recording)
+
+    def shortcut_playing(self) -> bool:
+        m = getattr(self.app, "macros", None)
+        return bool(m is not None and m.playing)
+
+    def toggle_shortcut_recording(self) -> None:
+        """Tray "Record a shortcut" / "Stop recording": a tray recording is saved as "Shortcut N"."""
+        m = getattr(self.app, "macros", None)
+        if m is not None:
+            m.hook_control("toggle_recording", {})
+
+    def stop_shortcut(self) -> None:
+        m = getattr(self.app, "macros", None)
+        if m is not None:
+            m.stop_playback()
+
     def quit(self) -> None:
         self.app.stop()
 
@@ -387,6 +407,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             visible=lambda _i: ctl.camera_retry_stopped(),
         ),
         *comfort_menu_items(pystray, ctl, notify),  # v0.1.20: attention gate switch + guided first run
+        pystray.MenuItem(
+            lambda _i: "Stop recording shortcut" if ctl.shortcut_recording() else "Record a shortcut",
+            lambda _icon, _item: ctl.toggle_shortcut_recording(),
+        ),
+        pystray.MenuItem(
+            "Stop shortcut", lambda _icon, _item: ctl.stop_shortcut(), visible=lambda _i: ctl.shortcut_playing()
+        ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
