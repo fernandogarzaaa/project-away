@@ -184,8 +184,9 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
     async def body(s, init, notes):
         assert "bridge" in (init.instructions or "")
         names = {t.name for t in (await s.list_tools()).tools}
-        # v0.1.21: 15 grouped tools (was 37); the old names still work on REST and /v1/rpc
+        # v0.1.21: 15 grouped tools (was 37); the old names still work on REST and /v1/rpc. v0.1.22: + inbox
         assert names == {
+            "inbox",
             "get_status",
             "get_context",
             "events",
