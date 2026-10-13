@@ -232,7 +232,11 @@ class Service:
             from away.agentlink.bundle import _tail
 
             file_lines = _tail(p, 400_000).decode("utf-8", "replace").splitlines()[-lines:]
-        return {"app_log": file_lines, "events": mem}
+        from away.app import crashlog
+
+        # v0.1.22: crash.log too (crashes and uncaught errors; the Settings notice points at it)
+        crash = crashlog.tail(self.data_dir / "logs", min(lines, 400))
+        return {"app_log": file_lines, "crash_log": crash, "events": mem}
 
     def get_config(self, agent: Agent) -> dict[str, Any]:
         from away import config as cfgmod

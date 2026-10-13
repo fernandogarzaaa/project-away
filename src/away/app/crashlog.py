@@ -114,6 +114,44 @@ def recent_note(folder: Path | None = None, max_age_s: float = NOTE_MAX_AGE_S, c
     return str(data["note"]) if 0 <= age <= max_age_s else None
 
 
+def dismiss_note(folder: Path | None = None) -> bool:
+    """v0.1.22: the person closed the "an unexpected error was logged last time" notice. It is forgotten in this
+    process and in crash-seen.json (so Settings and the tray stop showing it); crash.log itself is kept. True when a
+    note was cleared."""
+    had = _state.get("note") is not None
+    with _lock:
+        _state["note"] = None
+    seen = logs_dir(folder) / SEEN_FILE
+    try:
+        data = json.loads(seen.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return had
+    if not isinstance(data, dict):
+        return had
+    if data.get("note"):
+        had = True
+    data.pop("note", None)
+    data.pop("noted_at", None)
+    with contextlib.suppress(OSError):
+        tmp = seen.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, seen)
+    return had
+
+
+def tail(folder: Path | None = None, lines: int = 80, max_bytes: int = 200_000) -> list[str]:
+    """v0.1.22: the last ``lines`` lines of crash.log (diagnostics logs); [] when there is none."""
+    p = crash_log_path(folder)
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            f.seek(max(0, size - max_bytes))
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return text.splitlines()[-max(1, int(lines)) :]
+
+
 def new_entries(path: Path, seen: Path) -> str:
     """The crash.log text written since the last start read it ("" when nothing new or no file)."""
     try:
