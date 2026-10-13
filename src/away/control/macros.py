@@ -55,6 +55,10 @@ class MacroError(ValueError):
     """A shortcut file or edit is invalid. The message is written for people, not programmers."""
 
 
+class SensitiveExportError(MacroError):
+    """Export refused: a shortcut types text you entered (pass ``include_sensitive=True`` to export anyway)."""
+
+
 # --------------------------------------------------------------------------- config
 @dataclass
 class MacrosConfig:
@@ -535,7 +539,7 @@ class MacroStore:
         private = [m.label for m in macros if m.sensitive]
         if private and not include_sensitive:
             one = len(private) == 1
-            raise MacroError(
+            raise SensitiveExportError(
                 f"{', '.join(private)} type{'s' if one else ''} text you entered, so "
                 f"{'it stays' if one else 'they stay'} on this PC. Export anyway only if the file will not be shared."
             )

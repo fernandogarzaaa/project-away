@@ -261,6 +261,10 @@ class SettingsModel:
         """Choices for the argument dropdown, or None when the argument is free text."""
         if kind not in ACTION_ARGS:
             return None
+        if kind == "macro":  # the saved shortcuts (Settings > Shortcuts)
+            from away.app.macro_panel import shortcut_ids
+
+            return shortcut_ids(self.cfg) or None
         choices = ACTION_ARGS[kind]
         if choices is None:
             return None
@@ -1495,6 +1499,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=6)
         self._build_bindings(nb)
+        from away.app.macro_panel import build_shortcuts_tab
+
+        self.shortcuts = build_shortcuts_tab(self, nb)  # v0.1.20: record a shortcut, bind it to a gesture/phrase
         self._build_tuning(nb)
         self._build_voice(nb)
         self._build_cameras(nb)
