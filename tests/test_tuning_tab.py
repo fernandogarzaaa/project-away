@@ -854,3 +854,10 @@ def test_failed_undo_rolls_back_the_part_that_worked(ctl: T.TuningController, mo
     assert err == "refused" and ok is None
     assert model.cfg.hands.cursor.gain == 3.0 and model.cfg.hands.cursor.dead_zone == 0.01
     assert ctl.undo_stack.peek().label == "batch"
+
+
+def test_tuning_sources_decode_with_the_windows_code_page() -> None:
+    """Some tests read sources with the default encoding (cp1252 on Windows CI); keep the Tuning glyphs escaped."""
+    root = Path(__file__).resolve().parents[1] / "src" / "away"
+    for rel in ("app/settings_gui.py", "app/tunables.py", "app/tuning_live.py", "hands/autotune.py"):
+        (root / rel).read_bytes().decode("cp1252")

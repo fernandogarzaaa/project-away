@@ -125,6 +125,8 @@ VOICE_FIELDS = {
     "updates.channel": UPDATE_CHANNELS,
     "performance.mode": PERFORMANCE_MODES,
 }
+# Tuning tab glyphs, escaped: some tests read this file with the Windows default code page
+OPEN_MARK, CLOSED_MARK, RESET_MARK, RECORDING_MARK = "\u25be ", "\u25b8 ", "\u21ba", "\u25cf"
 PERFORMANCE_LABELS = {"auto": "Auto (detect)", "cpu": "CPU only", "gpu": "GPU (NVIDIA CUDA)"}
 
 
@@ -1674,7 +1676,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._tune_sync()
 
     def _tune_section(self, parent: Any, row: int, title: str, open_: bool, reset: Any = None) -> Any:
-        """A collapsible section: a header button (▸ / ▾ title) with an optional "Reset section" button."""
+        """A collapsible section: a header button (triangle + title) and an optional "Reset section" button."""
         ttk = self.ttk
         box = ttk.Frame(parent)
         box.grid(row=row, column=0, sticky="we", pady=(6, 0))
@@ -1682,7 +1684,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         head.pack(fill="x")
         body = ttk.Frame(box, padding=(16, 2, 2, 4))
         state = {"open": open_}
-        btn = ttk.Button(head, text=("▾ " if open_ else "▸ ") + title)
+        btn = ttk.Button(head, text=(OPEN_MARK if open_ else CLOSED_MARK) + title)
 
         def toggle() -> None:
             state["open"] = not state["open"]
@@ -1690,7 +1692,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
                 body.pack(fill="x")
             else:
                 body.pack_forget()
-            btn.configure(text=("▾ " if state["open"] else "▸ ") + title)
+            btn.configure(text=(OPEN_MARK if state["open"] else CLOSED_MARK) + title)
 
         btn.configure(command=toggle)
         btn.pack(side="left")
@@ -1722,7 +1724,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         sc.grid(row=r, column=1, sticky="we")
         val = ttk.Label(body, width=16, anchor="w")
         val.grid(row=r, column=2, sticky="w", padx=4)
-        rb = ttk.Button(body, text="↺", width=3, command=lambda p=t.path: self._tune_reset(p))
+        rb = ttk.Button(body, text=RESET_MARK, width=3, command=lambda p=t.path: self._tune_reset(p))
         rb.grid(row=r, column=3)
         ttk.Label(body, text=t.help, foreground="#666", wraplength=int(560 * s), justify="left").grid(
             row=r + 1, column=0, columnspan=4, sticky="w", pady=(0, 4)
@@ -1972,7 +1974,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         if msg["type"] == "countdown":
             self.at_prompt.set(f"{sess.prompt()}  ...starting in {msg['left']}")
         elif msg["type"] == "recording":
-            self.at_prompt.set(f"{sess.prompt()}  ● recording")
+            self.at_prompt.set(f"{sess.prompt()}  " + RECORDING_MARK + " recording")
         elif msg["type"] == "trial":
             self._at_meta = (str(msg.get("handedness", "Right")), float(msg.get("fps", 30.0)) or 30.0)
             err = sess.add_trial(msg.get("frames", []))
