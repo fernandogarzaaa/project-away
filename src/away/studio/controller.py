@@ -104,7 +104,14 @@ class StudioController:
             rounds = self.store.sessions(g.name) if n else 0
             out.append(
                 GestureRow(
-                    g.name, name_for(g.name), KIND_WORDS[g.kind], HANDS_WORDS[g.hands], n, rounds, status, action_text(act)
+                    g.name,
+                    name_for(g.name),
+                    KIND_WORDS[g.kind],
+                    HANDS_WORDS[g.hands],
+                    n,
+                    rounds,
+                    status,
+                    action_text(act),
                 )
             )
         return out
@@ -346,3 +353,34 @@ class WizardPlan:
         if s.kind == "relax":
             return f"Relax round {s.round + 1} of {self.rounds}"
         return f"Practice example {self.takes_done() + 1} of {self.total_takes} (round {s.round + 1} of {self.rounds})"
+
+
+def action_runner(model: Any, backend: Any = None, chains: Any = None) -> Any:
+    """For the Studio with practice mode off: ``run(name)`` performs the gesture's bound action (current
+    profile) and its follow-up steps, like the app would. ``backend`` defaults to the real mouse/keyboard."""
+    from away.actions import ActionExecutor
+    from away.bindings import parse_action
+    from away.control.mouse import MouseController
+    from away.hands.cursor import CursorMapper
+    from away.studio.engine import ChainRunner
+
+    if backend is None:  # pragma: no cover - real input devices
+        from away.control.mouse import PynputBackend
+
+        backend = PynputBackend()
+    cfg = model.cfg
+    mouse = MouseController(backend, CursorMapper((1920, 1080), cfg.hands.cursor))
+    executor = ActionExecutor(mouse, cfg.bindings.allow_shell)
+    runner = chains or ChainRunner()
+
+    def run(name: str) -> bool:
+        act = cfg.bindings.resolve("gestures", name, model.profile)
+        ok = executor.run(act)
+        if ok:
+            g = StudioStore().get(name)
+            steps = gesture_settings(cfg, name, g.kind if g else "static").then
+            allow = cfg.bindings.allow_shell
+            runner.run(list(steps), lambda step: executor.run(parse_action(step, allow_shell=allow)))
+        return ok
+
+    return run

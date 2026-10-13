@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import shutil
 import time
@@ -56,7 +57,7 @@ def train_mlp(
     sd = X.std(axis=0) + 1e-6
     Z = (X - mu) / sd
     sizes = [X.shape[1], *hidden, n_classes]
-    W = [rng.normal(0, np.sqrt(2.0 / a), (b, a)) for a, b in zip(sizes, sizes[1:])]
+    W = [rng.normal(0, np.sqrt(2.0 / a), (b, a)) for a, b in itertools.pairwise(sizes)]
     B = [np.zeros(b) for b in sizes[1:]]
     params = [*W, *B]
     m1 = [np.zeros_like(p) for p in params]
@@ -165,7 +166,7 @@ def clip_samples(
     n = len(clip.X)
     spans = [(0, n)]
     if clip.label == NOTHING and clip.fps > 0:
-        w = max(8, int(round(window_s * clip.fps)))
+        w = max(8, round(window_s * clip.fps))
         spans = [(s, min(n, s + w)) for s in range(0, max(1, n - w + 1), max(1, w // 2))]
     for s, e in spans:
         crops = [(s, e)]
@@ -450,7 +451,7 @@ def train_studio(
     score = float(np.trace(cm) / cm.sum()) if cm.sum() else None
     res = TrainResult(
         True,
-        "All set! Your gestures are ready." if score is not None else "Learned. Do more practice rounds to see a score.",
+        "All set! Your gestures are ready." if score is not None else "Learned. Practise more rounds to see a score.",
         score=score,
         per_gesture=per,
         labels=labels,
@@ -489,7 +490,8 @@ def save_models(
         groups.append(entry)
     if examples:
         np.savez(tmp / "examples.npz", **examples)  # type: ignore[arg-type]
-    meta_all = {"version": 1, "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "backend": res.backend, "groups": groups}
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta_all = {"version": 1, "trained_at": stamp, "backend": res.backend, "groups": groups}
     (tmp / "studio.json").write_text(json.dumps(meta_all, indent=2))
     shutil.rmtree(store.model_dir, ignore_errors=True)
     tmp.replace(store.model_dir)

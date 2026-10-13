@@ -23,7 +23,14 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from away.studio.features import MOTION_FRAMES, motion_window, occlude_motion, occlude_static, parse_group, static_vector
+from away.studio.features import (
+    MOTION_FRAMES,
+    motion_window,
+    occlude_motion,
+    occlude_static,
+    parse_group,
+    static_vector,
+)
 from away.studio.pack import NOTHING, GestureSettings, StudioStore, gesture_settings
 from away.studio.zones import ZoneGate, anchor_point, camera_key, lookup_map
 

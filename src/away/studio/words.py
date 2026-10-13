@@ -204,12 +204,13 @@ FIXES = {
     "setup": "Show me how",
 }
 
+CAMERA_DID_NOT_START = "The camera did not start. Check it is plugged in and chosen in camera settings."
 _EXPLAIN = (
     ("busy", "", "Another app is using the camera. Close it, then try again.", "retry"),
     ("in use", "", "Another app is using the camera. Close it, then try again.", "retry"),
     ("waiting for project away", "", "Project Away is letting go of the camera. This takes a few seconds.", ""),
-    ("did not open", "", "The camera did not start. Check it is plugged in and chosen in camera settings.", "open_cameras"),
-    ("could not open", "", "The camera did not start. Check it is plugged in and chosen in camera settings.", "open_cameras"),
+    ("did not open", "", CAMERA_DID_NOT_START, "open_cameras"),
+    ("could not open", "", CAMERA_DID_NOT_START, "open_cameras"),
     ("no frames", "", "The camera is not sending a picture. Check camera settings.", "open_cameras"),
     ("hand model missing", "", "Some hand-tracking files are missing.", "setup"),
     ("hand tracking could not start", "", "Hand tracking could not start.", "setup"),

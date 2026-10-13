@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import copy
+import itertools
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -201,7 +202,7 @@ def _edges(v: Any, n: int, path: str) -> list[float]:
     if not isinstance(v, list) or len(v) != n + 1:
         raise ValueError(f"{path}: must list {n + 1} boundaries")
     out = [_num(e, f"{path}[{i}]") for i, e in enumerate(v)]
-    if out[0] != 0.0 or out[-1] != 1.0 or any(b <= a for a, b in zip(out, out[1:])):
+    if out[0] != 0.0 or out[-1] != 1.0 or any(b <= a for a, b in itertools.pairwise(out)):
         raise ValueError(f"{path}: must start at 0, end at 1 and increase")
     return out
 
@@ -342,10 +343,13 @@ class ZoneGate:
             return True
         x, y = point
         raw = self.map.allowed(x, y)
-        if self.state is None or self.h <= 0:
-            self.state = raw
-        elif raw != self.state and all(
-            self.map.allowed(x + self.h * dx, y + self.h * dy) == raw for dx, dy in _PROBES
+        if (
+            self.state is None
+            or self.h <= 0
+            or (
+                raw != self.state
+                and all(self.map.allowed(x + self.h * dx, y + self.h * dy) == raw for dx, dy in _PROBES)
+            )
         ):
             self.state = raw
         return self.state
