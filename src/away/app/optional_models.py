@@ -125,8 +125,7 @@ CLEANUP_MODELS: tuple[OptionalModel, ...] = (
 # qwen3.5-0.8b). Non-thinking mode, <think> removed (away.voice.cleanup_next).
 _UNSLOTH = "https://huggingface.co/unsloth/"
 QWEN35_NOTICE = "Apache-2.0 (Qwen3.5 by Alibaba Cloud, GGUF by Unsloth); runs locally, nothing is sent anywhere."
-CLEANUP_MODELS = (
-    *CLEANUP_MODELS,
+CLEANUP_MODELS_NEXT: tuple[OptionalModel, ...] = (
     OptionalModel(
         key="qwen3.5-2b",
         name="Smart cleanup: newer standard (Qwen3.5-2B, Q4_K_M)",
@@ -137,7 +136,7 @@ CLEANUP_MODELS = (
         license="Apache-2.0",
         notice=QWEN35_NOTICE,
         restricted=False,
-        kind="cleanup",
+        kind="cleanup_next",
         purpose="better instruction following than Qwen2.5-1.5B (IFEval 61.2 vs 47.4, different harnesses); GPU",
         cost="not measured yet on a PC like yours: run Test my PC",
     ),
@@ -151,7 +150,7 @@ CLEANUP_MODELS = (
         license="Apache-2.0",
         notice=QWEN35_NOTICE,
         restricted=False,
-        kind="cleanup",
+        kind="cleanup_next",
         purpose="the same model at near-lossless 8-bit; needs a graphics card",
         cost="not measured yet on a PC like yours: run Test my PC",
     ),
@@ -165,7 +164,7 @@ CLEANUP_MODELS = (
         license="Apache-2.0",
         notice=QWEN35_NOTICE,
         restricted=False,
-        kind="cleanup",
+        kind="cleanup_next",
         purpose="about the size of the old 0.5B, closer to the old 1.5B in quality; the CPU choice",
         cost="~2 s per sentence on 2 shared ARM CPU cores (llama-cpp-python 0.3.36 CPU build, measured)",
     ),
@@ -173,8 +172,9 @@ CLEANUP_MODELS = (
 
 
 def all_models() -> tuple[OptionalModel, ...]:
-    """Every downloadable model: :data:`MODELS` (gaze) plus :data:`CLEANUP_MODELS`."""
-    return MODELS + CLEANUP_MODELS
+    """Every downloadable model: :data:`MODELS` (gaze), :data:`CLEANUP_MODELS` and (v0.1.24, kind
+    ``cleanup_next``, listed in Settings > Models rather than the v0.1.23 cleanup list) :data:`CLEANUP_MODELS_NEXT`."""
+    return MODELS + CLEANUP_MODELS + CLEANUP_MODELS_NEXT
 
 
 class LicenseNotAccepted(PermissionError):

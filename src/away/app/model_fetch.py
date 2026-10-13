@@ -132,3 +132,70 @@ def unzip(zf_path: Path, dest: Path) -> None:
 def find(model_folder: Path, pattern: str) -> Path | None:
     hits = sorted(model_folder.glob(f"**/{pattern}"))
     return hits[0] if hits else None
+
+
+# ----------------------------------------------------------------------------------------------- one click
+def cleanup_key(model: Any) -> str | None:
+    """A cleanup model handled by :mod:`away.app.optional_models` (downloaded where Smart cleanup looks)."""
+    from away.app import optional_models as om
+
+    key = str((getattr(model, "set", None) or {}).get("voice.cleanup.model", "") or "")
+    try:
+        om.get(key)
+    except KeyError:
+        return None
+    return key
+
+
+def engine_archive(model: Any, data_dir: Path | None = None) -> Any:
+    from away.app import engines
+
+    name = str(getattr(model, "engine", "") or "")
+    if not name:
+        return None
+    if name == "nemo-speech":
+        from away.voice.asr_next import nemotron_plan
+
+        return engines.archive_for(name, str(nemotron_plan("auto", data_dir)["variant"]))
+    return engines.archive_for(name)
+
+
+def ready(model: Any, data_dir: Path | None = None) -> bool:
+    """Everything this model needs is on this PC (its files and its engine)."""
+    from away.app import engines
+    from away.app import optional_models as om
+    from away.app.model_registry import models_dir
+
+    if getattr(model, "bundled", False):
+        return True
+    key = cleanup_key(model)
+    if key is not None:
+        return om.installed(key, models_dir(data_dir))
+    if files_of(model) and not have(model, data_dir):
+        return False
+    if getattr(model, "engine", ""):
+        mod = engines.MODULES.get(str(model.engine))
+        if not ((mod and engines.pip_installed(mod)) or engines.installed(engine_archive(model, data_dir), data_dir)):
+            return False
+    return bool(files_of(model)) or bool(getattr(model, "engine", ""))
+
+
+def download(
+    model: Any, data_dir: Path | None = None, progress: Callable[[int, int], None] | None = None
+) -> Path | None:
+    """One click: the model's files (verified) and the engine it runs in. Returns the model folder."""
+    from away.app import engines
+    from away.app import optional_models as om
+    from away.app.model_registry import models_dir
+
+    key = cleanup_key(model)
+    if key is not None:
+        om.install(key, models_dir(data_dir), progress=progress)
+        return models_dir(data_dir)
+    folder = fetch(model, data_dir, progress) if files_of(model) else None
+    a = engine_archive(model, data_dir)
+    if a is not None:
+        mod = engines.MODULES.get(a.engine)
+        if not (mod and engines.pip_installed(mod)):
+            engines.install(a, data_dir, progress)
+    return folder

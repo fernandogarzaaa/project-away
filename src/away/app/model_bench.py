@@ -167,7 +167,7 @@ def default_benches(cfg: Any, data_dir: Path | None = None, reg: Any = None) -> 
     out: list[tuple[str, Callable[[], Measure]]] = []
 
     def have(mid: str) -> bool:
-        return mid in reg.models and model_fetch.have(reg.models[mid], data_dir)
+        return mid in reg.models and model_fetch.ready(reg.models[mid], data_dir)
 
     def skip(mid: str, why: str) -> Callable[[], Measure]:
         m = reg.models.get(mid)
@@ -198,7 +198,7 @@ def default_benches(cfg: Any, data_dir: Path | None = None, reg: Any = None) -> 
     from away.voice import asr_next
 
     for size, mid in asr_next.MOONSHINE_IDS.items():
-        if have(mid) and engines.activate("moonshine", data_dir):
+        if have(mid) and engines.activate("moonshine", data_dir):  # model files + moonshine-voice
             opts = copy.copy(cfg.models_next)
             opts.moonshine_model = size
             out.append(
@@ -399,9 +399,9 @@ def _ready(m: Any, cfg: Any, data_dir: Path | None, model_fetch: Any) -> bool:
     if "wake_model" in (m.requires or []):
         p = str(getattr(cfg.models_next, "wake_model", "") or "")
         return bool(p) and Path(p).is_file()
-    if m.bundled or m.download:
-        return True
-    return bool(model_fetch.have(m, data_dir))
+    if m.bundled or (m.download and not m.url and not m.files):
+        return True  # built in, or downloaded by its v0.1.23 button (its engine falls back by itself)
+    return bool(model_fetch.ready(m, data_dir))
 
 
 def summary(report: dict[str, Any] | None) -> str:
