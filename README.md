@@ -105,6 +105,21 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
 - Speech is processed on your PC and never saved or uploaded.
 
+### Shortcuts: show it once, then a gesture or a word repeats it
+
+Something you do often, like opening your mail and starting a new message? Teach it once:
+
+1. Open **Settings > Shortcuts** and press the big **Record a shortcut** button (or say **"record shortcut"**, or pick
+   **Record a shortcut** in the tray menu).
+2. Do the clicks and typing yourself, the normal way. A small red **Recording** bar shows at the top; press its **Stop**
+   button when you are done (or say **"stop recording"**).
+3. Give it a name, then choose what runs it: **say** a phrase ("open mail") or **make a gesture**. That's it.
+
+To stop a shortcut while it runs, press **Esc**, move the mouse, or say **"stop"**. If a shortcut can't run (the app it
+was made in isn't open, or another window is in the way), Settings > Shortcuts tells you why and shows a button that
+fixes it. Shortcuts never record what you type into a password box, and a shortcut that types text stays on your PC.
+**Edit steps** lets you remove or reorder steps, change pauses, add text, a key or a wait, and pick the speed.
+
 ### 5. Head and eye tracking (optional, off until you set it up)
 
 - **Head pointer:** with your hands busy, turn your head to move the cursor and click with a wink, smile or
@@ -910,6 +925,72 @@ child processes, retries a failed installer once after 5 s, clears the PyInstall
 and restarts Project Away itself after the installer finishes unless the installer's own relaunch already
 did (it watches for the app for up to 10 s first, so there is never a second copy).
 
+## Shortcuts: teach by demonstration (v0.1.20)
+
+A shortcut (``macro`` in code and config) is a recorded list of steps that any gesture, voice phrase or hotkey runs
+through the normal bindings with the action **`macro:<id>`** (for example `voice: {open mail: macro:open_mail}`).
+`macro_control:record | stop_recording | toggle_recording | stop` drive recording and stop a running shortcut; the
+default voice phrases are "record shortcut" / "record macro", "stop recording" and "stop".
+
+**Recording** (Settings > Shortcuts, the tray, voice, or `away shortcut record`) captures your own mouse and keyboard
+with pynput, with timing:
+
+- clicks (single/double, any button, ctrl/shift/alt/cmd held), drags with their path, wheel scrolls, typed text
+  (one step per run of characters) and key presses (`enter`, `ctrl+c`, a lone Windows key);
+- each click is stored at its screen position **and relative to the window it landed in**, plus the app (process),
+  the window title and, on Windows, the **UI Automation name of the control** under the pointer (e.g. "Send");
+- Project Away's own input is left out: every synthetic event Away sends (gesture clicks, voice commands, replays)
+  is marked, and on Windows every event the OS flags as injected is dropped too; clicks on Away's own windows (Settings,
+  the Recording bar) and the tray click that stops a recording are dropped;
+- **every keystroke is skipped while a password box has focus** (UI Automation `IsPassword`, or a classic Edit control
+  with `ES_PASSWORD`). Where that can't be checked (macOS, Linux, or Windows without UI Automation) typed characters are
+  not recorded at all unless `macros.record_text_without_password_check: true`; keys like enter, tab and ctrl+c still are;
+- pauses longer than `macros.max_delay_s` are shortened.
+
+A recording started from voice or the tray is saved as "Shortcut N"; name it and pick a gesture or phrase in Settings.
+
+**Replay** runs on a worker thread while gesture output is paused:
+
+- a click is aimed at the recorded control found again by name (Windows UI Automation), else at the same spot
+  relative to the app's window (so moving the window is fine), else at the screen position (macOS/Linux);
+- it is **refused** when the app is not open, another app covers the spot, the window got too small, or (for text and
+  keys) another app has focus, unless the shortcut (Edit steps > "Allow it to click and type in any app") or
+  `macros.allow_other_app` allows it; text is never typed into a password box;
+- **stop** any time: `macros.abort_hotkey` (Esc), real mouse movement (`macros.abort_on_mouse_move`), voice "stop",
+  tray "Stop shortcut". Keys and buttons held by a step are always released;
+- speed per shortcut: 1x, 2x or instant (waits you add yourself always wait their full time).
+
+**Storage and privacy.** One JSON file per shortcut in `<data dir>/macros` (local, never the roaming config folder).
+A shortcut that types text is marked `sensitive`: owner-only file permissions on macOS/Linux, a lock in the list, and
+export refuses it unless you confirm ("Export anyway" / `--include-private`). The outcome of the last replay is kept in
+`_last_result.json` there, so Settings can show what went wrong with a fix button.
+
+```bash
+away shortcut list                                  # alias: away macro
+away shortcut record [--name "Open mail"] [--seconds 10]
+away shortcut bind open_mail --say "open mail" | --gesture palm_tap [--replace]
+away shortcut run open_mail [--speed 1x|2x|instant]
+away shortcut show | rename | delete | unbind ID
+away shortcut export FILE [ID ...] [--include-private]
+away shortcut import FILE [--overwrite]
+```
+
+Config (`macros:` in config.yaml, all optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | master switch |
+| `abort_hotkey` | `esc` | a physical press stops a running shortcut (`""` = none) |
+| `abort_on_mouse_move` / `abort_move_px` | `true` / `40` | moving the real mouse this far stops it |
+| `allow_other_app` | `false` | replay even into another app than recorded |
+| `default_speed` | `1x` | speed of new recordings (`1x`, `2x`, `instant`) |
+| `max_delay_s` | `3.0` | longer recorded pauses are shortened to this |
+| `min_gap_s` | `0.05` | smallest gap between steps (so apps keep up at "instant") |
+| `record_away_input` | `false` | also record the clicks/keys Project Away itself produced |
+| `record_text_without_password_check` | `false` | record typed text where password boxes can't be detected |
+| `use_ui_automation` | `true` | Windows: remember and find controls by name |
+| `store_dir` | `""` | shortcut folder (`""` = `<data dir>/macros`) |
+
 ## Verified vs untested
 
 | Area | Status |
@@ -966,6 +1047,8 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
 | Settings → Tuning (sections, presets, master sensitivity, undo, per-app tuning, live gauges, auto-tune) (v0.1.19) | Grouping, presets, sensitivity mapping, threshold selection, undo, per-app tuning (parse, validate, live switch in the pipeline), the auto-tune session, clip saving and the camera worker unit-tested with fake frames (`tests/test_tuning_tab.py`, `tests/test_autotune.py`); the tab itself is smoke-tested under Xvfb; **live view and auto-tune untested with a real camera** |
 | Tuning tab with the head / gaze sliders (v0.1.19) | All 28 auto-centering, head and gaze tunables land in Head & eyes with titles, help and units; presets, master Sensitivity and Reset section keep them apart; per-app profile tuning of the auto-centering / head keys validates, applies (ints rounded) and switches live in the pipeline, `gaze.*` is refused per app; Sensitivity still orders cursor speed with soft recenter on (`tests/test_v0119_integration.py`); the merged Settings window (Tuning sections, Performance → Models) rendered under Xvfb; **untested on a real desktop with a real camera** |
+| Shortcuts: model, recording, replay, Settings, CLI (v0.1.20) | Step building (clicks, double-clicks, drags, scroll merging, text runs, combos, lone modifiers, pause capping), JSON round trip and validation, store/import/export with the private-shortcut rule, the recorder's filters (Away's own marked input, Windows-injected events, own windows, the recording bar, the tray click, password boxes, no-password-check mode), window-relative and control-name aiming, every refusal and its fix, abort by hotkey/mouse/voice, key and button release on errors, speeds, the bindings/dispatcher route for `macro:` and `macro_control:`, the Settings model (record, name, bind, take over a gesture, rename, delete, fixes, step editor), the CLI and the tray items unit-tested with fake listeners, backends and window APIs (`tests/test_v0120_macros.py`); **untested on a real desktop**: the pynput listener and replay backend, the Tk Shortcuts tab and Recording bar (Tk was not available in the build sandbox, not even under Xvfb), and the Windows ctypes window lookup and UI Automation calls (vtable slots follow UIAutomationClient.h but have never run) |
+| Shortcuts: own-input filtering on macOS/Linux | Marked-input filtering tested; **Windows' injected flag does not exist there**, so input from other automation tools is recorded, and voice dictation typed by Away is filtered only by the marker (dictation output does not report to it yet, so it may be recorded) |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 
