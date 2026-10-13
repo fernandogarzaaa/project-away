@@ -11,6 +11,7 @@ coordinates and typed text is not recorded unless ``macros.record_text_without_p
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import sys
 import threading
@@ -225,8 +226,8 @@ class Win32WindowApi:  # pragma: no cover - Windows only, verified by hand
     def _guid(self, text: str) -> Any:
         ct = self.ct
 
-        class GUID(ct.Structure):
-            _fields_ = [("d1", ct.c_ulong), ("d2", ct.c_ushort), ("d3", ct.c_ushort), ("d4", ct.c_ubyte * 8)]
+        class GUID(ctypes.Structure):
+            _fields_ = (("d1", ct.c_ulong), ("d2", ct.c_ushort), ("d3", ct.c_ushort), ("d4", ct.c_ubyte * 8))
 
         g = GUID()
         ct.oledll.ole32.CLSIDFromString(ct.c_wchar_p(text), ct.byref(g))  # type: ignore[attr-defined]
@@ -281,15 +282,15 @@ class Win32WindowApi:  # pragma: no cover - Windows only, verified by hand
             return None
         ct = self.ct
 
-        class VARIANT(ct.Structure):
-            _fields_ = [
+        class VARIANT(ctypes.Structure):
+            _fields_ = (
                 ("vt", ct.c_ushort),
                 ("r1", ct.c_ushort),
                 ("r2", ct.c_ushort),
                 ("r3", ct.c_ushort),
                 ("val", ct.c_void_p),
                 ("pad", ct.c_void_p),
-            ]
+            )
 
         root = ct.c_void_p()
         cond = ct.c_void_p()
@@ -347,8 +348,8 @@ class Win32WindowApi:  # pragma: no cover - Windows only, verified by hand
         """Fallback without UIA: a classic Edit control with the ES_PASSWORD style has focus."""
         ct, wt, u = self.ct, self.wt, self.user32
 
-        class GUITHREADINFO(ct.Structure):
-            _fields_ = [
+        class GUITHREADINFO(ctypes.Structure):
+            _fields_ = (
                 ("cbSize", wt.DWORD),
                 ("flags", wt.DWORD),
                 ("hwndActive", wt.HWND),
@@ -358,7 +359,7 @@ class Win32WindowApi:  # pragma: no cover - Windows only, verified by hand
                 ("hwndMoveSize", wt.HWND),
                 ("hwndCaret", wt.HWND),
                 ("rcCaret", wt.RECT),
-            ]
+            )
 
         gti = GUITHREADINFO(cbSize=ct.sizeof(GUITHREADINFO))
         try:

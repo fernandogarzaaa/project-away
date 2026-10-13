@@ -537,7 +537,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             monitors.enable_dpi_awareness()  # no-op when cli/tray main already did it (before pynput/tk)
             self.monitor_layout = monitors.enumerate_monitors()
-            backend = PynputBackend()
+            from away.control.macro_record import MarkingBackend
+
+            # every synthetic event Away sends is marked, so a shortcut recording leaves it out (v0.1.20)
+            backend = MarkingBackend(PynputBackend())  # type: ignore[assignment]
         screen = self.monitor_layout
         self.monitor_watcher = monitors.MonitorWatcher(self.monitor_layout, float(cfg.hands.cursor.monitor_refresh_s))
         temporal = None
@@ -555,6 +558,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.guard = ManualInputGuard(cfg.app.auto_pause_idle_ms)
             backend = GuardedBackend(backend, self.guard)  # type: ignore[assignment]
         self.pipeline = Pipeline(cfg, backend, screen, self.bus, temporal, active_app=active_process, guard=self.guard)
+        # recorded shortcuts (v0.1.20): macro:<name> / macro_control:... run through the bindings like any action
+        from away.app.macro_service import DryRunBackend, MacroService
+
+        self.macros = MacroService(
+            cfg.macros,
+            notify=self._shortcut_notice,
+            on_replay=self._on_shortcut_replay,
+            backend_factory=(lambda _mark: DryRunBackend()) if dry_run else None,
+        )
+        self._paused_before_shortcut = True
+        self.pipeline.executor.hooks["macro"] = self.macros.hook_macro
+        self.pipeline.executor.hooks["macro_control"] = self.macros.hook_control
         self.camera_confidences: dict[int, float] = {}  # multi-camera: latest per-view confidence
         self.voice: Any = None  # VoiceController
         self.editor: Any = None  # SelectionEditor (voice.edit_hotkey)
@@ -618,6 +633,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self._notices.add(key)
         self.bus.publish("app.notice", {"title": title, "message": message, "key": key})
         return True
+
+    def _shortcut_notice(self, title: str, message: str) -> None:
+        self.notice(title, message)
+
+    def _on_shortcut_replay(self, started: bool) -> None:
+        """A shortcut replays: gesture output pauses so the hand cannot fight the replay, then resumes."""
+        if started:
+            self._paused_before_shortcut = self.pipeline.paused
+            self.pipeline.set_paused(True)
+        elif not self._paused_before_shortcut:
+            self.pipeline.set_paused(False)
 
     def _publish_quiet(self, topic: str, data: dict[str, Any]) -> None:
         self.bus.publish(topic, data)
@@ -756,6 +782,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.bus.publish("config.error", {"error": str(exc)})
                 continue
             self.pipeline.apply_config(new)
+            self.macros.set_config(new.macros)
             if self.voice is not None:
                 self._apply_voice(new)
             self._restart_hotkeys()
@@ -1761,6 +1788,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         except Exception as exc:
             # Shutdown must continue even if the OS input backend has failed.
             self.bus.publish("mouse.release_error", {"error": str(exc)})
+        with contextlib.suppress(Exception):
+            self.macros.stop_playback()
+            self.macros.stop_recording()
         self._restore_cursor()  # the user's own cursor size, right away (no debounce)
         with contextlib.suppress(Exception):
             self.pipeline.headgaze.save_bias()  # keep the gaze drift correction for the next start

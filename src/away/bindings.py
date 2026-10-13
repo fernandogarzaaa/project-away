@@ -247,7 +247,9 @@ def parse_action(value: Any, *, allow_shell: bool = False) -> Action:
     if kind == "macro":
         arg = "_".join(arg.lower().split())
         if not MACRO_NAME_RE.match(arg):
-            raise ValueError(f"macro:{arg} is not a shortcut id (lower-case letters, digits and _, e.g. macro:open_mail)")
+            raise ValueError(
+                f"macro:{arg} is not a shortcut id (lower-case letters, digits and _, e.g. macro:open_mail)"
+            )
     if kind == "shell" and not allow_shell:
         raise ValueError("shell actions are disabled for safety; set bindings.allow_shell: true to enable them")
     return Action(kind, arg)

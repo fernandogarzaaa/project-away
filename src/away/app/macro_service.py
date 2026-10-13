@@ -41,6 +41,22 @@ def _default_backend(mark: Callable[[], None]) -> Any:  # pragma: no cover - des
     return PynputMacroBackend(mark)
 
 
+class DryRunBackend:
+    """Replay output for ``away run --dry-run`` and tests: records what would have been sent."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def call(*a: Any) -> None:
+            self.calls.append((name, a))
+
+        return call
+
+
 class MacroService:
     def __init__(
         self,
