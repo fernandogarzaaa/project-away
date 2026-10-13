@@ -27,6 +27,7 @@ from away.control.mouse import MouseBackend, MouseController, RecordingBackend
 from away.events import EventBus
 from away.face.commands import BrowRaiseToggle, MouthOpenTrigger, WinkTrigger
 from away.face.gate import SpeechGate
+from away.face.headgaze import HeadGaze, calibration_camera
 from away.face.speaker import ActiveSpeakerDetector
 from away.face.speaking import SpeakingScorer
 from away.face.tracking import FaceTracker
@@ -61,6 +62,9 @@ def effective_ambient_fallback(cfg: AppConfig) -> str:
     if cfg.voice.ambient_fallback == "type" or not cfg.face.gate_dictation:
         return "type"
     return cfg.voice.ambient_fallback
+
+
+CLICK_ACTIONS = ("click", "double_click", "right_click", "middle_click")
 
 
 class Pipeline:
@@ -120,6 +124,18 @@ class Pipeline:
         )
         self.dispatcher.on_fire = self._on_fire
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
+        # head tracking + gaze (v0.1.19): acts only when hands.cursor.head_assist / monitor_switch are on or a
+        # gaze calibration exists for this camera
+        self.headgaze = HeadGaze(
+            cfg,
+            self.mouse,
+            calibration_camera(cfg),
+            paused=self.output_paused,
+            hand_active=lambda: bool(self.gestures.hand_present),
+            busy=lambda: bool(self.gestures.pinched or self.gestures.dragging),
+            publish=lambda topic, data: self.bus.publish(topic, data),
+        )
+        self.mouse.gaze_point = lambda: self.headgaze.estimator.point if self.headgaze.estimator else None
 
     @property
     def hand_prefer(self) -> str:
@@ -132,6 +148,8 @@ class Pipeline:
 
     def _on_fire(self, trig: str, act: Action) -> None:
         self.bus.publish("action.fired", {"trigger": trig, "action": str(act)})
+        if act.kind == "mouse" and act.arg in CLICK_ACTIONS:
+            self.headgaze.on_click(self.mouse.mapper.pos)  # gaze drift correction: you look where you click
 
     # pause -------------------------------------------------------------------
     def output_paused(self) -> bool:
@@ -218,7 +236,11 @@ class Pipeline:
         for src, dst in ((cfg.hands.gestures, self.cfg.hands.gestures), (cfg.hands.cursor, self.cfg.hands.cursor)):
             for k, v in vars(src).items():
                 setattr(dst, k, v)
-        for src, dst in ((cfg.hands.dwell, self.cfg.hands.dwell), (cfg.face, self.cfg.face)):  # type: ignore[assignment]
+        for src, dst in (  # type: ignore[assignment]
+            (cfg.hands.dwell, self.cfg.hands.dwell),
+            (cfg.face, self.cfg.face),
+            (cfg.gaze, self.cfg.gaze),
+        ):
             for k, v in vars(src).items():
                 setattr(dst, k, v)
         c = self.cfg.hands.cursor
@@ -332,6 +354,10 @@ class Pipeline:
                 self.bus.publish("gesture.rejected", {"kind": ev.kind}, t)
                 continue
             self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), t)
+            if ev.kind == "move" and ev.data.get("anchor") != "pinch" and "x" in ev.data:
+                self.headgaze.on_hand_move(t, (float(ev.data["x"]), float(ev.data["y"])))  # look-to-jump
+            elif ev.kind == "hand_lost":
+                self.headgaze.on_hand_lost()
             if not self.paused or ev.kind in ("clutch", "hand_lost", "drag_end"):
                 self.dispatcher.on_gesture(ev)
             if ev.kind == "move" and ev.data.get("anchor") != "pinch":
@@ -395,7 +421,11 @@ class Pipeline:
         boxes: list[tuple[float, float, float]],
         blendshapes: list[dict[str, float]],
         frontal: list[bool | None] | None = None,
+        extras: list[Any] | None = None,
+        net: tuple[float, float] | None = None,
     ) -> int | None:
+        """``extras``: per face, an object with ``pose`` / ``proxy`` / ``gaze`` (a FaceObs) for head tracking and
+        gaze (v0.1.19); ``net``: the learned gaze network's (yaw, pitch) for the user's face, if it ran."""
         ids = self.faces.update(boxes)
         if self._enroll_pending and ids:
             self.gate.enroll({fid: b[2] for fid, b in zip(ids, boxes)})
@@ -418,6 +448,15 @@ class Pipeline:
             if self.gate.primary is None and scores:  # not enrolled: the face the score came from
                 k = ids.index(max(scores, key=lambda f: scores[f]))
             user_frontal = frontal[k] if k < len(frontal) else None
+        if extras is not None and ids:
+            k = ids.index(user) if user is not None else 0
+            ex = extras[k] if k < len(extras) else None
+            raw_pose = getattr(ex, "pose", None)
+            self.headgaze.on_face(t, raw_pose, getattr(ex, "proxy", None), getattr(ex, "gaze", None), net)
+            if self.headgaze.facing(raw_pose) and user_frontal is not True:
+                # an off-axis webcam sees the head turned even while the user looks at the screens: the head pose
+                # (relative to the usual / calibrated screen-facing pose) says "facing the screen"
+                user_frontal = True
         present = (user is not None) if self.gate.primary is not None else bool(ids)
         self.gate.observe(t, active, len(ids), user_score, user_frontal, present)
         if self.cfg.face.brow_raise_toggle and self.gate.primary in ids:
@@ -507,6 +546,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._notices: set[str] = set()
         self.gate_hint = GateHint()
         self._face_lock = threading.Lock()
+        self.gaze_net: Any = None  # NetRunner (optional learned gaze model), created with the first face
         self.iphone: Any = None  # LiveLinkReceiver when face.source is iphone|auto
         from away.face.source import FaceSourceSelector
 
@@ -1018,12 +1058,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 )
             if faces is not None and n % max(1, prof.face_every) == 0 and self.face_source.use_webcam(t):
                 obs = faces.process(rgb, t)
+                net = self._gaze_net(t, rgb, obs)
                 with self._face_lock:
                     self.pipeline.on_faces(
                         t,
                         [o.box for o in obs],
                         [o.blendshapes for o in obs],
                         [getattr(o, "frontal", None) for o in obs],
+                        extras=list(obs),
+                        net=net,
                     )
 
         def run_single(idx: Any, until: Any = None) -> None:
@@ -1068,6 +1111,21 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 if close is not None:
                     with contextlib.suppress(Exception):
                         close()
+
+    def _gaze_net(self, t: float, rgb: Any, obs: list[Any]) -> tuple[float, float] | None:
+        """The optional learned gaze network on the largest face (only when the calibration uses it)."""
+        if not obs:
+            return None
+        if self.gaze_net is None:
+            from away.face.headgaze import NetRunner
+
+            self.gaze_net = NetRunner(self.cfg, self.models_dir)
+        box = max(obs, key=lambda o: o.box[2]).box
+        try:
+            return self.gaze_net.update(t, rgb, box, self.pipeline.headgaze.cal)  # type: ignore[no-any-return]
+        except Exception as exc:  # never let the optional network stop face tracking
+            self._publish_quiet("gaze.net_error", {"error": f"{type(exc).__name__}: {exc}"})
+            return None
 
     def _fourcc_for(self, device: Any) -> str:
         """The pixel format to request for a camera: its own ``fourcc`` in a multi-camera set (also when it
@@ -1426,12 +1484,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                             ):
                                 t_p, rgb_p = prim_frame
                                 obs = faces.process(rgb_p, t_p)
+                                net = self._gaze_net(t_p, rgb_p, obs)
                                 with self._face_lock:
                                     self.pipeline.on_faces(
                                         t_p,
                                         [o.box for o in obs],
                                         [o.blendshapes for o in obs],
                                         [getattr(o, "frontal", None) for o in obs],
+                                        extras=list(obs),
+                                        net=net,
                                     )
                         except Exception as exc:
                             if self.stop_event.is_set() or is_shutdown_error(exc):
@@ -1549,6 +1610,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             # Shutdown must continue even if the OS input backend has failed.
             self.bus.publish("mouse.release_error", {"error": str(exc)})
         self._restore_cursor()  # the user's own cursor size, right away (no debounce)
+        with contextlib.suppress(Exception):
+            self.pipeline.headgaze.save_bias()  # keep the gaze drift correction for the next start
         for lst in [*self._listeners, *getattr(self, "_input_listeners", [])]:
             try:
                 lst.stop()

@@ -14,6 +14,12 @@ origin can be negative) and every position is clamped onto the *union* of the mo
 never parks in a dead zone between monitors of different sizes. Relative-mode speed is relative to the
 primary monitor's width, so slow precise moves feel exactly like on one screen; only fast moves get extra
 reach, ``(desktop span / primary span) ** monitor_reach`` (3 equal monitors, default 0.5: ~1.73x).
+
+Auto-centering (v0.1.19, ``hands.cursor.autocenter``, :mod:`away.hands.autocenter`): soft recenter gain in
+relative mode, the learned comfort zone (absolute mode's active region follows it, applied only when the
+cursor re-anchors so a resting hand never drifts the cursor) and the edge clutch (a quick swing back from
+the camera edge re-anchors instead of dragging the cursor back). :meth:`CursorMapper.center` puts the cursor
+in the middle of the current monitor and re-anchors (``cursor:center``, voice "center").
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from away.control.monitors import (
     select_monitors,
     sort_monitors,
 )
+from away.hands.autocenter import AutoCenter, shift_region
 from away.hands.filters import OneEuro2D
 
 ACCEL_REF = 0.01  # hand-units per frame at which acceleration is neutral
@@ -117,6 +124,10 @@ class CursorMapper:
         self.set_monitors(screen, keep_position=False)
         self._prev: tuple[float, float] | None = None
         self._anchor: str | None = None
+        ac_cfg = getattr(self.cfg, "autocenter", None)
+        self.autocenter: AutoCenter | None = AutoCenter(ac_cfg) if ac_cfg is not None else None
+        self.region_center: tuple[float, float] | None = None  # learned comfort zone, applied at re-anchor
+        self.clutched = False  # edge clutch active: hand moves do not move the cursor
 
     # ------------------------------------------------------------------ monitors
     def set_monitors(self, screen: Screen, keep_position: bool = True) -> None:
@@ -166,11 +177,52 @@ class CursorMapper:
         self.reset()  # re-anchor: the next hand move continues from the new spot, no jump back
         return round(self.pos[0]), round(self.pos[1])
 
+    def center(self) -> tuple[int, int]:
+        """``cursor:center``: the centre of the monitor under the cursor, then re-anchor (no jump back)."""
+        self.pos = self.monitors[self.current_monitor()].center
+        self.reset()
+        return round(self.pos[0]), round(self.pos[1])
+
+    def warp(self, x: float, y: float) -> tuple[int, int]:
+        """Put the cursor at a desktop point (look-to-jump, head zones) and re-anchor the hand there."""
+        self.set_position(x, y)
+        self.reset()
+        return round(self.pos[0]), round(self.pos[1])
+
     # ------------------------------------------------------------------ mapping
     def reset(self) -> None:
         self.filter.reset()
         self._prev = None
         self._anchor = None
+        self.clutched = False
+        ac = self._sync_autocenter()
+        self.region_center = None
+        if ac is not None:
+            ac.reset()
+            # absolute mode: move the active region to the learned comfort zone only now (re-anchor), never
+            # under a resting hand
+            c = ac.cfg
+            if c.enabled and c.comfort_zone and ac.comfort.learned:
+                self.region_center = ac.comfort.center
+
+    def _sync_autocenter(self) -> AutoCenter | None:
+        """Follow a live config change (Settings replaces ``cfg.autocenter`` with a new object)."""
+        ac_cfg = getattr(self.cfg, "autocenter", None)
+        if ac_cfg is None:
+            self.autocenter = None
+        elif self.autocenter is None:
+            self.autocenter = AutoCenter(ac_cfg)
+        else:
+            self.autocenter.cfg = ac_cfg
+        return self.autocenter
+
+    @property
+    def region(self) -> tuple[float, float, float, float]:
+        """The absolute-mode active region in use (``active_region``, moved to the comfort zone if learned)."""
+        reg = tuple(self.cfg.active_region)
+        if self.region_center is None:
+            return reg  # type: ignore[return-value]
+        return shift_region(reg, self.region_center)  # type: ignore[arg-type]
 
     def set_position(self, x: float, y: float) -> None:
         self.pos = clamp_to_monitors(x, y, self.monitors)
@@ -181,12 +233,19 @@ class CursorMapper:
             self._prev = None
             self._anchor = anchor
         fx, fy = self.filter(t, x, y)
+        ac = self._sync_autocenter()
+        if ac is not None:
+            st = ac.observe(t, fx, fy, clutch=self.cfg.mode != "absolute")
+            self.clutched = st.clutched
+            if st.clutched or st.reanchor:
+                self._prev = None  # lifted: the next unclutched frame continues from wherever the hand is
+                return round(self.pos[0]), round(self.pos[1])
         if self.cfg.mode == "absolute":
             return self._absolute(fx, fy)
         return self._relative(fx, fy)
 
     def _absolute(self, fx: float, fy: float) -> tuple[int, int]:
-        x0, y0, x1, y1 = self.cfg.active_region
+        x0, y0, x1, y1 = self.region
         u = min(max((fx - x0) / (x1 - x0), 0.0), 1.0)
         v = min(max((fy - y0) / (y1 - y0), 0.0), 1.0)
         target = clamp_to_monitors(self.x0 + u * (self.w - 1), self.y0 + v * (self.h - 1), self.monitors)
@@ -205,8 +264,10 @@ class CursorMapper:
         dx, dy = apply_dead_zone(fx - self._prev[0], fy - self._prev[1], self.cfg.dead_zone)
         if dx == 0.0 and dy == 0.0:
             return round(self.pos[0]), round(self.pos[1])
+        start = self._prev
         self._prev = (fx, fy)
         c = self.cfg
+        soft = self.autocenter.gain(start, (dx, dy)) if self.autocenter is not None else 1.0
         if c.curve == "sigmoid":
             # one gain from the 2D speed so diagonal moves keep their direction; the extra multi-monitor
             # reach raises only the fast plateau, the slow (precise) plateau is unchanged
@@ -217,6 +278,6 @@ class CursorMapper:
             ax = accelerate(dx, c.acceleration, reach=self.reach)
             ay = accelerate(dy, c.acceleration, reach=self.reach)
         ax, ay = direction_scale(ax, ay, c.speed_up, c.speed_down, c.speed_left, c.speed_right)
-        scale = c.gain * self.ref.width  # relative to the primary monitor, not the whole desktop
+        scale = c.gain * soft * self.ref.width  # relative to the primary monitor, not the whole desktop
         self.set_position(self.pos[0] + ax * scale, self.pos[1] + ay * scale)
         return round(self.pos[0]), round(self.pos[1])

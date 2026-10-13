@@ -61,6 +61,13 @@ def ask(prompt: str, default: bool, assume: bool | None) -> bool:
     return default if not ans else ans in ("y", "yes")
 
 
+OPTIONAL_GAZE_NOTICE = (
+    "  Optional, not downloaded: learned gaze networks (L2CS-Net / MobileGaze) for eye tracking. Their weights are\n"
+    "  research-only (trained on Gaze360), so they are an explicit opt-in: Settings > Performance > Models, or\n"
+    "  `away gaze model install mobilegaze --accept-license`. Eye tracking also works without them (iris landmarks)."
+)
+
+
 def run(
     yes: bool = False,
     asr_model: str | None = None,
@@ -89,6 +96,8 @@ def run(
         except Exception as exc:
             rep.models[mf.name] = f"failed: {exc}"
             rep.warnings.append(f"{mf.name} download failed: {exc}")
+
+    out(OPTIONAL_GAZE_NOTICE)
 
     out("\n[2/4] Hardware and speech recognition model")
     prof = _profile(cfg, profiler, out)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from away.hands.cursor import CursorMapper
@@ -155,6 +156,8 @@ class MouseController:
         self.enabled = True
         self.button_down = False
         self.stabilizer = stabilizer
+        # ``cursor:gaze``: returns the current gaze point on the desktop (None = not calibrated / no face)
+        self.gaze_point: Callable[[], tuple[float, float] | None] | None = None
 
     # ------------------------------------------------------------ steady click
     def observe_pinch(self, t: float, ratio: float, pinch_on: float, pinched: bool, dragging: bool) -> None:
@@ -239,9 +242,23 @@ class MouseController:
 
     def jump_monitor(self, arg: str) -> bool:
         """``cursor:`` action argument (``next_monitor`` | ``prev_monitor`` | ``primary_monitor`` |
-        ``monitor N``): move the pointer to the centre of that monitor. False when there is none."""
+        ``monitor N``): move the pointer to the centre of that monitor. False when there is none.
+        ``center``: the centre of the current monitor; ``gaze``: the gaze point (v0.1.19). Both re-anchor."""
         if not self.enabled:
             return False
+        if arg in ("center", "gaze"):
+            to: tuple[int, int]
+            if arg == "center":
+                to = self.mapper.center()
+            else:
+                pt = self.gaze_point() if self.gaze_point is not None else None
+                if pt is None:
+                    return False
+                to = self.mapper.warp(pt[0], pt[1])
+            if self.stabilizer is not None:
+                self.stabilizer.reset()
+            self.backend.move(*to)
+            return True
         target = {"next_monitor": "next", "prev_monitor": "prev", "primary_monitor": "primary"}.get(arg)
         if target is None and arg.startswith("monitor "):
             target = arg.split(" ", 1)[1]

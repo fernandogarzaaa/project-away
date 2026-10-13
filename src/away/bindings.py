@@ -27,6 +27,8 @@ Actions (what happens) are written ``kind:argument``::
                               which hand is the pointer (hands.roles.mode, until the app restarts)
     cursor:next_monitor | prev_monitor | primary_monitor | monitor 2
                               jump the cursor to the centre of a monitor (numbers from `away monitors`)
+    cursor:center             centre of the current monitor + re-anchor the hand (voice "center")
+    cursor:gaze               jump to where you look (needs `away gaze calibrate`; voice "look here")
 
 Profiles: ``default`` holds the full map. Any other profile lists the
 ``apps`` (process names, case-insensitive, ``.exe`` optional) it applies to
@@ -70,8 +72,25 @@ CATEGORY_PREFIX = {"gestures": "gesture", "voice": "voice", "face": "face", "hot
 PREFIX_CATEGORY = {v: k for k, v in CATEGORY_PREFIX.items()}
 
 MAX_MONITORS = 9
-CURSOR_ARGS = ("next_monitor", "prev_monitor", "primary_monitor", *(f"monitor {i}" for i in range(1, MAX_MONITORS + 1)))
-_CURSOR_ALIASES = {"previous_monitor": "prev_monitor", "next": "next_monitor", "prev": "prev_monitor"}
+CURSOR_ARGS = (
+    "next_monitor",
+    "prev_monitor",
+    "primary_monitor",
+    *(f"monitor {i}" for i in range(1, MAX_MONITORS + 1)),
+    "center",
+    "gaze",
+)
+_CURSOR_ALIASES = {
+    "previous_monitor": "prev_monitor",
+    "next": "next_monitor",
+    "prev": "prev_monitor",
+    "centre": "center",
+    "center_cursor": "center",
+    "centre_cursor": "center",
+    "recenter": "center",
+    "look": "gaze",
+    "look_here": "gaze",
+}
 _NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
 ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
@@ -270,6 +289,10 @@ def default_profile() -> Profile:
             "monitor one": a("cursor:monitor 1"),
             "monitor two": a("cursor:monitor 2"),
             "monitor three": a("cursor:monitor 3"),
+            "center": a("cursor:center"),
+            "centre": a("cursor:center"),
+            "center cursor": a("cursor:center"),
+            "look here": a("cursor:gaze"),
             "use left hand": a("hands:left"),
             "use right hand": a("hands:right"),
             "use either hand": a("hands:auto"),
