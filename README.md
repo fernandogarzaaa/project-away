@@ -1449,6 +1449,44 @@ studio:
     wave: {enabled: true, threshold: 0.8, hold_s: 0.0, cooldown_s: 1.0, then: ["wait:0.3", "key:enter"]}
 ```
 
+## Models (v0.1.23)
+
+**Settings → Models** lists every model slot: hand tracking, face / attention, eye tracking, speech to text, smart
+cleanup and the voice your agents speak with. Each row has a drop-down of the models for that job, an **On** switch
+for the optional ones, where it runs (CPU / GPU) and, for the natural voices, **Download** / **Remove**.
+**Performance mode** (Light / Balanced / Best) sets every slot at once. Changes are saved at once and load at the
+next start. Agents make the same changes with the `models` settings op (`{"domain": "models", "op": "switch",
+"key": "stt", "value": "whisper-small-cpu"}`, `enable` / `disable`, `mode`), each undoable.
+
+Only permissively licensed models are listed and used by the performance modes (MIT, Apache-2.0, BSD...). Models
+with research-only or non-commercial weights (the L2CS / MobileGaze gaze networks, the Piper voice data) stay
+available through their own settings but are not offered here.
+
+The list comes from three places: the built-in manifest (`src/away/data/models.json`), the online catalog
+(`models/catalog.json` in this repository, fetched at most once a day and used only when its SHA-256 matches
+`models/catalog.sha256`), and your own file `<data>/models/local.json` (same format, for a local model).
+
+### Add a model to the catalog
+
+1. Add an entry to `models/catalog.json` under `"models"`:
+
+   ```json
+   {"id": "whisper-medium-cpu", "slot": "stt", "title": "Whisper medium on the processor",
+    "description": "More accurate than small; slower.", "license": "MIT", "runtime": "whisper",
+    "runs_on": "cpu", "size": 1530000000, "cost": {"cpu_pct": 60, "vram_mb": 0},
+    "set": {"voice.asr_model": "medium", "voice.device": "cpu"}}
+   ```
+
+   * `slot`: `hands`, `face`, `gaze`, `stt`, `cleanup` or `voice`.
+   * `set`: the settings this model uses. Only `hands.*`, `face.*`, `gaze.*`, `voice.*` and `speech.*` keys are
+     accepted (never `agent_link.*`).
+   * `license`: an SPDX name. Anything not permissive is hidden from Settings → Models.
+   * A file to download needs `url` (https, from huggingface.co, github.com / objects.githubusercontent.com or
+     files.pythonhosted.org) and its `sha256`.
+   * `runtime`: `mediapipe`, `onnx`, `gguf`, `whisper`, `rules`, `ollama` or `system`.
+2. Update the checksum file: `python -c "import hashlib;print(hashlib.sha256(open('models/catalog.json','rb').read()).hexdigest()+'  catalog.json')" > models/catalog.sha256`
+3. Open a pull request. `tests/test_v0123_voices_models.py` checks the checksum and validates every entry.
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -1676,7 +1714,56 @@ Config (`macros:` in config.yaml, all optional):
 | Smart cleanup engine download for installer users (v0.1.20) | Pinned wheel table, size + SHA-256 check (a tampered file is never unpacked), unpacking only `llama_cpp` (path traversal refused), the separate-process load check and its clean-up, friendly errors and the Settings Download button (model + engine in one go) unit-tested (`tests/test_cleanup_engine.py`); the real Linux ARM64 wheel downloaded, verified, loaded through `away cleanup-engine check` and generated text with a tiny GGUF in the build sandbox; the CI test job downloads and loads the real wheel on Windows and Ubuntu (`AWAY_NET_TESTS=1`; on macOS it found the published Apple Silicon wheel damaged, so Macs get no engine download and use Ollama or pip; a damaged archive is now a friendly error); the frozen Windows app runs install + check in the release workflow (non-blocking step); **untested on a real user PC, in particular one without the Visual C++ Redistributable** |
 | Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
+| Agent Link Host / Origin / JSON guard (v0.1.23) | Unit-tested (host parsing, origins, content types) and through the real middleware with a Starlette test client: rebinding Host, `Origin: null`, foreign origins and `text/plain` / form posts refused, the active tunnel hostname accepted and dropped when the link ends, the token still required; the existing live-server tests (REST, MCP over HTTP, stdio bridge) pass with it; **untested through a real Cloudflare / localhost.run link after this change** |
+| Tray guard, COM apartment, crash.log tagging (v0.1.23) | Serialization, error swallowing and stop-once tested with fake icons; COM initialisation with a fake ole32; faulthandler output summarised and folded per process with fake files; **untested on the real Windows tray** (whether the RPC_E_DISCONNECTED errors are gone can only be seen in the user's crash.log) |
+| Big cursor with two app copies, single-instance lock, `away cursor reset` (v0.1.23) | Two controllers sharing one marker, leftover big sizes, stuck restores and reset tested with a fake cursor; the lock with a fake Windows mutex and a real `flock` across two processes; **the Windows cursor size registry write and the named mutex are untested on real Windows** |
+| 120 Hz glide (v0.1.23) | Interpolation, prediction limit, stall, jump and the output thread tested on a fake clock; **not felt on a real PC** (whether 120 Hz output is smoother at 4-10 fps camera rates) |
+| Attention / auto-pause hysteresis (v0.1.23) | Arming at the line, the 0.5 s dwell and the auto-pause dwell tested with synthetic hands; **untested with real hands** |
+| Natural voices (v0.1.23) | Text chunking, overlapped playback, Kokoro / Piper engines on fake models, the PowerShell WinRT command (text on stdin, unsafe voice names ignored), the fallback chain, pinned downloads with a fake server (checksum mismatch installs nothing, unsafe wheel paths refused), the picker and its licence note tested; **no voice was downloaded or heard**: the pinned sizes / SHA-256 values were recorded when the voices were added, and Kokoro / Piper / Windows natural are unplayed on real speakers |
+| Model registry, Settings → Models, catalog (v0.1.23) | Validation, catalog SHA-256 check (tampered / bad entries ignored), local models, switch / enable / modes with undo, Try-it rollback and the agent op tested; the Models tab rendered and driven under Xvfb on Linux; **untested on Windows**, and Try-it has no real benchmark wired to the GUI yet (agent op and API only) |
+| Which app holds the camera, busiest programs (v0.1.23) | ConsentStore parsing with a fake registry, NVIDIA Broadcast's source from a fake settings file, messages, psutil aggregation with a fake psutil; **untested on the user's PC** (the real ConsentStore keys and Broadcast's settings file layout are assumptions) |
+| WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
 | Parakeet, Wayland | **Untested** |
+
+## Changes in v0.1.23
+
+v0.1.23 fixes what the v0.1.22 crash log and the user's PC showed (NVIDIA Broadcast holding the built-in camera,
+three app copies at once, a mouse pointer that stayed big, choppy tracking) and adds natural voices and a model list.
+
+* **Security: the local Agent Link server refuses web pages.** A `Host` header that is not this PC (localhost,
+  127.0.0.1, [::1]) or the active secure / backup link is refused (DNS rebinding); a state-changing request with
+  `Origin: null` or another site's origin is refused (it used to accept `null`); POST / PUT / PATCH must be JSON (no
+  `text/plain` or form posts, which a browser sends without asking). The bearer token is still required.
+* **Groq and similar servers work for Smart cleanup.** Requests to OpenAI-compatible servers now send
+  `User-Agent: ProjectAway/<version>`; Groq answered 403 without one.
+* **Backup link without Cloudflare** (localhost.run, then Pinggy, over SSH) in Settings → Agent Link and the CLI,
+  for when Cloudflare blocks an agent. Agents are remembered, the inbox survives a restart, and "Sent to Claude" /
+  "not connected" are spoken.
+* **One app at a time.** A second launch opens the running app's Settings instead of starting another copy
+  (crash logs showed three or four copies within seconds).
+* **The mouse pointer no longer stays big.** The big cursor never takes its own enlarged size for your original,
+  shrinks back at once when gestures pause, re-enlarges only after 1.5 s, checks that the restore took and offers
+  **Reset cursor size to normal** (tray, Settings, `away cursor reset`).
+* **Smoother pointer on a slow camera.** The pointer moves 120 times a second (`hands.cursor.output_hz`), gliding
+  to each new hand position and holding still when frames stop, instead of jumping once per camera frame.
+* **NVIDIA Broadcast is never opened as a fallback while the built-in camera is set up** (opening it made
+  Broadcast take the built-in camera), and a background camera check never opens it. Camera opens try the formats
+  the camera reports (WinRT lists them; "Element not found" moves on to the next one).
+* **Which app has the camera** ("Your built-in camera is being used by NVIDIA Broadcast") from Windows' privacy
+  records, with **Retry** and **Turn off**; a camera that keeps failing is retried after 5, 15 and 60 minutes, then
+  waits for Retry or a change in the camera list. With no camera working at all, retries stay frequent.
+* **Busy PC / choppy hints.** "Your PC is busy (NVIDIA Broadcast 40%), so gestures may be choppy" in the tray;
+  health and `away cameras diagnose` list the five busiest programs. A camera removed in Settings stops at once.
+* **No flicker at the edge of the attention gate**: arming uses the lower threshold and falls back to idle only
+  after 0.5 s; auto-pause (physical mouse use) ends after 0.5 s of quiet.
+* **Tray stability**: every tray icon update is serialized and guarded (Windows COM errors in pystray), the tray
+  thread is a single-threaded COM apartment, and crash.log labels helper windows and tags handled Windows
+  exceptions as "handled (not a crash)" instead of counting them as crashes.
+* **Natural voices** (Settings → Voice & input → Voice): Natural (Kokoro, five voices), Light (Piper), Windows
+  natural, or the classic system voice, with Preview and a one-time Download. A voice that cannot play falls back
+  to the next one silently. The download includes espeak-ng and phonemizer, which are GPL-3.0: they are fetched
+  only when you press Download, the picker says so first, and they are never in the installers.
+* **Settings → Models** and the online model catalog (see *Models*).
 
 ## Changes in v0.1.22
 
