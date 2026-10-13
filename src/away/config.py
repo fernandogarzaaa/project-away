@@ -16,6 +16,7 @@ import yaml
 from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
 from away.control.keys import KeyComboError, canonical
+from away.control.macros import MacrosConfig, validate_macros_config
 
 
 @dataclass
@@ -409,6 +410,7 @@ class AppConfig:
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
     models_dir: str | None = None
     bindings: BindingsConfig = field(default_factory=BindingsConfig)
+    macros: MacrosConfig = field(default_factory=MacrosConfig)  # recorded shortcuts (away.control.macros)
     # what :func:`migrate` changed while loading (not saved); the app re-saves the file when non-empty
     migrations: list[str] = field(default_factory=list, compare=False, repr=False)
 
@@ -673,6 +675,7 @@ def validate(cfg: AppConfig) -> None:
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
     validate_profile_tuning(cfg)
+    validate_macros_config(cfg.macros)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:
