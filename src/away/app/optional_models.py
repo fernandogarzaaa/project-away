@@ -80,15 +80,60 @@ MODELS: tuple[OptionalModel, ...] = (
 )
 
 
+# v0.1.20 "Smart cleanup" (voice.cleanup.mode: llm): small instruct models for llama.cpp, pinned to a Hub commit.
+# Both are Apache-2.0 (checked on the model cards and the LICENSE files of the GGUF repos). Qwen2.5-3B is NOT
+# listed on purpose: it ships under the Qwen Research license (non-commercial), not Apache-2.0.
+_QWEN = "https://huggingface.co/Qwen/"
+CLEANUP_NOTICE = "Apache-2.0 (Qwen2.5 by Alibaba Cloud); runs locally, nothing is sent anywhere."
+
+CLEANUP_MODELS: tuple[OptionalModel, ...] = (
+    OptionalModel(
+        key="qwen2.5-1.5b",
+        name="Smart cleanup: standard (Qwen2.5-1.5B-Instruct, Q4_K_M)",
+        filename="cleanup_qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        url=_QWEN + "Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/"
+        "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        sha256="6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+        size_bytes=1_117_320_736,
+        license="Apache-2.0",
+        notice=CLEANUP_NOTICE,
+        restricted=False,
+        kind="cleanup",
+        purpose="polishes dictation and adapts its tone to the app (voice.cleanup.mode: llm); best with a GPU",
+        cost="median 3.6 s per sentence on 2 shared ARM CPU cores (CPU build, measured); GPU build untested",
+    ),
+    OptionalModel(
+        key="qwen2.5-0.5b",
+        name="Smart cleanup: light (Qwen2.5-0.5B-Instruct, Q4_K_M)",
+        filename="cleanup_qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        url=_QWEN + "Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/"
+        "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        sha256="74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+        size_bytes=491_400_032,
+        license="Apache-2.0",
+        notice=CLEANUP_NOTICE,
+        restricted=False,
+        kind="cleanup",
+        purpose="the same, ~3x lighter: the CPU choice",
+        cost="median 1.4-2.4 s per sentence on 2 shared ARM CPU cores (CPU build, measured)",
+    ),
+)
+
+
+def all_models() -> tuple[OptionalModel, ...]:
+    """Every downloadable model: :data:`MODELS` (gaze) plus :data:`CLEANUP_MODELS`."""
+    return MODELS + CLEANUP_MODELS
+
+
 class LicenseNotAccepted(PermissionError):
     """A restricted model was requested without the explicit opt-in."""
 
 
 def get(key: str) -> OptionalModel:
-    for m in MODELS:
+    for m in all_models():
         if m.key == key:
             return m
-    raise KeyError(f"unknown model {key!r}; choose from {', '.join(m.key for m in MODELS)}")
+    raise KeyError(f"unknown model {key!r}; choose from {', '.join(m.key for m in all_models())}")
 
 
 def path_of(key: str, models_dir: Path) -> Path:
@@ -120,7 +165,7 @@ class Status:
 
 def status(models_dir: Path, kind: str | None = None) -> list[Status]:
     out = []
-    for m in MODELS:
+    for m in all_models():
         if kind is not None and m.kind != kind:
             continue
         part = models_dir / (m.filename + ".part")
@@ -251,6 +296,7 @@ def describe(models_dir: Path) -> list[dict[str, Any]]:
             "notice": s.model.notice,
             "purpose": s.model.purpose,
             "cost": s.model.cost,
+            "kind": s.model.kind,
         }
         for s in status(models_dir)
     ]

@@ -16,6 +16,7 @@ import yaml
 from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
 from away.control.keys import KeyComboError, canonical
+from away.voice.cleanup_config import CleanupConfig, DictionaryConfig, validate_cleanup
 
 
 @dataclass
@@ -275,6 +276,9 @@ class VoiceConfig:
     clap_sensitivity: float = 0.5  # 0 = only sharp, loud claps .. 1 = softer claps (more false triggers)
     clap_double_window: float = 0.6  # second clap within this many seconds = double clap (a single waits this long)
     clap_require_hands: bool = False  # only accept claps while the camera sees both hands close together
+    # v0.1.20: smart cleanup (rules / optional local LLM, per-app tone) and the personal dictionary
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    dictionary: DictionaryConfig = field(default_factory=DictionaryConfig)
 
 
 @dataclass
@@ -673,6 +677,7 @@ def validate(cfg: AppConfig) -> None:
     if not isinstance(cfg.bindings, BindingsConfig):
         raise BindingsError(["bindings: invalid"])
     validate_profile_tuning(cfg)
+    validate_cleanup(cfg.voice.cleanup, cfg.voice.dictionary)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:
