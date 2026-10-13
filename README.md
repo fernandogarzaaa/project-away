@@ -111,6 +111,10 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **A camera is "too slow":** Settings → Cameras → **Test both cameras** reports any camera below 10 frames per
   second as FAILED. Project Away has already tried every format and size on it; if NVIDIA Broadcast is
   installed it can use Broadcast's camera instead (and says so). Otherwise use the other camera alone.
+- **A camera never opens, but the Windows Camera app shows it:** Project Away now also tries the Camera app's
+  own way of reading cameras (WinRT). Settings → Cameras → **Diagnose** shows, for every camera, which way
+  works and how fast. If a camera keeps failing, Project Away stops retrying it after a while and says so; fix
+  it, then press **Retry cameras** (Settings → Cameras, or the tray menu).
 - **"The app crashed last time":** the details are in `crash.log` in the logs folder
   (`%LOCALAPPDATA%\ProjectAway\logs\crash.log` on Windows, next to `away.log`). Please attach it to a bug report.
 
@@ -478,6 +482,7 @@ away cameras use "HD User Facing" # single-camera mode: pick the camera by name
 away cameras add 2                # index, /dev/video2, or part of the name ("brio"); saved by name
 away cameras test                 # can all configured cameras stream at the same time? (~10 s)
 away cameras test --save          # ...and save the combination that works (e.g. secondary at 320x240 MJPG)
+away cameras diagnose [NAME]      # every camera x every backend: native formats, does each mode open, fps
 away calibrate-cameras            # wave an open hand through both views for ~20 s
 away calibrate-cameras --method checkerboard --checkerboard 9x6 --square-mm 25   # accurate option
 away calibrate-cameras --print-board board.png --checkerboard 9x6                # printable board
@@ -525,6 +530,46 @@ still said both cameras stream together. Now:
   *Live confidence* and the log say "using Camera (NVIDIA Broadcast) instead (HD User Facing is too slow ...)";
   `away cameras test --save` / *Save* writes Broadcast's camera into `hands.cameras`. With
   `virtual_fallback: false` the test only offers it.
+
+**WinRT MediaCapture backend, diagnose, retries that back off (v0.1.19).** On the reported Acer the built-in
+camera ("HD User Facing") never opens through OpenCV's DirectShow or Media Foundation (a fast "did not open",
+even when it is the only camera), while the Windows Camera app shows it smoothly. The Camera app uses WinRT
+`MediaCapture` through the Windows Camera Frame Server, so Project Away can now too:
+
+- **WinRT backend** (`away.multicam.winrt_capture`, Windows only, pywinrt packages: the `[winrt]` extra, part of
+  `[all]` and bundled in the Windows installer). The camera is found by its name among WinRT's source groups;
+  `MediaCapture` is opened with exclusive control (so the format can be chosen), else shared read-only (the
+  current format, when another app controls it). The native format closest to the configured one is used:
+  30 fps first, then the smallest size that covers the configured one, up to 1280x720, downscaled to fit the
+  configured size (aspect ratio kept). Frames come from a `MediaFrameReader` as BGRA8 and are converted to BGR
+  on the capture's own thread / asyncio loop; the rest of the app reads them like an OpenCV camera.
+- **Order** (`hands.camera_backend: auto`, the default): DirectShow → Media Foundation → **WinRT** (when both
+  failed or stayed below `hands.min_camera_fps`) → the slow-camera sweep → the NVIDIA Broadcast fallback. A
+  camera WinRT opened is remembered in `camera-modes.json` as backend `WinRT` with its native format and opened
+  that way first next time. `dshow`, `msmf` or `winrt` use that backend alone (virtual cameras such as NVIDIA
+  Broadcast always use DirectShow). Settings → Cameras → *Capture backend* sets it. `away.log` names the format,
+  sharing mode and output size WinRT used.
+- **HD sweep**: the slow-camera sweep now also tries 1280x720 (MJPG and the driver's format) last; HD frames are
+  downscaled to the configured size.
+- **Honest MJPG**: the FOURCC is set before the size, read back, set once more after the size when the driver
+  reports another one, and a camera that ignores it is logged as such ("asked for MJPG but the driver reports
+  YUY2") instead of being described as MJPG.
+- **`away cameras diagnose [NAME] [--seconds 1]`** and Settings → Cameras → **Diagnose**: for each camera and each
+  backend (DirectShow, Media Foundation, WinRT; elsewhere OpenCV's default) the native formats where the backend
+  can list them (WinRT can; OpenCV cannot list DirectShow / Media Foundation formats, so common modes are tried:
+  the configured size in MJPG, YUY2, NV12 and the driver's format, 1280x720 and 320x240), whether each opens, and
+  the measured fps or the error. The cameras are borrowed from the running app first. The test and diagnose
+  output in Settings is now a scrollable, word-wrapped text box (long lines were cut off).
+- **Retries back off and stop.** v0.1.17 re-probed a dead camera every 45 s forever (306 times in a day). Now the
+  failed cameras are re-probed after `hands.camera_retry_s` (45 s), then 90, 180, 360, 720 s, capped at
+  `hands.camera_retry_max_s` (900 s = 15 min), and after `hands.camera_retry_limit` (8) failures in a row the app
+  stops, says so once (tray notification, a red line in Settings → Cameras) and waits for **Retry cameras**
+  (tray menu, or Settings → Cameras). `camera_retry_limit: 0` never stops. The same back-off applies when no
+  camera works at all. A re-probe never reopens the camera that is tracking (it is an error instead, if the
+  failed camera's name now resolves to it), and a camera already measured too slow in this session is checked in
+  its remembered mode only, not swept again.
+- **Settings → Cameras**: the Device picker shows the current camera (it was blank until a row was selected), the
+  only camera is selected for editing and its Role defaults to primary.
 
 **Crash capture (v0.1.16).** The tray app, the Settings window, the CLI and the installed exe all write
 `crash.log` in the logs folder next to `away.log` (`%LOCALAPPDATA%\ProjectAway\logs\crash.log` on Windows;
@@ -707,7 +752,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1282 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy) | 1387 tests (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |
@@ -731,6 +776,8 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Hand roles (v0.1.14) | Track identity by position and size, stickiness, label flips (both hands, every frame), hands with the same label, release after loss and at the frame border, promotion of the helper, the flat-hand-first handover, right/left hysteresis, mode changes, voice commands and the `hands.prefer` migration unit-tested with synthetic hands and fake landmarkers; **untested with a live webcam and two real hands** (MediaPipe's real two-hand tracking, hands overlapping); with two cameras each camera assigns roles on its own (not cross-checked between views) |
 | Palm-glide scroll (v0.1.14) | Engage/disengage geometry on upright, rolled, sideways, upside-down, tilted and turned palms, local-frame direction, horizontal two-finger scroll, gain and dead zone, momentum decay and its interruption, tap timing, occlusion hold and jump rejection, the 3D path, and suppression of cursor/clicks/clutch/auto-scroll unit-tested with synthetic hands projected through a pinhole; Settings fields checked headless and the window rendered under Xvfb; **untested on real hardware**: MediaPipe's z on a fingertip touching the other hand, landmark quality while one hand covers the other, and the feel of the default depth threshold, gain and friction are not measured |
 | Four-finger auto-scroll (v0.1.9; v0.1.16 threshold, neutral point, proportional speed) | State machine, the configurable thumb-fold threshold with hysteresis, four-fingers-beat-the-clutch, the neutral point (mean of the hold) and the proportional speed unit-tested with synthetic hands; the thumb-fold measure checked on 11 real photos (folded 0.2-0.4, open palm 1.3-1.5); **the new 0.95 default is a judgment call, untested on the user's real hand** (only a live try shows whether it now triggers reliably without catching open palms) |
+| WinRT MediaCapture backend (v0.1.19) | Native-format choice (30 fps first, covering size up to 1280x720, FOURCC ranking), BGRA→BGR conversion, downscaling, exclusive → shared read-only fallback, set-format failure, reader start failure, open/read timeouts, the open chain order (DirectShow → Media Foundation → WinRT → sweep → NVIDIA Broadcast), single-backend settings, remembering the WinRT native mode and `away cameras diagnose` unit-tested against a fake WinRT API and fake OpenCV; on the Windows CI runner the real pywinrt packages import and the real asyncio plumbing runs against WinRT with no camera attached; **untested on real hardware**: whether WinRT really opens the Acer's "HD User Facing" (and at what rate), the real frame conversion path (`SoftwareBitmap` → BGRA8 buffer), exclusive vs shared behaviour while NVIDIA Broadcast holds the camera, and the frozen installer's WinRT bundle on a real PC |
+| Camera retry back-off, stop and Retry cameras; honest MJPG read-back; Settings camera fixes (v0.1.19) | Back-off schedule, stop after the limit with one notice, Retry cameras from the tray and from Settings (request file), the no-camera back-off, never reopening a held camera during a probe, the FOURCC set/read-back order and the "driver ignores MJPG" log tested with fakes; the Settings Cameras tab (Device picker filled, Role primary, wrapped output, Diagnose / Retry cameras) rendered under Xvfb; **untested on the real laptop** (whether JoyCam takes MJPG after the second set, and the tray item on a real Windows desktop) |
 | Slow-camera handling, `hands.min_camera_fps`, NVIDIA Broadcast fallback (v0.1.16) | Per-mode fps measurement, the fastest-mode choice, the DirectShow → Media Foundation sweep (a fake 1-fps camera that reaches 30 fps only in MJPG on Media Foundation), remembered modes, an always-slow camera replaced by Broadcast (closed first; Broadcast must reach the minimum), the FAILED verdicts in the test / Live confidence / log, saving Broadcast, and calibration refusing a slow camera unit-tested with a fake OpenCV on a fake clock; **untested on the real laptop**: why HD User Facing runs at 1 fps (driver, low-light exposure, Broadcast holding it) and whether any mode or Broadcast fixes it can only be shown there (`away.log` now lists every attempt) |
 | Crash capture (v0.1.16) | `faulthandler` set-up, the uncaught-exception hooks, the next-start report (once, and shared with Settings), rotation and the C++-exception noise filter unit-tested with simulated crashes; the hand-over wait and the Tk-thread queue unit-tested; **not yet exercised by a real native crash**, and the cause of the first-run Test crash is not proven (crash.log will show it if it happens again) |
 | Clap control (v0.1.9) | Detector tested on synthetic claps vs vowels, plosives, beeps and noise, plus timing and dictation gating; **untested with a real microphone and room** |

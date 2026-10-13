@@ -69,3 +69,15 @@ def no_camera_mode_store():
     capture.use_mode_store(None)
     yield
     capture.use_mode_store(None)
+
+
+@pytest.fixture(autouse=True)
+def no_real_winrt(monkeypatch):
+    """v0.1.19: the WinRT MediaCapture backend never touches real WinRT in tests (the Windows CI runner has the
+    pywinrt packages but no camera); tests that exercise it inject fakes. The backend preference is reset."""
+    from away.multicam import capture
+
+    monkeypatch.setattr(capture, "winrt_factory_available", lambda: (False, "WinRT disabled in tests"))
+    capture._backend_pref = "auto"
+    yield
+    capture._backend_pref = "auto"

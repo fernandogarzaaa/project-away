@@ -89,6 +89,7 @@ class DwellConfig:
 
 
 CAMERA_ROLES = ("primary", "secondary")
+CAMERA_BACKENDS = ("auto", "dshow", "msmf", "winrt")  # hands.camera_backend (Windows; elsewhere always auto)
 
 
 @dataclass
@@ -164,6 +165,15 @@ class HandsConfig:
     # Settings and the app log; calibration refuses to run with it; a too-slow camera is replaced by a free
     # NVIDIA Broadcast camera (when virtual_fallback is on and Broadcast itself reaches this rate)
     min_camera_fps: float = 10.0
+    # v0.1.19: the Windows capture backend: auto (DirectShow, then Media Foundation, then WinRT MediaCapture, the
+    # Windows Camera app's API) | dshow | msmf | winrt (that backend alone). Ignored on macOS / Linux.
+    camera_backend: str = "auto"
+    # v0.1.19: a camera that failed while another one tracks is re-probed after camera_retry_s, then after twice
+    # as long each time (capped at camera_retry_max_s); after camera_retry_limit failed probes in a row the app
+    # stops retrying and says so (tray / Settings > Cameras > Retry cameras starts again). 0 = never stop.
+    camera_retry_s: float = 45.0
+    camera_retry_max_s: float = 900.0
+    camera_retry_limit: int = 8
     max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
     # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
     roles: RolesConfig = field(default_factory=RolesConfig)
@@ -538,6 +548,18 @@ def validate(cfg: AppConfig) -> None:
     validate_hint("hands.camera_hint", cfg.hands.camera_hint)
     validate_cameras(cfg.hands.cameras)
     cfg.hands.camera_fourcc = validate_fourcc("hands.camera_fourcc", cfg.hands.camera_fourcc)
+    h = cfg.hands
+    if h.camera_backend not in CAMERA_BACKENDS:
+        raise ValueError(f"hands.camera_backend must be {'|'.join(CAMERA_BACKENDS)}, got {h.camera_backend!r}")
+    for name, lo, hi in (("camera_retry_s", 5.0, 3600.0), ("camera_retry_max_s", 5.0, 86400.0)):
+        val = getattr(h, name)
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= float(val) <= hi:
+            raise ValueError(f"hands.{name} must be seconds in [{lo:g}, {hi:g}], got {val!r}")
+    if h.camera_retry_max_s < h.camera_retry_s:
+        raise ValueError("hands.camera_retry_max_s must be >= hands.camera_retry_s")
+    lim = h.camera_retry_limit
+    if isinstance(lim, bool) or not isinstance(lim, int) or not 0 <= lim <= 1000:
+        raise ValueError(f"hands.camera_retry_limit must be an integer in [0, 1000] (0 = never stop), got {lim!r}")
     if not isinstance(cfg.hands.virtual_fallback, bool):
         raise ValueError(f"hands.virtual_fallback must be true or false, got {cfg.hands.virtual_fallback!r}")
     if cfg.hands.multicam.fusion not in ("weighted", "best_view"):

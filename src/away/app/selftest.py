@@ -137,6 +137,19 @@ def _pyperclip() -> str:
     return "pyperclip ok"
 
 
+def _winrt_camera() -> str:
+    """The WinRT MediaCapture camera backend (v0.1.19; Windows only): the pywinrt namespaces load."""
+    if not sys.platform.startswith("win"):
+        return "n/a (Windows only)"
+    from away.multicam import winrt_capture
+
+    mods = winrt_capture.load_winrt()
+    frames, mc = mods["frames"], mods["mc"]
+    assert hasattr(frames.MediaFrameSourceGroup, "find_all_async"), "MediaFrameSourceGroup.find_all_async missing"
+    assert hasattr(mc.MediaCaptureSharingMode, "EXCLUSIVE_CONTROL"), "MediaCaptureSharingMode missing"
+    return "pywinrt MediaCapture ok"
+
+
 def _away_data() -> str:
     from away.hands.runtime import bundled_model
 
@@ -177,6 +190,7 @@ CHECKS: tuple[Check, ...] = (
     Check("onnxruntime", "gesture model runtime", _onnxruntime),
     Check("mediapipe", "hand + face tracking", _mediapipe),
     Check("opencv", "camera capture", _opencv),
+    Check("winrt-camera", "WinRT camera backend (Windows)", _winrt_camera),
     Check("faster-whisper", "dictation (Whisper + Silero VAD)", _faster_whisper),
     Check("hf-xet", "fast Whisper download fallback (Xet)", _hf_xet),
     Check("sounddevice", "microphone (PortAudio)", _sounddevice),

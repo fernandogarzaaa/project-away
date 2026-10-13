@@ -285,3 +285,149 @@ def camera_speed_lines(threads: Sequence[Any], min_fps: float) -> list[tuple[boo
         else:
             out.append((False, f"camera {name}: ok - {mode or 'streaming'}, {fps:.1f} fps measured"))
     return out
+
+
+# ------------------------------------------------------------------------------ camera retries (v0.1.19)
+# v0.1.17 on the Acer: the background re-probe of a dead camera fired 306 times in one day (every 45 s, forever),
+# each time reopening a camera for ~10 s. It now backs off exponentially and stops after a number of failures,
+# with a notice; "Retry cameras" (tray, Settings > Cameras) starts it again.
+RETRY_REQUEST_FILE = "camera-retry-request.json"  # Settings -> app: retry the cameras now
+RETRY_STATUS_FILE = "camera-retry-status.json"  # app -> Settings: retrying / stopped, attempts, next retry
+
+
+class RetryBackoff:
+    """Exponential back-off for re-probing failed cameras: ``base_s``, then twice as long after every failure,
+    capped at ``max_s``; ``exhausted`` once ``limit`` failures happened in a row (0 = never). Pure logic."""
+
+    def __init__(self, base_s: float = 45.0, max_s: float = 900.0, limit: int = 8) -> None:
+        self.base_s = max(0.0, float(base_s))
+        self.max_s = max(self.base_s, float(max_s))
+        self.limit = max(0, int(limit))
+        self.failures = 0
+
+    def delay(self) -> float:
+        """Seconds to wait before the next attempt."""
+        return float(min(self.max_s, self.base_s * (2.0 ** min(self.failures, 60))))
+
+    def failed(self) -> None:
+        self.failures += 1
+
+    def reset(self) -> None:
+        self.failures = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.limit > 0 and self.failures >= self.limit
+
+    def schedule(self, n: int | None = None) -> list[float]:
+        """The waits of the next ``n`` attempts (default: until the limit) from a fresh start, for messages and
+        tests: 45, 90, 180, 360, 720, 900, 900, 900."""
+        count = self.limit if n is None else n
+        return [float(min(self.max_s, self.base_s * (2.0 ** min(f, 60)))) for f in range(count)]
+
+
+def _data_folder(folder: Any = None) -> Any:
+    from pathlib import Path
+
+    if folder is not None:
+        return Path(folder)
+    from away import paths
+
+    return Path(paths.data_dir())
+
+
+def request_camera_retry(folder: Any = None, clock: Callable[[], float] = time.time) -> bool:
+    """Ask the running app to retry its cameras now (Settings > Cameras > Retry cameras). True when written."""
+    import json
+
+    p = _data_folder(folder) / RETRY_REQUEST_FILE
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"t": clock()}), encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def take_retry_request(folder: Any = None, clock: Callable[[], float] = time.time, max_age_s: float = 3600.0) -> bool:
+    """True (once) when Settings asked for a retry within ``max_age_s``; the request is removed."""
+    import json
+
+    p = _data_folder(folder) / RETRY_REQUEST_FILE
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    with contextlib.suppress(OSError):
+        p.unlink()
+    t = data.get("t") if isinstance(data, dict) else None
+    return isinstance(t, (int, float)) and clock() - float(t) <= max_age_s
+
+
+def write_retry_status(
+    status: Mapping[str, Any] | None, folder: Any = None, clock: Callable[[], float] = time.time
+) -> None:
+    """The app's retry state for Settings (None: nothing is being retried; the file is removed)."""
+    import json
+
+    p = _data_folder(folder) / RETRY_STATUS_FILE
+    with contextlib.suppress(OSError):
+        if status is None:
+            p.unlink(missing_ok=True)
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**status, "t": clock()}), encoding="utf-8")
+        import os
+
+        os.replace(tmp, p)
+
+
+def read_retry_status(folder: Any = None) -> dict[str, Any] | None:
+    import json
+
+    try:
+        data = json.loads((_data_folder(folder) / RETRY_STATUS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def retry_status_text(status: Mapping[str, Any] | None) -> str:
+    """One line for Settings > Cameras: what the app's camera retry is doing ('' when nothing)."""
+    if not status:
+        return ""
+    failed = status.get("failed") or {}
+    names = ", ".join(str(k) for k in failed) or "a camera"
+    n = int(status.get("attempts") or 0)
+    if status.get("stopped"):
+        return (
+            f"Project Away stopped retrying {names} after {n} failed attempts. Fix the camera (or remove it), "
+            "then press Retry cameras."
+        )
+    nxt = status.get("next_s")
+    when = f" next retry in about {float(nxt):.0f} s" if isinstance(nxt, (int, float)) else ""
+    return f"Project Away is retrying {names} in the background ({n} failed so far;{when or ' retrying now'})."
+
+
+def wait_for_retry(
+    delay: float,
+    done: threading.Event,
+    stop: threading.Event,
+    manual: Callable[[], bool],
+    step: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """Wait ``delay`` seconds (``float('inf')``: until asked) for the next camera retry. ``"time"`` when it is
+    due, ``"manual"`` when "Retry cameras" was pressed (``manual()`` True), ``"done"`` when ``done`` or ``stop``
+    was set."""
+    deadline = clock() + delay
+    while True:
+        if done.is_set() or stop.is_set():
+            return "done"
+        if manual():
+            return "manual"
+        left = deadline - clock()
+        if left <= 0:
+            return "time"
+        done.wait(min(step, left))

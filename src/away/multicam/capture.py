@@ -497,10 +497,81 @@ MIN_CAMERA_FPS = 10.0  # the default of hands.min_camera_fps
 MEASURE_S = 1.5  # frames are counted this long in every attempted mode (0 = accept the first frame unmeasured)
 SWEEP_FOURCCS = ("MJPG", "YUY2", "NV12", "")  # "" = the driver's default format
 SWEEP_SIZES = ((640, 480), (320, 240))  # after the configured size
+# v0.1.19: 1280x720 last (MJPG and the driver's format): some built-in cameras deliver 30 fps only in their HD
+# mode; the frames are downscaled to the configured size (ScaledCapture), keeping the aspect ratio
+SWEEP_HD = (1280, 720)
+SWEEP_HD_FOURCCS = ("MJPG", "")
 SWEEP_FPS = 30  # CAP_PROP_FPS requested in the sweep when the configuration asks for none
 SWEEP_BUDGET_S = 60.0  # the slow-camera sweep stops trying further modes after this long
 BANDWIDTH_HINT = "two USB cameras may exceed the USB bandwidth; try another USB port, or the other camera alone"
 _BROADCAST_RE = re.compile(r"nvidia broadcast", re.IGNORECASE)
+
+
+# v0.1.19: hands.camera_backend. "auto" tries DirectShow, Media Foundation, then WinRT MediaCapture (the API the
+# Windows Camera app uses: the Acer's built-in camera opened only there); the others use that backend alone.
+WINRT = "WinRT"
+CAMERA_BACKENDS = ("auto", "dshow", "msmf", "winrt")
+_BACKEND_NAMES = {"dshow": "DirectShow", "msmf": "Media Foundation", "winrt": WINRT}
+_backend_pref = "auto"
+
+
+def backends_for(pref: str | None, windows: bool = True) -> list[str]:
+    """The backends to try, in order, for hands.camera_backend ``pref`` (None: the one set with
+    :func:`set_camera_backend`). Not on Windows: OpenCV's default backend only."""
+    if not windows:
+        return ["default"]
+    p = (pref if pref is not None else _backend_pref) or "auto"
+    if p == "auto":
+        return ["DirectShow", "Media Foundation", WINRT]
+    return [_BACKEND_NAMES[p]]
+
+
+def set_camera_backend(pref: str) -> None:
+    """Use hands.camera_backend ``pref`` (auto | dshow | msmf | winrt) for every open in this process."""
+    global _backend_pref
+    p = str(pref or "auto").strip().lower()
+    if p not in CAMERA_BACKENDS:
+        raise ValueError(f"camera backend must be one of {', '.join(CAMERA_BACKENDS)}, got {pref!r}")
+    if p != _backend_pref:
+        log.info("camera backend: %s", p)
+    _backend_pref = p
+
+
+def camera_backend() -> str:
+    return _backend_pref
+
+
+def configure(hands: Any) -> None:
+    """Apply the camera settings of ``hands`` (a HandsConfig) that hold for the whole process."""
+    with contextlib.suppress(ValueError):
+        set_camera_backend(str(getattr(hands, "camera_backend", "auto") or "auto"))
+
+
+def winrt_name(me: CameraDevice | None, label: str | None) -> str | None:
+    """The name WinRT looks the camera up by: the listed name, else a configured name (not a bare index)."""
+    if me is not None and me.name:
+        return me.name
+    text = str(label or "").strip().strip("'\"")
+    return text if text and not text.isdigit() and not text.startswith("/dev/") else None
+
+
+def winrt_factory_available() -> tuple[bool, str]:
+    from away.multicam import winrt_capture
+
+    return winrt_capture.available()
+
+
+def winrt_factory(name: str, width: int, height: int, occurrence: int = 0) -> Callable[[CaptureMode], Any]:
+    """Opens camera ``name`` through WinRT for a mode: the native format closest to it (a remembered native
+    mode is matched exactly), frames downscaled to fit ``width`` x ``height``."""
+    from away.multicam import winrt_capture
+
+    def make(mode: CaptureMode) -> Any:
+        return winrt_capture.WinrtCapture(
+            name, mode.width, mode.height, mode.fps, mode.fourcc, out_size=(width, height), occurrence=occurrence
+        )
+
+    return make
 
 
 def is_broadcast_camera(name: str) -> bool:
@@ -693,11 +764,17 @@ class OpenedCamera:
     hints: list[str] = field(default_factory=list)  # what to tell the user (Broadcast offer, too slow)
 
 
-def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
-    """FOURCC first (DirectShow picks the media type when the size is set), then size and frame rate."""
+def apply_mode(cap: Any, mode: CaptureMode, cv2: Any, label: str = "") -> str:
+    """FOURCC first (DirectShow picks the media type when the size is set), then size and frame rate.
+
+    v0.1.19 (JoyCam asked for MJPG read back YUY2): the FOURCC is read back after the size was set; when the
+    driver reports another one it is set once more (some DirectShow drivers only take it once the size is
+    known) and read back again. Returns what the driver reports (``""`` when it reports nothing); a camera
+    that ignores the request is logged as such (``label`` names it) instead of claiming the requested format."""
+    prop = getattr(cv2, "CAP_PROP_FOURCC", 6)
     if mode.fourcc:
         with contextlib.suppress(Exception):
-            cap.set(getattr(cv2, "CAP_PROP_FOURCC", 6), fourcc_code(mode.fourcc))
+            cap.set(prop, fourcc_code(mode.fourcc))
     if mode.width and mode.height:
         with contextlib.suppress(Exception):
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
@@ -707,6 +784,93 @@ def apply_mode(cap: Any, mode: CaptureMode, cv2: Any) -> None:
             cap.set(cv2.CAP_PROP_FPS, mode.fps)
     with contextlib.suppress(Exception):
         cap.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)  # low latency; not every backend honours it
+    if not mode.fourcc:
+        return ""
+    got = _read_fourcc(cap, prop)
+    if got and got != mode.fourcc:
+        with contextlib.suppress(Exception):
+            cap.set(prop, fourcc_code(mode.fourcc))
+        got = _read_fourcc(cap, prop)
+        if got == mode.fourcc:
+            log.info("camera %s: %s accepted only after the size was set", label or "?", mode.fourcc)
+    if got and got != mode.fourcc:
+        log.warning(
+            "camera %s: asked for %s but the driver reports %s; it ignores the requested pixel format (frames are %s)",
+            label or "?",
+            mode.fourcc,
+            got,
+            got,
+        )
+    elif not got:
+        log.info("camera %s: asked for %s; the driver does not report its pixel format", label or "?", mode.fourcc)
+    return got
+
+
+def _read_fourcc(cap: Any, prop: int) -> str:
+    try:
+        return decode_fourcc(cap.get(prop))
+    except Exception:
+        return ""
+
+
+def fit_within(width: int, height: int, max_w: int, max_h: int) -> tuple[int, int]:
+    """``width`` x ``height`` scaled down (aspect ratio kept, never up) to fit ``max_w`` x ``max_h``; unchanged
+    when either limit is 0 (auto) or it already fits. Even sizes (video-friendly)."""
+    w, h, mw, mh = int(width), int(height), int(max_w or 0), int(max_h or 0)
+    if not (w and h and mw and mh) or (w <= mw and h <= mh):
+        return w, h
+    s = min(mw / w, mh / h)
+    return max(2, int(w * s) // 2 * 2), max(2, int(h * s) // 2 * 2)
+
+
+def resize_frame(frame: Any, width: int, height: int) -> Any:
+    """``frame`` resized to ``width`` x ``height`` (OpenCV's area filter when available, else nearest pixel)."""
+    try:
+        import cv2
+
+        return cv2.resize(frame, (int(width), int(height)), interpolation=cv2.INTER_AREA)
+    except Exception:
+        import numpy as np
+
+        h, w = frame.shape[:2]
+        ys = (np.arange(int(height)) * h // int(height)).clip(0, h - 1)
+        xs = (np.arange(int(width)) * w // int(width)).clip(0, w - 1)
+        return frame[ys][:, xs]
+
+
+class ScaledCapture:
+    """A capture whose frames are downscaled to fit ``max_w`` x ``max_h`` (aspect ratio kept): the 1280x720 sweep
+    mode delivers HD frames while the rest of the app asked for the configured size (v0.1.19)."""
+
+    def __init__(self, cap: Any, max_w: int, max_h: int) -> None:
+        self._cap = cap
+        self.max_w, self.max_h = int(max_w), int(max_h)
+
+    def scale(self, frame: Any) -> Any:
+        if frame is None or not hasattr(frame, "shape"):
+            return frame
+        h, w = frame.shape[:2]
+        ow, oh = fit_within(w, h, self.max_w, self.max_h)
+        return frame if (ow, oh) == (w, h) else resize_frame(frame, ow, oh)
+
+    def read(self) -> tuple[bool, Any]:
+        ok, frame = self._cap.read()
+        return ok, (self.scale(frame) if ok else frame)
+
+    def release(self) -> None:
+        self._cap.release()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cap, name)
+
+
+def scaled(cap: Any, frame: Any, mode: CaptureMode, width: int, height: int) -> tuple[Any, Any]:
+    """Wrap ``cap`` in :class:`ScaledCapture` when ``mode`` is larger than the configured size (the HD sweep
+    mode); ``(cap, first frame)`` either way."""
+    if not (width and height and mode.width and mode.height) or (mode.width <= width and mode.height <= height):
+        return cap, frame
+    sc = ScaledCapture(cap, width, height)
+    return sc, sc.scale(frame)
 
 
 def read_first(
@@ -728,10 +892,13 @@ def read_first(
 
 @dataclass
 class _Attempt:
-    backend: str  # DirectShow | Media Foundation | default
+    backend: str  # DirectShow | Media Foundation | WinRT | default
     api: Any  # cv2.CAP_* (None = OpenCV's default backend)
     src: int | str  # the index in *that* backend's numbering
     modes: list[CaptureMode]
+    # v0.1.19: opens a capture for a mode itself (the WinRT backend picks the native format from the mode);
+    # None = cv2.VideoCapture(src, api) + apply_mode
+    factory: Callable[[CaptureMode], Any] | None = None
 
 
 def decode_fourcc(value: Any) -> str:
@@ -831,6 +998,7 @@ class _Candidate:
     src: int | str
     mode: CaptureMode
     fps: float | None  # None: not measured
+    factory: Callable[[CaptureMode], Any] | None = None
 
 
 class _Search:
@@ -881,15 +1049,22 @@ class _Search:
             self._check()
             self.done.add(k)
             log.info("camera %s: trying %s index %s, mode %s", self.label, at.backend, at.src, mode.describe())
-            cap = cv2.VideoCapture(at.src) if at.api is None else cv2.VideoCapture(at.src, at.api)
+            cap = self._create(at.src, at.api, at.factory, mode)
             if not cap.isOpened():
+                why = str(getattr(cap, "error", "") or "")
                 with contextlib.suppress(Exception):
                     cap.release()
-                self.tried.append(f"{at.backend} {at.src}: did not open")
-                log.warning("camera %s: %s could not open index %s", self.label, at.backend, at.src)
+                self.tried.append(f"{at.backend} {at.src}: did not open" + (f" ({why})" if why else ""))
+                log.warning(
+                    "camera %s: %s could not open index %s%s", self.label, at.backend, at.src, f": {why}" if why else ""
+                )
                 return None
             self.opened = True
-            apply_mode(cap, mode, cv2)
+            if at.factory is None:
+                apply_mode(cap, mode, cv2, self.label)
+            else:  # the backend chose a native format itself: that is the mode to remember
+                native = getattr(cap, "mode", None)
+                mode = native if isinstance(native, CaptureMode) else mode
             frame = read_first(cap, self.first_frame_s if self.first else self.retry_frame_s, self.clock, self.sleep)
             self.first = False
             if frame is None:
@@ -909,7 +1084,7 @@ class _Search:
                 continue
             fps, frame = measure_fps(cap, frame, self.measure_s, self.clock, self.sleep, self.cancelled)
             rb = read_back(cap, cv2)
-            cand = _Candidate(at.backend, at.api, at.src, mode, fps)
+            cand = _Candidate(at.backend, at.api, at.src, mode, fps, at.factory)
             if fps is None or fps >= self.min_fps:
                 log.info("%s", attempt_line(self.label, at.backend, at.src, mode, rb, fps, "ok"))
                 log.info(
@@ -928,22 +1103,50 @@ class _Search:
             self._check()
         return None
 
+    def _create(self, src: int | str, api: Any, factory: Callable[[CaptureMode], Any] | None, mode: CaptureMode) -> Any:
+        """The capture for one attempt: ``factory(mode)`` (WinRT), else ``cv2.VideoCapture``. A factory that
+        raises gives a capture that is not open and says why (``error``)."""
+        if factory is not None:
+            try:
+                return factory(mode)
+            except Exception as exc:
+                return _NotOpened(str(exc))
+        cv2 = self.cv2
+        return cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+
     def reopen(self, cand: _Candidate) -> tuple[Any, Any] | None:
         """Open ``cand`` again (the fastest of the slow modes); ``(cap, frame)`` or None."""
         self._check()
         cv2 = self.cv2
-        cap = cv2.VideoCapture(cand.src) if cand.api is None else cv2.VideoCapture(cand.src, cand.api)
+        cap = self._create(cand.src, cand.api, cand.factory, cand.mode)
         if not cap.isOpened():
             with contextlib.suppress(Exception):
                 cap.release()
             return None
-        apply_mode(cap, cand.mode, cv2)
+        if cand.factory is None:
+            apply_mode(cap, cand.mode, cv2, self.label)
         frame = read_first(cap, max(self.retry_frame_s, 2.0), self.clock, self.sleep)
         if frame is None:
             with contextlib.suppress(Exception):
                 cap.release()
             return None
         return cap, frame
+
+
+class _NotOpened:
+    """A capture that did not open (a backend factory raised): ``error`` says why."""
+
+    def __init__(self, error: str) -> None:
+        self.error = error
+
+    def isOpened(self) -> bool:
+        return False
+
+    def read(self) -> tuple[bool, Any]:
+        return False, None
+
+    def release(self) -> None:
+        pass
 
 
 def _try_open(
@@ -1123,8 +1326,9 @@ def msmf_index(
 
 def sweep_modes(width: int, height: int, fps: int, virtual: bool = False) -> list[CaptureMode]:
     """The slow-camera sweep (v0.1.16): MJPG, YUY2, NV12 and the driver's format at the configured size, then
-    640x480, then 320x240, each asking for ``fps`` (or SWEEP_FPS) with ``CAP_PROP_FPS``. A virtual camera only
-    in its own format."""
+    640x480, then 320x240, each asking for ``fps`` (or SWEEP_FPS) with ``CAP_PROP_FPS``; v0.1.19: then 1280x720
+    in MJPG and the driver's format (downscaled to the configured size when it is used). A virtual camera only
+    in its own format (and never in HD)."""
     f = int(fps or 0) or SWEEP_FPS
     sizes: list[tuple[int, int]] = []
     for size in ((int(width), int(height)), *SWEEP_SIZES):
@@ -1134,6 +1338,12 @@ def sweep_modes(width: int, height: int, fps: int, virtual: bool = False) -> lis
     for w, h in sizes:
         for fcc in ("",) if virtual else SWEEP_FOURCCS:
             m = CaptureMode(w, h, f, fcc)
+            if m not in out:
+                out.append(m)
+    if not virtual:
+        hw, hh = SWEEP_HD
+        for fcc in SWEEP_HD_FOURCCS:
+            m = CaptureMode(hw, hh, f, fcc)
             if m not in out:
                 out.append(m)
     return out
@@ -1176,6 +1386,7 @@ def open_camera(
     min_fps: float | None = None,
     measure_s: float | None = None,
     sweep_budget_s: float | None = None,
+    backend: str | None = None,
 ) -> OpenedCamera:
     """Open ``src`` (an index or path from :func:`resolve_device`) and prove it works: read a frame, then
     measure the frame rate for ``measure_s`` (default MEASURE_S; 0 = do not measure).
@@ -1187,10 +1398,13 @@ def open_camera(
        process already holds another camera) 320x240 and 320x240 at 15 fps;
     2. Media Foundation at the index *its own* list gives this camera (:func:`msmf_index`): the configured
        size, then nothing forced;
-    3. only when every mode so far delivered frames but below ``min_fps`` (default MIN_CAMERA_FPS): the sweep
+    3. v0.1.19, when DirectShow and Media Foundation failed or stayed below ``min_fps``: WinRT MediaCapture
+       (:mod:`away.multicam.winrt_capture`, the Windows Camera app's API) by the camera's name, in the native
+       format closest to the configured one (1280x720 allowed, downscaled);
+    4. only when every mode so far delivered frames but below ``min_fps`` (default MIN_CAMERA_FPS): the sweep
        (:func:`sweep_modes`) on DirectShow, then on Media Foundation, for at most ``sweep_budget_s``; the
        fastest mode wins and is remembered in camera-modes.json (with its fps);
-    4. ``virtual_fallback``: exactly one free NVIDIA Broadcast virtual camera when the camera did not open,
+    5. ``virtual_fallback``: exactly one free NVIDIA Broadcast virtual camera when the camera did not open,
        sent no frames, or stayed below ``min_fps`` in every mode (Broadcast must reach ``min_fps`` itself;
        the slow camera is closed first and not kept open: Broadcast usually shows that same camera).
 
@@ -1199,6 +1413,10 @@ def open_camera(
     worked are kept and tried first on later opens in this session. Virtual cameras are opened in their own
     format (no FOURCC). Raises :class:`CameraOpenError` saying whether the camera did not open or opened without
     frames, with hints (USB bandwidth, NVIDIA Broadcast) that are also logged.
+
+    ``backend`` (hands.camera_backend; None = :func:`set_camera_backend`): ``auto`` is the order above;
+    ``dshow`` / ``msmf`` / ``winrt`` use that backend alone (virtual cameras always use DirectShow). A camera
+    that WinRT opened is remembered as backend ``WinRT`` with its native format, and opened that way first.
     """
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
@@ -1225,6 +1443,7 @@ def open_camera(
             min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
             measure_s=MEASURE_S if measure_s is None else float(measure_s),
             sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
+            backend=backend,
         )
     finally:
         with _lock:
@@ -1251,6 +1470,7 @@ def _open_camera(
     min_fps: float,
     measure_s: float,
     sweep_budget_s: float,
+    backend: str | None = None,
 ) -> OpenedCamera:
     devs = list(devices or [])
     me = next((d for d in devs if (d.index if d.index is not None else d.path) == src), None)
@@ -1267,8 +1487,14 @@ def _open_camera(
     with _lock:
         known_slow = _slow_known.get(key)
     windows = _windows() and isinstance(src, int)
+    allowed = backends_for(backend, windows)
+    if windows and virtual and "DirectShow" not in allowed:
+        allowed = ["DirectShow", *allowed]  # virtual cameras (NVIDIA Broadcast) are DirectShow filters
+    if kept is not None and kept[0] not in allowed and kept[0] != "default":
+        kept = None  # remembered for a backend that hands.camera_backend now rules out
     search = _Search(repr(name), cv2, first_frame_s, retry_frame_s, clock, sleep, min_fps, measure_s)
     mf_index: list[int | None] = []  # computed once, when Media Foundation is first needed
+    winrt_tried: list[bool] = []
 
     def mf() -> int | None:
         if not mf_index:
@@ -1280,6 +1506,8 @@ def _open_camera(
     def found(got: tuple[Any, Any, _Candidate], first: tuple[str, CaptureMode]) -> OpenedCamera:
         cap, frame, cand = got
         _remember(key, name, cand.backend, cand.mode, first, cand.fps, min_fps)
+        if cand.factory is None:
+            cap, frame = scaled(cap, frame, cand.mode, int(width), int(height))
         return OpenedCamera(HeldCapture(cap, str(src)), frame, cand.mode, src, name, backend=cand.backend, fps=cand.fps)
 
     def attempt(at: _Attempt, deadline: float | None = None) -> OpenedCamera | None:
@@ -1289,20 +1517,45 @@ def _open_camera(
             at.modes.insert(0, kept[1])
         got = search.run(at, deadline)
         # "first" = the configured way (DirectShow on Windows): anything else is remembered for the next start
-        return None if got is None else found(got, ("DirectShow" if windows else "default", modes[0]))
+        return None if got is None else found(got, (allowed[0] if windows else "default", modes[0]))
+
+    def winrt_attempt(mode_list: list[CaptureMode]) -> _Attempt | None:
+        """The WinRT attempt (v0.1.19), or None when it cannot be made here (logged once per open)."""
+        if winrt_tried:
+            return None
+        winrt_tried.append(True)
+        wname = winrt_name(me, label)
+        if wname is None:
+            search.tried.append("WinRT: no camera name to look up")
+            log.warning("camera %r: WinRT needs the camera's name; skipping it", name)
+            return None
+        ok, why = winrt_factory_available()
+        if not ok:
+            search.tried.append(f"WinRT: {why}")
+            log.warning("camera %r: skipping WinRT: %s", name, why)
+            return None
+        occurrence = 0
+        if me is not None:
+            same = [d for d in devs if d.name.lower() == me.name.lower()]
+            occurrence = next((j for j, d in enumerate(same) if d is me), 0)
+        factory = winrt_factory(wname, int(width), int(height), occurrence)
+        return _Attempt(WINRT, None, src, list(mode_list), factory)
+
+    def by_backend(b: str, mode_list: list[CaptureMode]) -> _Attempt | None:
+        if not windows:
+            return _Attempt("default", None, src, list(mode_list))
+        if b == "Media Foundation":
+            mfi = mf()
+            return None if mfi is None else _Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(mode_list))
+        if b == WINRT:
+            return winrt_attempt(mode_list)
+        return _Attempt("DirectShow", cv2.CAP_DSHOW, src, list(mode_list))
 
     if known_slow is not None and kept is not None:
-        # a full sweep already found nothing fast enough: check the remembered (fastest) mode again only; still
-        # slow -> straight to the fallback, without another long sweep at every start
+        # a full search already found nothing fast enough in this session: check the remembered (fastest) mode
+        # again only; still slow -> straight to the fallback, without another long sweep at every (re)try
         b, m = kept
-        at: _Attempt | None
-        if not windows:
-            at = _Attempt("default", None, src, [m])
-        elif b == "Media Foundation":
-            mfi = mf()
-            at = None if mfi is None else _Attempt("Media Foundation", cv2.CAP_MSMF, mfi, [m])
-        else:
-            at = _Attempt("DirectShow", cv2.CAP_DSHOW, src, [m])
+        at = by_backend(b, [m])
         got = None if at is None else attempt(at)
         if got is not None:
             return got
@@ -1310,6 +1563,7 @@ def _open_camera(
             known_slow = None
             with _lock:
                 _slow_known.pop(key, None)
+            winrt_tried.clear()
     if known_slow is not None:
         pass
     elif not windows:
@@ -1319,20 +1573,29 @@ def _open_camera(
     else:
         assert isinstance(src, int)
         mf_modes = [CaptureMode(int(width), int(height), int(fps or 0), ""), DEVICE_DEFAULT]
-        order = ["DirectShow", "Media Foundation"]
+        usual = {"DirectShow": list(modes), "Media Foundation": mf_modes}
+        order: list[str] = [b for b in ("DirectShow", "Media Foundation") if b in allowed]
         if kept is not None and kept[0] == "Media Foundation":
             order.reverse()
-        for backend in order:
-            if backend == "DirectShow":
-                got = attempt(_Attempt("DirectShow", cv2.CAP_DSHOW, src, list(modes)))
+        if WINRT in allowed and not virtual:
+            # after DirectShow / Media Foundation (failed or too slow), before the NVIDIA Broadcast fallback; first
+            # when it is what worked last (camera-modes.json) or the only backend allowed
+            if kept is not None and kept[0] == WINRT:
+                order.insert(0, WINRT)
             else:
-                mfi = mf()
-                got = None if mfi is None else attempt(_Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(mf_modes)))
+                order.append(WINRT)
+        for b in order:
+            if b == WINRT:
+                at = winrt_attempt([CaptureMode(int(width), int(height), int(fps or 0), "")])
+            else:
+                at = by_backend(b, usual[b])
+            got = None if at is None else attempt(at)
             if got is not None:
                 return got
 
     # every mode so far either failed or was too slow
-    if search.best is not None and known_slow is None:
+    sweep_backends = [b for b in ("DirectShow", "Media Foundation") if b in allowed] if windows else ["default"]
+    if search.best is not None and known_slow is None and sweep_backends:
         log.warning(
             "camera %r: below %g fps in every usual mode (best %.1f fps, %s %s); trying every format and size",
             name,
@@ -1349,17 +1612,13 @@ def _open_camera(
             group = [m for m in sweep if (m.width, m.height) == size]
             if clock() >= deadline:
                 break
-            if windows:
-                assert isinstance(src, int)
-                got = attempt(_Attempt("DirectShow", cv2.CAP_DSHOW, src, list(group)), deadline)
-                if got is None and clock() < deadline:
-                    mfi = mf()
-                    if mfi is not None:
-                        got = attempt(_Attempt("Media Foundation", cv2.CAP_MSMF, mfi, list(group)), deadline)
-            else:
-                got = attempt(_Attempt("default", None, src, list(group)), deadline)
-            if got is not None:
-                return got
+            for b in sweep_backends:
+                if clock() >= deadline:
+                    break
+                at = by_backend(b, group)
+                got = None if at is None else attempt(at, deadline)
+                if got is not None:
+                    return got
 
     hints: list[str] = []
     broadcast = [d for d in devs if d.virtual and is_broadcast_camera(d.name) and d.index is not None]
@@ -1911,14 +2170,25 @@ def open_capture(
     cv2: Any = None,
     low_res: bool | None = None,
     min_fps: float | None = None,
+    skip_held: bool = False,
+    devices: list[CameraDevice] | None = None,
 ) -> Any:
     """Open one camera of a multi-camera set (see :func:`open_camera`); returns a reader whose first ``read()``
     gives the frame that proved the mode works. A secondary camera may fall back to 320x240 (``low_res``
-    overrides that: True also for the primary, False never). ``min_fps``: hands.min_camera_fps."""
+    overrides that: True also for the primary, False never). ``min_fps``: hands.min_camera_fps.
+
+    ``skip_held`` (the background re-probe of failed cameras, v0.1.19): a camera this process already holds
+    open (the one that is working) is never opened again; that is an error instead (it means the failed
+    camera's name now resolves to the working camera)."""
     if cv2 is None:  # pragma: no cover - real OpenCV
         cv2 = load_cv2()
-    devs = camera_devices()
+    devs = camera_devices() if devices is None else list(devices)
     src = resolve_device(spec.device, devs if devs else None, hint=spec.index_hint)  # by name, at every open
+    if skip_held and str(src) in held_cameras():
+        raise CameraOpenError(
+            f"camera {spec.device!r} resolves to camera {src}, which is already open and working; "
+            "not reopening it during a retry"
+        )
     low = low_res if low_res is not None else (True if spec.role != "primary" else None)
     got = open_camera(
         src,
@@ -2159,11 +2429,11 @@ def primary_index(specs: list[CameraSpec]) -> int:
 
 
 def camera_opener(
-    virtual_fallback: bool = True, low_res: bool | None = None, min_fps: float | None = None
+    virtual_fallback: bool = True, low_res: bool | None = None, min_fps: float | None = None, skip_held: bool = False
 ) -> Callable[[CameraSpec], Any]:
     """The opener every multi-camera user shares: :func:`open_capture` with the NVIDIA Broadcast fallback
     setting, a secondary allowed down to 320x240, the minimum frame rate, and the backend/mode kept for the
-    session (and across starts with :func:`use_mode_store`)."""
+    session (and across starts with :func:`use_mode_store`). ``skip_held``: see :func:`open_capture`."""
     import functools
 
     kw: dict[str, Any] = {"virtual_fallback": virtual_fallback}
@@ -2171,6 +2441,8 @@ def camera_opener(
         kw["low_res"] = low_res
     if min_fps is not None:
         kw["min_fps"] = min_fps
+    if skip_held:
+        kw["skip_held"] = True
     return functools.partial(open_capture, **kw)
 
 
@@ -2187,6 +2459,7 @@ def start_camera_threads(
     thread_factory: Callable[..., Any] = CameraThread,
     start: bool = True,
     min_fps: float | None = None,
+    skip_held: bool = False,
 ) -> list[Any]:
     """Start one capture thread per camera, the same way everywhere (the app, Settings > Live confidence and
     Test both cameras, ``away calibrate-cameras`` and ``away cameras test``; v0.1.15):
@@ -2199,7 +2472,7 @@ def start_camera_threads(
     """
     if open_lock is None and (_windows() if serial is None else serial):
         open_lock = threading.Lock()
-    op = opener or camera_opener(virtual_fallback, min_fps=min_fps)
+    op = opener or camera_opener(virtual_fallback, min_fps=min_fps, skip_held=skip_held)
     first = primary_index(specs)
     threads: list[Any] = [None] * len(specs)
     threads[first] = thread_factory(first, specs[first], pairer, stop, open_lock=open_lock, opener=op)

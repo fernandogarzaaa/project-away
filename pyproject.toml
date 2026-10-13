@@ -32,6 +32,19 @@ dependencies = [
 
 [project.optional-dependencies]
 hands = ["mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17"]
+# v0.1.19: the WinRT MediaCapture camera backend (Windows only; the API the Windows Camera app uses)
+winrt = [
+  "winrt-runtime>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Devices.Enumeration>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.Capture>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.Capture.Frames>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.MediaProperties>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams>=2.0; sys_platform == 'win32'",
+]
 face = ["mediapipe>=0.10.14", "opencv-python>=4.8"]
 # Silero VAD comes from the ONNX model bundled in faster-whisper (no torch needed)
 voice = ["faster-whisper>=1.1", "sounddevice>=0.4.6"]
@@ -44,6 +57,17 @@ all = [
   "faster-whisper>=1.1", "sounddevice>=0.4.6",
   "pynput>=1.7.6", "pyperclip>=1.8",
   "pystray>=0.19", "Pillow>=10",
+  # the [winrt] extra (Windows only)
+  "winrt-runtime>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Devices.Enumeration>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.Capture>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.Capture.Frames>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Media.MediaProperties>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging>=2.0; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams>=2.0; sys_platform == 'win32'",
 ]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML"]
 

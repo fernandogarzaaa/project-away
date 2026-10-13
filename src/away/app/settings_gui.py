@@ -34,7 +34,7 @@ from away.bindings import (
     parse_action,
     split_trigger,
 )
-from away.config import PERFORMANCE_MODES, ROLE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
+from away.config import CAMERA_BACKENDS, PERFORMANCE_MODES, ROLE_MODES, UPDATE_CHANNELS, VOICE_MODES, AppConfig
 from away.hands.gestures import GestureEvent
 
 TUNABLE_LABELS = {
@@ -124,6 +124,7 @@ VOICE_FIELDS = {
     "voice.ambient_fallback": ("commands_only", "type"),
     "updates.channel": UPDATE_CHANNELS,
     "performance.mode": PERFORMANCE_MODES,
+    "hands.camera_backend": CAMERA_BACKENDS,
 }
 PERFORMANCE_LABELS = {"auto": "Auto (detect)", "cpu": "CPU only", "gpu": "GPU (NVIDIA CUDA)"}
 
@@ -361,6 +362,7 @@ class SettingsModel:
             "hands.gestures.autoscroll_horizontal",
             "voice.clap_enabled",
             "voice.clap_require_hands",
+            "hands.camera_backend",
         }
         if path not in allowed:
             return f"unknown setting {path!r}"
@@ -498,13 +500,66 @@ class SettingsModel:
 
     def role_default(self, selected: int | None = None) -> str:
         """What the Role picker shows: primary in single-camera mode (the only camera is the primary, so Apply on
-        it just works), the selected camera's own role, or secondary for a camera about to be added."""
+        it just works), the selected camera's own role, or secondary for a camera about to be added. v0.1.19:
+        the only camera (also a one-entry hands.cameras) and a set without a primary default to primary."""
         cams = self.cfg.hands.cameras
-        if not cams:
+        if len(cams) <= 1:
             return "primary"
         if selected is not None and 0 <= selected < len(cams):
             return cams[selected].role
+        if not any(c.role == "primary" for c in cams):
+            return "primary"
         return "secondary"
+
+    def device_choice(self, selected: int | None = None, choices: list[str] | None = None) -> str:
+        """The Device picker entry for a camera row (v0.1.19: the picker was blank until a row was selected):
+        the selected row's camera, else the only (or primary) camera; ``""`` when it is not in the list."""
+        from away.multicam.capture import find_device
+
+        h = self.cfg.hands
+        if h.cameras:
+            if selected is not None and 0 <= selected < len(h.cameras):
+                dev: Any = h.cameras[selected].device
+            else:
+                dev = next((c.device for c in h.cameras if c.role == "primary"), h.cameras[0].device)
+        else:
+            dev = h.camera_index
+        values = getattr(self, "choice_values", {}) or {}
+        labels = list(choices) if choices is not None else list(values)
+        for label in labels:
+            if label in values and str(values[label]) == str(dev):
+                return label
+        listed = self._listed()
+        if listed:
+            d = find_device(dev, listed)
+            if d is not None:
+                for label in labels:
+                    if label.split(":", 1)[0].strip() == str(d.index if d.index is not None else d.path):
+                        return label
+        for label in labels:  # "HD User Facing (configured)" / "1: camera 1 (in use by Project Away)"
+            if label.split(" (", 1)[0].strip() == str(dev) or label.split(":", 1)[0].strip() == str(dev):
+                return label
+        return ""
+
+    def camera_backend(self) -> str:
+        return str(self.cfg.hands.camera_backend)
+
+    @staticmethod
+    def retry_status_text(folder: Any = None) -> str:
+        """What the running app's camera retry is doing (Settings > Cameras), '' when nothing."""
+        from away.app.camera_loop import read_retry_status, retry_status_text
+
+        try:
+            return retry_status_text(read_retry_status(folder))
+        except Exception:
+            return ""
+
+    @staticmethod
+    def request_camera_retry(folder: Any = None) -> str | None:
+        """Retry cameras: ask the running app to probe its failed cameras now. An error message, or None."""
+        from away.app.camera_loop import request_camera_retry
+
+        return None if request_camera_retry(folder) else "could not ask Project Away to retry (data folder)"
 
     def multi_tools(self) -> tuple[bool, str]:
         """Are Calibrate / Live confidence usable? ``(enabled, hint)``: they need two configured cameras."""
@@ -1116,6 +1171,7 @@ def camera_confidence_worker(
         if start is None:  # pragma: no cover - real cameras
             import functools
 
+            capture.configure(model.cfg.hands)
             capture.use_mode_store(capture.default_mode_file())
             start = functools.partial(start_camera_threads, min_fps=floor)
         threads = start(list(cams), pairer, cam_stop, virtual_fallback=bool(model.cfg.hands.virtual_fallback))
@@ -1178,6 +1234,7 @@ def camera_test_worker(
         if lease.app_running and not lease.handed_over:
             out.put({"error": "Project Away is using the cameras and did not hand them over in time - pause it"})
             return
+        capture.configure(model.cfg.hands)
         if tester is None:  # pragma: no cover - real cameras
             import functools
 
@@ -1191,6 +1248,43 @@ def camera_test_worker(
         out.put({"report": report})
     except Exception as exc:
         out.put({"error": f"camera test failed: {exc}"})
+    finally:
+        leases.release()
+
+
+def camera_diagnose_worker(
+    model: SettingsModel,
+    out: queue.Queue[Any],
+    *,
+    leases: Any = None,
+    runner: Callable[..., Any] | None = None,
+    lister: Callable[[], list[Any]] | None = None,
+) -> None:
+    """Settings > Cameras > Diagnose (v0.1.19): the same report as ``away cameras diagnose``, one line at a time
+    on ``out`` (strings), then ``{"done": True}`` (or ``{"error": str}``). The cameras are borrowed from the app."""
+    from away.app.camera_share import SharedLease, confirm_handover
+    from away.multicam import capture, diagnose
+
+    leases = leases or SharedLease()
+    lease = leases.acquire("settings-camera-diagnose")
+    try:
+        confirm_handover(lease, say=lambda m: out.put(str(m)))
+        if lease.app_running and not lease.handed_over:
+            out.put({"error": "Project Away is using the cameras and did not hand them over in time - pause it"})
+            return
+        capture.configure(model.cfg.hands)
+        h = model.cfg.hands
+        spec = h.cameras[0] if h.cameras else None
+        perf = getattr(model.cfg, "performance", None)
+        width = spec.width if spec is not None else int(getattr(perf, "camera_width", 0) or 0) or 640
+        height = spec.height if spec is not None else int(getattr(perf, "camera_height", 0) or 0) or 480
+        fps = spec.fps if spec is not None else 30
+        devs = (lister or (lambda: diagnose.diagnose_devices(None)))()
+        out.put("diagnosing every camera on every backend (this takes a while)...")
+        (runner or diagnose.run_diagnose)(devs, width=width, height=height, fps=fps, out=lambda m: out.put(str(m)))
+        out.put({"done": True})
+    except Exception as exc:
+        out.put({"error": f"camera diagnosis failed: {exc}"})
     finally:
         leases.release()
 
@@ -1722,9 +1816,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ttk.Label(f, textvariable=self.cam_multi_hint, foreground="#555").grid(
             row=9, column=0, columnspan=6, sticky="w", pady=(2, 0)
         )
-        self.cam_tree.bind(
-            "<<TreeviewSelect>>", lambda _e: self.cam_role.set(self.m.role_default(self._cam_selected()))
-        )
+        self.cam_tree.bind("<<TreeviewSelect>>", lambda _e: self._cam_on_select())
         ttk.Label(f, text="Fusion:").grid(row=6, column=0, sticky="w")
         self.cam_fusion = tk.StringVar(value=self.m.cfg.hands.multicam.fusion)
         cb = ttk.Combobox(f, textvariable=self.cam_fusion, values=["weighted", "best_view"], state="readonly", width=12)
@@ -1732,6 +1824,18 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         cb.bind(
             "<<ComboboxSelected>>",
             lambda _e: self._report(self.m.set_voice("hands.multicam.fusion", self.cam_fusion.get())),
+        )
+        # v0.1.19: the Windows capture backend (auto: DirectShow, Media Foundation, then WinRT MediaCapture)
+        ttk.Label(f, text="Capture backend:").grid(row=6, column=2, sticky="e", padx=(12, 0))
+        self.cam_backend = tk.StringVar(value=self.m.camera_backend())
+        bcb = ttk.Combobox(f, textvariable=self.cam_backend, values=list(CAMERA_BACKENDS), state="readonly", width=8)
+        bcb.grid(row=6, column=3, sticky="w", padx=4)
+        bcb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._report(
+                self.m.set_voice("hands.camera_backend", self.cam_backend.get()),
+                "camera backend saved on Save; applies the next time the cameras open",
+            ),
         )
         self.cam_calib = tk.StringVar()
         ttk.Label(f, textvariable=self.cam_calib, foreground="#555").grid(
@@ -1743,10 +1847,27 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             "The primary camera is the cursor's frame of reference.",
             foreground="#555",
         ).grid(row=8, column=0, columnspan=6, sticky="w")
-        self.cam_test_var = tk.StringVar()
-        ttk.Label(f, textvariable=self.cam_test_var, foreground="#333", justify="left").grid(
+        # v0.1.19: the app's camera retry state, Diagnose / Retry cameras, and the test / diagnose output in a
+        # read-only, word-wrapped, scrollable text box (long lines were cut off in a label)
+        self.cam_retry_var = tk.StringVar()
+        ttk.Label(f, textvariable=self.cam_retry_var, foreground="#a33", wraplength=640, justify="left").grid(
             row=10, column=0, columnspan=6, sticky="w", pady=(4, 0)
         )
+        tools = ttk.Frame(f)
+        tools.grid(row=11, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        self.cam_diag_btn = ttk.Button(tools, text="Diagnose", command=self._cam_diagnose)
+        self.cam_diag_btn.pack(side="left", padx=2)
+        ttk.Button(tools, text="Retry cameras", command=self._cam_retry).pack(side="left", padx=2)
+        outf = ttk.Frame(f)
+        outf.grid(row=12, column=0, columnspan=6, sticky="nsew", pady=(4, 0))
+        f.rowconfigure(12, weight=1)
+        self.cam_out = tk.Text(outf, height=12, width=96, wrap="word", relief="flat", background="#f6f6f6")
+        osb = ttk.Scrollbar(outf, orient="vertical", command=self.cam_out.yview)
+        self.cam_out.configure(yscrollcommand=osb.set, state="disabled")
+        osb.pack(side="right", fill="y")
+        self.cam_out.pack(side="left", fill="both", expand=True)
+        self._cam_diag_q: queue.Queue[Any] = queue.Queue()
+        self._cam_diag_thread: threading.Thread | None = None
         self._cam_q: queue.Queue[Any] = queue.Queue()
         self._cam_stop = threading.Event()
         self._cam_thread: threading.Thread | None = None
@@ -1761,8 +1882,68 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._cam_refresh_devices()
 
     def _cam_refresh_devices(self) -> None:
-        self.cam_dev_cb["values"] = self.m.device_choices()
+        choices = self.m.device_choices()
+        self.cam_dev_cb["values"] = choices
         self._cam_refresh()  # the Device column shows the names from the fresh list
+        if not self.cam_dev.get() or self.cam_dev.get() not in choices:
+            self.cam_dev.set(self.m.device_choice(self._cam_selected(), choices))
+
+    def _cam_on_select(self) -> None:
+        i = self._cam_selected()
+        self.cam_role.set(self.m.role_default(i))
+        choice = self.m.device_choice(i, list(self.cam_dev_cb["values"] or []))
+        if choice:
+            self.cam_dev.set(choice)
+
+    def _cam_out_set(self, text: str) -> None:
+        """Replace the test / diagnose output (read-only text box)."""
+        self.cam_out.configure(state="normal")
+        self.cam_out.delete("1.0", "end")
+        self.cam_out.insert("end", text)
+        self.cam_out.configure(state="disabled")
+
+    def _cam_out_add(self, line: str) -> None:
+        self.cam_out.configure(state="normal")
+        self.cam_out.insert("end", ("\n" if self.cam_out.get("1.0", "end-1c") else "") + line)
+        self.cam_out.see("end")
+        self.cam_out.configure(state="disabled")
+
+    def _cam_retry(self) -> None:
+        err = self.m.request_camera_retry()
+        self._report(err, "asked Project Away to retry the cameras now")
+        self.cam_retry_var.set("")
+
+    def _cam_diagnose(self) -> None:
+        err = self._cam_tools.begin("test")  # it opens every camera: never at the same time as the other tools
+        if err:
+            self._report(err)
+            return
+        self._cam_out_set("diagnosing: every camera on every backend; this takes a while...")
+        self.cam_diag_btn.configure(state="disabled")
+        self._cam_diag_thread = threading.Thread(
+            target=camera_diagnose_worker,
+            args=(self.m, self._cam_diag_q),
+            kwargs={"leases": self._cam_leases},
+            daemon=True,
+            name="camera-diagnose",
+        )
+        self._cam_diag_thread.start()
+        self.root.after(200, self._cam_diag_poll)
+
+    def _cam_diag_poll(self) -> None:
+        running = self._cam_diag_thread is not None and self._cam_diag_thread.is_alive()
+        while not self._cam_diag_q.empty():
+            msg = self._cam_diag_q.get_nowait()
+            if isinstance(msg, str):
+                self._cam_out_add(msg)
+            elif isinstance(msg, dict) and "error" in msg:
+                self._cam_out_add(f"error: {msg['error']}")
+        if running:
+            self.root.after(200, self._cam_diag_poll)
+            return
+        self._cam_tools.end("test")
+        self.cam_diag_btn.configure(state="normal")
+        self._cam_refresh()
 
     def _cam_selected(self) -> int | None:
         sel = self.cam_tree.selection()
@@ -1785,6 +1966,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_live_btn.configure(state=st["live"])
         self.cam_test_btn.configure(state=st["test"] if self.m.cfg.hands.cameras else "disabled")
         self.cam_multi_hint.set(hint)
+        self.cam_retry_var.set(self.m.retry_status_text())
+        rows = self.cam_tree.get_children()
+        if self._cam_selected() is None and len(rows) == 1:
+            self.cam_tree.selection_set(rows[0])  # the only camera: editing it needs no extra click
         if self._cam_selected() is None:
             self.cam_role.set(self.m.role_default())
 
@@ -1932,7 +2117,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self._on_save()
         self._cam_combo = None
         self.cam_save_combo_btn.configure(state="disabled")
-        self.cam_test_var.set("testing: opening every camera one after another, then streaming ~10 s...")
+        self._cam_out_set("testing: opening every camera one after another, then streaming ~10 s...")
         self._cam_refresh()
         self._cam_test_thread = threading.Thread(
             target=camera_test_worker,
@@ -1949,12 +2134,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         while not self._cam_test_q.empty():
             msg = self._cam_test_q.get_nowait()
             if isinstance(msg, str):
-                self.cam_test_var.set(msg)
+                self._cam_out_set(msg)
             elif isinstance(msg, dict) and "error" in msg:
-                self.cam_test_var.set(f"error: {msg['error']}")
+                self._cam_out_set(f"error: {msg['error']}")
             elif isinstance(msg, dict) and "report" in msg:
                 rep = msg["report"]
-                self.cam_test_var.set("\n".join(rep.lines()))
+                self._cam_out_set("\n".join(rep.lines()))
                 self._cam_tested = list(self.m.cfg.hands.cameras)
                 self._cam_combo = rep.save_offer(self._cam_tested)
                 if self._cam_combo is not None:
