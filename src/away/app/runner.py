@@ -705,6 +705,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._camera_retry_now = threading.Event()
         self.camera_retry_stopped = False
         self.camera_unavailable: dict[str, Any] | None = None  # v0.1.23: "Internal camera unavailable ..." for the tray
+        self._frame_times: deque[float] = deque(maxlen=240)
+        self.health_hint = ""  # v0.1.23: "Your PC is busy (...)" / "Hand tracking is choppy (...)" for the tray
         self._camera_set_changed_since: float | None = None
         with contextlib.suppress(Exception):
             from away.multicam import capture as _capture
@@ -894,6 +896,39 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self._apply_voice(new)
             self._restart_hotkeys()
             self.bus.publish("config.reloaded", {"path": str(path)})
+
+    def tracking_fps(self, now: float | None = None, window_s: float = 4.0) -> float | None:
+        """v0.1.23: camera frames processed per second over the last ``window_s`` (None before any frame)."""
+        t = time.monotonic() if now is None else now
+        ts = [x for x in list(getattr(self, "_frame_times", [])) if t - x <= window_s]
+        if not ts:
+            return None
+        return len(ts) / window_s
+
+    def _health_loop(self, every_s: float = 5.0) -> None:
+        """v0.1.23: the busy-PC / choppy-tracking tray hint (one sentence, changes published as app.health_hint)."""
+        from away.agentlink.telemetry import CpuSampler
+        from away.app.sysload import LoadHints, choppy_reason, top_processes
+
+        hints, cpu, last = LoadHints(), CpuSampler(), ""
+        n = 0
+        while not self.stop_event.wait(every_s):
+            try:
+                _proc, system = cpu.sample()
+                top = top_processes(5) if (system or 0) >= 80 and n % 2 == 0 else None
+                n += 1
+                active = self.pipeline.gestures_active()
+                fps = self.tracking_fps() if active else None
+                hint = hints.update(system, fps, top, choppy_reason(self))
+            except Exception:
+                continue
+            if hint != last:
+                last = hint
+                self.health_hint = hint
+                self.bus.publish("app.health_hint", {"hint": hint})
+                if hint:
+                    with contextlib.suppress(Exception):
+                        self.notice("Project Away", hint, key=f"health:{hint.split('(')[0]}")
 
     def _start_glide(self) -> None:
         """v0.1.23: the fixed-rate cursor output (hands.cursor.output_hz). Only pointer moves run on it."""
@@ -1277,6 +1312,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         def process(n: int, t: float, rgb: Any) -> None:
             self.pipeline.gate.note_camera_frame(t)  # v0.1.22: the camera is delivering (for the face gate)
+            self._frame_times.append(time.monotonic())  # v0.1.23: hand-tracking rate for the "choppy" hint
             if hands is not None and n % max(1, prof.hands_every) == 0:
                 fr = hands.process(rgb, t)
                 self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
@@ -1583,6 +1619,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             listed = self._camera_list() if hasattr(self, "_camera_list") else None
         broadcast = any("nvidia broadcast" in str(getattr(d, "name", d)).lower() for d in (listed or []))
         name, why = next(iter(labels.items()), ("", ""))
+        with contextlib.suppress(Exception):  # v0.1.23: name the app that holds the camera (Windows records it)
+            from away.multicam import camera_users as cu
+
+            users = cu.current_users()
+            info = cu.explain(name, users, cu.broadcast_source())
+            self.camera_users = info
+            if users or info.get("broadcast_uses_it"):
+                return str(info["message"]).rstrip(".")
         return unavailable_text(name, why, broadcast)
 
     def _retry_status(self, status: dict[str, Any] | None) -> None:
@@ -2115,6 +2159,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.threads.append(threading.Thread(target=self._cursor_size_loop, daemon=True, name="cursor-size"))
         if self.monitor_watcher.enabled:
             self.threads.append(threading.Thread(target=self._watch_monitors, daemon=True, name="monitors"))
+        if not self.dry_run:
+            self.threads.append(threading.Thread(target=self._health_loop, daemon=True, name="health-hints"))
         for th in self.threads:
             th.start()
         self._start_glide()

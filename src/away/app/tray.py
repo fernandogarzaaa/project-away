@@ -114,6 +114,8 @@ class TrayController:
         text += f" - {cam}" if cam else ""
         badge = self.agent_badge()
         text += f" - {badge}" if badge else ""
+        hint = str(getattr(self.app, "health_hint", "") or "")  # v0.1.23: busy PC / choppy tracking
+        text += f" - {hint}" if hint else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
 
     def camera_status(self) -> str:
@@ -558,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         "cameras.retry_stopped",
         "cameras.retry_requested",
         "cameras.turned_off",
+        "app.health_hint",
     )
     # v0.1.20: the attention gate and connected AI agents change the tray title
     for topic in (*topics, "attention.state", "agentlink.changed", "camera.handover"):

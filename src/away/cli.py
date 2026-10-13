@@ -667,7 +667,27 @@ def cmd_cameras_diagnose(
             budget_s=diagnose.BUDGET_S if budget is None else float(budget),
             include_virtual=bool(getattr(args, "include_virtual", False) or device not in (None, "")),
         )
+    for line in pc_context_lines():  # v0.1.23: who else uses the camera / the CPU
+        print(line)
     return 0
+
+
+def pc_context_lines(users: Any = None, top: Any = None, source: Any = None) -> list[str]:
+    """v0.1.23: apps using a camera now (Windows privacy records), NVIDIA Broadcast's source camera and the 5
+    programs using the most CPU, for ``away cameras diagnose`` and diagnostics bundles."""
+    from away.app.sysload import top_processes
+    from away.multicam import camera_users as cu
+
+    out = []
+    us = cu.current_users() if users is None else users
+    out.append("apps using a camera now: " + (", ".join(u.name for u in us) or "none"))
+    src = cu.broadcast_source() if source is None else source
+    if src:
+        out.append(f"NVIDIA Broadcast takes its picture from: {src}")
+    rows = top_processes(5, interval=0.5) if top is None else top
+    if rows:
+        out.append("busiest programs: " + ", ".join(f"{r['name']} {r['cpu_pct']:.0f}%" for r in rows))
+    return out
 
 
 def pick_camera(arg: str, devs: list[Any]) -> tuple[int | str, int | None]:
