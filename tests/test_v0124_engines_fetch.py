@@ -251,6 +251,8 @@ def test_missing_modules_and_status(tmp_path, monkeypatch):
 
     assert engines.missing_modules(("numpy", "nope", "boom"), find) == ["nope", "boom"]
     monkeypatch.setattr(engines, "pip_installed", lambda mod: False)
+    # a PC that has a CPU build (macOS only has the Metal one)
+    monkeypatch.setattr(engines, "platform_key", lambda system=None, machine=None: ("linux", "x86_64"))
     st = engines.status("nemo-speech", "cpu", tmp_path)
     assert st["engine"] == "nemo-speech" and st["installed"] is False and st["pip"] is False
     assert st["license"] == "Apache-2.0"
