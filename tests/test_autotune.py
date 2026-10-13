@@ -494,3 +494,121 @@ def test_worker_survives_malformed_landmarks(tmp_path: Path) -> None:
     )
     fr = [x for x in _drain(out) if x["type"] == "frame"]
     assert len(fr) == 1 and fr[0]["gauges"] == []
+
+
+# ===================================================================================== edge cases (mutation pass)
+def test_handle_command_keeps_the_recording_on_junk() -> None:
+    rec = TL.handle_command(None, {"cmd": "record"}, 0.0)
+    assert TL.handle_command(rec, "junk", 1.0) is rec
+    assert TL.handle_command(rec, None, 1.0) is rec
+
+
+def test_step_recording_fps_uses_the_seconds() -> None:
+    rec = TL.handle_command(None, {"cmd": "record", "tag": 1, "seconds": 0.5, "countdown": 0.0}, 0.0)
+    for t in (0.0, 0.25):
+        TL.step_recording(rec, t, PALM, None, "Right")
+    msgs, done = TL.step_recording(rec, 0.5, PALM, None, "Right")
+    assert done and msgs[-1]["fps"] == pytest.approx(6.0)  # 3 hand frames in 0.5 s
+
+
+def test_worker_frame_cadence(tmp_path: Path) -> None:
+    from away.app.settings_gui import SettingsModel
+
+    m = SettingsModel(C.AppConfig(), tmp_path / "c.yaml")
+    share = CS.CameraShare(tmp_path / "share", pid=2)
+    frames = lambda idx, mirror: iter([(i * 0.1, None) for i in range(20)])  # noqa: E731
+    for every, want in ((4, 5), (None, 10)):
+        out: queue.Queue = queue.Queue()
+        kw = {} if every is None else {"every": every}
+        TL.tuning_camera_worker(
+            m, out, threading.Event(), queue.Queue(), share=share, frames=frames,
+            tracker_factory=lambda: FakeTracker([]), **kw,
+        )  # fmt: skip
+        fr = [x for x in _drain(out) if x["type"] == "frame"]
+        assert len(fr) == want and fr[0]["t"] == 0.0
+
+
+def test_worker_borrows_the_camera_from_the_running_app(tmp_path: Path) -> None:
+    import time
+
+    from away.app.settings_gui import SettingsModel
+
+    m = SettingsModel(C.AppConfig(), tmp_path / "c.yaml")
+    app = CS.CameraShare(tmp_path / "share", pid=1)
+    app.publish_owner([0])
+
+    def app_side():
+        for _ in range(300):
+            if app.requested():
+                app.ack_released([0])
+                return
+            time.sleep(0.01)
+
+    threading.Thread(target=app_side, daemon=True).start()
+    out: queue.Queue = queue.Queue()
+    frames = lambda idx, mirror: iter([(0.0, None)])  # noqa: E731
+    TL.tuning_camera_worker(
+        m, out, threading.Event(), queue.Queue(), share=CS.CameraShare(tmp_path / "share", pid=2),
+        frames=frames, tracker_factory=lambda: FakeTracker([]),
+    )  # fmt: skip
+    texts = [x.get("text", "") for x in _drain(out)]
+    assert any("paused hand tracking for the live view" in t for t in texts)
+    assert not app.requested()  # handed back
+
+
+def test_gauge_active_is_a_bool() -> None:
+    assert A.Gauge("x", "X", None, 1.0, 0.0, 2.0).active is False
+    assert A.gauge_fraction(1.0, 0.0, 2.0) == 0.5
+    assert A.gauge_fraction(0.5, 0.0, 4.0) == 0.125
+
+
+def test_live_gauge_ranges_are_fixed() -> None:
+    gs = A.live_gauges(PALM, PALM, C.AppConfig())
+    assert [(g.lo, g.hi, g.fires) for g in gs] == [
+        (0.0, 1.0, "below"),
+        (0.0, 1.6, "below"),
+        (0.5, 2.0, "above"),
+        (0.0, 2.0, "below"),
+    ]
+    assert gs[3].label == "Fingertip to palm"
+
+
+def test_skeleton_margin_on_a_wide_hand() -> None:
+    hand = np.zeros((21, 3))
+    hand[:, 0] = np.linspace(0.0, 0.1, 21)
+    (pts,) = A.skeleton_points([hand], 100, 100, margin=10)
+    assert pts[0] == pytest.approx((10.0, 50.0), abs=1e-3) and pts[-1] == pytest.approx((90.0, 50.0), abs=1e-3)
+    (dflt,) = A.skeleton_points([hand], 100, 100)
+    assert dflt[0][0] == pytest.approx(10.0, abs=1e-3)
+    (tiny,) = A.skeleton_points([hand], 4, 4, margin=10)  # canvas smaller than the margins: still 1 px of room
+    assert tiny[-1][0] - tiny[0][0] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_balanced_accuracy_negative_on_the_threshold_stays_quiet() -> None:
+    assert A.balanced_accuracy([0.1, 0.2], [0.3, 0.6], 0.3) == 1.0
+
+
+def test_choose_threshold_edge_candidates() -> None:
+    same = A.choose_threshold([0.1, 0.1, 0.1], [0.1, 0.1, 0.1])
+    assert same.threshold == pytest.approx(0.099)  # one value: a 0.001 step below it
+    spread = A.choose_threshold([0.3, 0.3, 0.3], [0.1, 0.1, 0.3])
+    assert spread.threshold == pytest.approx(0.09)  # 5 % of the 0.2 span below the smallest value
+
+
+def test_new_session_id_uses_the_given_time() -> None:
+    import time
+
+    sid = A.new_session_id("pinch", now=86400.0 * 365)
+    assert time.strftime("%Y%m%d-%H%M%S", time.localtime(86400.0 * 365)) in sid
+
+
+def test_save_clips_defaults_and_five_frame_minimum(tmp_path: Path) -> None:
+    s = A.AutoTuneSession(A.AUTOTUNE_SPECS["pinch"], count=3)
+    for p in (1.0, 0.95, 0.9):
+        s.add_trial(_trial(pinch_hand(p), n=5))
+    for p in (0.0, 0.1, 0.2):
+        s.add_trial(_trial(pinch_hand(p), n=5))
+    paths = s.save_clips(tmp_path)
+    assert len(paths) == 6
+    with np.load(paths[0]) as d:
+        assert float(d["fps"]) == 30.0 and str(d["handedness"]) == "Right"

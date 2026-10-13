@@ -748,3 +748,109 @@ def test_tuning_tab_smoke(tmp_path: Path) -> None:  # pragma: no cover - needs a
         root.update()
     finally:
         root.destroy()
+
+
+# ===================================================================================== edge cases (mutation pass)
+def test_sensitivity_pinch_off_floor_exact() -> None:
+    assert T.sensitivity_values(-1.0, DEFAULTS, BOUNDS)["hands.gestures.pinch_off"] == pytest.approx(0.36)
+
+
+def test_format_value_zero_step_falls_back_to_three_decimals() -> None:
+    assert T.format_value(1.23456, "", False, 0.0) == "1.235"
+    assert T.format_value(1.23456, "", False, None) == "1.235"
+
+
+def test_estimate_sensitivity_small_default() -> None:
+    assert T.estimate_sensitivity({"hands.cursor.gain": 1.0}, {"hands.cursor.gain": 0.5}) == pytest.approx(1.0)
+    assert T.estimate_sensitivity({"hands.cursor.gain": 0.5}, {"hands.cursor.gain": 0.5}) == 0.0
+
+
+def test_preset_bounds_without_the_smoothing_paths() -> None:
+    only_gain = {"hands.cursor.gain": (0.1, 10.0)}
+    vals = T.preset_values("Fast", DEFAULTS, only_gain)
+    assert vals["hands.cursor.min_cutoff"] == pytest.approx(DEFAULTS["hands.cursor.min_cutoff"] * 1.6)
+
+
+def test_matching_preset_tolerance() -> None:
+    fast = dict(DEFAULTS, **T.preset_values("Fast", DEFAULTS, BOUNDS))
+    v = fast["hands.cursor.min_cutoff"]
+    assert 1.0 < v < 2.0
+    assert T.matching_preset(dict(fast, **{"hands.cursor.min_cutoff": v + 0.5e-6 * v}), DEFAULTS) == "Fast"
+    assert T.matching_preset(dict(fast, **{"hands.cursor.min_cutoff": v + 1.8e-6}), DEFAULTS) is None
+
+
+def test_undo_defaults_and_return_values() -> None:
+    u = T.UndoStack()
+    assert u.max_depth == 100 and u.coalesce_s == 1.0
+    assert T.UndoEntry("x", []).t == 0.0
+    assert u.can_undo is False
+    assert u.push("g", [T.Change("g", 1.0, 1.0)]) is False
+    assert u.push("g", [T.Change("g", 1.0, 2.0)]) is True
+    assert u.peek().t == 0.0 and u.can_undo is True
+    assert u.push("g", [T.Change("g", 2.0, 3.0)]) is True  # default: no coalescing even at the same time
+    assert len(u) == 2
+    assert u.push("g", [T.Change("g", 3.0, 4.0)], coalesce=True) is True  # same instant: merged
+    assert len(u) == 2 and u.peek().changes == [T.Change("g", 2.0, 4.0)]
+    assert u.push("h", [T.Change("g", 4.0, 5.0)], coalesce=True) is True  # another label: not merged
+    assert len(u) == 3
+
+
+def test_snapshot_tolerance_is_strict() -> None:
+    d = {"hands.cursor.gain": 1.0}
+    assert T.profile_tuning_snapshot({"hands.cursor.gain": 1.5}, d, tol=0.5) == {}
+    assert T.profile_tuning_snapshot({"hands.cursor.gain": 1.75}, d, tol=0.5) == {"hands.cursor.gain": 1.75}
+
+
+def test_profile_tuned_equal_pinch_values_are_reset() -> None:
+    cfg = C.AppConfig()
+    cfg.bindings.new_profile("x", ["x"])
+    cfg.bindings.profiles["x"].tuning = {"hands.gestures.pinch_on": 0.45}  # == the global pinch_off
+    out = T.profile_tuned(cfg, "x")
+    assert (out.hands.gestures.pinch_on, out.hands.gestures.pinch_off) == (0.32, 0.45)
+    cfg.bindings.profiles["x"].tuning = {"hands.gestures.pinch_on": 0.44}
+    assert T.profile_tuned(cfg, "x").hands.gestures.pinch_on == 0.44
+
+
+def test_controller_bounds_are_cached(ctl: T.TuningController) -> None:
+    b = ctl.bounds
+    assert b["hands.cursor.gain"] == (0.1, 10.0) and ctl.bounds is b
+    assert ctl.defaults is ctl.defaults
+
+
+def test_is_default_and_sensitivity_matches_tolerance(ctl: T.TuningController, model: SettingsModel) -> None:
+    d = DEFAULTS["hands.cursor.dead_zone"]
+    assert d < 1.0
+    model.cfg.hands.cursor.dead_zone = d + 1e-12
+    assert ctl.is_default("hands.cursor.dead_zone")
+    model.cfg.hands.cursor.dead_zone = d + 1.5e-9
+    assert not ctl.is_default("hands.cursor.dead_zone")
+    model.cfg.hands.cursor.dead_zone = d + 0.5e-6
+    assert ctl.sensitivity_matches()
+    model.cfg.hands.cursor.dead_zone = d + 1.5e-6
+    assert not ctl.sensitivity_matches()
+
+
+def test_slider_moves_coalesce_but_apply_does_not(model: SettingsModel) -> None:
+    ctl = T.TuningController(model, clock=lambda: 0.0)
+    ctl.set("hands.cursor.gain", 3.0)
+    ctl.set("hands.cursor.gain", 3.5)
+    assert len(ctl.undo_stack) == 1
+    ctl.apply({"hands.cursor.beta": 0.5}, label="x")
+    ctl.apply({"hands.cursor.beta": 0.6}, label="x")
+    assert len(ctl.undo_stack) == 3
+
+
+def test_failed_undo_rolls_back_the_part_that_worked(ctl: T.TuningController, model: SettingsModel) -> None:
+    ctl.apply({"hands.cursor.gain": 3.0, "hands.cursor.dead_zone": 0.01}, label="batch")
+    real = model.set_tunable
+
+    def picky(path: str, v: float) -> str | None:
+        if path == "hands.cursor.dead_zone" and v == DEFAULTS["hands.cursor.dead_zone"]:
+            return "refused"
+        return real(path, v)
+
+    model.set_tunable = picky  # type: ignore[method-assign]
+    err, ok = ctl.undo()
+    assert err == "refused" and ok is None
+    assert model.cfg.hands.cursor.gain == 3.0 and model.cfg.hands.cursor.dead_zone == 0.01
+    assert ctl.undo_stack.peek().label == "batch"
