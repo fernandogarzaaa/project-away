@@ -100,7 +100,9 @@ def fetch(
             if dest.exists() and fastdl.file_digest(dest, "sha256") == s.sha256:
                 pm.meter.add(s.size)
                 continue
-            (downloader or fastdl.download_file)(s.url, dest, fastdl.RemoteFile(s.path, s.size, sha256=s.sha256), pm.meter)
+            (downloader or fastdl.download_file)(
+                s.url, dest, fastdl.RemoteFile(s.path, s.size, sha256=s.sha256), pm.meter
+            )
             if fastdl.file_digest(dest, "sha256") != s.sha256:
                 dest.unlink(missing_ok=True)
                 raise FetchError(f"{s.path} did not match its checksum; it was removed")

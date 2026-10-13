@@ -83,7 +83,7 @@ def letterbox(rgb: NDArray[np.uint8], size: int = DET_SIZE) -> tuple[NDArray[np.
 
     h, w = rgb.shape[:2]
     r = min(size / h, size / w)
-    nh, nw = max(1, int(round(h * r))), max(1, int(round(w * r)))
+    nh, nw = max(1, round(h * r)), max(1, round(w * r))
     out = np.full((size, size, 3), 114, dtype=np.uint8)
     out[:nh, :nw] = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
     return out[:, :, ::-1].astype(np.float32), r

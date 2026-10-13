@@ -8,6 +8,7 @@ library so the streaming speech backend needs no extra package.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import os
 import socket
@@ -131,11 +132,7 @@ class WebSocket:
                 return body.decode("utf-8", "replace") if kind == OP_TEXT else body
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(OSError):
             self.sock.sendall(encode_frame(OP_CLOSE, b""))
-        except OSError:
-            pass
-        try:
+        with contextlib.suppress(OSError):
             self.sock.close()
-        except OSError:
-            pass

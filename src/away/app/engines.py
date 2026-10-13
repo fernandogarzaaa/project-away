@@ -129,16 +129,25 @@ ARCHIVES: dict[str, dict[tuple[str, str], Archive]] = {
     # NeMo-Speech.cpp v0.2.0 (2026-10-02); sizes/sha256 = the release's asset digests
     "nemo-speech": {
         ("win32", "amd64-cuda"): _nemo(
-            "windows-x86_64-cuda", "zip", 102_183_465, "9ffe5e842c39a7d3211f3b2c3b3aa1bca8c0b2455d96d961ed5f22ec5108f98d"
+            "windows-x86_64-cuda",
+            "zip",
+            102_183_465,
+            "9ffe5e842c39a7d3211f3b2c3b3aa1bca8c0b2455d96d961ed5f22ec5108f98d",
         ),
         ("win32", "amd64-vulkan"): _nemo(
-            "windows-x86_64-vulkan", "zip", 19_302_464, "edf15a04ba98740aa0ab75ae4681ac7ad0a488b22b35ce2cbebd10590bb1c1e1"
+            "windows-x86_64-vulkan",
+            "zip",
+            19_302_464,
+            "edf15a04ba98740aa0ab75ae4681ac7ad0a488b22b35ce2cbebd10590bb1c1e1",
         ),
         ("win32", "amd64-cpu"): _nemo(
             "windows-x86_64-cpu", "zip", 5_528_418, "82c80451086e86194aba9af19f800da77cd66d1c28d993d0efceffd6cdb49bb8"
         ),
         ("linux", "x86_64-cuda"): _nemo(
-            "linux-x86_64-cuda", "tar.gz", 105_010_050, "aef573fcc6c2c759401d2ed03e5ca9e401ed23b0e38cb852d917080c1e2d4515"
+            "linux-x86_64-cuda",
+            "tar.gz",
+            105_010_050,
+            "aef573fcc6c2c759401d2ed03e5ca9e401ed23b0e38cb852d917080c1e2d4515",
         ),
         ("linux", "x86_64-cpu"): _nemo(
             "linux-x86_64-cpu", "tar.gz", 6_683_477, "f396057150f1b774935c7414fd32ebc04195a795a34120d78d8c9ecefa1b7507"
@@ -147,7 +156,10 @@ ARCHIVES: dict[str, dict[tuple[str, str], Archive]] = {
             "linux-aarch64-cpu", "tar.gz", 6_309_769, "ac50694d4729f9eae390a9851d38f51269d9af9829b535325539090a3b95c787"
         ),
         ("darwin", "arm64-metal"): _nemo(
-            "macos-aarch64-metal", "tar.gz", 5_031_510, "5cb02ba7c04f0b5585ce5cde9c830be5f0b7dfb4c83083c500109c381b4f2da9"
+            "macos-aarch64-metal",
+            "tar.gz",
+            5_031_510,
+            "5cb02ba7c04f0b5585ce5cde9c830be5f0b7dfb4c83083c500109c381b4f2da9",
         ),
     },
 }

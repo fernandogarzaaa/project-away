@@ -112,7 +112,7 @@ def remember_all(before: dict[str, Any], data_dir: Path | None = None) -> None:
 def try_next(
     reg: Any, cfg: Any, slot: str, mid: str, bench: Callable[[Any], float], data_dir: Path | None = None
 ) -> Any:
-    """"Try it" for a new model with this PC's tolerance; a kept model's undo is remembered for later failures."""
+    """ "Try it" for a new model with this PC's tolerance; a kept model's undo is remembered for later failures."""
     from away.app.model_registry import try_model
 
     tol = float(getattr(getattr(cfg, "models_next", None), "rollback_tolerance", 0.1))

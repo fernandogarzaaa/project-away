@@ -182,9 +182,7 @@ class WakeGate:
         return list(self.session.feed(audio) or [])
 
 
-def wrap_session(
-    session: Any, opts: Any, preset_best: bool = False, detector: Any = None
-) -> tuple[Any, str]:
+def wrap_session(session: Any, opts: Any, preset_best: bool = False, detector: Any = None) -> tuple[Any, str]:
     """``(session behind a WakeGate, "")`` when ``models_next.wake_engine`` is livekit and a model is set;
     otherwise ``(session, reason)`` - speech-to-text keeps listening for the wake word as before."""
     if getattr(opts, "wake_engine", "asr") != "livekit":

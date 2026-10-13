@@ -1,4 +1,4 @@
-""""Test my PC" for the 2026-10 models (v0.1.24): measure each model here, recommend Light / Balanced / Best, and
+""" "Test my PC" for the 2026-10 models (v0.1.24): measure each model here, recommend Light / Balanced / Best, and
 switch only when the benchmark passes. Until then Light / Balanced / Best keep picking the v0.1.23 models.
 
 For every model that is downloaded (the rest are listed as "not downloaded", never fetched by the benchmark):
@@ -291,8 +291,18 @@ def recommend(ms: list[Measure], gpu: dict[str, Any], vram_est: dict[str, int] |
     q2 = _get(ms, "cleanup-qwen3.5-2b-q4km")
     q8 = _get(ms, "cleanup-qwen3.5-2b-q8")
     gpu_ok = bool(gpu.get("nvidia")) and nem is not None and nem.ok and (nem.rtf or 9) <= RTF_OK
-    if gpu_ok and q8 is not None and q8.ok and (q8.latency_ms or 1e9) <= CLEANUP_OK_MS and free >= est["best"] + VRAM_HEADROOM_MB:
-        return {"preset": "best", "passed": True, "why": "the graphics card runs streaming speech and the 8-bit cleanup fast"}
+    if (
+        gpu_ok
+        and q8 is not None
+        and q8.ok
+        and (q8.latency_ms or 1e9) <= CLEANUP_OK_MS
+        and free >= est["best"] + VRAM_HEADROOM_MB
+    ):
+        return {
+            "preset": "best",
+            "passed": True,
+            "why": "the graphics card runs streaming speech and the 8-bit cleanup fast",
+        }
     if gpu_ok and free >= est["balanced"] + VRAM_HEADROOM_MB:
         why = "the graphics card runs streaming speech fast"
         if q2 is not None and q2.ok and (q2.latency_ms or 1e9) > CLEANUP_OK_MS:
@@ -429,7 +439,26 @@ def agent_rows(cfg: Any, data_dir: Path | None = None) -> list[dict[str, Any]]:
         }
     ]
     for m in (rep or {}).get("measures") or []:
-        rows.append({"key": m.get("id"), **{k: m.get(k) for k in ("slot", "title", "ok", "skipped", "load_s", "latency_ms", "rtf", "cpu_pct", "vram_mb", "error")}})
+        rows.append(
+            {
+                "key": m.get("id"),
+                **{
+                    k: m.get(k)
+                    for k in (
+                        "slot",
+                        "title",
+                        "ok",
+                        "skipped",
+                        "load_s",
+                        "latency_ms",
+                        "rtf",
+                        "cpu_pct",
+                        "vram_mb",
+                        "error",
+                    )
+                },
+            }
+        )
     return rows
 
 
@@ -441,7 +470,9 @@ def register_agent_link(data_dir: Path | None = None) -> None:
     def apply(cfg: Any, op: Any) -> Any:
         if op.op == "run":
             started = start_background(cfg, data_dir)
-            text = "Test my PC started; read model_bench for the results" if started else "Test my PC is already running"
+            text = (
+                "Test my PC started; read model_bench for the results" if started else "Test my PC is already running"
+            )
             return al.Applied(op, None, None, [], text, True)
         if op.op == "apply":
             rep = last_report(data_dir)
@@ -450,12 +481,21 @@ def register_agent_link(data_dir: Path | None = None) -> None:
             except ValueError as exc:
                 raise al.ChangeError(str(exc)) from None
             preset = (rep or {}).get("recommendation", {}).get("preset", "")
-            return al.Applied(op, before, preset, [al.Op("model_bench", "restore", "", before)], f"Models: {preset} preset (2026-10)", True)
+            return al.Applied(
+                op,
+                before,
+                preset,
+                [al.Op("model_bench", "restore", "", before)],
+                f"Models: {preset} preset (2026-10)",
+                True,
+            )
         if op.op == "restore":
             before = {k: al._get(cfg, k) for k in dict(op.value or {})}
             for k, v in dict(op.value or {}).items():
                 al._set(cfg, k, v)
-            return al.Applied(op, before, op.value, [al.Op("model_bench", "restore", "", before)], "Models: put back as before", True)
+            return al.Applied(
+                op, before, op.value, [al.Op("model_bench", "restore", "", before)], "Models: put back as before", True
+            )
         raise al.ChangeError("model_bench supports run, apply and restore")
 
     al.register(
@@ -476,13 +516,29 @@ def selftest_check(cfg: Any, data_dir: Path | None = None, run: bool = False) ->
     rep = run_bench(cfg, data_dir).to_dict() if run else last_report(data_dir)
     base = {"id": "model_bench", "title": "Newer models"}
     if not rep:
-        return {**base, "status": "skip", "summary": summary(None), "details": {}, "fix": {"id": "model_bench:run", "label": "Test my PC"}}
+        return {
+            **base,
+            "status": "skip",
+            "summary": summary(None),
+            "details": {},
+            "fix": {"id": "model_bench:run", "label": "Test my PC"},
+        }
     rec = rep.get("recommendation") or {}
     details = {"recommendation": rec, "measures": rep.get("measures"), "gpu": rep.get("gpu")}
     if rec.get("passed"):
-        fix = None if cfg.models_next.presets == "next" else {"id": "model_bench:apply", "label": f"Use {str(rec.get('preset')).title()}"}
+        fix = (
+            None
+            if cfg.models_next.presets == "next"
+            else {"id": "model_bench:apply", "label": f"Use {str(rec.get('preset')).title()}"}
+        )
         return {**base, "status": "pass", "summary": summary(rep), "details": details, "fix": fix}
-    return {**base, "status": "warn", "summary": summary(rep), "details": details, "fix": {"id": "model_bench:run", "label": "Test again"}}
+    return {
+        **base,
+        "status": "warn",
+        "summary": summary(rep),
+        "details": details,
+        "fix": {"id": "model_bench:run", "label": "Test again"},
+    }
 
 
 SELFTEST_HOOK = {"id": "model_bench", "title": "Newer models", "check": selftest_check}
