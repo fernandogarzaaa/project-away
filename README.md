@@ -313,7 +313,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") as (r, w, _):
     async with ClientSession(r, w) as s:
-        await s.initialize()                 # the person sees "<your client name> wants to connect"
+        await s.initialize()  # the person sees "<your client name> wants to connect"
         print(await s.call_tool("get_context", {}))
 ```
 
@@ -1495,7 +1495,7 @@ Config (`macros:` in config.yaml, all optional):
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 1659 tests collected on Linux (272 new in v0.1.19; on Linux without the optional extras 6 skip: torch training, faster-whisper, the real DirectShow / Media Foundation / pywinrt checks) (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2106 tests collected on Linux at v0.1.20 (447 new since v0.1.19): 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
 | Agent Link: auth, pairing, permissions, rate limit, path traversal, snapshot/screen gating | Unit + integration tests: real uvicorn server on 127.0.0.1, REST, MCP Streamable HTTP (bearer and pairing link), resource subscriptions, the stdio bridge launched like Claude Desktop launches it |
 | Agent Link through a real Cloudflare quick tunnel | **Verified from the Linux build sandbox**: pinned cloudflared 2026.10.0 downloaded and SHA-256 checked, quick tunnel started, a remote MCP client and the REST example client paired and called tools through `https://*.trycloudflare.com` |
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
@@ -1575,6 +1575,57 @@ Config (`macros:` in config.yaml, all optional):
 | Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
 | Parakeet, Wayland | **Untested** |
 
+## Changes in v0.1.20
+
+v0.1.20 turns Project Away into **the bridge between you and your AI agents**, and makes everyday hands-free use
+easier for people who are not technical. Everything below is new in this release; the sections above have the
+details, and "Verified vs untested" says honestly what has and has not been tried on real hardware.
+
+**Agent Link: connect any AI agent.** Claude, ChatGPT, Cursor or anything else can now talk to Project Away,
+through MCP (on this PC or over a private link) or a plain REST API. Connecting is a 3-step wizard in Settings →
+Agent Link, and nothing connects until you press **Allow** on your own screen (with a click, a thumbs up or by
+saying "allow"). You choose what each agent may do in plain words: see your gestures, see your camera or screen
+only when you allow it, change your settings, or use your computer. Your agent can ask you quick questions that
+you answer with a thumbs up or down, a finger count or your voice, and tell you when something is done. When you
+let it use your computer, a bright border shows it is working; touching the mouse or keyboard, or making a
+gesture, pauses it at once, and **Ctrl+Alt+Esc**, saying "stop" or an open palm stops it. It never types into
+password boxes and asks before anything like Send, Pay or Delete. Agents can also tune Project Away to how you
+like it (a slower cursor, fewer accidental right-clicks): they ask first by default, every change is listed with
+who made it and why, and **Undo** puts it back. Agents can also manage your custom gestures and shortcuts and
+see when your arm looks tired. **Disconnect all** ends every connection at once. See "Connect your AI agent".
+
+**Gesture Studio: teach your own gestures.** Settings → Gesture Studio replaces the old "Test gesture" tab. Show a
+new gesture 15 times, then choose what it does (a key, a click, some text, an app, a website or a voice action).
+Practice mode lets you try it safely first, **That was wrong** teaches it what not to react to, and you can mark
+parts of the camera picture where gestures are ignored (your coffee cup, your keyboard). The guided first run
+now includes it. Recordings are hand points only, never pictures, and stay on your PC.
+
+**Shortcuts: show it once, repeat it with a word or a gesture.** Press **Record a shortcut**, do the clicks and
+typing yourself (pinch-clicks and dictated text count too, so it works hands-free), then give it a phrase or a
+gesture. Esc, a mouse move or "stop" halts a running shortcut, password boxes are never recorded, and **Edit
+steps** lets you tidy it up.
+
+**Smart pointer (Windows).** The pointer is gently drawn to buttons and links and holds still over them, so a
+shaky webcam picture doesn't make you miss. Say **"click Save"** or look at something and say **"click that"**;
+if two things share a name, numbers appear and you say the number. An optional **Smoother cursor** predicts your
+hand's movement (off by default until it has been tried with real webcams).
+
+**Attention & comfort.** A friendly guided first run (find your camera, sit comfortably, a 2-minute practice
+where nothing is really clicked) opens on the first start and from Settings → Getting started, now the first
+tab. Optional switches: **Only respond when I'm looking at the screen** (resting your hand or turning away
+clicks nothing), **Switch to head control when my arm is tired**, gentle tired-arm notes and break reminders.
+The Settings tabs are reordered for new users: Getting started, Bindings, Gesture Studio, Shortcuts, Voice &
+input, Agent Link, Cameras, Tuning, Performance.
+
+**Smart cleanup and My words.** Dictation now drops "um"s and repeated words, understands "no wait, make it
+Tuesday", and adjusts its tone to the app: casual in chat, tidy in email and documents, word for word in code
+editors and terminals. The optional **Smart cleanup** switch adds a small local AI model (Qwen2.5, Apache-2.0)
+for proper punctuation; in the installed app one **Download** button fetches the model and a pinned, SHA-256
+checked CPU engine (llama-cpp-python), tested in a separate process before it is used. If the model is ever slow
+the basic cleanup is typed instead, so you never wait. For a GPU, use Ollama. **My words** is your own word list
+for names and terms ("add Jonie to my dictionary", "correct Jonnie to Jonie"); fixes you make by hand are learned
+too. Everything runs on your PC.
+
 ## Changes in v0.1.19
 
 **Cameras: WinRT MediaCapture backend, `away cameras diagnose`, retries that back off.** Built-in cameras that
@@ -1636,4 +1687,4 @@ pytest -q && ruff check . && ruff format --check . && mypy src
 python scripts/mutation.py && python scripts/mutation.py --summary
 ```
 
-Private project. All rights reserved by the author until a license is chosen.
+MIT licensed; see [LICENSE](LICENSE).
