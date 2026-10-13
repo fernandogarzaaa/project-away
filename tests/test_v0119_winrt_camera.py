@@ -1117,7 +1117,12 @@ def test_cli_cameras_diagnose(tmp_path: Path, capsys: Any) -> None:
 # =============================================================================== 8. config
 def test_new_config_keys_defaults_and_validation() -> None:
     h = C.AppConfig().hands
-    assert (h.camera_backend, h.camera_retry_s, h.camera_retry_max_s, h.camera_retry_limit) == ("auto", 300.0, 3600.0, 3)
+    assert (h.camera_backend, h.camera_retry_s, h.camera_retry_max_s, h.camera_retry_limit) == (
+        "auto",
+        300.0,
+        3600.0,
+        3,
+    )
     cfg, _ = C.from_dict({"hands": {"camera_backend": "winrt", "camera_retry_limit": 0}})
     assert cfg.hands.camera_backend == "winrt" and cfg.hands.camera_retry_limit == 0
     for bad in (

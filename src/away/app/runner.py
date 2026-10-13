@@ -58,6 +58,7 @@ MULTICAM_PROBE_S = 45.0
 HANDOVER_FREE_S = 15.0  # a hand-over waits at most this long for this process's cameras to be closed
 SPEED_CHECK_S = 5.0  # after this long streaming, each camera's measured frame rate is logged (ok / too slow)
 MULTICAM_RETRY_S = 45.0  # after falling back to one camera: re-probe the failed ones (default hands.camera_retry_s)
+AUTO_PAUSE_DWELL_S = 0.5  # v0.1.23: auto-pause ends only after the mouse/keyboard stayed quiet this long
 HAND_QUIET_S = 20.0  # v0.1.23: no background camera probe while a hand was tracked this recently
 MAX_DEFER_S = 1800.0  # ...but a probe is not put off longer than this
 DEVICE_CHECK_S = 30.0  # v0.1.23: how often a waiting camera retry checks whether the camera list changed
@@ -100,6 +101,7 @@ class Pipeline:
         self.mouse = MouseController(backend or RecordingBackend(), CursorMapper(screen, c), stabilizer=stab)
         self.guard = guard  # ManualInputGuard: physical mouse/keyboard use pauses gesture output
         self._auto_paused = False
+        self._auto_clear_since: float | None = None
         self.dwell = DwellDetector(cfg.hands.dwell.radius_px, cfg.hands.dwell.time_s)
         mc = cfg.hands.multicam
         self.push = PushDetector(mc.push_distance_m, mc.push_time_s, mc.push_cooldown_s)
@@ -193,7 +195,16 @@ class Pipeline:
     def _check_auto_pause(self, t: float) -> None:
         auto = bool(self.guard is not None and self.guard.active)
         if auto == self._auto_paused:
+            self._auto_clear_since = None
             return
+        if not auto:  # v0.1.23: resume only after the mouse/keyboard stayed quiet AUTO_PAUSE_DWELL_S (no flapping)
+            since = getattr(self, "_auto_clear_since", None)
+            if since is None:
+                self._auto_clear_since = t
+                return
+            if t - since < AUTO_PAUSE_DWELL_S:
+                return
+        self._auto_clear_since = None
         self._auto_paused = auto
         if auto:
             self.mouse._release_if_down()
@@ -689,6 +700,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._camera_retry_now = threading.Event()
         self.camera_retry_stopped = False
         self.camera_unavailable: dict[str, Any] | None = None  # v0.1.23: "Internal camera unavailable ..." for the tray
+        self._camera_set_changed_since: float | None = None
         with contextlib.suppress(Exception):
             from away.multicam import capture as _capture
 
@@ -871,11 +883,23 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.bus.publish("config.error", {"error": str(exc)})
                 continue
             self.pipeline.apply_config(new)
+            self._apply_camera_switch(new)
             self.macros.set_config(new.macros)
             if self.voice is not None:
                 self._apply_voice(new)
             self._restart_hotkeys()
             self.bus.publish("config.reloaded", {"path": str(path)})
+
+    def _apply_camera_switch(self, new: AppConfig) -> None:
+        """v0.1.23: a camera turned off or on in Settings takes effect without restarting the app (the rest of
+        the camera setup still applies at the next start, as before)."""
+        h, nh = self.cfg.hands, new.hands
+        if [str(c.device) for c in h.disabled_cameras] == [str(c.device) for c in nh.disabled_cameras]:
+            return
+        h.disabled_cameras = nh.disabled_cameras
+        h.cameras = nh.cameras
+        h.camera_index, h.camera_hint, h.camera_fourcc = nh.camera_index, nh.camera_hint, nh.camera_fourcc
+        self._retry_event().set()
 
     def _apply_voice(self, new: AppConfig) -> None:
         v = new.voice
@@ -1278,10 +1302,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         self._camera_list(log=True)  # the enumerated cameras (source, index, name, virtual) -> away.log
         try:
-            if len(self.cfg.hands.cameras) >= 2 and hands is not None:
-                self._multicam_loop(hands, faces, run_single)
+            while not self.stop_event.is_set():
+                if len(self.cfg.hands.cameras) >= 2 and hands is not None:
+                    self._multicam_loop(hands, faces, run_single)
+                    if (
+                        getattr(self, "_camera_set_changed_since", None) is not None
+                    ):  # v0.1.23: a camera was turned off / on
+                        self._camera_set_changed_since = None
+                        continue
+                    return
+                run_single(self.cfg.hands.camera_index)
                 return
-            run_single(self.cfg.hands.camera_index)
         finally:
             # close the landmarkers only after this thread stopped calling them (shutdown race)
             for tr in (hands, faces):
@@ -1795,6 +1826,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         none_backoff = self._retry_backoff(none_retry_s)
         try:
             while not self.stop_event.is_set():
+                if [str(c.device) for c in self.cfg.hands.cameras] != [str(c.device) for c in cams]:
+                    # v0.1.23: a camera was turned off (tray / Settings / an agent): start over with the new set
+                    self._camera_set_changed_since = time.monotonic()
+                    break
                 # every attempt: bare indices from older versions are pinned to camera names (a virtual camera at
                 # that index is swapped for a real one: the auto-skip), so each open resolves by name (hot-plug safe)
                 listed = self._camera_list()

@@ -29,6 +29,20 @@ from pathlib import Path
 from typing import Any
 
 CRASH_FILE = "crash.log"
+NATIVE_PREFIX = "crash-native-"  # v0.1.23: faulthandler's raw output, one file per process, folded into crash.log
+# v0.1.23: Windows exception codes that are raised and handled inside Windows / COM all the time. faulthandler
+# prints every SEH exception with the error bit ("Windows fatal exception: code 0x80010108") even when the code
+# that raised it catches it; these are written to crash.log as one "handled, not a crash" line per process.
+HANDLED_CODES = {
+    "0x80010108": "RPC_E_DISCONNECTED",
+    "0x8001010d": "RPC_E_CANTCALLOUT_ININPUTSYNCCALL",
+    "0x80010105": "RPC_E_SERVERFAULT",
+    "0xe06d7363": "C++ exception",
+    "0x406d1388": "thread name",
+    "0x40010006": "debug output",
+}
+# v0.1.23: helper processes the app starts (labelled so a real restart stands out in crash.log)
+HELPER_COMMANDS = ("agent-ui", "settings", "first-run", "mcp", "voice", "cameras", "selftest", "update")
 SEEN_FILE = "crash-seen.json"  # how far into crash.log the last start had read
 MAX_BYTES = 1_000_000  # crash.log is moved to crash.log.1 beyond this
 CRASHED_MESSAGE = "the app crashed last time; details in crash.log"
@@ -53,7 +67,7 @@ UNCAUGHT_MARKER = "Uncaught exception"
 log = logging.getLogger("away.crash")
 
 _lock = threading.Lock()
-_state: dict[str, Any] = {"file": None, "path": None, "note": None, "entry": None}
+_state: dict[str, Any] = {"file": None, "path": None, "note": None, "entry": None, "native": None, "folder": None}
 
 
 def logs_dir(folder: Path | None = None) -> Path:
@@ -171,6 +185,108 @@ def new_entries(path: Path, seen: Path) -> str:
         return ""
 
 
+def entry_label(argv: list[str]) -> str:
+    """v0.1.23: how a frozen-exe start is named in crash.log: "app (tray)" for the app itself, "helper agent-ui
+    toast" / "helper settings" for the windows and helpers it starts, "frozen <command>" for anything else."""
+    args = [str(a) for a in argv if not str(a).startswith("-")]
+    if not args or args == ["tray"]:
+        return "app (tray)"
+    if args[0] in HELPER_COMMANDS:
+        return "helper " + " ".join(args[:2] if args[0] == "agent-ui" else args[:1])
+    return f"frozen {args[0]}"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    try:
+        import psutil
+
+        return bool(psutil.pid_exists(pid))
+    except Exception:
+        pass
+    if os.name == "nt":
+        return True  # cannot tell: leave the file for a later start
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def summarize_native(text: str, pid: int | str = "?") -> str:
+    """faulthandler's raw output -> what goes into crash.log: a real crash (access violation, Fatal Python error...)
+    in full; handled Windows exceptions (``HANDLED_CODES`` and any other bare ``code 0x...``) as one tagged line each
+    with a count and the first Python frame, so they no longer look like crashes."""
+    if not text.strip():
+        return ""
+    blocks: list[list[str]] = []
+    for line in text.splitlines():
+        if line.startswith(("Windows fatal exception", "Fatal Python error")) or not blocks:
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    out: list[str] = []
+    handled: dict[str, list[Any]] = {}
+    for b in blocks:
+        head = b[0].strip()
+        if any(m in head for m in FATAL_MARKERS):
+            out.append(f"native crash in pid {pid}:")
+            out.extend(b)
+            continue
+        low = head.lower()
+        if "code 0x" in low:
+            code = low.split("code ", 1)[1].split()[0].rstrip(".:")
+            frame = next((x.strip() for x in b[1:] if x.strip().startswith("File ")), "")
+            entry = handled.setdefault(code, [0, frame])
+            entry[0] += 1
+            continue
+        out.extend(b)
+    for code, (n, frame) in handled.items():
+        name = HANDLED_CODES.get(code, "handled Windows exception")
+        out.append(
+            f"handled (not a crash): Windows exception {code} ({name}) x{n} in pid {pid}"
+            + (f"; first at {frame}" if frame else "")
+        )
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def fold_native(folder: Path | None = None, clock: Any = None, own: bool = False) -> int:
+    """Move finished processes' faulthandler files (``crash-native-<pid>.log``) into crash.log, summarized by
+    :func:`summarize_native`. ``own``: this process's file too (at exit). Returns how many files were folded."""
+    d = logs_dir(folder)
+    n = 0
+    try:
+        files = sorted(d.glob(NATIVE_PREFIX + "*.log"))
+    except OSError:
+        return 0
+    for f in files:
+        try:
+            pid = int(f.stem[len(NATIVE_PREFIX) :])
+        except ValueError:
+            continue
+        if pid == os.getpid() and not own:
+            continue
+        if pid != os.getpid() and _pid_alive(pid):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        summary = summarize_native(text, pid)
+        try:
+            if summary:
+                with (d / CRASH_FILE).open("a", encoding="utf-8") as out:
+                    out.write(f"[{_stamp(clock)}] faulthandler output of pid {pid}:\n{summary}")
+            f.unlink()
+            n += 1
+        except OSError:
+            continue
+    return n
+
+
 def classify(text: str) -> str | None:
     """``crashed`` (a fatal error), ``error`` (an uncaught exception) or None for ``text`` from crash.log."""
     if any(m in text for m in FATAL_MARKERS):
@@ -263,6 +379,8 @@ def install(
         d.mkdir(parents=True, exist_ok=True)
         path = d / CRASH_FILE
         seen = d / SEEN_FILE
+        with contextlib.suppress(Exception):
+            fold_native(d, clock)  # v0.1.23: earlier processes' faulthandler output, handled exceptions tagged
         text = new_entries(path, seen)
         kind = classify(text)
         note = None
@@ -273,20 +391,47 @@ def install(
             if path.stat().st_size > MAX_BYTES:
                 os.replace(path, path.with_name(CRASH_FILE + ".1"))
         f = path.open("a", encoding="utf-8", buffering=1)
-        f.write(f"[{_stamp(clock)}] {entry} started (pid {os.getpid()}, Project Away {version})\n")
+        parent = ""
+        with contextlib.suppress(Exception):
+            parent = f", parent {os.getppid()}"
+        f.write(f"[{_stamp(clock)}] {entry} started (pid {os.getpid()}{parent}, Project Away {version})\n")
         f.flush()
+        # v0.1.23: faulthandler writes to its own per-process file (folded into crash.log at the next start or at
+        # exit), so handled Windows exceptions can be told apart from real crashes
+        native = (d / f"{NATIVE_PREFIX}{os.getpid()}.log").open("a", encoding="utf-8", buffering=1)
         _write_seen(seen, f.tell(), note, clock)
     except Exception as exc:  # never stop the app over its crash log
         log.warning("crash log unavailable: %s", exc)
         return None
     with _lock:
-        _state.update(file=f, path=path, note=note, entry=entry)
+        _state.update(file=f, path=path, note=note, entry=entry, native=native, folder=d)
     with contextlib.suppress(Exception):
-        fh.enable(file=f, all_threads=True)
+        fh.enable(file=native, all_threads=True)
+    with contextlib.suppress(Exception):
+        import atexit
+
+        atexit.register(_at_exit)
     sm.excepthook = _excepthook(getattr(sm, "excepthook", None))
     with contextlib.suppress(Exception):
         tm.excepthook = _thread_excepthook(getattr(tm, "excepthook", None))
     return note
+
+
+def _at_exit() -> None:
+    """A clean exit: fold this process's own faulthandler file into crash.log."""
+    import faulthandler as _fh
+
+    native = _state.get("native")
+    folder = _state.get("folder")
+    if native is None or folder is None:
+        return
+    with contextlib.suppress(Exception):
+        _fh.disable()
+    with contextlib.suppress(Exception):
+        native.close()
+    _state["native"] = None
+    with contextlib.suppress(Exception):
+        fold_native(folder, own=True)
 
 
 def uninstall(faulthandler_mod: Any = None) -> None:
@@ -296,9 +441,13 @@ def uninstall(faulthandler_mod: Any = None) -> None:
     fh = faulthandler_mod or _fh
     with _lock:
         f = _state["file"]
-        _state.update(file=None, path=None, note=None, entry=None)
+        native = _state.get("native")
+        _state.update(file=None, path=None, note=None, entry=None, native=None, folder=None)
     if f is not None:
         with contextlib.suppress(Exception):
             fh.disable()
         with contextlib.suppress(Exception):
             f.close()
+    if native is not None:
+        with contextlib.suppress(Exception):
+            native.close()

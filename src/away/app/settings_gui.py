@@ -593,6 +593,36 @@ class SettingsModel:
             return ""
 
     @staticmethod
+    def failed_cameras(folder: Any = None) -> list[str]:
+        """v0.1.23: the cameras the running app gave up on (for "Turn off")."""
+        from away.app.camera_loop import read_retry_status
+
+        try:
+            st = read_retry_status(folder) or {}
+        except Exception:
+            return []
+        return [str(k) for k in (st.get("failed") or {})] if st.get("stopped") else []
+
+    def turn_off_cameras(self, devices: list[str], save: bool = True) -> tuple[str | None, str]:
+        """v0.1.23 "Turn off": the failing cameras move to hands.disabled_cameras (saved at once). (error, done)."""
+        from away.app.camera_switch import CameraSwitchError, turn_off
+
+        if not devices:
+            return "no camera is failing right now", ""
+        done = []
+        for d in devices:
+            try:
+                done.append(turn_off(self.cfg, d))
+            except CameraSwitchError as exc:
+                return str(exc), "; ".join(done)
+        if save:
+            try:
+                self.save()
+            except ValueError as exc:
+                return str(exc), "; ".join(done)
+        return None, "; ".join(done) + " (Turn it back on: add it again in this tab)"
+
+    @staticmethod
     def request_camera_retry(folder: Any = None) -> str | None:
         """Retry cameras: ask the running app to probe its failed cameras now. An error message, or None."""
         from away.app.camera_loop import request_camera_retry
@@ -2436,6 +2466,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_diag_btn = ttk.Button(tools, text="Diagnose", command=self._cam_diagnose)
         self.cam_diag_btn.pack(side="left", padx=2)
         ttk.Button(tools, text="Retry cameras", command=self._cam_retry).pack(side="left", padx=2)
+        # v0.1.23: stop using a camera that keeps failing (it is kept, with its settings, to turn back on)
+        ttk.Button(tools, text="Turn off failing camera", command=self._cam_turn_off).pack(side="left", padx=2)
         outf = ttk.Frame(f)
         outf.grid(row=12, column=0, columnspan=6, sticky="nsew", pady=(4, 0))
         f.rowconfigure(12, weight=1)
@@ -2490,6 +2522,13 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         err = self.m.request_camera_retry()
         self._report(err, "asked Project Away to retry the cameras now")
         self.cam_retry_var.set("")
+
+    def _cam_turn_off(self) -> None:
+        err, done = self.m.turn_off_cameras(self.m.failed_cameras())
+        self._report(err, done or None)
+        self._cam_refresh()
+        if not err:
+            self.m.request_camera_retry()  # the app re-reads its cameras and stops probing the one turned off
 
     def _cam_diagnose(self) -> None:
         err = self._cam_tools.begin("test")  # it opens every camera: never at the same time as the other tools

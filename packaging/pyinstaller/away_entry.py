@@ -19,7 +19,9 @@ def main() -> int:
     from away.app import crashlog, frozen
     from away.cli import main as cli_main
 
-    crashlog.install("frozen")  # crash.log before anything else can crash (v0.1.16; the CLI's call is a no-op then)
+    # crash.log before anything else can crash (v0.1.16; the CLI's call is a no-op then). v0.1.23: labelled "app
+    # (tray)" or "helper agent-ui toast" so the windows the app starts are not mistaken for restarts
+    crashlog.install(crashlog.entry_label(sys.argv[1:]))
 
     args = sys.argv[1:]
     if args and args != ["tray"]:
