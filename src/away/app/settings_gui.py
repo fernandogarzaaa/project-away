@@ -1506,7 +1506,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_voice(nb)
         self._build_cameras(nb)
         self._build_performance(nb)
-        self._build_test(nb)
+        self._build_studio(nb)  # v0.1.20: Gesture Studio replaces the old "Test gesture" tab
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches (first tab)
@@ -1963,7 +1963,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             return False
         test = getattr(self, "_test_thread", None)
         if test is not None and test.is_alive():
-            self.live_status.set("stop the camera test (Test gesture tab) first")
+            self.live_status.set("turn the camera off in the Gesture Studio tab first")
             return False
         self._live_stop.clear()
         self._live_q = queue.Queue()
@@ -2712,6 +2712,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._report(None, "GPU pack removed")
         self._perf_refresh()
 
+    def _build_studio(self, nb: Any) -> None:
+        from away.studio.ui import StudioTab
+
+        self._test_thread: threading.Thread | None = None  # the Studio camera (the Tuning live view waits for it)
+        self.studio = StudioTab(self, nb)
+
     def _build_test(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk
         f = self._scroll_tab(nb, "Test gesture")
@@ -2729,7 +2735,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ttk.Label(f, text="Shows the gesture or clap detected and what it is bound to. Nothing is executed.").pack(
             anchor="w", pady=6
         )
-        self._test_thread: threading.Thread | None = None
+        self._test_thread = None
 
     # ------------------------------------------------------------- helpers
     def _report(self, err: str | None, ok: str | None = None) -> None:
@@ -2933,6 +2939,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from tkinter import messagebox
 
         self._test_stop.set()
+        if getattr(self, "studio", None) is not None:
+            self.studio.stop.set()  # Gesture Studio camera
         self._cam_stop.set()
         self._live_stop.set()  # Tuning tab live view
         for th in (self._test_thread, self._cam_thread, self._cam_test_thread, self._live_thread):  # cameras back first

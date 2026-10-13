@@ -62,7 +62,7 @@ jobs:
           cache: pip
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[dev,train]"
-      - run: pytest tests/test_train_torch.py -p no:warnings
+      - run: pytest tests/test_train_torch.py tests/test_studio_torch.py -p no:warnings
 
   wheel:
     name: wheel installs in a clean venv

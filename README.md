@@ -112,6 +112,30 @@ Tips for smooth control:
   toward the middle, and a quick swing back from the edge of the camera's view doesn't drag the cursor back (like
   lifting a mouse). Lost the cursor? Say **"center"** to put it in the middle of the screen you're on.
 
+### Teaching your own gestures (Settings → Gesture Studio)
+
+Open **Settings** and pick the **Gesture Studio** tab.
+
+1. Press **Turn camera on**. You see yourself like in a mirror, with your hand drawn on top. (Project Away pauses
+   while the Studio uses the camera and carries on when you turn it off.)
+2. Press **Teach a new gesture** and follow the 3 steps: give it a name, show it when the app says **Now!**
+   (15 times, in 3 short rounds, with a short "just relax" moment after each round), then try it and choose what it
+   should do: press a key, click, type some text, open an app or a website, or a voice action.
+3. **Practice mode** is on by default: you see what would happen, but nothing is really pressed or opened. Untick
+   it when you are happy.
+4. Did something happen that you did not want? Press **That was wrong** straight away. The last 2 seconds are
+   kept as an example of "no gesture" so it learns not to do that. Then press **Learn my gestures now**.
+5. **Where gestures work:** the picture is split into squares. Pick **Ignore here** and click the squares where
+   gestures should be ignored (where your coffee cup is, or where your hand rests on the keyboard). You can also
+   draw a box or say "only above a line". The cursor still moves everywhere unless you tick **Also stop the cursor
+   there** (under **Show details**). Areas are saved for each camera, and can differ for each app profile.
+6. **Show details** adds charts: the last 5 seconds, the points of your hand it looks at, which practice example the
+   hand looks most like, and what it mixed up when it checked itself.
+
+Your practice recordings stay on this computer (only hand points, never pictures). **Delete all my recordings**
+removes them. **Share my gestures...** saves your gestures to a file for someone else; recordings are only added
+if you say so.
+
 ### 4. Voice
 
 Voice is always listening by default. Just talk, and your words are typed wherever the text cursor is.
@@ -1097,6 +1121,75 @@ so prose like "correct the plan to match the budget" is still typed) and "spell 
 corrections: on Windows the focused field is re-read for `watch_seconds` after a dictation, and a small word
 substitution you make in that span is learned after it was seen `learn_after` times.
 
+## Gesture Studio (v0.1.20, unreleased)
+
+Settings → **Gesture Studio** replaces the old "Test gesture" tab (its "built-in gesture" line still shows what
+the state machine saw and what it is bound to). It borrows the camera from the running app through the same
+camera lease as the Tuning tab's live view (`away.app.camera_share`), so the camera is never opened twice.
+
+* **Zones** (`away/studio/zones.py`): one map applies to every gesture: a grid (default 6 x 4, draggable
+  boundaries) of *works here* / *ignore here* cells, free-form boxes on top (later boxes win), and an optional
+  activation line (gestures count only above it). Coordinates are normalised in the mirrored image (what the
+  preview shows); landmarks from a camera with `mirror: false` are flipped before the test. The point tested is
+  the palm centre (`zones.anchor`). A hysteresis band (`zones.hysteresis`, 0.03 image widths) stops a hand on a
+  boundary from flickering. The pipeline enforces it at runtime (`Pipeline.on_hand`): events that *start*
+  something (click, double click, drag start, scroll, auto-scroll start, open palm, swipes, push, dwell, palm tap,
+  custom gestures, Studio gestures) are dropped in ignored areas and published as `gesture.zoned`; ongoing and
+  ending events (moves, drag end, auto-scroll, hand lost) always pass, so a drag never sticks. The cursor is only
+  stopped with `zones.block_cursor: true` (default off: a cursor that freezes at a zone edge feels like a dead
+  mouse, and keeping clicks out of an area is what zones are for). Maps are saved per camera (the primary camera's
+  name) and per bindings profile, falling back camera+profile → camera+default → any camera+profile → any
+  camera+default.
+* **What the recogniser sees** (`away/studio/engine.py`): per-class bars including *No gesture*, the top
+  candidate (shown as *Not sure* below the gesture's threshold), the per-gesture state (idle → arming →
+  firing → cooldown; *recognized* = seen but switched off or in an ignored area), a 5-second timeline with fired
+  actions, an occlusion importance map (each landmark replaced by its training mean, the drop in the top class's
+  probability; 21 batched forward passes, at most 3 times a second), the nearest practice example ("looks most
+  like practice example #7 of Wave") and a practice-mode (dry-run) switch that suppresses actions (on by default).
+  *Watch: Built-in gestures* shows the bundled temporal model's classes instead (its `idle` = No gesture).
+* **Custom gestures from a blank model** (`away/studio/trainer.py`): a gesture is a *static pose* or a *motion*,
+  one or two hands. Gestures are trained in groups by (kind, hands), each with a `nothing` class: static poses on
+  `static_features` (the static pose model's input; two hands add the second hand + its offset), motions on
+  `sequence_features` windows resampled to 24 frames (the temporal TCN's input). With the `[train]` extra, poses
+  use the `StaticPoseMLP` shape and motions the `GestureTCN` (exported to ONNX), trained with
+  `away.hands.train._fit`; without torch (the installed app) a small numpy MLP of the same input is trained, so
+  teaching works out of the box. Training takes seconds. The held-out score is **group-disjoint by
+  `session_id`** (PR #6): every practice round is a session, the wizard records 3 rounds of 5 plus a relax round
+  after each, and a group k-fold (up to 5 folds) never trains and checks on the same round. With fewer than 3
+  rounds there is no score and the result says so. Warnings: fewer than 3 rounds, fewer than 8 examples, two
+  gestures that look alike (class means closer than half their spread), and pairs mixed up 30 %+ of the time. The
+  confusion chart is under *Show details*. *Improve the built-in gestures* records examples of a built-in gesture
+  and runs the existing `away.hands.train.calibrate` fine-tune (needs `[train]`).
+* **Negatives**: the automatic relax round after each practice round, plus **That was wrong** (the last 2 s).
+* **Binding**: Studio gestures are ordinary custom gestures (`bindings.custom_gestures`, `gesture:<name>`), bound
+  through the existing bindings with plain choices (key, mouse, text, app, URL, dictation/voice/mic/pause; shell
+  only with `bindings.allow_shell: true`). Optional follow-up steps (`then:`, an automation chain of actions and
+  `wait:<s>` pauses) run after the bound action, off the camera thread, only when the action ran (not while
+  paused). Per gesture: on/off, how sure it must be, hold time (hold-to-arm) and rest time (cooldown).
+* **Packs** (`away/studio/pack.py`): a zip with `manifest.json` (format `away-gesture-pack` v1, gestures, their
+  settings and actions) + the trained model; practice recordings only when the user ticks it (never by default).
+  Import rejects unsafe paths, foreign or newer packs and packs over 200 MB, and skips shell actions unless shell
+  is allowed. An imported pack's model replaces the current one (teach again to combine).
+* **Privacy**: recordings live in `<data folder>/studio/clips` (hand landmarks only, never images) and never
+  leave the computer unless exported; **Delete all my recordings** removes them.
+* **Plain words**: every visible string lives in `away/studio/words.py` and a test checks it for jargon
+  ("confidence", "model", "takes", "blocked", ...). Problems show a friendly message with a fix button (open camera
+  settings, try again, record a relax round, practise more, show me how).
+
+New config keys:
+
+```yaml
+zones:
+  enabled: true        # false keeps the maps but never enforces them
+  block_cursor: false  # true: the cursor also stops in ignored areas (default: only activations are ignored)
+  hysteresis: 0.03     # image widths the hand must pass a boundary by before its side changes (0..0.2)
+  anchor: palm         # palm | index_tip | wrist: the point of the hand that is tested
+  maps: {}             # camera name or "*" -> profile name -> {grid: {cols, rows, xs, ys, cells}, rects, line}
+studio:
+  gestures:            # per Studio gesture
+    wave: {enabled: true, threshold: 0.8, hold_s: 0.0, cooldown_s: 1.0, then: ["wait:0.3", "key:enter"]}
+```
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -1293,6 +1386,9 @@ Config (`macros:` in config.yaml, all optional):
 | Guided first run, Settings → Getting started, tray items (v0.1.20) | Step list, skip/back, progress dots, saved state, plug-in steps (placeholder, replacement, broken plug-ins), framing tips, the tutorial coach driven by the real gesture state machine, the camera session with a fake camera (events, preview, face sampling, hand-back, errors), friendly errors, the model download fix, `away tour --text` and the tray menu items unit-tested (`tests/test_v0120_first_run.py`); the window was walked through every step and the Settings tab rendered under Xvfb with a fake camera; **untested on a real Windows desktop and with a real webcam** (live preview speed, the 2-minute target, `ms-settings:privacy-webcam`, the auto-open on a real first start, the tray check box on Windows) |
 | Shortcuts: model, recording, replay, Settings, CLI (v0.1.20) | Step building (clicks, double-clicks, drags, scroll merging, text runs, combos, lone modifiers, pause capping), JSON round trip and validation, store/import/export with the private-shortcut rule, the recorder's filters (Away's own marked input, Windows-injected events, own windows, the recording bar, the tray click, password boxes, no-password-check mode), window-relative and control-name aiming, every refusal and its fix, abort by hotkey/mouse/voice, key and button release on errors, speeds, the bindings/dispatcher route for `macro:` and `macro_control:`, the Settings model (record, name, bind, take over a gesture, rename, delete, fixes, step editor), the CLI and the tray items unit-tested with fake listeners, backends and window APIs (`tests/test_v0120_macros.py`); **untested on a real desktop**: the pynput listener and replay backend, real recording through the Tk Recording bar (the Shortcuts tab, its problem banner with a working fix button, the save dialog and Edit steps were rendered and driven under Xvfb at 1366x768), and the Windows ctypes window lookup and UI Automation calls (vtable slots follow UIAutomationClient.h but have never run) |
 | Shortcuts: own-input filtering on macOS/Linux | Marked-input filtering tested (gesture output, replays and dictated text all report to the marker); **Windows' injected flag does not exist there**, so input from other automation tools is recorded, and the marker is time-based (events arriving more than 0.15 s after Away's call returned would be recorded) |
+| Gesture Studio zones (v0.1.20) | Grid, boxes, line, resize, edge drag, hysteresis band, per camera + profile fallback, config validation and the runtime gate in the pipeline (clicks dropped, moves kept, `block_cursor`, profile switch, live reload) unit-tested with synthetic hands (`tests/test_studio_zones.py`); **untested with a live webcam**: whether the palm-centre point and the 0.03 band feel right on a real hand |
+| Gesture Studio learning, recogniser, states, packs (v0.1.20) | Recording format, numpy and torch (StaticPoseMLP / TCN → ONNX) training from a blank model on synthetic poses and swipes, the group-disjoint score (a spy checks no round is trained and checked in the same fold), warnings, occlusion importance, nearest example, idle/arming/firing/cooldown/recognized, chains, packs (lean/with recordings, unsafe paths, shell refused) and the camera worker (practice mode, zones, recording, "That was wrong", built-in source) tested with fake frames (`tests/test_studio_learning.py`, `tests/test_studio_torch.py`, `tests/test_studio_controller.py`); **untested on real hands**: the synthetic scores (often 100 %) say nothing about real accuracy, and 15 examples per gesture is a starting point, not a measured number |
+| Gesture Studio window (v0.1.20) | Built and driven under Xvfb (tab replaces Test gesture, fake frames with the picture, zones, bars, details charts, wizard steps 1-2, gesture dialog) and screenshots checked; **untested on a real desktop with a real camera**: the live picture rate, the wizard's timing with a person, real actions with practice mode off (pynput) |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Smart cleanup rules, app categories and tones, model guard, timeout fallback (v0.1.20) | Unit-tested with a mocked model (`tests/test_v0120_voice_context.py`): accepted polish, invented content rejected, 150 ms budget kept with a 600 ms model, no queueing behind a timed-out call, engine errors, code/terminal pass-through, chat/email tone, sentence continuation, the dictation session end to end; Ollama and OpenAI-compatible engines tested against a local HTTP server |
 | Smart cleanup with the real models (v0.1.20) | Both Qwen2.5 GGUF files downloaded and SHA-256 checked; run through `SmartCleaner` with CPU-only llama-cpp-python 0.3.36 on Linux aarch64 (latency above); a real-model smoke test exists but is skipped in CI (`AWAY_TEST_GGUF`); **untested on Windows, on a GPU (CUDA/Metal llama.cpp builds) and with the frozen installers (the engine is not bundled)** |
