@@ -809,3 +809,21 @@ def test_crash_notice_can_be_dismissed_and_is_in_the_logs(cfg_core, tmp_path: Pa
     a, _ = core.registry.issue("Claude", ["read", "diagnose"], 3600)
     assert core.service.get_logs(a, 5)["crash_log"][-1] == "Traceback..."
     assert crashlog.tail(tmp_path / "nowhere") == []
+
+
+def test_gui_model_saves_talk_settings(tmp_path: Path) -> None:
+    from away.agentlink.gui_model import EVERYONE, AgentLinkModel
+
+    cfgp = tmp_path / "config.yaml"
+    m = AgentLinkModel(data_dir=tmp_path, config_path=cfgp)
+    assert m.talk_enabled() and m.default_agent() == ""
+    m.set_default_agent("Claude")
+    m.set_talk_enabled(False)
+    cfg = C.load(cfgp)[0]
+    assert cfg.agent_link.default_agent == "Claude" and not cfg.agent_link.talk_enabled
+    assert m.default_choices([{"name": "Claude"}, {"name": "Cursor"}, {"name": "Claude"}]) == [
+        EVERYONE,
+        "Claude",
+        "Cursor",
+    ]
+    assert m.set_talk("x", wake_url="http://evil.example/x").startswith("use https://")

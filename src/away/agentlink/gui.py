@@ -80,6 +80,13 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
             wraplength=640,
             justify="left",
         ).pack(anchor="w")
+        self.talk_on = tk.BooleanVar(value=model.talk_enabled())
+        ttk.Checkbutton(
+            tb,
+            text="Listen for \u201cHey\u201d + an agent's name (off: those words are typed like any others)",
+            variable=self.talk_on,
+            command=lambda: self.m.set_talk_enabled(self.talk_on.get()),
+        ).pack(anchor="w")
         drow = ttk.Frame(tb)
         drow.pack(fill="x", pady=2)
         self.default_var = tk.StringVar(value=model.default_agent() or "Every connected agent")

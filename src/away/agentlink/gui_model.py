@@ -218,6 +218,25 @@ class AgentLinkModel:
         cfg.agent_link.default_agent = str(name or "").strip()[:60]
         cfgmod.save(cfg, path)
 
+    def set_talk_enabled(self, on: bool) -> None:
+        """v0.1.22: listen for "Hey <agent>" at all (off: those words are typed like any other)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.talk_enabled = bool(on)
+        cfgmod.save(cfg, path)
+
+    def talk_enabled(self) -> bool:
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return bool(cfg.agent_link.talk_enabled)
+        except Exception:
+            return True
+
     def default_agent(self) -> str:
         from away import config as cfgmod
 
