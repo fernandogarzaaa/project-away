@@ -504,6 +504,49 @@ def check_models(env: Env) -> list[Result]:
     return [_r("models", "Models", PASS, "All present" + (f" ({using})." if using else "."), **d)]
 
 
+# --------------------------------------------------------------------------------- model benchmark (optional)
+def model_bench_hook() -> dict[str, Any] | None:
+    """The model benchmark's self-test hook, ``away.app.model_bench.SELFTEST_HOOK`` (feat/model-refresh), or None
+    while that module is not in this build. Optional on purpose: nothing changes until it lands on main."""
+    try:
+        from away.app import model_bench  # type: ignore[attr-defined,unused-ignore]
+    except Exception:
+        return None
+    hook = getattr(model_bench, "SELFTEST_HOOK", None)
+    if not isinstance(hook, dict) or not callable(hook.get("check")):
+        return None
+    return hook
+
+
+def check_model_bench(env: Env, hook: dict[str, Any] | None = None) -> list[Result]:
+    """Reads the last benchmark result (``run=False``: the self-test never starts a long benchmark by itself)."""
+    hook = hook if hook is not None else model_bench_hook()
+    if hook is None:
+        return []
+    cid = str(hook.get("id") or "model_bench")
+    title = str(hook.get("title") or "Newer models")
+    out = hook["check"](getattr(env, "cfg", None), getattr(env, "data_dir", None))
+    if not isinstance(out, dict):
+        return []
+    status = str(out.get("status") or SKIP)
+    if status not in (PASS, WARN, FAIL, SKIP):
+        status = WARN
+    f = out.get("fix")
+    fix = Fix(str(f.get("id")), str(f.get("label") or "Fix")) if isinstance(f, dict) and f.get("id") else None
+    raw = out.get("details")
+    details: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    return [
+        Result(
+            str(out.get("id") or cid),
+            str(out.get("title") or title),
+            status,
+            str(out.get("summary") or ""),
+            dict(details),
+            fix,
+        )
+    ]
+
+
 CHECKS: tuple[tuple[str, str, Callable[[Env], list[Result]]], ...] = (
     ("cameras", "Cameras", check_cameras),
     ("tracking", "Hand tracking", check_tracking),
@@ -519,4 +562,7 @@ CHECKS: tuple[tuple[str, str, Callable[[Env], list[Result]]], ...] = (
     ("load", "PC load", check_load),
     ("models", "Models", check_models),
 )
+_BENCH = model_bench_hook()
+if _BENCH is not None:  # only once away.app.model_bench is on main
+    CHECKS += ((str(_BENCH.get("id") or "model_bench"), str(_BENCH.get("title") or "Newer models"), check_model_bench),)
 CHECK_IDS = tuple(c[0] for c in CHECKS)

@@ -476,3 +476,49 @@ def test_app_process_counting_skips_helpers() -> None:
     got = gpu_load(lambda _cmd: "37, 1200, 6144, NVIDIA GeForce RTX 2060\n")
     assert got == {"gpu_pct": 37.0, "vram_used_mb": 1200, "vram_total_mb": 6144, "gpu_name": "NVIDIA GeForce RTX 2060"}
     assert gpu_load(lambda _cmd: None) == {}
+
+
+# ------------------------------------------------------------------ optional model benchmark hook (feat/model-refresh)
+def test_model_bench_hook_is_optional_and_does_nothing_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "away.app.model_bench", None)  # import fails like a build without it
+    assert ck.model_bench_hook() is None
+    assert ck.check_model_bench(FakeEnv()) == []
+    if ck._BENCH is None:
+        assert "model_bench" not in ck.CHECK_IDS
+
+
+def test_model_bench_hook_result_becomes_a_selftest_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    seen: list[Any] = []
+
+    def check(cfg: Any, data_dir: Any = None, run: bool = False) -> dict[str, Any]:
+        seen.append((cfg, data_dir, run))
+        return {
+            "id": "model_bench",
+            "title": "Newer models",
+            "status": "warn",
+            "summary": "Speech to text is too slow for the next preset.",
+            "details": {"rtf": 0.9},
+            "fix": {"id": "model_bench:run", "label": "Test again"},
+        }
+
+    mod = types.ModuleType("away.app.model_bench")
+    mod.SELFTEST_HOOK = {"id": "model_bench", "title": "Newer models", "check": check}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "away.app.model_bench", mod)
+    import away.app
+
+    monkeypatch.setattr(away.app, "model_bench", mod, raising=False)
+    hook = ck.model_bench_hook()
+    assert hook is not None
+    env = FakeEnv()
+    env.cfg, env.data_dir = "CFG", "DIR"  # type: ignore[attr-defined]
+    (res,) = ck.check_model_bench(env, hook)
+    assert (res.id, res.status, res.details) == ("model_bench", WARN, {"rtf": 0.9})
+    assert res.fix is not None and (res.fix.action, res.fix.label) == ("model_bench:run", "Test again")
+    assert seen == [("CFG", "DIR", False)]  # reads the last result; never starts a benchmark by itself
+    mod.SELFTEST_HOOK["check"] = lambda *a, **k: {"status": "weird"}  # type: ignore[attr-defined]
+    assert ck.check_model_bench(env, mod.SELFTEST_HOOK)[0].status == WARN  # type: ignore[attr-defined]
