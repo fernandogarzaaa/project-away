@@ -119,8 +119,8 @@ def to_image(pts: NDArray[np.float64], center: NDArray[np.float64], side: float,
 
 
 def box_from_points(pts: NDArray[np.float64], w: int, h: int) -> NDArray[np.float64]:
-    x1, y1 = pts[:, 0].min(), pts[:, 1].min()
-    x2, y2 = pts[:, 0].max(), pts[:, 1].max()
+    x1, y1 = float(np.min(pts[:, 0])), float(np.min(pts[:, 1]))
+    x2, y2 = float(np.max(pts[:, 0])), float(np.max(pts[:, 1]))
     return np.array([max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2)], dtype=np.float64)
 
 

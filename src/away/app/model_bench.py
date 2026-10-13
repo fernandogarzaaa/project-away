@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import json
 import os
 import shutil
@@ -203,11 +204,12 @@ def default_benches(cfg: Any, data_dir: Path | None = None, reg: Any = None) -> 
             out.append(
                 (
                     mid,
-                    lambda mid=mid, opts=opts: measure(
+                    functools.partial(
+                        measure,
                         mid,
                         "stt",
                         reg.models[mid].title,
-                        lambda: asr_next.build_next("moonshine", opts, SR, data_dir, reg),
+                        functools.partial(asr_next.build_next, "moonshine", opts, SR, data_dir, reg),
                         lambda a: a.transcribe(audio),
                         audio_s=5.0,
                     ),
@@ -235,7 +237,7 @@ def default_benches(cfg: Any, data_dir: Path | None = None, reg: Any = None) -> 
         out.append((mid, skip(mid, "not downloaded")))
     # smart cleanup
     from away.app import optional_models as om
-    from away.voice.llm_backends import LlamaCppBackend, llama_cpp_available
+    from away.voice.llm_backends import llama_cpp_available
 
     for key, mid in (
         ("qwen3.5-0.8b", "cleanup-qwen3.5-0.8b-q4km"),
@@ -244,14 +246,16 @@ def default_benches(cfg: Any, data_dir: Path | None = None, reg: Any = None) -> 
     ):
         md = Path(data_dir) / "models" if data_dir else _models_dir()
         if om.installed(key, md) and llama_cpp_available():
+            load = functools.partial(_load_llm, om.path_of(key, md), -1 if gpu["nvidia"] else 0)
             out.append(
                 (
                     mid,
-                    lambda key=key, mid=mid, md=md: measure(
+                    functools.partial(
+                        measure,
                         mid,
                         "cleanup",
                         reg.models[mid].title if mid in reg.models else key,
-                        lambda: _loaded(LlamaCppBackend(om.path_of(key, md), gpu_layers=-1 if gpu["nvidia"] else 0)),
+                        load,
                         lambda b: b.complete("Fix punctuation. Return only the text.", SENTENCE, 48, 30),
                         runs=2,
                         vram=vram,
@@ -269,7 +273,10 @@ def _models_dir() -> Path:
     return models_dir()
 
 
-def _loaded(b: Any) -> Any:
+def _load_llm(path: Path, gpu_layers: int) -> Any:
+    from away.voice.llm_backends import LlamaCppBackend
+
+    b = LlamaCppBackend(path, gpu_layers=gpu_layers)
     b.load()
     return b
 

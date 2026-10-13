@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import Callable
 from typing import Any
 
-Notice = Callable[[str, str], None]
+Notice = Callable[[str, str], object]
 
 
 def opts(cfg: Any) -> Any:
