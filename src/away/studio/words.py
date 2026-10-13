@@ -65,7 +65,7 @@ TOOLTIPS = {
     "how_sure": "How sure the app is that you are making this gesture right now. The red mark is how sure it must be.",
     "teach": "Three easy steps: name your gesture, show it a few times, try it.",
     "practise_more": "Record a few more practice examples of the selected gesture. More rounds make it more reliable.",
-    "learn": "Teaches the app all your gestures again from your practice examples. Takes a few seconds.",
+    "learn": "Teaches the app all your gestures again from your practice examples. It only needs a few seconds.",
     "gesture_settings": "Pick what happens when you make the selected gesture: a key, a click, typing text, "
     "opening an app or website, or a voice action.",
     "remove": "Removes the selected gesture and its practice examples.",
@@ -208,7 +208,7 @@ CAMERA_DID_NOT_START = "The camera did not start. Check it is plugged in and cho
 _EXPLAIN = (
     ("busy", "", "Another app is using the camera. Close it, then try again.", "retry"),
     ("in use", "", "Another app is using the camera. Close it, then try again.", "retry"),
-    ("waiting for project away", "", "Project Away is letting go of the camera. This takes a few seconds.", ""),
+    ("waiting for project away", "", "Project Away is letting go of the camera. This needs a few seconds.", ""),
     ("did not open", "", CAMERA_DID_NOT_START, "open_cameras"),
     ("could not open", "", CAMERA_DID_NOT_START, "open_cameras"),
     ("no frames", "", "The camera is not sending a picture. Check camera settings.", "open_cameras"),
@@ -219,7 +219,7 @@ _EXPLAIN = (
     ("round(s)", "practised in", "It needs a few more practice rounds to check itself.", "practise_more"),
     ("teach a gesture first", "", "You have not taught any gestures yet.", "teach"),
     ("no gestures taught", "", "You have not taught any gestures yet.", "teach"),
-    ("training add-on", "", "Improving the built-in gestures needs an extra add-on.", "install_training"),
+    ("learning add-on", "", "Improving the built-in gestures needs an extra add-on.", "install_training"),
     ("shell actions are disabled", "", "Running commands is switched off for safety.", "allow_shell"),
     ("built-in gesture model is missing", "", "The built-in gestures file is missing.", "setup"),
 )
@@ -236,7 +236,7 @@ def explain(text: str) -> tuple[str, str, str] | None:
 
 
 HELP = {
-    "install_training": "To improve the built-in gestures, install the training add-on once. Open a terminal and "
+    "install_training": "To improve the built-in gestures, install the learning add-on once. Open a terminal and "
     'run:\n\n    pip install "project-away[train]"\n\nThen come back and press the button again.',
     "setup": "Open a terminal and run:\n\n    away setup\n\nIt downloads the hand-tracking files again.",
     "allow_shell": "Running commands is off for safety. To allow it, open your settings file and set\n\n"

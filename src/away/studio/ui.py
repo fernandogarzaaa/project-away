@@ -121,16 +121,20 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         # ---- top bar
         bar = ttk.Frame(f)
         bar.grid(row=0, column=0, sticky="we")
-        self.cam_btn = tip(ttk.Button(bar, text=LABELS["camera_on"], style="Big.TButton", command=self.toggle), "camera_on")
+        self.cam_btn = tip(
+            ttk.Button(bar, text=LABELS["camera_on"], style="Big.TButton", command=self.toggle), "camera_on"
+        )
         self.cam_btn.pack(side="left")
         self.dry = tk.BooleanVar(value=True)
-        tip(ttk.Checkbutton(bar, text=LABELS["practice_mode"], variable=self.dry, command=self._dry_changed), "practice_mode").pack(
-            side="left", padx=10
-        )
+        tip(
+            ttk.Checkbutton(bar, text=LABELS["practice_mode"], variable=self.dry, command=self._dry_changed),
+            "practice_mode",
+        ).pack(side="left", padx=10)
         self.details = tk.BooleanVar(value=False)
-        tip(ttk.Checkbutton(bar, text=LABELS["details"], variable=self.details, command=self._details_changed), "details").pack(
-            side="left", padx=4
-        )
+        tip(
+            ttk.Checkbutton(bar, text=LABELS["details"], variable=self.details, command=self._details_changed),
+            "details",
+        ).pack(side="left", padx=4)
         tip(ttk.Button(bar, text=LABELS["thats_wrong"], command=self._wrong), "thats_wrong").pack(side="right")
         self.watch = tk.StringVar(value=LABELS["my_gestures"])
         cb = ttk.Combobox(bar, textvariable=self.watch, state="readonly", width=16,
@@ -174,15 +178,21 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         for var in (self.cols, self.rows):
             sp = ttk.Spinbox(tools2, from_=1, to=12, width=3, textvariable=var, command=self._resize)
             tip(sp, "grid").pack(side="left", padx=1)
-        tip(ttk.Button(tools2, text=LABELS["clear_zones"], command=self._clear_zones), "clear_zones").pack(side="left", padx=6)
+        tip(ttk.Button(tools2, text=LABELS["clear_zones"], command=self._clear_zones), "clear_zones").pack(
+            side="left", padx=6
+        )
         ttk.Label(tools2, text=LABELS["zones_for"] + ":").pack(side="left")
         self.zprof_var = tk.StringVar(value="default")
         self.zprof_cb = ttk.Combobox(tools2, textvariable=self.zprof_var, state="readonly", width=12)
         self.zprof_cb.bind("<<ComboboxSelected>>", lambda _e: self._zone_profile_changed())
         tip(self.zprof_cb, "zones_for").pack(side="left", padx=2)
         self.block_var = tk.BooleanVar(value=bool(self.ctl.cfg.zones.block_cursor))
-        self.block_chk = ttk.Checkbutton(left, text="Also stop the cursor there", variable=self.block_var,
-                                         command=lambda: self._report(self.ctl.set_block_cursor(self.block_var.get())))  # fmt: skip
+        self.block_chk = ttk.Checkbutton(
+            left,
+            text="Also stop the cursor there",
+            variable=self.block_var,
+            command=lambda: self._report(self.ctl.set_block_cursor(self.block_var.get())),
+        )
         Tooltip(self.block_chk, "When ticked, the cursor also stops moving in 'Ignore here' areas. "
                 "Normally only clicks and gestures are ignored there.")  # fmt: skip
         self.zone_note = tk.StringVar()
@@ -205,15 +215,21 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         self.bars.pack(anchor="w", pady=(6, 0))
         tip(self.bars, "how_sure")
         self.near_var = tk.StringVar()
-        self.near_lbl = tip(ttk.Label(right, textvariable=self.near_var, foreground="#555", wraplength=300), "looks_like")
+        self.near_lbl = tip(
+            ttk.Label(right, textvariable=self.near_var, foreground="#555", wraplength=300), "looks_like"
+        )
 
         # ---- details (hidden by default)
         self.det = ttk.LabelFrame(f, text=LABELS["details"], padding=6)
         ttk.Label(self.det, text=LABELS["timeline"]).grid(row=0, column=0, sticky="w")
-        self.tl_canvas = tip(tk.Canvas(self.det, width=420, height=140, background="white", highlightthickness=0), "timeline")
+        self.tl_canvas = tip(
+            tk.Canvas(self.det, width=420, height=140, background="white", highlightthickness=0), "timeline"
+        )
         self.tl_canvas.grid(row=1, column=0, sticky="w")
         ttk.Label(self.det, text=LABELS["mixups"]).grid(row=0, column=1, sticky="w", padx=(12, 0))
-        self.cm_canvas = tip(tk.Canvas(self.det, width=260, height=160, background="white", highlightthickness=0), "mixups")
+        self.cm_canvas = tip(
+            tk.Canvas(self.det, width=260, height=160, background="white", highlightthickness=0), "mixups"
+        )
         self.cm_canvas.grid(row=1, column=1, sticky="w", padx=(12, 0))
         self.split_var = tk.StringVar()
         ttk.Label(self.det, textvariable=self.split_var, foreground="#555", wraplength=680).grid(
@@ -242,8 +258,13 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
             tip(ttk.Button(btns, text=LABELS[key], command=cmd), key).pack(side="left", padx=3)
         btns2 = ttk.Frame(lst)
         btns2.grid(row=2, column=0, sticky="w", pady=(4, 0))
-        for key, cmd in (("share", self.share), ("add_file", self.add_file),
-                         ("delete_recordings", self.delete_recordings), ("improve_builtin", self.improve_builtin)):  # fmt: skip
+        more = (
+            ("share", self.share),
+            ("add_file", self.add_file),
+            ("delete_recordings", self.delete_recordings),
+            ("improve_builtin", self.improve_builtin),
+        )
+        for key, cmd in more:
             tip(ttk.Button(btns2, text=LABELS[key], command=cmd), key).pack(side="left", padx=3)
         self.result_var = tk.StringVar()
         tk.Label(lst, textvariable=self.result_var, justify="left", anchor="w", wraplength=760).grid(
@@ -312,7 +333,9 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         self.tree.delete(*self.tree.get_children())
         for r in self.ctl.rows():
             ex = f"{r.examples} ({r.rounds} round{'s' if r.rounds != 1 else ''})"
-            self.tree.insert("", "end", iid=r.name, values=(r.title, f"{r.kind}, {r.hands.lower()}", ex, r.status, r.action))
+            self.tree.insert(
+                "", "end", iid=r.name, values=(r.title, f"{r.kind}, {r.hands.lower()}", ex, r.status, r.action)
+            )
         self.zprof_cb["values"] = self.ctl.zone_profiles()
         res = self.ctl.last_result()
         if res:
@@ -372,7 +395,8 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
             try:
                 self._runner = action_runner(self.w.m)
             except Exception as exc:
-                self.w._ui.post(lambda: self.show_problem(f"Actions cannot run on this computer ({exc})"))
+                text = f"Actions cannot run on this computer ({exc})"
+                self.w._ui.post(lambda: self.show_problem(text))
                 self._runner = lambda _n: False
         self._runner(name)
 
@@ -477,9 +501,7 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         if fr.get("builtin"):
             self.builtin_var.set(f"Built-in gesture: {fr['builtin']}")
         near = fr.get("nearest")
-        self.near_var.set(
-            f"{LABELS['looks_like']}: practice example #{near[1]} of {name_for(near[0])}" if near else ""
-        )
+        self.near_var.set(f"{LABELS['looks_like']}: practice example #{near[1]} of {name_for(near[0])}" if near else "")
         thr = self._threshold(top)
         self._bar(self.sure_canvas, float(fr.get("top_p", 0.0)) if probs else 0.0, thr, 260)
         self._draw_bars(probs, states)
@@ -505,7 +527,9 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
     def _bar(self, c: Any, p: float, thr: float, width: int) -> None:
         c.delete("all")
         c.create_rectangle(0, 6, width, 20, fill="#e3e3e3", outline="")
-        c.create_rectangle(0, 6, width * max(0.0, min(1.0, p)), 20, fill="#43a047" if p >= thr else "#90a4ae", outline="")
+        c.create_rectangle(
+            0, 6, width * max(0.0, min(1.0, p)), 20, fill="#43a047" if p >= thr else "#90a4ae", outline=""
+        )
         c.create_line(width * thr, 2, width * thr, 24, fill="#d32f2f", width=2)
         c.create_text(width - 4, 13, text=sure_text(p), anchor="e", fill="#222")
 
@@ -513,7 +537,9 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         c = self.bars
         c.delete("all")
         if not probs:
-            c.create_text(4, 10, anchor="w", fill="#777", text=f"{LABELS['how_sure']}: shows here when a hand is in view")
+            c.create_text(
+                4, 10, anchor="w", fill="#777", text=f"{LABELS['how_sure']}: shows here when a hand is in view"
+            )
             return
         items = list(probs.items())[:8]
         c.configure(height=max(40, 22 * len(items) + 6))
@@ -897,7 +923,9 @@ class Wizard:  # pragma: no cover - widgets
         box2.pack(anchor="w")
         ttk.Radiobutton(box2, text="One hand", value=1, variable=self.hands_var).pack(side="left")
         ttk.Radiobutton(box2, text="Two hands", value=2, variable=self.hands_var).pack(side="left", padx=8)
-        tk.Label(self.body, textvariable=self.err, fg="#b71c1c", wraplength=460, justify="left").pack(anchor="w", pady=4)
+        tk.Label(self.body, textvariable=self.err, fg="#b71c1c", wraplength=460, justify="left").pack(
+            anchor="w", pady=4
+        )
         nav = ttk.Frame(self.body)
         nav.pack(fill="x", pady=(8, 0))
         ttk.Button(nav, text=WIZARD["cancel"], command=self.cancel).pack(side="left")
@@ -1191,7 +1219,7 @@ class BuiltinDialog:  # pragma: no cover - widgets
         choices = [g for g in GESTURES if g != "idle"]
         self.var = tk.StringVar(value=choices[0])
         ttk.Combobox(body, textvariable=self.var, values=choices, state="readonly").pack(anchor="w", pady=6)
-        ttk.Label(body, text="You will show it 5 times. Then the app updates the built-in gestures (this can take "
+        ttk.Label(body, text="You will show it 5 times. Then the app updates the built-in gestures (this may last "
                   "a minute).", wraplength=380).pack(anchor="w")  # fmt: skip
         nav = ttk.Frame(body)
         nav.pack(fill="x", pady=(8, 0))
@@ -1202,7 +1230,7 @@ class BuiltinDialog:  # pragma: no cover - widgets
         from away.studio.trainer import torch_available
 
         if not torch_available():
-            self.tab.show_problem("Improving the built-in gestures needs the training add-on.")
+            self.tab.show_problem("Improving the built-in gestures needs the learning add-on.")
             self.top.destroy()
             return
         label = self.var.get()
@@ -1223,7 +1251,7 @@ class BuiltinDialog:  # pragma: no cover - widgets
         def retrain() -> None:
             from away.studio.trainer import retrain_builtin
 
-            self.tab.status.set("Updating the built-in gestures... (this can take a minute)")
+            self.tab.status.set("Updating the built-in gestures... (this may last a minute)")
 
             def work() -> None:
                 from away import paths as pth

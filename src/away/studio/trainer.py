@@ -501,7 +501,7 @@ def retrain_builtin(models_dir: Path, recordings: Path) -> dict[str, Any]:
     """'Improve the built-in gestures with my examples': the existing personal fine-tune of the bundled TCN
     (:func:`away.hands.train.calibrate`); needs the [train] extra (torch)."""
     if not torch_available():
-        raise RuntimeError("needs the training add-on")
+        raise RuntimeError("needs the learning add-on")
     from away.hands.train import calibrate
 
     return calibrate(models_dir, recordings)
