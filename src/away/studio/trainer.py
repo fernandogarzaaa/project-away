@@ -32,7 +32,7 @@ from away.studio.pack import NOTHING, GestureDef, StudioStore
 Array = NDArray[np.float64]
 MIN_ROUNDS = 3  # practice rounds (sessions) a gesture needs before it can be checked on unseen rounds
 MIN_EXAMPLES = 8
-SIMILAR_COSINE = 0.92
+SIMILAR_SEPARATION = 0.5
 CONFUSED_RATE = 0.3
 MAX_FOLDS = 5
 
@@ -346,17 +346,18 @@ def evaluate_group(
 
 
 def similar_pairs(X: Array, y: NDArray[np.int64], classes: list[str]) -> list[tuple[str, str, float]]:
-    """Gesture pairs whose average (standardised) inputs point the same way: likely to be mixed up."""
+    """Gesture pairs whose average (standardised) inputs are closer than half their spread: likely to be mixed
+    up. On synthetic hands the same pose recorded under two names measures ~0.3, fist vs two fingers ~0.9."""
     Z = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
-    cents = {i: Z[y == i].mean(axis=0) for i in sorted(set(int(v) for v in y)) if classes[i] != NOTHING}
+    ids = [i for i in sorted(set(int(v) for v in y)) if classes[i] != NOTHING]
     out = []
-    keys = sorted(cents)
-    for a_i, a in enumerate(keys):
-        for b in keys[a_i + 1 :]:
-            va, vb = cents[a], cents[b]
-            cos = float(va @ vb / (np.linalg.norm(va) * np.linalg.norm(vb) + 1e-9))
-            if cos >= SIMILAR_COSINE:
-                out.append((classes[a], classes[b], cos))
+    for k, a in enumerate(ids):
+        for b in ids[k + 1 :]:
+            za, zb = Z[y == a], Z[y == b]
+            within = float(np.sqrt((za.var(axis=0).sum() + zb.var(axis=0).sum()) / 2)) + 1e-9
+            sep = float(np.linalg.norm(za.mean(axis=0) - zb.mean(axis=0)) / within)
+            if sep < SIMILAR_SEPARATION:
+                out.append((classes[a], classes[b], sep))
     return out
 
 
