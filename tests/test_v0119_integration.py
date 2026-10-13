@@ -12,6 +12,7 @@ from away.bindings import BindingsError, parse_bindings
 from away.hands.cursor import CursorMapper
 
 TRACKING_PREFIXES = ("hands.cursor.autocenter.", "hands.cursor.head.", "gaze.")
+V0120_PREFIXES = ("attention.", "comfort.")
 DEFAULTS = T.default_values()
 
 
@@ -41,7 +42,8 @@ def test_tracking_tunables_land_in_head_and_eyes(model: SettingsModel) -> None:
         assert t.help and not t.help.startswith("Advanced setting"), p
     assert by_path["hands.cursor.head.coarse_cols"].is_int and by_path["hands.cursor.head.coarse_rows"].is_int
     # nothing else moved into Head & eyes, and the old Cursor section keeps its own sliders
-    head = {t.path for t in model.tunables() if t.group == "Head & eyes"}
+    # (v0.1.20 adds the attention-gate / arm-fatigue sliders to Head & eyes on purpose)
+    head = {t.path for t in model.tunables() if t.group == "Head & eyes" and not t.path.startswith(V0120_PREFIXES)}
     assert head == set(paths)
     assert by_path["hands.cursor.gain"].group == "Cursor" and by_path["hands.cursor.min_cutoff"].group == "Cursor"
 
