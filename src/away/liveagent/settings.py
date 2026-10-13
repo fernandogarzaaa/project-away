@@ -158,23 +158,26 @@ def save(s: LiveSettings, p: Path | None = None) -> Path:
 
 
 class Watcher:
-    """Re-reads the file when Settings (another process) saved it."""
+    """Re-reads the file when Settings (another process) saved it.
+
+    Compares the file's contents, not only its modified time: two saves close together can keep the same time stamp
+    (seen on Windows CI), and the second change must not be missed."""
 
     def __init__(self, p: Path | None = None) -> None:
         self.path = Path(p or path())
         self.current = load(self.path)
-        self._mtime = self._stat()
+        self._sig = self._stat()
 
-    def _stat(self) -> float:
+    def _stat(self) -> bytes | None:
         try:
-            return self.path.stat().st_mtime
+            return self.path.read_bytes()
         except OSError:
-            return -1.0
+            return None
 
     def poll(self) -> bool:
         m = self._stat()
-        if m != self._mtime:
-            self._mtime = m
+        if m != self._sig:
+            self._sig = m
             self.current = load(self.path)
             return True
         return False

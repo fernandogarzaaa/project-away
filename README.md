@@ -586,7 +586,7 @@ model's price is unknown, it is counted at a cautious $1 / $5 per million tokens
 
 | Part | Status |
 |---|---|
-| Router, fallback order, rest periods, daily budget, redaction, fencing of screen text, Jev answers, barge-in logic, Settings tab logic, key storage | Unit-tested with fake providers, a fake opencode server, a fake key store and fake clocks (57 tests) |
+| Router, fallback order, rest periods, daily budget, redaction, fencing of screen text, Jev answers, barge-in logic, Settings tab logic, key storage | Unit-tested with fake providers, a fake opencode server, a fake key store and fake clocks (58 tests) |
 | Settings → Live agent tab | Drawn under Xvfb on Linux (a render test and a screenshot check) |
 | opencode download, SHA-256 check, private `opencode serve`, free models answering | **Verified for real on Linux (arm64)** on 2026-10-14: opencode 1.19.0 downloaded and checked, a free model answered "15% of 80 is 12" in about 3.5 s at $0, and "Free usage exceeded" moved on to the next model |
 | Jev (free) | **Verified for real** on 2026-10-14: routing and the risk check answered in about 0.3 s |

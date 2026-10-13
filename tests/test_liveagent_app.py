@@ -171,7 +171,8 @@ def test_server_lifecycle_auth_free_models_chat_and_tool_rejection(fake_server, 
     assert "".join(pieces) == "Hello there. All good."  # reasoning part left out, early delta kept
     assert srv.client.get_json(f"{srv.url}/rejected", srv._auth(), 5) == ["per_1"]  # the bash ask got "no"
     log = (srv.home / "state" / "fake.log").read_text()
-    assert '"env_has_secret": false' in log and str(srv.home.parent / "work") in log
+    seen = json.loads(log.strip().splitlines()[-1])
+    assert seen["env_has_secret"] is False and os.path.samefile(seen["cwd"], srv.home.parent / "work")
     with pytest.raises(HttpError) as limited:  # "Free usage exceeded": stop at once, the funnel tries another model
         list(srv.chat_stream("big-pickle-limited", "hi", timeout=20))
     assert limited.value.status == 429 and "free_tier_limit" in str(limited.value)
@@ -644,3 +645,14 @@ def test_cli_ask_reports_every_attempt_when_no_model_answers(tmp_path, monkeypat
     assert cli.main(["--data-dir", str(tmp_path), "ask", "hi"]) == 1
     err = capsys.readouterr().err
     assert "No model answered" in err and "opencode_free/x: rate_limit: 429 Free usage" in err
+
+
+def test_watcher_sees_a_second_save_with_the_same_time_stamp(tmp_path) -> None:
+    p = st.path(tmp_path)
+    st.save(st.LiveSettings(enabled=False), p)
+    w = st.Watcher(p)
+    stamp = p.stat().st_mtime_ns
+    st.save(st.LiveSettings(enabled=True), p)
+    os.utime(p, ns=(stamp, stamp))  # coarse clocks (Windows) can give two quick saves the same time
+    assert w.poll() and w.current.enabled is True
+    assert not w.poll()
