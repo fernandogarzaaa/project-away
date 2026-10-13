@@ -2700,7 +2700,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _build_studio(self, nb: Any) -> None:
         from away.studio.ui import StudioTab
 
-        self._test_thread = None  # the Studio camera thread (the Tuning live view waits for it)
+        self._test_thread: threading.Thread | None = None  # the Studio camera (the Tuning live view waits for it)
         self.studio = StudioTab(self, nb)
 
     def _build_test(self, nb: Any) -> None:
@@ -2720,7 +2720,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ttk.Label(f, text="Shows the gesture or clap detected and what it is bound to. Nothing is executed.").pack(
             anchor="w", pady=6
         )
-        self._test_thread: threading.Thread | None = None
+        self._test_thread = None
 
     # ------------------------------------------------------------- helpers
     def _report(self, err: str | None, ok: str | None = None) -> None:
