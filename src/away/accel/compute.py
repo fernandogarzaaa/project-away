@@ -211,7 +211,11 @@ def face_landmarker(
 
                 p = gm.paths("face", data_dir)
                 return OnnxFaceLandmarker(
-                    p["face_detector"], p["face_landmark"], p["face_blendshape"], max_faces, [c.provider, "CPUExecutionProvider"]
+                    p["face_detector"],
+                    p["face_landmark"],
+                    p["face_blendshape"],
+                    max_faces,
+                    [c.provider, "CPUExecutionProvider"],
                 )
     from away.face.landmarker import FaceLandmarker
 

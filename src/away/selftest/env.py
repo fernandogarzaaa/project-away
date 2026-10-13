@@ -400,7 +400,9 @@ class RealEnv:
         prompts = getattr(getattr(h, "core", None), "prompts", None)
         if prompts is None:
             return {"skipped": "Project Away is not running, so no pop-up was shown."}
-        res = prompts.notify("Self-test: this is how messages from your agents look.", "info", False, agent="Project Away")
+        res = prompts.notify(
+            "Self-test: this is how messages from your agents look.", "info", False, agent="Project Away"
+        )
         return {"shown": bool(res.get("shown")), "via": res.get("via"), "reason": res.get("reason")}
 
     # ---------------------------------------------------------------- link
@@ -415,7 +417,12 @@ class RealEnv:
             if srv is not None and getattr(srv, "running", False):
                 port = int(srv.port)
                 try:
-                    out["server"] = {"running": True, "port": port, "ok": True, "ms": round(http_ms(f"http://127.0.0.1:{port}/v1/ping"), 1)}
+                    out["server"] = {
+                        "running": True,
+                        "port": port,
+                        "ok": True,
+                        "ms": round(http_ms(f"http://127.0.0.1:{port}/v1/ping"), 1),
+                    }
                 except Exception as exc:
                     out["server"] = {"running": True, "port": port, "ok": False, "error": str(exc)[:120]}
             for key, attr in (("tunnel", "tunnel"), ("backup", "relay"), ("named", "named")):
@@ -506,6 +513,11 @@ def gpu_load(run: Callable[..., str | None] | None = None) -> dict[str, Any]:
         return {}
     try:
         util, used, total, name = [x.strip() for x in txt.strip().splitlines()[0].split(",", 3)]
-        return {"gpu_pct": float(util), "vram_used_mb": int(float(used)), "vram_total_mb": int(float(total)), "gpu_name": name}
+        return {
+            "gpu_pct": float(util),
+            "vram_used_mb": int(float(used)),
+            "vram_total_mb": int(float(total)),
+            "gpu_name": name,
+        }
     except Exception:
         return {}

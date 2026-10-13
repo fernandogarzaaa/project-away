@@ -1481,7 +1481,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.cfg,
                 model,
                 paths.data_dir(),
-                on_note=lambda why: self.notice("Project Away: hand tracking on the processor", why, key="gpu-tracking"),
+                on_note=lambda why: self.notice(
+                    "Project Away: hand tracking on the processor", why, key="gpu-tracking"
+                ),
             )
         except Exception:
             return None

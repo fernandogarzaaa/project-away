@@ -178,7 +178,9 @@ def check_tracking(env: Env) -> list[Result]:
         parts.append(f"{float(fps):.0f} updates a second")
     if ms is not None:
         parts.append(f"{float(ms):.0f} ms each")
-    return [_r("tracking", "Hand tracking", PASS, "Smooth" + (f": {', '.join(parts)}" if parts else "") + f"{on}.", **d)]
+    return [
+        _r("tracking", "Hand tracking", PASS, "Smooth" + (f": {', '.join(parts)}" if parts else "") + f"{on}.", **d)
+    ]
 
 
 def check_gpu_tracking(env: Env) -> list[Result]:
@@ -218,7 +220,14 @@ def check_glide(env: Env) -> list[Result]:
     d = {"hz": round(hz, 1), "target_hz": want, "source": g.get("source")}
     if hz <= 0:
         return [
-            _r("glide", "Smooth pointer", FAIL, "The pointer output did not run.", Fix("restart_app", "Restart Project Away"), **d)
+            _r(
+                "glide",
+                "Smooth pointer",
+                FAIL,
+                "The pointer output did not run.",
+                Fix("restart_app", "Restart Project Away"),
+                **d,
+            )
         ]
     if hz < GLIDE_MIN_HZ:
         return [
@@ -245,7 +254,9 @@ def check_big_cursor(env: Env) -> list[Result]:
         msg = f"The pointer is stuck at the big size ({b.get('size')} px; yours is {b.get('user_size')} px)."
         return [_r("big_cursor", "Big pointer", FAIL, msg, fix, **d)]
     if b.get("restored") is False:
-        return [_r("big_cursor", "Big pointer", FAIL, "The pointer grew but did not shrink back to your size.", fix, **d)]
+        return [
+            _r("big_cursor", "Big pointer", FAIL, "The pointer grew but did not shrink back to your size.", fix, **d)
+        ]
     return [_r("big_cursor", "Big pointer", PASS, "Grows while gestures are on and shrinks back to your size.", **d)]
 
 
@@ -261,7 +272,9 @@ def check_instances(env: Env) -> list[Result]:
         out.append(_r("single", "Only one Project Away", PASS, "Only one copy can run at a time.", **d))
     if count > 1:
         msg = f"{count} copies of Project Away are running. They fight over the camera and the pointer."
-        out.append(_r("duplicates", "Extra copies running", FAIL, msg, Fix("close_duplicates", "Close the extra copies"), **d))
+        out.append(
+            _r("duplicates", "Extra copies running", FAIL, msg, Fix("close_duplicates", "Close the extra copies"), **d)
+        )
     else:
         out.append(_r("duplicates", "Extra copies running", PASS, "None.", **d))
     return out
@@ -272,7 +285,16 @@ def check_mic(env: Env) -> list[Result]:
     m = env.mic()
     sound = Fix("open:sound_settings", "Open sound settings")
     if m.get("error"):
-        return [_r("mic", "Microphone", FAIL, f"The microphone could not be opened: {m['error']}", sound, device=m.get("device"))]
+        return [
+            _r(
+                "mic",
+                "Microphone",
+                FAIL,
+                f"The microphone could not be opened: {m['error']}",
+                sound,
+                device=m.get("device"),
+            )
+        ]
     rms, peak = m.get("rms_db"), m.get("peak_db")
     d = {"device": m.get("device"), "rms_db": rms, "peak_db": peak}
     dev = f" ({m['device']})" if m.get("device") else ""
@@ -280,7 +302,16 @@ def check_mic(env: Env) -> list[Result]:
         msg = f"Nothing reaches the microphone{dev}. Is it muted, or is another microphone the default?"
         return [_r("mic", "Microphone", FAIL, msg, sound, **d)]
     if peak is not None and float(peak) > MIC_LOUD_DB:
-        return [_r("mic", "Microphone", WARN, "Very loud: words may get cut off. Turn the input level down a little.", sound, **d)]
+        return [
+            _r(
+                "mic",
+                "Microphone",
+                WARN,
+                "Very loud: words may get cut off. Turn the input level down a little.",
+                sound,
+                **d,
+            )
+        ]
     return [_r("mic", "Microphone", PASS, f"Hears sound{dev or ' (default microphone)'}.", **d)]
 
 
@@ -317,7 +348,15 @@ def check_stt(env: Env) -> list[Result]:
 def check_tts(env: Env) -> list[Result]:
     engines = env.tts()
     if not engines:
-        return [_r("tts", "Speaking voice", FAIL, "No voice found to speak with.", Fix("open:settings/voice", "Choose a voice"))]
+        return [
+            _r(
+                "tts",
+                "Speaking voice",
+                FAIL,
+                "No voice found to speak with.",
+                Fix("open:settings/voice", "Choose a voice"),
+            )
+        ]
     out = []
     for e in engines:
         name = str(e.get("name") or "voice")
@@ -363,9 +402,19 @@ def check_link(env: Env) -> list[Result]:
     srv = k.get("server") or {}
     if srv.get("running"):
         ms, ok = srv.get("ms"), bool(srv.get("ok", True))
-        msg = "Answers on this PC" + (f" ({float(ms):.0f} ms)." if ms is not None else ".") if ok else "Does not answer."
+        msg = (
+            "Answers on this PC" + (f" ({float(ms):.0f} ms)." if ms is not None else ".") if ok else "Does not answer."
+        )
         out.append(
-            _r("link", "Agent Link", PASS if ok else FAIL, msg, None if ok else Fix("restart_link", "Restart Agent Link"), port=srv.get("port"), ms=ms)
+            _r(
+                "link",
+                "Agent Link",
+                PASS if ok else FAIL,
+                msg,
+                None if ok else Fix("restart_link", "Restart Agent Link"),
+                port=srv.get("port"),
+                ms=ms,
+            )
         )
     else:
         out.append(_r("link", "Agent Link", PASS, "Ready (it starts when an agent connects)."))
@@ -384,7 +433,15 @@ def check_link(env: Env) -> list[Result]:
     for r in k.get("relays") or []:
         name = str(r.get("name"))
         if r.get("ok"):
-            out.append(_r(f"relay:{name}", f"Can reach {name}", PASS, f"Yes ({float(r.get('ms') or 0):.0f} ms).", ms=r.get("ms")))
+            out.append(
+                _r(
+                    f"relay:{name}",
+                    f"Can reach {name}",
+                    PASS,
+                    f"Yes ({float(r.get('ms') or 0):.0f} ms).",
+                    ms=r.get("ms"),
+                )
+            )
         else:
             msg = f"No ({r.get('error') or 'blocked'}). {r.get('why') or ''}".strip()
             out.append(_r(f"relay:{name}", f"Can reach {name}", WARN, msg, error=r.get("error")))
@@ -402,7 +459,13 @@ def check_load(env: Env) -> list[Result]:
     cpu, gpu = ld.get("cpu_pct"), ld.get("gpu_pct")
     top = list(ld.get("top") or [])
     names = ", ".join(f"{p.get('name')} {float(p.get('cpu_pct') or 0):.0f}%" for p in top[:3])
-    d = {"cpu_pct": cpu, "gpu_pct": gpu, "gpu": ld.get("gpu_name"), "top": top[:5], "vram_used_mb": ld.get("vram_used_mb")}
+    d = {
+        "cpu_pct": cpu,
+        "gpu_pct": gpu,
+        "gpu": ld.get("gpu_name"),
+        "top": top[:5],
+        "vram_used_mb": ld.get("vram_used_mb"),
+    }
     out = []
     if cpu is not None and float(cpu) >= CPU_BUSY_PCT:
         first = next((p for p in top if p.get("name") != "Project Away"), None)
@@ -415,7 +478,15 @@ def check_load(env: Env) -> list[Result]:
         out.append(_r("cpu", "Processor load", PASS, msg, **d))
     if gpu is not None:
         st = WARN if float(gpu) >= GPU_BUSY_PCT else PASS
-        out.append(_r("gpu_load", "Graphics card load", st, f"{float(gpu):.0f}% busy ({ld.get('gpu_name') or 'graphics card'}).", **d))
+        out.append(
+            _r(
+                "gpu_load",
+                "Graphics card load",
+                st,
+                f"{float(gpu):.0f}% busy ({ld.get('gpu_name') or 'graphics card'}).",
+                **d,
+            )
+        )
     return out
 
 

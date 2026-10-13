@@ -38,7 +38,10 @@ class FakeEnv:
             "instances": {"lock_held": True, "count": 1, "pids": [100]},
             "mic": {"device": "Mic (USB)", "rms_db": -35.0, "peak_db": -12.0},
             "stt": {"heard": "Project Away is ready.", "method": "loopback", "ms": 900},
-            "tts": [{"name": "Windows voice", "first_audio_ms": 300}, {"name": "Natural (Kokoro)", "first_audio_ms": 600}],
+            "tts": [
+                {"name": "Windows voice", "first_audio_ms": 300},
+                {"name": "Natural (Kokoro)", "first_audio_ms": 600},
+            ],
             "notification": {"shown": True, "via": "window"},
             "link": {
                 "enabled": True,
@@ -82,7 +85,10 @@ def test_a_healthy_pc_passes_everything() -> None:
 
 def test_camera_held_by_another_app_names_it_and_offers_to_close_it() -> None:
     env = FakeEnv(
-        cameras=[{"name": "HD User Facing", "opened": False, "fps": 0, "error": "busy"}, {"name": "JoyCam", "opened": True, "fps": 12}],
+        cameras=[
+            {"name": "HD User Facing", "opened": False, "fps": 0, "error": "busy"},
+            {"name": "JoyCam", "opened": True, "fps": 12},
+        ],
         camera_users={
             "message": "Your built-in camera is being used by Zoom. Close it, then Retry.",
             "users": [{"name": "Zoom", "path": "C:\\Zoom\\Zoom.exe", "packaged": False}],
@@ -102,7 +108,9 @@ def test_camera_rules_too_slow_none_and_turned_off() -> None:
     assert none.status == FAIL and none.fix and none.fix.action == "open:camera_privacy"
     off = ck.check_cameras(FakeEnv(cameras=[{"name": "Old cam", "off": True}]))[0]
     assert off.status == SKIP and off.fix and off.fix.label == "Turn on"
-    idx = ck.check_cameras(FakeEnv(cameras=[{"name": "0", "opened": False, "fps": 0}], camera_users={"message": "0 could not be opened."}))[0]
+    idx = ck.check_cameras(
+        FakeEnv(cameras=[{"name": "0", "opened": False, "fps": 0}], camera_users={"message": "0 could not be opened."})
+    )[0]
     assert idx.title == "Camera 0" and idx.summary.startswith("Camera 0 could")
 
 
@@ -121,11 +129,19 @@ def test_tracking_rules(tracking: dict[str, Any], want: str) -> None:
 
 
 def test_gpu_rules() -> None:
-    offer = ck.check_gpu_tracking(FakeEnv(gpu_tracking={"setting": "auto", "using": "processor", "provider": "DirectML", "models_ready": False}))[0]
+    offer = ck.check_gpu_tracking(
+        FakeEnv(gpu_tracking={"setting": "auto", "using": "processor", "provider": "DirectML", "models_ready": False})
+    )[0]
     assert offer.status == WARN and offer.fix and offer.fix.action == "download:gpu_tracking"
-    on = ck.check_gpu_tracking(FakeEnv(gpu_tracking={"setting": "auto", "using": "graphics card", "provider": "DirectML", "models_ready": True}))[0]
+    on = ck.check_gpu_tracking(
+        FakeEnv(
+            gpu_tracking={"setting": "auto", "using": "graphics card", "provider": "DirectML", "models_ready": True}
+        )
+    )[0]
     assert on.status == PASS
-    asked = ck.check_gpu_tracking(FakeEnv(gpu_tracking={"setting": "gpu", "using": "processor", "provider": "", "reason": "no GPU"}))[0]
+    asked = ck.check_gpu_tracking(
+        FakeEnv(gpu_tracking={"setting": "gpu", "using": "processor", "provider": "", "reason": "no GPU"})
+    )[0]
     assert asked.status == WARN and asked.fix and asked.fix.action == "set:hands.compute=cpu"
 
 
@@ -147,7 +163,9 @@ def test_sound_rules() -> None:
     assert ck.check_stt(FakeEnv(stt={"heard": "project way is ready", "method": "loopback", "ms": 1}))[0].status == PASS
     assert ck.check_stt(FakeEnv(stt={"heard": "banana", "method": "spoken", "ms": 1}))[0].status == WARN
     assert ck.check_stt(FakeEnv(stt={"skipped": "no model"}))[0].status == SKIP
-    tts = ck.check_tts(FakeEnv(tts=[{"name": "Piper", "error": "not downloaded"}, {"name": "Slow", "first_audio_ms": 4000}]))
+    tts = ck.check_tts(
+        FakeEnv(tts=[{"name": "Piper", "error": "not downloaded"}, {"name": "Slow", "first_audio_ms": 4000}])
+    )
     assert [r.status for r in tts] == [FAIL, WARN]
     assert ck.check_tts(FakeEnv(tts=[]))[0].status == FAIL
     assert ck.check_notification(FakeEnv(notification={"shown": False, "reason": "Focus assist"}))[0].status == FAIL
@@ -209,9 +227,19 @@ def test_redaction_removes_tokens_user_names_and_outside_paths(tmp_path: Path) -
     )
     out = r.text(text)
     assert "<data>/logs/away.log" in out
-    for leak in ("pa_abcdefghijklmnop", "par_qrstuvwxyz123", "abc.def.ghijkl", "Videos", "secret.txt", "fernando", "supersecretvalue"):
+    for leak in (
+        "pa_abcdefghijklmnop",
+        "par_qrstuvwxyz123",
+        "abc.def.ghijkl",
+        "Videos",
+        "secret.txt",
+        "fernando",
+        "supersecretvalue",
+    ):
         assert leak not in out, leak
-    rep = redact_report({"results": [{"details": {"refresh_token": "par_x", "path": "D:\\Games\\x.exe"}}]}, [data_dir], ["fernando"])
+    rep = redact_report(
+        {"results": [{"details": {"refresh_token": "par_x", "path": "D:\\Games\\x.exe"}}]}, [data_dir], ["fernando"]
+    )
     assert rep["redacted"] is True
     assert rep["results"][0]["details"] == {"refresh_token": "***", "path": "<path>"}
 
@@ -318,7 +346,9 @@ def test_rest_and_mcp_resource(tmp_path: Path) -> None:
 
     core = make_core(tmp_path)
     a, tok = core.registry.issue("Hark", ["read", "diagnose"], 3600)
-    core.service.selftest = SelftestService(tmp_path, lambda _i: FakeEnv(), agents=core.registry.reconnectable, background=False)
+    core.service.selftest = SelftestService(
+        tmp_path, lambda _i: FakeEnv(), agents=core.registry.reconnectable, background=False
+    )
     gate = api.Gate(core.service, core.registry, local_key="k" * 43, rate=(100.0, 100))
     mcp = mcp_tools.build(api.LocalBackend(core.service))
     client = TestClient(api.create_app(core.service, gate, mcp))
@@ -401,7 +431,11 @@ def test_cli_runs_here_when_the_app_is_closed(tmp_path: Path, monkeypatch: pytes
 
     monkeypatch.setattr(stcli, "_via_app", lambda only, trig: None)
     monkeypatch.setattr(
-        stcli, "run_here", lambda only, trig, ask=None: SelftestService(tmp_path, lambda _i: FakeEnv(), background=False).run_now(trig, only)
+        stcli,
+        "run_here",
+        lambda only, trig, ask=None: SelftestService(tmp_path, lambda _i: FakeEnv(), background=False).run_now(
+            trig, only
+        ),
     )
     p = argparse.ArgumentParser()
     stcli.add_arguments(p)

@@ -30,7 +30,9 @@ def note_text(report: dict[str, Any]) -> str:
     bad = [r for r in report.get("results") or [] if r.get("status") in (FAIL, WARN)]
     for r in bad[:MAX_NOTE_LINES]:
         fix = f" (fix: {r['fix']['label']})" if r.get("fix") else ""
-        lines.append(f"- {'NOT WORKING' if r.get('status') == FAIL else 'look at'}: {r.get('title')}: {r.get('summary')}{fix}")
+        lines.append(
+            f"- {'NOT WORKING' if r.get('status') == FAIL else 'look at'}: {r.get('title')}: {r.get('summary')}{fix}"
+        )
     if len(bad) > MAX_NOTE_LINES:
         lines.append(f"- and {len(bad) - MAX_NOTE_LINES} more")
     lines.append("Full report: away://selftest/latest or GET /v1/selftest/latest")

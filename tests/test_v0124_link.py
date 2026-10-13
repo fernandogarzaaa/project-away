@@ -186,7 +186,9 @@ def test_rendezvous_off_and_forged_messages() -> None:
     raws: list[Any] = []
     s = C.AgentLinkConfig()
     s.rendezvous = "off"
-    ann = rendezvous.LinkAnnouncer(lambda: [a], settings=lambda: s, post_raw=lambda u, b: raws.append(u), background=False)
+    ann = rendezvous.LinkAnnouncer(
+        lambda: [a], settings=lambda: s, post_raw=lambda u, b: raws.append(u), background=False
+    )
     res = ann.link_up("https://q.trycloudflare.com")
     assert raws == [] and res[0]["rendezvous"] == "off"
 
@@ -238,7 +240,9 @@ class FakeLink:
         self.url = None
 
 
-def test_host_brings_the_link_back_after_a_restart_and_tells_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_brings_the_link_back_after_a_restart_and_tells_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     h = make_host(tmp_path, monkeypatch)
     a, _ = h.core.registry.issue("Hark", ["read"], 3600)
     h.core.registry.new_refresh(a.id)

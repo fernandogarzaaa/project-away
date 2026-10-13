@@ -215,7 +215,9 @@ def set_named_token(token: str, keyring_mod: Any = None) -> None:
             kr.delete_password(KEYRING_SERVICE, KEYRING_NAMED)
         return
     if len(tok) < 20 or any(c.isspace() for c in tok):
-        raise TunnelError("that does not look like a Cloudflare tunnel token (copy it from the tunnel's install command)")
+        raise TunnelError(
+            "that does not look like a Cloudflare tunnel token (copy it from the tunnel's install command)"
+        )
     kr.set_password(KEYRING_SERVICE, KEYRING_NAMED, tok)
 
 

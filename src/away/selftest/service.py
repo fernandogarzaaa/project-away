@@ -92,8 +92,10 @@ class SelftestService:
             self._done.set()
 
         threading.Thread(target=go, daemon=True, name="selftest").start()
-        return {"state": "running", "how_to_get_it": "away://selftest/latest, GET /v1/selftest/latest or the event "
-                "selftest.completed"}
+        return {
+            "state": "running",
+            "how_to_get_it": "away://selftest/latest, GET /v1/selftest/latest or the event selftest.completed",
+        }
 
     def wait(self, timeout: float) -> bool:
         return self._done.wait(timeout)

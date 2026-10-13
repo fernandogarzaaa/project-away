@@ -123,7 +123,9 @@ def download(
                         progress(done, total)
         except Exception as exc:
             tmp.unlink(missing_ok=True)
-            raise ModelDownloadError(f"could not download the graphics-card models ({exc}); check the internet") from None
+            raise ModelDownloadError(
+                f"could not download the graphics-card models ({exc}); check the internet"
+            ) from None
         got = sha256(tmp)
         if got != m.sha256:
             tmp.unlink(missing_ok=True)

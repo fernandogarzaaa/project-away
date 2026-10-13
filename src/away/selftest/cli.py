@@ -93,7 +93,9 @@ def main(args: argparse.Namespace) -> int:
         from away.selftest import ui
 
         return ui.run_window(only, trigger=str(args.trigger or "you"))
-    print("Running the self-test (cameras, tracking, pointer, microphone, voices, link, PC load, models)...", flush=True)
+    print(
+        "Running the self-test (cameras, tracking, pointer, microphone, voices, link, PC load, models)...", flush=True
+    )
     got = _via_app(only, "you (command line)")
     if got is None:
 

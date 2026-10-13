@@ -91,7 +91,11 @@ class OnnxHandLandmarker:
         x = (patch.astype(np.float32) / 255.0)[None]
         name = self.lmk.get_inputs()[0].name
         outs = self.lmk.run(None, {name: x})
-        pts, presence, handed = np.asarray(outs[0]).reshape(21, 3), float(np.ravel(outs[1])[0]), float(np.ravel(outs[2])[0])
+        pts, presence, handed = (
+            np.asarray(outs[0]).reshape(21, 3),
+            float(np.ravel(outs[1])[0]),
+            float(np.ravel(outs[2])[0]),
+        )
         if presence < 0.0 or presence > 1.0:  # a logit: make it a probability
             presence = float(mp.sigmoid(presence))
         if presence < self.min_presence:

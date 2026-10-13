@@ -80,7 +80,12 @@ def test_gpu_that_fails_to_start_falls_back_with_a_note(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(gm, "download", broken)
     notes: list[str] = []
-    assert compute.hand_factory(cfg, tmp_path / "h.task", tmp_path, on_note=notes.append, providers=["DmlExecutionProvider"]) is None
+    assert (
+        compute.hand_factory(
+            cfg, tmp_path / "h.task", tmp_path, on_note=notes.append, providers=["DmlExecutionProvider"]
+        )
+        is None
+    )
     assert notes and "processor" in notes[0]
     st = compute.status(cfg, tmp_path, providers=["DmlExecutionProvider"])
     assert st["using"] == "processor" and "could not start" in st["reason"]
@@ -96,7 +101,9 @@ def test_face_stays_on_mediapipe_when_the_gpu_is_not_used(tmp_path: Path, monkey
             made.append((path, n))
 
     monkeypatch.setattr(fl, "FaceLandmarker", FakeFL)
-    got = compute.face_landmarker(C.AppConfig(), tmp_path / "face.task", tmp_path, 4, providers=["CPUExecutionProvider"])
+    got = compute.face_landmarker(
+        C.AppConfig(), tmp_path / "face.task", tmp_path, 4, providers=["CPUExecutionProvider"]
+    )
     assert isinstance(got, FakeFL) and made == [(tmp_path / "face.task", 4)]
 
 
@@ -175,7 +182,9 @@ def test_crop_and_project_are_inverse(rot: float) -> None:
     pts_img = np.array([[300.0, 250.0], [280.0, 300.0], [320.0, 240.0]])
     in_crop = (m @ np.c_[pts_img, np.ones(3)].T).T  # where cv2.warpAffine puts these pixels
     back = mp.project(np.c_[in_crop, np.zeros(3)], r, size, w, h)
-    assert np.allclose(back[:, 0] * w, pts_img[:, 0], atol=1e-3) and np.allclose(back[:, 1] * h, pts_img[:, 1], atol=1e-3)
+    assert np.allclose(back[:, 0] * w, pts_img[:, 0], atol=1e-3) and np.allclose(
+        back[:, 1] * h, pts_img[:, 1], atol=1e-3
+    )
 
 
 def test_transform_squares_and_shifts_in_the_rotated_frame() -> None:
@@ -226,7 +235,12 @@ def hand_outputs(_x: Any) -> list[Any]:
     pts = np.zeros((21, 3), np.float32)
     pts[:, 0] = 112.0
     pts[:, 1] = np.linspace(180, 40, 21)
-    return [pts.reshape(1, 63), np.array([[0.98]], np.float32), np.array([[0.9]], np.float32), np.zeros((1, 63), np.float32)]
+    return [
+        pts.reshape(1, 63),
+        np.array([[0.98]], np.float32),
+        np.array([[0.9]], np.float32),
+        np.zeros((1, 63), np.float32),
+    ]
 
 
 def test_onnx_hand_landmarker_detects_then_tracks() -> None:
@@ -247,7 +261,12 @@ def test_onnx_hand_landmarker_plugs_into_hand_tracker() -> None:
     from away.accel.onnx_hands import OnnxHandLandmarker
     from away.hands.tracker import HandTracker
 
-    tr = HandTracker(None, 1, factory=lambda n: OnnxHandLandmarker(FakeSession(palm_outputs), FakeSession(hand_outputs), n), image_fn=lambda x: x)
+    tr = HandTracker(
+        None,
+        1,
+        factory=lambda n: OnnxHandLandmarker(FakeSession(palm_outputs), FakeSession(hand_outputs), n),
+        image_fn=lambda x: x,
+    )
     fr = tr.process(np.zeros((480, 640, 3), np.uint8), 0.0)
     assert fr.landmarks is not None and fr.landmarks.shape == (21, 3) and fr.n_hands == 1
 

@@ -283,7 +283,11 @@ class Gate:
         from away.agentlink import rendezvous
 
         info = dict(self.link_info() or {})
-        rdv = rendezvous.agent_info(agent, str(info.get("rendezvous_server") or "")) if info.get("rendezvous") != "off" else {}
+        rdv = (
+            rendezvous.agent_info(agent, str(info.get("rendezvous_server") or ""))
+            if info.get("rendezvous") != "off"
+            else {}
+        )
         return {
             "refresh_token": refresh_token,
             "refresh_expires": agent.refresh_expires,

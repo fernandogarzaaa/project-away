@@ -38,7 +38,9 @@ def _user_names() -> list[str]:
         names.add(Path.home().name)
     except Exception:
         pass
-    return sorted((n for n in names if n and len(n) >= 2 and n.lower() not in ("root", "user", "admin")), key=len, reverse=True)
+    return sorted(
+        (n for n in names if n and len(n) >= 2 and n.lower() not in ("root", "user", "admin")), key=len, reverse=True
+    )
 
 
 class Redactor:
@@ -58,7 +60,9 @@ class Redactor:
     def text(self, s: str) -> str:
         out = str(s)
         for rx in TOKEN_RES:
-            out = rx.sub(lambda m: (m.group(1) + m.group(2) + "***") if m.lastindex and m.lastindex >= 2 else "***", out)
+            out = rx.sub(
+                lambda m: (m.group(1) + m.group(2) + "***") if m.lastindex and m.lastindex >= 2 else "***", out
+            )
         for d, label in sorted(self.keep, key=lambda x: -len(x[0])):  # app folders become <data>
             for variant in {d, d.replace("\\", "/"), d.replace("/", "\\")}:
                 if variant and len(variant) > 3:
@@ -85,7 +89,9 @@ class Redactor:
         return v
 
 
-def redact_report(report: dict[str, Any], keep_dirs: list[Path] | None = None, users: list[str] | None = None) -> dict[str, Any]:
+def redact_report(
+    report: dict[str, Any], keep_dirs: list[Path] | None = None, users: list[str] | None = None
+) -> dict[str, Any]:
     """A redacted copy of a report's public dict (the original is not changed)."""
     out: dict[str, Any] = Redactor(keep_dirs, users).value(report)
     out["redacted"] = True
