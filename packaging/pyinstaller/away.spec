@@ -27,7 +27,7 @@ hidden = collect_submodules("away")
 missing = []
 
 
-def optional(pkg, data=True, libs=False, subs=False, hidden_mods=(), meta=False):
+def optional(pkg, data=True, libs=False, subs=False, hidden_mods=(), meta=False, skip_subs=()):
     # find_spec, not import: pynput/pystray fail to *import* on a headless build machine
     if importlib.util.find_spec(pkg) is None:
         print(f"[away.spec] package {pkg!r} not installed, skipping")
@@ -39,7 +39,10 @@ def optional(pkg, data=True, libs=False, subs=False, hidden_mods=(), meta=False)
     if libs:
         binaries += collect_dynamic_libs(pkg)
     if subs:
-        hidden += collect_submodules(pkg)
+        # skip_subs: subpackages that must not even be imported while collecting (they exit or need extras)
+        hidden += collect_submodules(
+            pkg, filter=lambda name: not any(name == s or name.startswith(s + ".") for s in skip_subs)
+        )
     if meta:
         datas += copy_metadata(pkg)
     hidden += list(hidden_mods)
@@ -83,7 +86,9 @@ optional("markupsafe", data=False, subs=True)
 optional("typing_extensions", data=False)
 # v0.1.20 Agent Link: the MCP SDK + its HTTP stack (uvicorn picks protocol/loop modules by name at run time),
 # QR codes, the OS keyring, and UI Automation on Windows. All pure Python (no new DLLs).
-optional("mcp", data=False, subs=True, meta=True)
+# mcp.cli (the `mcp` developer CLI) calls sys.exit(1) on import without typer (the mcp[cli] extra), which killed
+# PyInstaller's submodule scan; Project Away never uses it.
+optional("mcp", data=False, subs=True, meta=True, skip_subs=("mcp.cli",))
 optional("uvicorn", data=False, subs=True)
 optional("starlette", data=False, subs=True)
 optional("sse_starlette", data=False, subs=True)
