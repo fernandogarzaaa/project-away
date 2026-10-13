@@ -2847,6 +2847,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.app import models_panel  # optional models + eye tracking (v0.1.19), isolated in its own module
 
         models_panel.build(self, f)
+        from away.accel import settings_ui as accel_ui  # v0.1.24: where tracking runs + "Run self-test"
+
+        accel_ui.build(self, f)
 
     def _perf_refresh(self) -> None:
         try:

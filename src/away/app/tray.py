@@ -173,6 +173,24 @@ class TrayController:
         return icon_state(self.paused, self.voice_state())
 
     @staticmethod
+    def selftest_command() -> list[str]:
+        """v0.1.24 "Run self-test": the report window in its own process (it runs the checks inside this app)."""
+        from away.app.frozen import away_command
+
+        return away_command(["selftest", "--window", "--trigger", "tray"])
+
+    def run_selftest(self) -> None:  # pragma: no cover - launches a GUI process
+        import subprocess
+
+        try:
+            subprocess.Popen(self.selftest_command())
+        except Exception:
+            al = getattr(self.app, "agent_link", None)
+            st = getattr(al, "selftest", None)
+            if st is not None:
+                st.start(trigger="tray")
+
+    @staticmethod
     def settings_command() -> list[str]:
         """argv that opens the settings window in its own process (Tk and pystray each want the main thread)."""
         from away.app.frozen import away_command  # frozen: the app exe is the `away` CLI (no `-m away`)
@@ -572,6 +590,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
         ),
+        pystray.MenuItem("Run self-test", lambda _icon, _item: ctl.run_selftest()),  # v0.1.24
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
