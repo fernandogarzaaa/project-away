@@ -91,7 +91,7 @@ def run_window(only: list[str] | None = None, trigger: str = "you", tk_mod: Any 
                 row=i, column=0, sticky="n", pady=3
             )
             text = f"{r.get('title')} \u2014 {WORDS.get(st, st)}\n{r.get('summary')}"
-            tkm.Label(inner, text=text, justify="left", anchor="w", wraplength=430).grid(row=i, column=1, sticky="w", pady=3)
+            tkm.Label(inner, text=text, justify="left", anchor="w", wraplength=360).grid(row=i, column=1, sticky="w", pady=3)
             fx = r.get("fix")
             if fx:
                 tkm.Button(inner, text=fx["label"], command=_fix_cmd(root, run_fix, fx["action"], messagebox)).grid(
