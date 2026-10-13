@@ -178,7 +178,11 @@ def build_core(
         allow_always=registry.allow_always,
     )
     jobs = shared_runner(Path(data_dir) / "diagnostics", command=job_command)
+    from away.agentlink.inbox import Inbox
+
+    inbox = Inbox(path=base / "inbox.json")  # v0.1.23: kept on disk (7 days, 200 messages)
     service = Service(
+        inbox=inbox,
         data_dir=Path(data_dir),
         registry=registry,
         telemetry=telemetry,
@@ -220,6 +224,7 @@ class AgentLinkHost:
         self.server: Any = None
         self.gate: Any = None
         self.tunnel: Any = None
+        self.relay: Any = None  # v0.1.23 backup link (SSH relay, no Cloudflare)
         self.pairing: Any = None
         self.errors: list[str] = []
         self._overlay_stop: Path | None = None
@@ -580,22 +585,41 @@ class AgentLinkHost:
 
     # ------------------------------------------------------------ talk (v0.1.22)
     def _talk_agents(self) -> list[dict[str, Any]]:
-        return [{"id": a.id, "name": a.name, "wake_word": a.wake_word} for a in self.core.registry.list()]
+        # v0.1.23: remembered agents too (an expired link), so "Hey Hark" keeps the message until Hark is back
+        reg = self.core.registry
+        agents = reg.known() if hasattr(reg, "known") else reg.list()
+        return [{"id": a.id, "name": a.name, "wake_word": a.wake_word} for a in agents]
 
     def _deliver_message(self, target: str, text: str, source: str) -> str:
         """A spoken message for an agent (``target`` id, "" = default / everyone): stored in its inbox, its
         ``user.message`` event, its wake-up POST; shows "Sent to <agent>". Returns that label ("" = not sent)."""
         res = self.core.service.deliver_message(target, text, source)
         if res.get("sent"):
-            self._flash(str(res["label"]))
-            return str(res["label"])
-        self._notice("Project Away", str(res.get("reason") or "Your message could not be sent."))
+            label = str(res["label"])
+            note = str(res.get("note") or "")
+            self._flash(f"{label}. {note}" if note else label)
+            self._say(note or label)  # v0.1.23: spoken too, so you know it went somewhere
+            return label
+        reason = str(res.get("reason") or "Your message could not be sent.")
+        self._notice("Project Away", reason)
+        self._say(reason)
         return ""
+
+    def _say(self, text: str) -> None:
+        """v0.1.23: speak a short confirmation ("Sent to Hark") when agent_link.talk_confirm_aloud is on."""
+        if not text or not bool(getattr(self.cfg().agent_link, "talk_confirm_aloud", True)):
+            return
+        with contextlib.suppress(Exception):
+            self.core.prompts._speak(text)
 
     def _target_names(self, target: str) -> str:
         from away.agentlink.inbox import resolve_targets
 
-        ts = resolve_targets(target, self.core.registry.list(), str(self.cfg().agent_link.default_agent or ""))
+        reg = self.core.registry
+        pool = reg.list() or (reg.known() if hasattr(reg, "known") else [])
+        if target and hasattr(reg, "known"):
+            pool = reg.known()
+        ts = resolve_targets(target, pool, str(self.cfg().agent_link.default_agent or ""))
         names = [a.name for a in ts]
         if not names:
             return ""
@@ -740,13 +764,19 @@ class AgentLinkHost:
         port = int(self.server.port) if self.server is not None and self.server.running else 0
         write_private(self.base / "host.json", json.dumps({"pid": os.getpid(), "port": port, "ts": time.time()}))
 
-    def start_pairing(self, scopes: Any, remote: bool = True, download: bool = True) -> dict[str, Any]:
-        """A new single-use pairing link (+ QR + 6-digit code); starts the tunnel for remote agents."""
+    def start_pairing(
+        self, scopes: Any, remote: bool = True, download: bool = True, relay: str | None = None
+    ) -> dict[str, Any]:
+        """A new single-use pairing link (+ QR + 6-digit code); starts the secure link for remote agents.
+        ``relay``: "standard" (Cloudflare) or "backup" (v0.1.23 SSH relay); None = agent_link.link_type."""
         port = self.ensure_server()
         s = self.cfg().agent_link
+        kind = str(relay or getattr(s, "link_type", "standard") or "standard")
+        if kind not in ("standard", "backup"):
+            raise ValueError("link type must be standard or backup")
         url = f"http://127.0.0.1:{port}"
         if remote:
-            url = self._ensure_tunnel(port, download)
+            url = self._ensure_relay(port) if kind == "backup" else self._ensure_tunnel(port, download)
         p = self.core.registry.new_pairing(perms.normalize(scopes), float(s.pairing_ttl_s))
         self.pairing = {
             "url": f"{url}/c/{p.code}",
@@ -755,8 +785,33 @@ class AgentLinkHost:
             "scopes": perms.to_list(p.scopes),
             "remote": remote,
             "code": p.code,
+            "link_type": kind if remote else "local",
         }
         return dict(self.pairing)
+
+    def _ensure_relay(self, port: int) -> str:
+        """v0.1.23: the backup link (localhost.run or Pinggy over the system's ssh; no Cloudflare, no account)."""
+        from away.agentlink import relay
+
+        if self.relay is not None and self.relay.alive() and self.relay.url:
+            return str(self.relay.url)
+        s = self.cfg().agent_link
+        ssh = relay.find_ssh(str(getattr(s, "ssh_path", "") or ""))
+        self.relay = relay.Relay(
+            ssh,
+            str(getattr(s, "backup_relay", "localhost.run") or "localhost.run"),
+            known_hosts=self.base / "relay_known_hosts",
+            on_url=self._relay_moved,
+        )
+        return str(self.relay.start(port))
+
+    def _relay_moved(self, old: str | None, new: str) -> None:
+        """The backup link restarted with a new address: the pairing link follows; remote agents need it."""
+        p = self.pairing
+        if p is not None and p.get("link_type") == "backup" and old and str(p.get("url", "")).startswith(old):
+            p["url"] = new + str(p["url"])[len(old) :]
+        self.errors.append(f"the backup link restarted with a new address: {new} (paste it into your AI app again)")
+        self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
 
     def _ensure_tunnel(self, port: int, download: bool) -> str:
         from away.agentlink import tunnel
@@ -772,21 +827,24 @@ class AgentLinkHost:
         self.tunnel = tunnel.Tunnel(exe)
         return self.tunnel.start(port)
 
-    def new_link(self, scopes: Any = None) -> dict[str, Any]:
+    def new_link(self, scopes: Any = None, relay: str | None = None) -> dict[str, Any]:
         """v0.1.22 "New link": a fresh secure link (a new web address) without disconnecting anyone. Cloudflare
         sometimes blocks one agent's servers on one temporary address (every request answers 403); a new address
         usually fixes it. Agents on this PC are not affected; remote agents need the new address."""
-        old = self.tunnel.url if self.tunnel is not None else None
+        kind = str(relay or getattr(self.cfg().agent_link, "link_type", "standard") or "standard")
+        which = "relay" if kind == "backup" else "tunnel"
+        cur = getattr(self, which)
+        old = cur.url if cur is not None else None
         keep_scopes = scopes if scopes is not None else (self.pairing or {}).get("scopes")
-        if self.tunnel is not None:
-            self.tunnel.stop()
-            self.tunnel = None
+        if cur is not None:  # only the link being renewed restarts; the other one keeps running
+            cur.stop()
+            setattr(self, which, None)
         self.pairing = None
         if keep_scopes is None:
             from away.agentlink.gui_model import AgentLinkModel
 
             keep_scopes = AgentLinkModel.default_scopes()
-        res = self.start_pairing(keep_scopes, remote=True, download=True)
+        res = self.start_pairing(keep_scopes, remote=True, download=True, relay=kind)
         res["previous_url"] = old
         res["note"] = (
             "New web address ready. Your agents stay connected; a remote agent (ChatGPT, Claude.ai) needs the new "
@@ -794,10 +852,21 @@ class AgentLinkHost:
         )
         return res
 
+    def backup_link(self, scopes: Any = None) -> dict[str, Any]:
+        """v0.1.23 "Blocked? Try the backup link": a pairing link on the SSH relay (Cloudflare keeps running)."""
+        res = self.new_link(scopes, relay="backup")
+        res["note"] = (
+            "Backup link ready (it does not use Cloudflare). Paste it into your AI app; your other agents stay "
+            "connected."
+        )
+        return res
+
     def stop_tunnel(self) -> None:
-        if self.tunnel is not None:
-            self.tunnel.stop()
-            self.tunnel = None
+        for which in ("tunnel", "relay"):
+            t = getattr(self, which, None)
+            if t is not None:
+                t.stop()
+                setattr(self, which, None)
         self.pairing = None
 
     def disconnect_all(self) -> int:
@@ -841,6 +910,9 @@ class AgentLinkHost:
         if self.tunnel is not None and not self.tunnel.alive():
             self.errors.append("the secure link stopped; press Connect again")
             self.tunnel = None
+        if self.relay is not None and not self.relay.alive():
+            self.errors.append(str(getattr(self.relay, "gave_up", "") or "the backup link stopped; press it again"))
+            self.relay = None
         self.write_state()
 
     def _take_requests(self) -> None:
@@ -869,12 +941,19 @@ class AgentLinkHost:
         if a == "serve":
             return {"port": self.ensure_server()}
         if a == "pair":
-            return self.start_pairing(req.get("scopes"), bool(req.get("remote", True)), bool(req.get("download", True)))
+            return self.start_pairing(
+                req.get("scopes"),
+                bool(req.get("remote", True)),
+                bool(req.get("download", True)),
+                relay=req.get("relay") or None,
+            )
+        if a == "backup_link":
+            return self.backup_link(req.get("scopes"))
         if a == "stop_link":
             self.stop_tunnel()
             return {}
         if a == "new_link":
-            return self.new_link(req.get("scopes"))
+            return self.new_link(req.get("scopes"), relay=req.get("relay") or None)
         if a == "set_talk":
             ag = core.registry.set_talk(
                 str(req.get("agent_id")),
@@ -925,6 +1004,7 @@ class AgentLinkHost:
 
     def write_state(self) -> None:
         core = self.core
+        agents, waiting = self._agent_rows()
         p = self.pairing
         if p is not None and time.time() >= float(p["expires"]):
             self.pairing = p = None
@@ -937,9 +1017,13 @@ class AgentLinkHost:
                 "running": bool(self.server and self.server.running),
                 "port": int(self.server.port) if self.server else 0,
             },
-            "link": {"url": self.tunnel.url if self.tunnel else None},
+            "link": {
+                "url": self.tunnel.url if self.tunnel else None,
+                "backup_url": self.relay.url if self.relay else None,  # v0.1.23
+            },
             "pairing": {k: v for k, v in (p or {}).items() if k != "code"} or None,
-            "agents": [a.public() for a in core.registry.list()],
+            "agents": agents,
+            "waiting": waiting,
             "prompts": core.prompts.pending(),
             "control": core.control.status(),
             "actions": core.control.actions(20),
@@ -952,6 +1036,30 @@ class AgentLinkHost:
             "context": core.telemetry.context(),
         }
         write_private(self.base / "state.json", json.dumps(state, default=str))
+
+    def _agent_rows(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Settings > Agent Link rows with unread inbox counts (v0.1.23), and the remembered agents (link
+        expired or disconnected) that have messages waiting for them."""
+        reg = self.core.registry
+        inbox = self.core.service.inbox
+        active = reg.list()
+        rows = []
+        for a in active:
+            row = a.public()
+            with contextlib.suppress(Exception):
+                row["unread"] = inbox.unread(a.id, a.name)
+            rows.append(row)
+        waiting = []
+        ids = {a.id for a in active}
+        for a in reg.known() if hasattr(reg, "known") else []:
+            if a.id in ids:
+                continue
+            n = 0
+            with contextlib.suppress(Exception):
+                n = inbox.unread(a.id, a.name)
+            if n:
+                waiting.append({"id": a.id, "name": a.name, "unread": n})
+        return rows, waiting
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -975,12 +1083,20 @@ def friendly_error(exc: BaseException) -> str:
     low = text.lower()
     if isinstance(exc, ModuleNotFoundError):
         return 'Agent Link needs its extra parts: pip install "project-away[agent]" (the installer includes them).'
+    if type(exc).__name__ == "SshMissing":
+        return text
+    if "backup link" in low:
+        return (
+            "Couldn't start the backup link. Check your internet connection and try again, or switch the backup "
+            "service (agent_link.backup_relay: localhost.run or pinggy)."
+        )
     if "cloudflared" in low or "secure link" in low:
         return "Couldn't start the secure link. Check your internet connection and try again."
-    if "403" in low or "forbidden" in low:
+    if "403" in low or "forbidden" in low or "request was blocked" in low:
         return (
-            "Cloudflare blocked this link for your agent (it answers 403 to everything). Press \u201cNew link\u201d "
-            "for a fresh address; your agents stay connected."
+            "Cloudflare blocked this link for your agent (it answers \u201c403 Your request was blocked.\u201d to "
+            "everything). Press \u201cBlocked? Try the backup link\u201d for a link that does not use Cloudflare, or "
+            "\u201cNew link\u201d for a fresh Cloudflare address; your agents stay connected."
         )
     if "urlopen" in low or "getaddrinfo" in low or "timed out" in low:
         return "No internet connection right now. Connect and try again."

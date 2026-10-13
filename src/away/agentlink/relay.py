@@ -67,7 +67,11 @@ PROVIDER_INFO: dict[str, Provider] = {
     "pinggy": Provider(
         "pinggy",
         ("-p", "443", "-R", "0:127.0.0.1:{port}", "a.pinggy.io"),
-        (re.compile(r"(https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:pinggy-free\.link|pinggy\.link|pinggy\.net|pinggy\.online))"),),
+        (
+            re.compile(
+                r"(https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:pinggy-free\.link|pinggy\.link|pinggy\.net|pinggy\.online))"
+            ),
+        ),
         False,
     ),
 }

@@ -676,7 +676,9 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
         "profiles": Domain(
             "profiles", "Per-app profiles", profiles_list, profiles_apply, ops=("create", "delete", "set")
         ),
-        "cameras": Domain("cameras", "Cameras (turn one off or on)", cameras_list, cameras_apply, ops=("disable", "enable")),
+        "cameras": Domain(
+            "cameras", "Cameras (turn one off or on)", cameras_list, cameras_apply, ops=("disable", "enable")
+        ),
         "gestures": integrations.gestures_domain(),
         "macros": integrations.macros_domain(),
     }

@@ -30,7 +30,9 @@ def listing(cfg: Any) -> list[dict[str, Any]]:
     """Every camera Project Away knows, on or off (what an agent sees in ``settings list cameras``)."""
     h = cfg.hands
     out = [{"key": d, "title": d, "value": "on", "kind": "camera"} for d in configured(cfg)]
-    out += [{"key": str(c.device), "title": str(c.device), "value": "off", "kind": "camera"} for c in h.disabled_cameras]
+    out += [
+        {"key": str(c.device), "title": str(c.device), "value": "off", "kind": "camera"} for c in h.disabled_cameras
+    ]
     return out
 
 
@@ -72,9 +74,7 @@ def turn_on(cfg: Any, device: str) -> str:
     cams = [copy.copy(c) for c in h.cameras]
     if not cams:  # single-camera mode: the current camera becomes the primary of a two-camera set
         cams = [
-            cfgmod.CameraSpec(
-                device=h.camera_index, role="primary", index_hint=h.camera_hint, fourcc=h.camera_fourcc
-            )
+            cfgmod.CameraSpec(device=h.camera_index, role="primary", index_hint=h.camera_hint, fourcc=h.camera_fourcc)
         ]
     if len(cams) == 1:
         cams[0].role = "primary"

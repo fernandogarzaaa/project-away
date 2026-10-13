@@ -49,6 +49,20 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         ttk.Button(top, text="Disconnect all", command=self._disconnect_all).pack(side="right")
         # v0.1.22: a fresh web address for remote agents, without disconnecting anyone
         ttk.Button(top, text="New link", command=self._new_link).pack(side="right", padx=4)
+        # v0.1.23: a link that does not use Cloudflare (when Cloudflare answers 403 to an agent's servers)
+        ttk.Button(top, text="Blocked? Try the backup link", command=self._backup_link).pack(side="right", padx=4)
+        lt = ttk.Frame(f)
+        lt.pack(anchor="w")
+        ttk.Label(lt, text="Link type:").pack(side="left")
+        self.link_type = tk.StringVar(value=model.link_type())
+        for val, text in (("standard", "Standard (Cloudflare)"), ("backup", "Backup")):
+            ttk.Radiobutton(
+                lt,
+                text=text,
+                value=val,
+                variable=self.link_type,
+                command=lambda: self.m.set_link_type(self.link_type.get()),
+            ).pack(side="left", padx=4)
         big = tk.Button(
             f,
             text="  Connect an AI agent  ",
@@ -93,6 +107,8 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.default_cb = ttk.Combobox(drow, textvariable=self.default_var, state="readonly", width=28)
         self.default_cb.pack(side="left")
         self.default_cb.bind("<<ComboboxSelected>>", lambda _e: self._set_default())
+        self.inbox_text = tk.StringVar(value="")  # v0.1.23: unread messages per agent
+        ttk.Label(tb, textvariable=self.inbox_text, justify="left", foreground="#1f6feb").pack(anchor="w")
         self.control_box = ttk.LabelFrame(f, text="Using your computer", padding=6)
         self.control_box.pack(fill="x", pady=6)
         self.control_text = tk.StringVar(value="No agent is using your computer.")
@@ -204,6 +220,7 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self._show_problem(self.m.not_running())
         self._render_prompts(st.get("prompts") or [])
         self._render_agents(st.get("agents") or [])
+        self.inbox_text.set("\n".join(self.m.inbox_lines(st)))
         ctl = st.get("control") or {}
         if ctl.get("active"):
             mins = int(ctl.get("expires_in_s", 0)) // 60
@@ -266,7 +283,10 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
 
     def _render_agents(self, agents: list[dict[str, Any]]) -> None:
         box = self.agents_box
-        key = [(a["id"], a["connected"], tuple(a["scopes"]), a.get("wake_phrase"), a.get("wake_me")) for a in agents]
+        key = [
+            (a["id"], a["connected"], tuple(a["scopes"]), a.get("wake_phrase"), a.get("wake_me"), a.get("unread"))
+            for a in agents
+        ]
         if getattr(self, "_agents_key", None) == key:
             return
         self._agents_key = key
@@ -280,6 +300,8 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
             row.pack(fill="x", pady=2)
             mark = "\u2713" if a["connected"] else "\u2022"
             self.ttk.Label(row, text=f"{mark} {a['name']}", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+            if a.get("unread"):
+                self.ttk.Label(row, text=f"  {a['unread']} unread", foreground="#cf222e").pack(side="left")
             if a.get("wake_phrase"):
                 self.ttk.Label(row, text=f"  say \u201c{a['wake_phrase']}\u201d", foreground="#1f6feb").pack(
                     side="left"
@@ -357,6 +379,27 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
 
         v = self.default_var.get()
         self.m.set_default_agent("" if v == EVERYONE else v)
+
+    def _backup_link(self) -> None:
+        self.link_note.set("Getting a backup link (not Cloudflare)...")
+
+        def done(res: Any) -> None:
+            if isinstance(res, Exception):
+                self.link_note.set(str(res))
+                return
+            problem, info = res
+            if problem is not None:
+                self.link_note.set(problem.text)
+                return
+            with contextlib.suppress(Exception):
+                self.win.root.clipboard_clear()
+                self.win.root.clipboard_append(str(info.get("url", "")))
+            self.link_type.set("backup")
+            with contextlib.suppress(Exception):
+                self.m.set_link_type("backup")
+            self.link_note.set(f"Backup link (copied): {info.get('url')}  {info.get('note', '')}")
+
+        self._bg(self.m.backup_link, done)
 
     def _new_link(self) -> None:
         self.link_note.set("Getting a new link...")
@@ -446,7 +489,8 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         lines = [
             "How agents connect (technical):",
             "- Apps on this PC run `away mcp` (MCP over stdio); the first time you approve them here.",
-            "- Remote apps use a private https link (a Cloudflare quick tunnel to 127.0.0.1) that works once,",
+            "- Remote apps use a private https link (a Cloudflare quick tunnel, or the backup SSH relay, to "
+            "127.0.0.1) that works once,",
             "  for 10 minutes, and only after you press Allow. Remote access ends after 1 hour.",
             f"- Local server: 127.0.0.1:{(st.get('server') or {}).get('port') or '-'}; private link: "
             f"{(st.get('link') or {}).get('url') or 'off'}",

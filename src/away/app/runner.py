@@ -1528,7 +1528,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         names = ", ".join(labels) or "a camera"
         headline = self._headline(labels)
         msg = (
-            f"{headline}. Stopped retrying {names} after {attempts} failed attempts. Retry / Turn off: tray menu "
+            f"{headline}; stopped retrying {names} after {attempts} failed attempts. Retry / Turn off: tray menu "
             "or Settings > Cameras (Retry cameras)."
         )
         logging.getLogger("away.cameras").warning("%s", msg)

@@ -275,9 +275,7 @@ class Service:
         }
 
     # ---------------------------------------------------------------- tune
-    def change_settings(
-        self, agent: Agent, ops: Any = None, why: str = "", changes: Any = None
-    ) -> dict[str, Any]:
+    def change_settings(self, agent: Agent, ops: Any = None, why: str = "", changes: Any = None) -> dict[str, Any]:
         """Apply changes with the user's policy: ask first (default), or low-risk changes at once and tell them.
         v0.1.23: ``ops`` (alias ``changes``) is a list of changes, one change, or ``{key: value}``."""
         self.require(agent, perms.TUNE)
@@ -749,9 +747,7 @@ class Service:
 def normalize_ops(ops: Any) -> list[dict[str, Any]]:
     """v0.1.23: the forms an agent may send to settings change: ``[{"key": ..., "value": ...}, ...]``, one
     ``{"key": ..., "value": ...}``, or ``{"hands.cursor.gain": 1.8, ...}``. Anything else is a plain ChangeError."""
-    hint = (
-        'send changes as a list like [{"key": "hands.cursor.gain", "value": 1.8}] or as {"hands.cursor.gain": 1.8}'
-    )
+    hint = 'send changes as a list like [{"key": "hands.cursor.gain", "value": 1.8}] or as {"hands.cursor.gain": 1.8}'
     if ops is None or ops == [] or ops == {}:
         raise ChangeError("nothing to change; " + hint)
     if isinstance(ops, str):
