@@ -15,7 +15,11 @@ def opts(cfg: Any) -> Any:
 
 
 def next_asr(
-    cfg: Any, build_whisper: Callable[[], Any], notice: Notice | None = None, sample_rate: int = 16000
+    cfg: Any,
+    build_whisper: Callable[[], Any],
+    notice: Notice | None = None,
+    sample_rate: int = 16000,
+    save: Callable[[], None] | None = None,
 ) -> Any:
     """Whisper as before, or Moonshine / Nemotron (``models_next.stt``) with Whisper as the fallback. A failure
     rolls the speech slot back (``models_next.auto_rollback``) and says so."""
@@ -31,6 +35,8 @@ def next_asr(
             back = model_guard.rollback(cfg, "stt", reason)
             if back:
                 msg = f"{reason}. {back}"
+                if save is not None:
+                    save()
         if notice is not None:
             notice("Project Away: speech model", msg)
 
@@ -91,7 +97,7 @@ def wrap_ambient(cfg: Any, ambient: Any, notice: Notice | None = None) -> Any:
     return GatedAmbient(gated, ambient)
 
 
-def hand_kwargs(cfg: Any, notice: Notice | None = None) -> dict[str, Any]:
+def hand_kwargs(cfg: Any, notice: Notice | None = None, save: Callable[[], None] | None = None) -> dict[str, Any]:
     """``factory=`` for HandTracker when RTMPose is chosen and downloaded (experimental), else nothing."""
     mn = opts(cfg)
     if mn is None or getattr(mn, "hands_landmarker", "mediapipe") != "rtmpose":
@@ -106,7 +112,8 @@ def hand_kwargs(cfg: Any, notice: Notice | None = None) -> dict[str, Any]:
         with contextlib.suppress(Exception):
             from away.app import model_guard
 
-            model_guard.rollback(cfg, "hands", str(exc))
+            if model_guard.rollback(cfg, "hands", str(exc)) and save is not None:
+                save()
         if notice is not None:
             notice("Project Away: hand tracking", f"RTMPose hands unavailable ({exc}); using MediaPipe")
         return {}
