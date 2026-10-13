@@ -89,7 +89,8 @@ def check_cameras(env: Env) -> list[Result]:
     out = []
     for c in cams:
         name = str(c.get("name") or "camera")
-        cid, title = f"camera:{name}", f"Camera \u201c{name}\u201d"
+        shown = f"camera {name}" if name.isdigit() else name  # a camera index, not a name
+        cid, title = f"camera:{name}", (f"Camera {name}" if name.isdigit() else f"Camera \u201c{name}\u201d")
         if c.get("off"):
             out.append(_r(cid, title, SKIP, "Turned off in Settings.", Fix(f"camera_on:{name}", "Turn on")))
             continue
@@ -99,6 +100,8 @@ def check_cameras(env: Env) -> list[Result]:
         d = {"fps": round(fps, 1), "format": fmt or None, "backend": c.get("backend"), "source": c.get("source")}
         if not c.get("opened") or fps <= 0:
             msg, fix, users = _camera_fix(env, name)
+            if name.isdigit():
+                msg = msg.replace(f"{name} could", f"{shown.capitalize()} could", 1)
             out.append(_r(cid, title, FAIL, msg, fix, error=c.get("error") or None, held_by=users or None, **d))
         elif fps < CAMERA_MIN_FPS:
             out.append(

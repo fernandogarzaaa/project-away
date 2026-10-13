@@ -40,7 +40,7 @@ def run_window(only: list[str] | None = None, trigger: str = "you", tk_mod: Any 
     tkm = tk_mod or tk
     root = tkm.Tk()
     root.title("Project Away self-test")
-    root.geometry("640x560")
+    root.geometry("760x580")
     head = tkm.Label(root, text="Checking your PC...", font=("Segoe UI", 15, "bold"), anchor="w")
     head.pack(fill="x", padx=16, pady=(14, 4))
     sub = tkm.Label(root, text="This takes about a minute. You may hear a short test voice.", anchor="w")
@@ -78,7 +78,9 @@ def run_window(only: list[str] | None = None, trigger: str = "you", tk_mod: Any 
         bar = tkm.Scrollbar(body, orient="vertical", command=canvas.yview)
         inner = tkm.Frame(canvas)
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        inner.columnconfigure(1, weight=1)
         canvas.configure(yscrollcommand=bar.set)
         canvas.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
@@ -89,11 +91,11 @@ def run_window(only: list[str] | None = None, trigger: str = "you", tk_mod: Any 
                 row=i, column=0, sticky="n", pady=3
             )
             text = f"{r.get('title')} \u2014 {WORDS.get(st, st)}\n{r.get('summary')}"
-            tkm.Label(inner, text=text, justify="left", anchor="w", wraplength=420).grid(row=i, column=1, sticky="w", pady=3)
+            tkm.Label(inner, text=text, justify="left", anchor="w", wraplength=430).grid(row=i, column=1, sticky="w", pady=3)
             fx = r.get("fix")
             if fx:
                 tkm.Button(inner, text=fx["label"], command=_fix_cmd(root, run_fix, fx["action"], messagebox)).grid(
-                    row=i, column=2, sticky="e", padx=6, pady=3
+                    row=i, column=2, sticky="ne", padx=(6, 10), pady=3
                 )
 
     def copy() -> None:
