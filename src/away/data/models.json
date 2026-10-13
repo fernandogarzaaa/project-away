@@ -23,6 +23,6 @@
   "modes": {
     "light": {"hands": "mediapipe-hands", "face": "mediapipe-face", "gaze": "gaze-iris", "stt": "whisper-base-cpu", "cleanup": "cleanup-rules", "voice": "voice-classic"},
     "balanced": {"hands": "mediapipe-hands", "face": "mediapipe-face", "gaze": "gaze-iris", "stt": "whisper-distil-large-v3-gpu", "cleanup": "cleanup-rules", "voice": "voice-kokoro"},
-    "best": {"hands": "mediapipe-hands", "face": "mediapipe-face", "gaze": "gaze-l2cs", "stt": "whisper-large-v3-turbo-gpu", "cleanup": "cleanup-qwen-1.5b", "voice": "voice-kokoro"}
+    "best": {"hands": "mediapipe-hands", "face": "mediapipe-face", "gaze": "gaze-iris", "stt": "whisper-large-v3-turbo-gpu", "cleanup": "cleanup-qwen-1.5b", "voice": "voice-kokoro"}
   }
 }

@@ -511,7 +511,9 @@ def test_the_repository_catalog_matches_its_sha256_file() -> None:
 def test_models_agent_op_is_undoable() -> None:
     cfg = C.AppConfig()
     a = AR.models_apply(cfg, AR.Op("models", "switch", "stt", "whisper-small-cpu"))
-    assert a.low_risk and cfg.voice.asr_model == "small" and a.text == "Speech to text: now Whisper small on the processor"
+    assert (
+        a.low_risk and cfg.voice.asr_model == "small" and a.text == "Speech to text: now Whisper small on the processor"
+    )
     AR.models_apply(cfg, a.inverse[0])
     assert cfg.voice.asr_model == C.AppConfig().voice.asr_model
     m = AR.models_apply(cfg, AR.Op("models", "mode", "light"))
