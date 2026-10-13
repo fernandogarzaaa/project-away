@@ -35,12 +35,14 @@ from away.face.speaking import SpeakingScorer
 from away.face.tracking import FaceTracker
 from away.fusion import GestureFusion
 from away.hands.cursor import CursorMapper, Screen
-from away.hands.filters import OneEuro2D
 from away.hands.gestures import GestureEvent, GestureStateMachine
 from away.hands.landmarks import as_array, pinch_ratio
 from away.hands.palmscroll import PalmScroller
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
+from away.pointer.smart import SmartPointer
+from away.pointer.targets import NullBackend
+from away.pointer.smoothing import make_cursor_filter
 from away.voice.always_on import GateHint
 from away.voice.clap import camera_view
 from away.wifi.classifier import CoarseCSIClassifier
@@ -79,6 +81,7 @@ class Pipeline:
         temporal: Any = None,
         active_app: Any = None,
         guard: Any = None,
+        pointer_backend: Any = None,
     ) -> None:
         self.cfg = cfg
         self.bus = bus or EventBus()
@@ -143,6 +146,17 @@ class Pipeline:
             publish=lambda topic, data: self.bus.publish(topic, data),
         )
         self.mouse.gaze_point = lambda: self.headgaze.estimator.point if self.headgaze.estimator else None
+        # v0.1.20 smart pointer: magnetic targets + "click <name>" (Windows UI Automation; a no-op elsewhere).
+        # AwayApp starts its background element cache; tests / demo never do, so the magnet has no targets there.
+        self.smart = SmartPointer(
+            cfg,
+            self.mouse,
+            backend=pointer_backend if pointer_backend is not None else NullBackend("pipeline"),
+            publish=lambda topic, data: self.bus.publish(topic, data),
+            is_bound=lambda p: self.dispatcher.resolve("voice", p).kind != "none",
+            paused=self.output_paused,
+        )
+        self.mouse.refiner = self.smart
 
     @property
     def hand_prefer(self) -> str:
@@ -262,7 +276,7 @@ class Pipeline:
             for k, v in vars(src).items():
                 setattr(dst, k, v)
         c = self.cfg.hands.cursor
-        self.mouse.mapper.filter = OneEuro2D(c.min_cutoff, c.beta, c.d_cutoff)
+        self.mouse.mapper.filter = make_cursor_filter(c)  # hands.cursor.smoothing (v0.1.20)
         self.mouse.mapper.refresh_selection()  # hands.cursor.monitors / monitor_reach
         self.mouse.stabilizer = ClickStabilizer(c.click_rewind_ms / 1000.0, c.freeze_margin) if c.click_freeze else None
         self.dwell = DwellDetector(self.cfg.hands.dwell.radius_px, self.cfg.hands.dwell.time_s)
@@ -285,7 +299,15 @@ class Pipeline:
 
     def fire(self, category: str, name: str, data: dict[str, Any] | None = None) -> Action:
         """Fire a voice/face/hotkey trigger through the bindings."""
+        if category == "voice":
+            act = self.smart.voice(name)  # "click <name>" / "click that" ... (None: not one, or a bound phrase)
+            if act is not None:
+                return act
         return self.dispatcher.trigger(category, name, data)
+
+    def voice_phrases(self) -> dict[str, Action]:
+        """The bound voice phrases for always-on listening, plus the smart pointer commands (v0.1.20)."""
+        return self.smart.phrases(self.cfg.bindings.voice_phrases(self.dispatcher.profile))
 
     # hands -------------------------------------------------------------------
     def on_fused(
@@ -554,7 +576,19 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             self.guard = ManualInputGuard(cfg.app.auto_pause_idle_ms)
             backend = GuardedBackend(backend, self.guard)  # type: ignore[assignment]
-        self.pipeline = Pipeline(cfg, backend, screen, self.bus, temporal, active_app=active_process, guard=self.guard)
+        from away.pointer.uia import make_backend as pointer_backend
+
+        self.pipeline = Pipeline(
+            cfg,
+            backend,
+            screen,
+            self.bus,
+            temporal,
+            active_app=active_process,
+            guard=self.guard,
+            pointer_backend=pointer_backend(),  # Windows UI Automation for the smart pointer (v0.1.20)
+        )
+        self.pipeline.smart.notify = self.notice
         self.camera_confidences: dict[int, float] = {}  # multi-camera: latest per-view confidence
         self.voice: Any = None  # VoiceController
         self.editor: Any = None  # SelectionEditor (voice.edit_hotkey)
@@ -907,7 +941,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 min_utterance_ms=v.min_utterance_ms,
                 max_utterance_s=v.max_utterance_s,
             ),
-            commands=lambda: self.cfg.bindings.voice_phrases(self.pipeline.dispatcher.profile),
+            commands=self.pipeline.voice_phrases,
             run_command=self._ambient_command,
             bus=self.bus,
             gate=self.pipeline.gate.allow_ambient if face_gate else None,
@@ -1738,6 +1772,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.threads.append(threading.Thread(target=self._watch_monitors, daemon=True, name="monitors"))
         for th in self.threads:
             th.start()
+        with contextlib.suppress(Exception):
+            self.pipeline.smart.start()  # low-rate UI Automation element cache (Windows; no-op elsewhere)
         if self.guard is not None:
             try:
                 from away.app.autopause import start_listeners
@@ -1764,6 +1800,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self._restore_cursor()  # the user's own cursor size, right away (no debounce)
         with contextlib.suppress(Exception):
             self.pipeline.headgaze.save_bias()  # keep the gaze drift correction for the next start
+        with contextlib.suppress(Exception):
+            self.pipeline.smart.stop()  # the UI Automation element cache thread + number badges
         for lst in [*self._listeners, *getattr(self, "_input_listeners", [])]:
             try:
                 lst.stop()

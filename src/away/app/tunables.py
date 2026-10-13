@@ -33,8 +33,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from away.bindings import PROFILE_TUNING_PREFIXES
+from away.pointer.config import POINTER_TUNABLE_TEXT
 
-GROUPS = ("Cursor", "Clicks", "Scroll", "Gestures", "Face", "Head & eyes", "Voice", "Other")
+GROUPS = ("Cursor", "Clicks", "Scroll", "Gestures", "Face", "Head & eyes", "Voice", "Advanced", "Other")
 DEFAULT_GROUP = "Other"
 
 
@@ -346,6 +347,8 @@ TUNABLE_META: dict[str, TunableMeta] = {
         "Other", "Multi-camera pairing tolerance", "Higher: frames further apart in time are paired.", "ms"
     ),
 }
+# v0.1.20 smart pointer (away.pointer.config): the numbers behind the three plain toggles, kept out of the way
+TUNABLE_META.update({p: M("Advanced", *text) for p, text in POINTER_TUNABLE_TEXT.items()})
 del M
 
 # A path segment containing one of these -> "Head & eyes" (head pose, gaze, auto-centre features).
