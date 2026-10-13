@@ -205,7 +205,7 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         self.bars.pack(anchor="w", pady=(6, 0))
         tip(self.bars, "how_sure")
         self.near_var = tk.StringVar()
-        self.near_lbl = tip(ttk.Label(right, textvariable=self.near_var, foreground="#555"), "looks_like")
+        self.near_lbl = tip(ttk.Label(right, textvariable=self.near_var, foreground="#555", wraplength=300), "looks_like")
 
         # ---- details (hidden by default)
         self.det = ttk.LabelFrame(f, text=LABELS["details"], padding=6)
@@ -520,11 +520,10 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         for i, (name, p) in enumerate(items):
             y = 4 + 22 * i
             label = name_for(name)
-            st = states.get(name)
-            if st in ("firing", "arming"):
-                label += f"  ({state_text(st)})"
-            c.create_text(0, y + 7, anchor="w", text=label[:26], fill="#222")
-            x0, x1 = 150, 290
+            if states.get(name) == "firing":
+                label = "> " + label
+            c.create_text(0, y + 7, anchor="w", text=label[:22], fill="#222")
+            x0, x1 = 160, 296
             c.create_rectangle(x0, y + 2, x1, y + 14, fill="#eee", outline="")
             c.create_rectangle(x0, y + 2, x0 + (x1 - x0) * p, y + 14, fill=PALETTE[i % len(PALETTE)], outline="")
             if name != NOTHING:
@@ -540,13 +539,10 @@ class StudioTab:  # pragma: no cover - widgets; smoke-tested under Xvfb only
         w, h = CANVAS_W, CANVAS_H
         prev = fr.get("preview") if fr else None
         if prev:
-            pw, ph, data = prev
+            _pw, _ph, data = prev
             try:
                 self.photo = tk.PhotoImage(data=data, format="PPM")
-                zx = max(1, w // max(1, pw))
-                if zx > 1:
-                    self.photo = self.photo.zoom(zx, zx)
-                c.create_image(w // 2, h // 2, image=self.photo)
+                c.create_image(0, 0, image=self.photo, anchor="nw")
             except Exception:
                 self.photo = None
         zm = self.zmap

@@ -34,21 +34,21 @@ from away.studio.pack import NOTHING, GestureSettings, StudioStore, gesture_sett
 from away.studio.zones import ZoneGate, anchor_point, zone_map_from_dict
 
 WRONG_S = 2.0  # "That was wrong" keeps this many seconds as a 'nothing' example
-PREVIEW_W = 320
+PREVIEW_W, PREVIEW_H = 400, 300  # the Studio picture (normalised landmarks map straight onto it)
 
 
-def ppm_preview(rgb: Any, width: int = PREVIEW_W) -> tuple[int, int, bytes] | None:
-    """Downscale an RGB frame (H, W, 3 uint8) by striding and encode it as binary PPM (Tk shows PPM without
-    Pillow). Returns ``(w, h, data)`` or None for anything that is not an RGB image."""
+def ppm_preview(rgb: Any, width: int = PREVIEW_W, height: int = PREVIEW_H) -> tuple[int, int, bytes] | None:
+    """Resize an RGB frame (H, W, 3 uint8) to exactly ``width`` x ``height`` (nearest pixel) and encode it as
+    binary PPM (Tk shows PPM without Pillow). Returns ``(w, h, data)`` or None for anything that is not RGB."""
     if rgb is None:
         return None
     a = np.asarray(rgb)
     if a.ndim != 3 or a.shape[2] < 3 or a.shape[0] < 2 or a.shape[1] < 2:
         return None
-    step = max(1, int(np.ceil(a.shape[1] / width)))
-    small = np.ascontiguousarray(a[::step, ::step, :3]).astype(np.uint8)
-    h, w = small.shape[:2]
-    return w, h, f"P6 {w} {h} 255\n".encode() + small.tobytes()
+    ys = np.linspace(0, a.shape[0] - 1, height).astype(int)
+    xs = np.linspace(0, a.shape[1] - 1, width).astype(int)
+    small = np.ascontiguousarray(a[ys][:, xs, :3]).astype(np.uint8)
+    return width, height, f"P6 {width} {height} 255\n".encode() + small.tobytes()
 
 
 class BuiltinSource:

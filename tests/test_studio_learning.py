@@ -505,7 +505,7 @@ def test_worker_shows_probabilities_states_and_fires_in_practice_mode(tmp_path, 
     assert msgs[-1]["type"] == "stopped" and tracker.closed
     frames = [m for m in msgs if m["type"] == "frame"]
     assert frames[0]["top"] == NOTHING and set(frames[0]["probs"]) == {NOTHING, "fist_hold"}
-    assert frames[0]["preview"][:2] == (64, 48) and frames[0]["preview"][2].startswith(b"P6 64 48 255\n")
+    assert frames[0]["preview"][:2] == (400, 300) and frames[0]["preview"][2].startswith(b"P6 400 300 255\n")
     last = frames[-1]
     assert last["top"] == "fist_hold" and not last["unknown"] and last["states"]["fist_hold"] in ("firing", "cooldown")
     assert last["nearest"][0] == "fist_hold" and any(f["saliency"] for f in frames)
@@ -588,5 +588,10 @@ def test_ppm_preview_rejects_non_images() -> None:
     from away.studio.live import ppm_preview
 
     assert ppm_preview(None) is None and ppm_preview(np.zeros((4, 4))) is None
-    w, h, data = ppm_preview(np.full((480, 640, 3), 7, dtype=np.uint8))  # type: ignore[misc]
-    assert (w, h) == (320, 240) and len(data) == len(b"P6 320 240 255\n") + 320 * 240 * 3
+    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    img[:, 320:, 0] = 200  # right half red
+    w, h, data = ppm_preview(img)  # type: ignore[misc]
+    header = b"P6 400 300 255\n"
+    assert (w, h) == (400, 300) and len(data) == len(header) + 400 * 300 * 3
+    px = np.frombuffer(data[len(header) :], dtype=np.uint8).reshape(300, 400, 3)
+    assert px[0, 0, 0] == 0 and px[0, 399, 0] == 200 and px[150, 201, 0] == 200 and px[150, 198, 0] == 0
