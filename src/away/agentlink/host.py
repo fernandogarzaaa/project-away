@@ -280,8 +280,14 @@ class AgentLinkHost:
         with contextlib.suppress(Exception):
             self.app.pipeline.apply_config(cfg)
         with contextlib.suppress(Exception):
-            for f in ("hands", "face", "gaze", "bindings"):
+            # v0.1.20: + attention/comfort, Gesture Studio (zones, per-gesture settings) and shortcuts
+            for f in ("hands", "face", "gaze", "bindings", "attention", "comfort", "zones", "studio", "macros"):
                 setattr(self.app.cfg, f, getattr(cfg, f))
+            self.app.cfg.voice.click_by_name = cfg.voice.click_by_name  # smart pointer (the rest of voice: Settings)
+        macros = getattr(self.app, "macros", None)
+        if macros is not None:
+            with contextlib.suppress(Exception):
+                macros.set_config(cfg.macros)
 
     def _record_header(self) -> dict[str, Any]:
         from away.agentlink.recording import make_header
@@ -328,9 +334,13 @@ class AgentLinkHost:
             except Exception:
                 return None
 
+        uia: Any = desktop.make_uia()
+        smart = getattr(getattr(self.app, "pipeline", None), "smart", None) if self.app is not None else None
+        if smart is not None:  # v0.1.20: find elements by name with the smart pointer's fast cache + fuzzy names
+            uia = desktop.SmartPointerUIA(smart, uia)
         return ControlHooks(
             backend=backend,
-            uia=desktop.make_uia(),
+            uia=uia,
             cursor_pos=pos,
             overlay_on=self._overlay_on,
             overlay_off=self._overlay_off,
@@ -458,6 +468,10 @@ class AgentLinkHost:
         tel.active_app = lambda: pipe.dispatcher.last_app
         tel.paused = lambda: bool(pipe.paused)
         tel.models = self._models()
+        with contextlib.suppress(Exception):  # v0.1.20: fatigue mode, attention gate, smart pointer, shortcuts...
+            from away.agentlink.integrations import context_extensions
+
+            tel.extensions.update(context_extensions(app))
         guard = getattr(app, "guard", None)
         if guard is not None:  # typing context from the auto-pause listener (timestamps only, never keys)
             orig_key = guard.on_key

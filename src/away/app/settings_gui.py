@@ -1431,7 +1431,7 @@ def scroll_window_height(canvas_h: int, content_h: int) -> int:
 
 
 class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb only
-    def __init__(self, root: Any, model: SettingsModel) -> None:
+    def __init__(self, root: Any, model: SettingsModel, tab: str | None = None, teach_gesture: bool = False) -> None:
         import tkinter as tk
         from tkinter import ttk
 
@@ -1514,15 +1514,29 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches (first tab)
+        self.nb = nb
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
         self._ui.pump(root)
+        if tab or teach_gesture:  # `away settings --tab studio [--teach-gesture]` (the guided first run uses it)
+            self.select_tab(tab or "Gesture Studio")
+        if teach_gesture and getattr(self, "studio", None) is not None:
+            root.after(300, self.studio.teach)
         from away.app import crashlog
 
         note = crashlog.last_crash_note() or crashlog.recent_note()
         if note:
             self._report(None, f"{note} ({crashlog.crash_log_path()})")
+
+    def select_tab(self, name: str) -> bool:
+        """Show the first tab whose title contains ``name`` (case-insensitive). False when none does."""
+        want = name.strip().lower()
+        for tab_id in self.nb.tabs():
+            if want and want in str(self.nb.tab(tab_id, "text")).lower():
+                self.nb.select(tab_id)
+                return True
+        return False
 
     # ---------------------------------------------------------------- layout
     def _apply_style(self) -> float:
@@ -2955,7 +2969,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.root.destroy()
 
 
-def main(config_path: Path | None = None, argv: list[str] | None = None) -> int:
+def main(
+    config_path: Path | None = None,
+    argv: list[str] | None = None,
+    tab: str | None = None,
+    teach_gesture: bool = False,
+) -> int:
     from away.app import crashlog
 
     crashlog.install("settings")  # crash.log: faulthandler + uncaught exceptions (v0.1.16); idempotent
@@ -2987,7 +3006,7 @@ def main(config_path: Path | None = None, argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    SettingsWindow(root, model)
+    SettingsWindow(root, model, tab=tab, teach_gesture=teach_gesture)
     root.mainloop()
     return 0
 

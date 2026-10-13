@@ -1196,7 +1196,11 @@ def cmd_tour(args: argparse.Namespace) -> int:
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
-    return settings_gui.main(config_path=Path(args.config) if args.config else None)
+    return settings_gui.main(
+        config_path=Path(args.config) if args.config else None,
+        tab=getattr(args, "tab", None),
+        teach_gesture=bool(getattr(args, "teach_gesture", False)),
+    )
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
@@ -1460,6 +1464,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")
+    st.add_argument("--tab", help='open on this tab (part of its title, e.g. "studio", "shortcuts")')
+    st.add_argument("--teach-gesture", action="store_true", help="open Gesture Studio's 'teach a gesture' guide")
     st.set_defaults(fn=cmd_settings)
 
     from away.control.macro_cli import add_parser as add_shortcut_parser

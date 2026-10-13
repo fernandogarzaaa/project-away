@@ -494,7 +494,7 @@ class Service:
 
     def act(self, agent: Agent, action: str, **kw: Any) -> dict[str, Any]:
         self.require(agent, perms.CONTROL)
-        # TODO(merge feat/smart-pointer): resolve element names with the smart pointer's UIA matcher when merged
+        # element names resolve through hooks.uia: the smart pointer's cache + fuzzy matcher when the app runs
         return self.control.act(agent.id, action, **kw)
 
     def stop_control(self, agent: Agent) -> dict[str, Any]:

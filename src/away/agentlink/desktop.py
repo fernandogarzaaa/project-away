@@ -257,8 +257,63 @@ class WindowsUIA:  # pragma: no cover - needs Windows + uiautomation
         return top
 
 
+class SmartPointerUIA:
+    """UI Automation for agents that reuses the smart pointer (v0.1.20): ``find`` first looks in the smart
+    pointer's element cache (one fast ``FindAllBuildCache`` walk of the foreground window, refreshed on demand)
+    with its fuzzy spoken-name matcher, and falls back to ``base`` (the full ``uiautomation`` walk). Everything
+    else - the focused element, the element at a point, the tree, password detection - comes from ``base``."""
+
+    def __init__(self, smart: Any, base: Any) -> None:
+        self.smart = smart
+        self.base = base
+
+    @property
+    def available(self) -> bool:
+        return bool(getattr(self.base, "available", False)) or self._smart_ok()
+
+    @property
+    def reason(self) -> str:
+        return str(getattr(self.base, "reason", ""))
+
+    def _smart_ok(self) -> bool:
+        try:
+            return bool(self.smart.available)
+        except Exception:
+            return False
+
+    def focused(self) -> Element | None:
+        return self.base.focused()  # type: ignore[no-any-return]
+
+    def element_at(self, x: int, y: int) -> Element | None:
+        return self.base.element_at(x, y)  # type: ignore[no-any-return]
+
+    def tree(self, max_depth: int = 3, max_nodes: int = 200) -> Element | None:
+        return self.base.tree(max_depth, max_nodes)  # type: ignore[no-any-return]
+
+    def find(self, name: str, control_type: str | None = None) -> Element | None:
+        if self._smart_ok():
+            try:
+                from away.pointer.looksay import match_names
+
+                snap = self.smart.cache.refresh_now()
+                targets = [t for t in snap.targets if not control_type or _same_type(t.kind, control_type)]
+                matches = match_names(name, targets)
+                if matches:  # ties are listed top-left first: an agent gets the first, a person would get badges
+                    t = matches[0].target
+                    left, top, right, bottom = (int(v) for v in t.rect)
+                    return Element(name=t.name, control_type=t.kind, rect=(left, top, right, bottom))
+            except Exception:
+                pass
+        return self.base.find(name, control_type)  # type: ignore[no-any-return]
+
+
+def _same_type(kind: str, control_type: str) -> bool:
+    return control_type.lower().replace("control", "") in str(kind).lower()
+
+
 def best_match(elements: list[Element], name: str, control_type: str | None = None) -> Element | None:
-    """Exact name (case-insensitive) beats prefix beats substring; enabled and on-screen elements only."""
+    """Exact name (case-insensitive) beats prefix beats substring; enabled and on-screen elements only. With no
+    such match, the smart pointer's fuzzy spoken-name score (v0.1.20) picks a close one ("Sned" -> "Send")."""
     want = name.strip().lower()
     if not want:
         return None
@@ -276,7 +331,20 @@ def best_match(elements: list[Element], name: str, control_type: str | None = No
         cand = (score, -len(n), e)
         if best is None or cand[:2] > best[:2]:
             best = cand
-    return best[2] if best else None
+    if best is not None:
+        return best[2]
+    from away.pointer.looksay import MATCH_THRESHOLD, name_score
+
+    fuzzy: tuple[float, Element] | None = None
+    for e in elements:
+        if not e.enabled or e.rect is None or not e.name:
+            continue
+        if ct and ct not in e.control_type.lower():
+            continue
+        sc = name_score(name, e.name)
+        if sc >= MATCH_THRESHOLD and (fuzzy is None or sc > fuzzy[0]):
+            fuzzy = (sc, e)
+    return fuzzy[1] if fuzzy else None
 
 
 def make_uia() -> Any:

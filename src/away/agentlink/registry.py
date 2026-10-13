@@ -13,8 +13,13 @@ Built-in domains on ``main``:
 * ``profiles`` - per-app profiles: create/delete, which apps, which is active, per-profile tuning
 * ``presets`` - named snapshots of the sliders (saved in the data folder), applied as ordinary setting changes
 
-Feature branches that are not on ``main`` yet register their own domain with :func:`register` (see
-:data:`MERGE_TODO`); until then a placeholder answers "not available in this version".
+Since the v0.1.20 integration (:mod:`away.agentlink.integrations`):
+
+* ``gestures`` - Gesture Studio, per gesture: enabled / how sure / hold for / rest time
+* ``macros`` - recorded shortcuts: list (no typed text), create, delete (undoable); run one with ``macro:<name>``
+* ``settings`` also covers the smart pointer, attention gate, arm-fatigue and Studio zone switches and sliders
+
+Other modules can still add a domain with :func:`register`.
 
 Never reachable through here: ``bindings.allow_shell``, ``agent_link.*`` (the agents' own permissions),
 ``updates.*``, ``models_dir``, file paths, hotkeys that could lock the user out, and anything outside the config.
@@ -32,13 +37,9 @@ from typing import Any
 
 from away import config as cfgmod
 
-MERGE_TODO = (
-    "feat/gesture-studio: register a 'gestures' domain (per-gesture enable/threshold/cooldown) and replace the "
-    "global custom_gestures threshold/cooldown here",
-    "feat/macros: register a 'macros' domain (list/get/create/delete shortcuts) replacing the placeholder",
-    "feat/smart-pointer: register its tunables (snap strength, UIA targets) and reuse its UIA matcher in control.py",
-    "feat/attention (comfort/fatigue): register its settings and feed telemetry.extensions['fatigue']",
-    "blocked zones ('ignore my hand in this part of the camera') need a pipeline hook; add a 'zones' op then",
+MERGE_TODO: tuple[str, ...] = (
+    "blocked zones from an agent ('ignore my hand in this part of the camera'): Gesture Studio has zone maps; "
+    "a 'zones' op that edits them is not exposed yet",
 )
 
 FORBIDDEN_PREFIXES = ("bindings.allow_shell", "agent_link.", "updates.", "models_dir", "telemetry")
@@ -46,15 +47,41 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "hands.cursor.mode": ("relative", "absolute"),
     "hands.cursor.curve": ("power", "sigmoid"),
     "hands.roles.mode": ("auto", "right", "left", "any"),
+    "hands.cursor.smoothing": ("one_euro", "predictive"),  # smart pointer: "Smoother cursor"
+    "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
 }
 SWITCHES = (
     "hands.dwell.enabled",
     "hands.cursor.click_freeze",
     "hands.gestures.autoscroll_enabled",
     "hands.cursor.autocenter.enabled",
+    "hands.cursor.magnet.enabled",  # smart pointer: "Snap to buttons"
+    "voice.click_by_name",  # smart pointer: "Click things by saying their name"
+    "attention.enabled",  # "Only respond when I'm looking at the screen"
+    "attention.require_gaze",
+    "attention.gate_voice",
+    "comfort.fatigue_switch",  # "Switch to head control when my arm is tired"
+    "comfort.fatigue_tips",
+    "comfort.break_reminders",
+    "zones.enabled",  # Gesture Studio zones
+    "zones.block_cursor",
 )
 ZONE_KEYS = ("hands.cursor.active_region",)
-SAFE_ACTION_KINDS = ("none", "mouse", "key", "type", "dictation", "mic", "voice", "pause", "hands", "cursor", "agent")
+SAFE_ACTION_KINDS = (
+    "none",
+    "mouse",
+    "key",
+    "type",
+    "dictation",
+    "mic",
+    "voice",
+    "pause",
+    "hands",
+    "cursor",
+    "agent",
+    "macro",  # run a recorded shortcut (only clicks, keys, text, scrolls and waits; never programs)
+    "macro_control",
+)
 
 
 class ChangeError(ValueError):
@@ -581,6 +608,8 @@ def placeholder(name: str, title: str, todo: str) -> Domain:
 
 
 def domains(store: PresetStore | None = None) -> dict[str, Domain]:
+    from away.agentlink import integrations
+
     out = {
         "settings": Domain("settings", "Settings", settings_list, settings_apply),
         "zones": Domain("zones", "Zones", zones_list, zones_apply),
@@ -597,7 +626,8 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
         "profiles": Domain(
             "profiles", "Per-app profiles", profiles_list, profiles_apply, ops=("create", "delete", "set")
         ),
-        "macros": placeholder("macros", "Shortcuts (macros)", "arrives with the macros feature"),
+        "gestures": integrations.gestures_domain(),
+        "macros": integrations.macros_domain(),
     }
     if store is not None:
         out["presets"] = make_presets_domain(store)

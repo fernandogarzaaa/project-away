@@ -1,19 +1,23 @@
-# Agent Link: TODO when the other v0.1.20 branches merge
+# Agent Link: integration with the other v0.1.20 features (done in the v0.1.20 merge)
 
-Agent Link (feat/remote-link) is built so other branches plug in without touching its core:
-`away.agentlink.registry.register(Domain(...))` adds a kind of setting agents can list/change (validated, undoable),
-and `Telemetry.extensions["name"] = callable` adds live context.
+Agent Link plugs other features in through `away.agentlink.registry` domains and `Telemetry.extensions`; the
+glue lives in `away/agentlink/integrations.py` (tests: `tests/test_v0120_release_integration.py`).
 
-- [ ] **feat/gesture-studio**: register a `gestures` domain (per-gesture enable / threshold / cooldown); then retire
-      the global `custom_gestures` threshold/cooldown ops in `registry.custom_apply`. Feed Studio's "that was wrong"
-      button into `feedback.wrong` on the bus (the misfire detector and agents already listen for it).
-- [ ] **feat/macros**: replace the `macros` placeholder in `registry.domains()` with a real domain (list / get /
-      create / delete shortcuts); keep `shell`/`launch` refusals from `_check_action`.
-- [ ] **feat/smart-pointer**: reuse its UIA matcher in `control.ComputerControl._point` / `desktop.best_match`
-      (marked `TODO(merge feat/smart-pointer)` in `service.act`), and register its tunables.
-- [ ] **feat/attention (comfort / fatigue)**: set `host.core.telemetry.extensions["fatigue"] = <fn returning the
-      fatigue mode>`; `get_context` / `away://about` then report it instead of `null`. Register its settings.
-- [ ] Blocked camera zones ("ignore my hand in this corner") need a pipeline hook first; then add a `zones` op.
-- [ ] Settings window: each branch adds a tab, so `tests/test_settings_layout.py` / `tests/test_tuning_tab.py`
-      tab counts (`len(w._scrollers)`) need the sum of all new tabs.
-- [ ] `config.AppConfig`: several branches add sections; resolve the dataclass field order and `CONFIG_VERSION` once.
+- [x] **Gesture Studio**: a `gestures` domain (per gesture `enabled` / `threshold` / `hold_s` / `cooldown_s`, the
+      same ranges as Studio's sliders); Studio's zone switches (`zones.enabled`, `zones.block_cursor`,
+      `zones.anchor`) are agent settings. The global `custom_gestures` threshold/cooldown ops are **kept**: they
+      drive the older recorded-custom-gesture model, which still runs next to Studio.
+- [x] **Shortcuts (macros)**: a real `macros` domain (list with step descriptions only, create from steps,
+      delete with a private undo backup in the shortcut folder; typed text never reaches an agent or the change
+      history). `macro:` / `macro_control:` are allowed binding actions; `shell` / program `launch` stay refused.
+- [x] **Smart pointer**: agent computer use finds elements through `desktop.SmartPointerUIA` (the smart pointer's
+      fast UIA cache + fuzzy spoken-name matcher, falling back to the full `uiautomation` walk); `best_match`
+      falls back to the same fuzzy score. Its switches/sliders are agent settings.
+- [x] **Attention / comfort**: `telemetry.extensions["fatigue"]` (`ok` / `tired` / `head_control`) so
+      `get_context` / `away://about` report it; also `attention_gate`, `smart_pointer`, `shortcuts`,
+      `gesture_studio` extensions. Its switches and sliders are agent settings.
+- [x] Settings window tab counts follow the notebook (`len(w._scrollers) == len(nb.tabs())`).
+- [x] `config.AppConfig`: all sections merged; `CONFIG_VERSION` unchanged (new sections are additive).
+- [ ] Not done: an agent op that edits Studio's zone *maps* (draw "ignore here" rectangles), and feeding
+      Studio's "That was wrong" button (Settings process) into the tray app's `feedback.wrong` (needs IPC
+      between the two processes; the voice command "that was wrong" already reaches agents).
