@@ -245,8 +245,10 @@ def test_selftest_has_display():
     assert selftest.has_display("win32") and selftest.has_display("darwin")
 
 
-def test_selftest_cli_hidden_and_runs(monkeypatch, capsys, tmp_path):
-    assert "selftest" not in build_parser().format_help()
+def test_selftest_cli_listed_and_runs(monkeypatch, capsys, tmp_path):
+    # v0.1.24: the PC self-test is user-facing (tray "Run self-test"), so it is listed in --help now;
+    # ``--json`` still runs the installer bundle check
+    assert "selftest" in build_parser().format_help()
     monkeypatch.setattr(selftest, "CHECKS", (selftest.Check("a", "a", lambda: "ok"),))
     assert cli_main(["selftest", "--json", str(tmp_path / "s.json")]) == 0
     assert json.loads((tmp_path / "s.json").read_text())["checks"]["a"]["ok"] is True
