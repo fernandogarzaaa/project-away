@@ -1295,6 +1295,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         hand_model = self.models_dir / "hand_landmarker.task"
         face_model = self.models_dir / "face_landmarker.task"
+        accel = self._tracking_accel(hand_model)  # v0.1.24: hands.compute (graphics card or processor)
         hands = (
             HandTracker(
                 hand_model,
@@ -1302,15 +1303,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 prefer=lambda: self.pipeline.hand_mode,
                 mirrored=self.cfg.hands.mirror,
                 release_s=lambda: self.cfg.hands.roles.release_s,
+                factory=accel[0] if accel else None,
+                image_fn=accel[1] if accel else None,
             )
             if self.cfg.hands.enabled
             else None
         )
         faces = None
         if self.cfg.face.enabled and self.face_source.needs_webcam_model and face_model.exists():
-            from away.face.landmarker import FaceLandmarker
+            from away.accel.compute import face_landmarker
 
-            faces = FaceLandmarker(face_model)
+            faces = face_landmarker(self.cfg, face_model, paths.data_dir())
         prof = self.profile
 
         def process(n: int, t: float, rgb: Any) -> None:
@@ -1467,6 +1470,21 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             min_fps=float(self.cfg.hands.min_camera_fps),
             skip_held=skip_held,
         )
+
+    def _tracking_accel(self, model: Any) -> Any:
+        """v0.1.24 ``hands.compute``: (factory, image_fn) for the hand trackers when the graphics card runs them,
+        None for MediaPipe on the processor. Never raises (falls back to the processor and says why)."""
+        try:
+            from away.accel.compute import hand_factory
+
+            return hand_factory(
+                self.cfg,
+                model,
+                paths.data_dir(),
+                on_note=lambda why: self.notice("Project Away: hand tracking on the processor", why, key="gpu-tracking"),
+            )
+        except Exception:
+            return None
 
     def _use_mode_store(self) -> None:
         """Remember per camera name a fallback mode it only works in (v0.1.15), so the next start opens it in
@@ -1897,6 +1915,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             model = self.models_dir / "hand_landmarker.task"
             first_tracker.roles.mirrored = cams[0].mirror  # each camera's own frame orientation
+            accel = self._tracking_accel(model)  # v0.1.24
             trackers = [first_tracker] + [
                 HandTracker(
                     model,
@@ -1904,6 +1923,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     prefer=lambda: self.pipeline.hand_mode,
                     mirrored=c.mirror,
                     release_s=lambda: self.cfg.hands.roles.release_s,
+                    factory=accel[0] if accel else None,
+                    image_fn=accel[1] if accel else None,
                 )
                 for c in cams[1:]
             ]
