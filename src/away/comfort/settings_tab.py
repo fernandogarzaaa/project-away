@@ -97,7 +97,7 @@ def build_tab(win: Any, nb: Any) -> Any:  # pragma: no cover - widgets
             if err:
                 win._report(err)
 
-        tk.Scale(
+        scale = tk.Scale(
             row,
             from_=t.lo,
             to=t.hi,
@@ -106,7 +106,8 @@ def build_tab(win: Any, nb: Any) -> Any:  # pragma: no cover - widgets
             showvalue=False,
             length=220,
             command=moved,
-        ).pack(side="left")
+        )
+        scale.set(t.value)  # before packing; moved() ignores this (no change)
+        scale.pack(side="left")
         val.pack(side="left")
-        row.winfo_children()[1].set(t.value)
     return f
