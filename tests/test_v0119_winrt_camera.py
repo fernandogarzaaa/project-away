@@ -1079,7 +1079,7 @@ def test_diagnose_winrt_errors_are_printed() -> None:
 def test_diagnose_modes_and_candidates() -> None:
     modes = diagnose.diagnose_modes(640, 480, 30)
     assert modes[0] == CaptureMode(640, 480, 30, "MJPG") and CaptureMode(1280, 720, 30, "") in modes
-    assert len(modes) == len(set(modes)) == 7
+    assert len(modes) == len(set(modes)) == 8  # v0.1.21: + 960x540 YUY2 (640x480 YUY2 was already there)
     assert diagnose.diagnose_modes(0, 0, 0)[0] == CaptureMode(640, 480, 30, "MJPG")
     fmts = [nf(640, 480, 15, i=0), nf(1280, 720, 30, i=1), nf(1920, 1080, 30, i=2)]
     assert diagnose.winrt_candidates(fmts, 640, 480, 30, 5)[:2] == [fmts[1], fmts[2]]
