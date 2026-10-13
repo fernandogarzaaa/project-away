@@ -121,4 +121,6 @@ import sys
 open(sys.argv[1]+"/models/catalog.json","w").write(body)
 h=hashlib.sha256(body.encode()).hexdigest()
 open(sys.argv[1]+"/models/catalog.sha256","w").write(f"{h}  catalog.json\n")
+nxt={"about":"Shipped copy of models/catalog.json models_next + presets_next (used until the online catalog has them).","models_next":N,"presets_next":cat["presets_next"]}
+open(sys.argv[1]+"/src/away/data/catalog_next.json","w").write(json.dumps(nxt, indent=1, ensure_ascii=False)+"\n")
 print(len(N), h)
