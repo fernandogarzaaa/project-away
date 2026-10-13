@@ -183,7 +183,7 @@ def test_snapshot_is_ui_ready() -> None:
 def run_arm(mon: FatigueMonitor, t0: float, seconds: float, height_fn: Any, noise_fn: Any = None, seed: int = 0):
     rng = np.random.default_rng(seed)
     events = []
-    n = int(round(seconds * FPS))
+    n = round(seconds * FPS)
     for i in range(n):
         t = t0 + i / FPS
         lm = hand(y=1.0 - height_fn(t - t0))
@@ -490,7 +490,9 @@ def test_pipeline_gate_ends_a_drag_cleanly_when_attention_is_lost() -> None:
     cfg.attention.grace_s = 0.0
     p = Pipeline(cfg)
     t = 0.0
-    for lm in [pose("pinch_open", center=(0.5, 0.5))] * 3 + [pose("pinch", center=(0.5 + 0.01 * i, 0.5)) for i in range(20)]:
+    for lm in [pose("pinch_open", center=(0.5, 0.5))] * 3 + [
+        pose("pinch", center=(0.5 + 0.01 * i, 0.5)) for i in range(20)
+    ]:
         p.on_hand(t, lm)
         t += 1 / FPS
     assert p.gestures.dragging

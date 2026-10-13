@@ -58,7 +58,15 @@ def test_a_plugin_replaces_the_placeholder_and_adds_a_custom_gesture_offer() -> 
     fr.register_step(fr.Step("custom_gesture", "Make your own gesture", "Record one.", "Record"), "gaze")
     steps = fr.build_steps(zones_available=lambda: False)
     assert keys(steps) == [
-        "welcome", "camera", "framing", "zones", "tutorial", "comfort", "gaze", "custom_gesture", "done"
+        "welcome",
+        "camera",
+        "framing",
+        "zones",
+        "tutorial",
+        "comfort",
+        "gaze",
+        "custom_gesture",
+        "done",
     ]
     assert [s.title for s in steps if s.key == "custom_gesture"] == ["Make your own gesture"]
     steps[3].run()  # type: ignore[misc]
@@ -308,8 +316,13 @@ def test_camera_session_posts_frames_events_and_gives_the_camera_back() -> None:
             yield i / FPS, np.full((480, 640, 3), 90, np.uint8)
 
     fr.camera_session(
-        C.AppConfig(), out, threading.Event(), share=share, frames=frames,
-        tracker_factory=lambda: tracker, face_factory=FakeFaces,
+        C.AppConfig(),
+        out,
+        threading.Event(),
+        share=share,
+        frames=frames,
+        tracker_factory=lambda: tracker,
+        face_factory=FakeFaces,
     )
     msgs = [out.get_nowait() for _ in range(out.qsize())]
     assert len(msgs) == len(lms)
@@ -331,8 +344,13 @@ def test_camera_session_reports_a_failure_as_a_message() -> None:
         raise RuntimeError("no face model")
 
     fr.camera_session(
-        C.AppConfig(), out, threading.Event(), share=FakeShare(), frames=frames,
-        tracker_factory=lambda: FakeTracker([]), face_factory=no_faces,
+        C.AppConfig(),
+        out,
+        threading.Event(),
+        share=FakeShare(),
+        frames=frames,
+        tracker_factory=lambda: FakeTracker([]),
+        face_factory=no_faces,
     )
     msg = out.get_nowait()
     assert "error" in msg and "did not open" in msg["error"]
@@ -351,8 +369,13 @@ def test_camera_session_stops_when_asked() -> None:
             i += 1
 
     fr.camera_session(
-        C.AppConfig(), out, stop, share=FakeShare(), frames=frames,
-        tracker_factory=lambda: FakeTracker([None] * 10), face_factory=lambda: None,
+        C.AppConfig(),
+        out,
+        stop,
+        share=FakeShare(),
+        frames=frames,
+        tracker_factory=lambda: FakeTracker([None] * 10),
+        face_factory=lambda: None,
     )
     assert out.qsize() == 3
     assert out.get_nowait()["face_tracking"] is False
@@ -412,7 +435,11 @@ def test_setup_points_to_the_tour() -> None:
 
     lines: list[str] = []
     setup_wizard.run(
-        yes=True, skip_asr=True, skip_probe=True, out=lines.append, downloader=lambda *a, **k: Path("x"),
+        yes=True,
+        skip_asr=True,
+        skip_probe=True,
+        out=lines.append,
+        downloader=lambda *a, **k: Path("x"),
         profiler=lambda cfg: None,
     )
     assert any("away tour" in line for line in lines)
