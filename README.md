@@ -506,6 +506,97 @@ These are enforced by Project Away itself, whatever the agent asks for, and each
 * Password fields are detected with Windows UI Automation (`IsPassword`). Without UI Automation, typing is refused on
   Windows; on macOS/Linux only window titles that look like sign-in prompts are blocked.
 
+## Live agent (optional)
+
+Talk to your computer and it talks back. Say **"Hey Away"** (you can change the name), then a question or a small
+job: "Hey Away, what's 15% of 80?", "Hey Away, open Notepad and type hello". It answers out loud, does small jobs on
+this PC, and hands big jobs (write code, research, long documents) to your other AI agents.
+
+**It is off by default.** Nothing is downloaded, nothing is sent anywhere, and nothing listens for "Hey Away" until
+you turn it on in **Settings → Live agent**.
+
+### Turn it on in one click (free models)
+
+Click **Use free models (opencode)**. That is all: no account, no key, no card.
+
+* Away uses [opencode](https://github.com/anomalyco/opencode) (free, MIT license) to reach its free models. If
+  opencode is not on your PC, the button downloads the official build (about 60 MB) and checks its fingerprint
+  (SHA-256) against the one GitHub publishes. A file that does not match is thrown away.
+* opencode runs privately, only for Away: on your PC only (127.0.0.1) with a random password, with its own settings
+  folder (your own opencode setup and keys are not touched), and with every tool it might want (shell, files, web)
+  refused. It only writes text for Away.
+* The button tries a few free models and picks one that answers quickly.
+* **Good to know:** the free models may keep what you send them. So **pictures of your screen and camera are never
+  sent to them**, nor anything typed into password fields, and e-mail addresses, phone and card numbers and keys
+  are hidden before anything is sent.
+* Free models have limits. When one says "Free usage exceeded", Away moves on to the next one right away.
+
+If opencode cannot be downloaded or started, the tab offers **Use a free key instead** (Gemini or Groq, both free
+with no card, with a link to get the key), or Ollama if it runs on your PC.
+
+### Add your own API key
+
+Under **Add my API key**: pick the provider, paste the key, click **Save and test**. Providers: Groq, Google Gemini,
+OpenAI, Anthropic (Claude), OpenRouter, OpenCode Zen, DeepSeek, Mistral, Together AI, Ollama and LM Studio on this
+PC, or any other OpenAI-compatible address.
+
+* The key is kept in your system's own safe store (Windows Credential Manager, the macOS Keychain, or the Secret
+  Service on Linux), **never in a file**, a log, or an answer to another agent.
+* Your own paid keys and models on your PC may see the screen, but only when you tick **Let it look at my screen**.
+
+### Which model answers (the fallback order)
+
+For each job Away tries models in this order, and moves to the next one if a model fails, is rate-limited, or does
+not start answering within 8 seconds:
+
+1. The model you chose for that job, or your **Preferred model**.
+2. Your other models (your API keys).
+3. Free models (opencode).
+4. Models on this PC (Ollama, LM Studio).
+
+A model that keeps failing is rested for a while (a minute, doubling up to ten; an hour for a refused key). Once a
+model starts answering, it finishes the turn. Looking at the screen only ever uses models that accept pictures and
+do not keep prompts.
+
+### Jev (quick decisions)
+
+Jev is a small, fast decision model (TypeSafe AI's "System One"). It does not write text; it answers short yes/no
+and pick-one questions in about 0.3 s. Away uses it to decide: is this a chat, a job on this PC, or a big job for
+another agent; is this action risky (send, pay, delete, anything you cannot undo, which is always confirmed on your
+PC first); which button on screen you meant; and whether the action worked. Jev's free version needs no key. Under
+**Advanced** it is set to *auto* (use it when it answers). When Jev is off or not answering, the chat model answers
+the same questions, and when that fails too, simple built-in rules do.
+
+### Daily budget
+
+Paid API keys stop for the day once today's spend reaches your daily limit: **$1.00 a day** by default, changed
+under **Advanced** (0 means paid keys are never used). Free models and models on your PC always count as $0. When a
+model's price is unknown, it is counted at a cautious $1 / $5 per million tokens so the limit still holds.
+
+### Talking over it, and what it may do
+
+* **Barge-in:** just start talking while it speaks and it stops. (The classic Windows voice finishes its current
+  few words first.)
+* By default it may not look at your screen or camera or use the mouse and keyboard. Each is a switch in the tab.
+  Mouse and keyboard use is approved on the PC each session, with the same safety rules as Agent Link.
+* **Recent turns** in the tab shows what was asked, which model answered, how fast, and what happened.
+* From a terminal: `python -m away.liveagent status | free | models | ask "..." | jev | update-engine`.
+
+### What is tested and what is not
+
+| Part | Status |
+|---|---|
+| Router, fallback order, rest periods, daily budget, redaction, fencing of screen text, Jev answers, barge-in logic, Settings tab logic, key storage | Unit-tested with fake providers, a fake opencode server, a fake key store and fake clocks (57 tests) |
+| Settings → Live agent tab | Drawn under Xvfb on Linux (a render test and a screenshot check) |
+| opencode download, SHA-256 check, private `opencode serve`, free models answering | **Verified for real on Linux (arm64)** on 2026-10-14: opencode 1.19.0 downloaded and checked, a free model answered "15% of 80 is 12" in about 3.5 s at $0, and "Free usage exceeded" moved on to the next model |
+| Jev (free) | **Verified for real** on 2026-10-14: routing and the risk check answered in about 0.3 s |
+| opencode settings isolation on Windows | **Untested** |
+| opencode installed by npm (`opencode.cmd`) on Windows | **Untested** (code path unit-tested only) |
+| Stopping opencode and its child processes on Windows (`taskkill /T`) | **Untested** |
+| Windows Credential Manager (and the macOS Keychain) | **Untested** with the real stores (a fake store in tests) |
+| The real voice loop (microphone, "Hey Away", speaking, barge-in on real audio) | **Untested** |
+| Your own API keys against the real providers (OpenAI-compatible, Anthropic) | **Untested** live (fake HTTP in tests) |
+
 ## Architecture
 
 ```mermaid
@@ -1842,6 +1933,7 @@ Config (`macros:` in config.yaml, all optional):
 | Area | Status |
 |---|---|
 | Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Live agent (optional, off by default) | See [Live agent (optional) → What is tested and what is not](#what-is-tested-and-what-is-not): free models through opencode and Jev verified for real on Linux; the Windows-only parts (opencode isolation, `opencode.cmd`, `taskkill`, Credential Manager), the real voice loop and live API-key providers are **untested** |
 | Agent messages: truthful `shown`, tray fallback, window start-up options (v0.1.21) | The acknowledgement protocol, timeouts, exit codes, the tray fallback and the Popen options (no CREATE_NO_WINDOW, show-normal, frozen environment reset) unit-tested; a real child process writing the acknowledgement is tested on every CI OS; **untested on the user's Windows desktop**: whether the Tk message window now appears from the installed tray app, and the tray balloon on Windows |
 | Speaking (v0.1.21) | Engine order per OS, the speaker thread and queue, settings, fallbacks between engines, the PowerShell and command-line engines (text never on a command line that a shell reads) and SAPI through a fake COM object unit-tested; the Windows release self-test creates the real `SAPI.SpVoice`, sets rate and volume and synthesizes into memory; **not heard on real speakers**, and macOS `say` / Linux `spd-say` are untested on real desktops |
 | Check ids, shared registry, expiry (v0.1.21) | Unit-tested and round-tripped over a real uvicorn server (`?job_id=82557239`, `?id=`, `/v1/rpc/diagnostics`, 404 vs 410) |
