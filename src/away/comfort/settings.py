@@ -14,7 +14,7 @@ from typing import Any
 
 @dataclass
 class AttentionConfig:
-    """"Only respond when I'm looking at the screen": gestures (and optionally voice commands) count only while
+    """ "Only respond when I'm looking at the screen": gestures (and optionally voice commands) count only while
     the user is engaged: facing the screen, looking at it (with a gaze calibration), hand raised into the working
     area, held for a moment. See :class:`away.comfort.attention.AttentionGate`."""
 

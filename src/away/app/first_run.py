@@ -177,6 +177,16 @@ def _safe(fn: Callable[[], bool]) -> bool:
 DONE, SKIPPED, FAILED, TODO, CURRENT = "done", "skipped", "failed", "todo", "current"
 
 
+def step_result(key: str, step_ok: bool, tutorial_done: int = 0) -> str:
+    """What pressing the big button on a step means: the camera and eye setup count as done only once they
+    worked, the tutorial once at least one move was seen; anything else the user moved on from is done."""
+    if key in ("camera", "gaze"):
+        return DONE if step_ok else SKIPPED
+    if key == "tutorial":
+        return DONE if tutorial_done > 0 else SKIPPED
+    return DONE
+
+
 def state_file(folder: Path | None = None) -> Path:
     if folder is None:
         from away import paths
@@ -269,7 +279,7 @@ class FirstRun:
         data = {
             "version": STATE_VERSION,
             "seen": True,
-            "completed": bool(completed) if completed is not None else bool(load_state(self.state_path).get("completed")),
+            "completed": bool(completed if completed is not None else load_state(self.state_path).get("completed")),
             "results": dict(self.results),
         }
         p = self.state_path or state_file()
@@ -525,7 +535,9 @@ class TutorialCoach:
 def camera_check(cfg: Any, prober: Callable[..., tuple[bool, str]] | None = None) -> tuple[bool, str]:
     """Quick "does the camera turn on" check (the probe ``away setup`` uses). ``(ok, raw message)``."""
     if prober is None:  # pragma: no cover - real camera
-        from away.hands.tracker import probe_camera as prober
+        from away.hands.tracker import probe_camera
+
+        prober = probe_camera
     h = cfg.hands
     device = h.cameras[0].device if h.cameras else h.camera_index
     try:
@@ -590,8 +602,7 @@ def camera_session(
         except Exception:
             faces = None  # the framing tips about the face are then left out
         sm = GestureStateMachine(h.gestures)
-        n = 0
-        for t, rgb in frames(idx, h.mirror):
+        for n, (t, rgb) in enumerate(frames(idx, h.mirror)):
             if stop.is_set():
                 break
             fr = tracker.process(rgb, t)
@@ -614,7 +625,6 @@ def camera_session(
                 with contextlib.suppress(Exception):
                     msg["image"] = rgb[::PREVIEW_SHRINK, ::PREVIEW_SHRINK].copy()
             out.put(msg)
-            n += 1
     except Exception as exc:
         out.put({"error": camera_error_message(exc, idx, lease.app_running, lease.handed_over)})
     finally:
@@ -623,3 +633,71 @@ def camera_session(
                 with contextlib.suppress(Exception):
                     obj.close()
         lease.close()
+
+
+def tracking_ready(cfg: Any, find_spec: Callable[[str], Any] | None = None) -> tuple[bool, str]:
+    """Can the live steps run? (OpenCV + MediaPipe installed, hand model downloaded). ``(ok, raw message)``;
+    the raw message goes through :func:`away.comfort.ui.friendly_error` for the user."""
+    import importlib.util
+
+    spec = find_spec or importlib.util.find_spec
+    for mod in ("cv2", "mediapipe"):
+        try:
+            if spec(mod) is None:
+                return False, f"{mod} not installed (pip install 'project-away[hands]')"
+        except (ImportError, ValueError):
+            return False, f"{mod} not installed"
+    from away import paths
+
+    mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
+    if not (mdir / "hand_landmarker.task").exists():
+        return False, "hand model missing (run `away setup`)"
+    return True, "ready"
+
+
+def download_models(
+    cfg: Any, out: Callable[[str], None] = print, downloader: Callable[..., Any] | None = None
+) -> str | None:
+    """The friendly "Download now" fix: fetch the MediaPipe models ``away setup`` downloads. Error text or None."""
+    from away import paths
+    from away.app import models
+
+    mdir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
+    fetch = downloader or models.download
+    for mf in models.MEDIAPIPE_MODELS:
+        try:
+            fetch(mf, mdir, out)
+        except Exception as exc:
+            return f"download failed: {exc}"
+    return None
+
+
+def text_tour(
+    cfg: Any,
+    out: Callable[[str], None] = print,
+    prober: Callable[..., tuple[bool, str]] | None = None,
+    find_spec: Callable[[str], Any] | None = None,
+) -> int:
+    """``away tour --text``: the parts of the guide that need no window (camera check, readiness, tips).
+    Returns 0 when the camera and hand tracking are ready, 1 otherwise."""
+    from away.comfort import ui
+    from away.comfort.settings import PLAIN_SWITCHES, get_path
+
+    out("Welcome to Project Away! Let's check your setup.\n")
+    ok, raw = camera_check(cfg, prober)
+    ready, raw2 = tracking_ready(cfg, find_spec)
+    for good, text, done in ((ok, raw, "Your camera works!"), (ready, raw2, "Hand tracking is ready.")):
+        if good:
+            out(f"  [ok] {done}")
+        else:
+            err = ui.friendly_error(text)
+            out(f"  [!!] {err.title}\n       {err.message}\n       ({text})")
+    out("\nHow to use it:")
+    for task in tutorial_tasks():
+        out(f"  - {task.title}: {task.how}")
+    out("\nComfort helpers (change them in Settings > Getting started):")
+    for path, label, _help in PLAIN_SWITCHES:
+        out(f"  [{'x' if get_path(cfg, path) else ' '}] {label}")
+    out("\nStart with `away tray`. For the full interactive tutorial, run `away tour` on your desktop.")
+    mark_seen()
+    return 0 if ok and ready else 1

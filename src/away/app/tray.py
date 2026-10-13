@@ -393,7 +393,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
-    for topic in ("voice.state", "app.paused", "attention.state", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested"):
+    topics = ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested")
+    for topic in (*topics, "attention.state"):  # v0.1.20: the attention gate changes the tray title
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))
