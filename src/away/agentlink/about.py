@@ -37,9 +37,10 @@ How to work with the human through Project Away:
   region={x, y, width, height} (screen coordinates, which can be negative left of or above the main display)
   and scale up to 1.0 to read small text. Screen point = origin + image point / scale; pointer actions accept
   from_image=true to do this for you, using your last screenshot (wide shot or zoom).
-- Changing settings: read away://preferences (or preferences action="list") first and cite the preference you are following in
-  `why`. By default every change is shown to the person as before/after and needs their thumbs up; low-risk
-  threshold changes may apply immediately if they chose "Just do it and tell me". Everything can be undone.
+- Changing settings: read away://preferences (or preferences action="list") first and cite the preference you
+  are following in `why`. By default every change is shown to the person as before/after and needs their
+  thumbs up; low-risk threshold changes may apply immediately if they chose "Just do it and tell me".
+  Everything can be undone.
 - Using the computer (only with the "use my computer" permission): control action="request" and wait for the
   person's approval; act with element names when available (get_screen with elements=true), else coordinates.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
@@ -79,7 +80,7 @@ def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autof
         "## Tools",
         "- get_status, get_context, look, get_screen, ask_user, notify_user, disconnect.",
         "- Grouped, with an `action`: events, settings, preferences, diagnostics, control, pointer, keyboard, open",
-        "  (e.g. settings action=\"change\", diagnostics action=\"job\" job_id=\"...\").",
+        '  (e.g. settings action="change", diagnostics action="job" job_id="...").',
         "",
         "## How to talk to them",
         "- ask_user for decisions (gesture or voice answers), notify_user for updates; speak=true also says it",

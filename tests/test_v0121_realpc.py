@@ -645,7 +645,7 @@ class JoyCV2:
 def yuy2_slow_at_720p(fcc: str, w: int, h: int) -> float:
     if fcc == "MJPG":
         return 30.0
-    return 10.0 if w * h > 640 * 480 else 30.0
+    return 12.0 if w * h > 640 * 480 else 30.0  # works (above the 10 fps minimum) but far below 24
 
 
 @pytest.fixture
@@ -690,7 +690,7 @@ def test_joycam_mjpg_accepted_when_the_size_is_set_first(_windows_cams: Path, ca
     got.cap.release()
 
 
-def test_joycam_prefers_a_smaller_mode_that_reaches_24fps_over_720p_yuy2_at_10(_windows_cams: Path, caplog) -> None:
+def test_joycam_prefers_a_smaller_mode_that_reaches_24fps_over_slow_720p_yuy2(_windows_cams: Path, caplog) -> None:
     clock = Clock()
     cv2 = JoyCV2(clock, mjpg=False, rate=yuy2_slow_at_720p)
     with caplog.at_level(logging.INFO, logger="away.cameras"):
@@ -735,7 +735,13 @@ WEAK = {
     "mouth_moving_frames": 0,
     "speaker_frames": 0,
 }
-STRONG = {"allowed": True, "reason": "enrolled face speaking", "frames": 14, "mouth_moving_frames": 9, "speaker_frames": 7}
+STRONG = {
+    "allowed": True,
+    "reason": "enrolled face speaking",
+    "frames": 14,
+    "mouth_moving_frames": 9,
+    "speaker_frames": 7,
+}
 
 
 def test_the_exact_log_cases_are_dropped() -> None:
@@ -834,7 +840,7 @@ def test_his_desktop_bounds_and_wide_shot() -> None:
     assert p.to_image(*p.to_screen(100, 200)) == pytest.approx((100, 200))
     small = screenshot.plan(ds, (5206, 1080), scale=0.3)  # under the cap: exactly the requested scale
     assert small.scale == 0.3 and small.out == (1562, 324) and not small.capped
-    assert small.to_screen(1562, 324) == pytest.approx((3286.7, 1080.0), abs=0.01)
+    assert small.to_screen(1562, 324) == pytest.approx((3286.67, 1080.0), abs=0.01)
 
 
 def test_zoom_into_one_monitor_of_three() -> None:
