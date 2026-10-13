@@ -46,7 +46,7 @@ EVENT_TRIGGER = {
 PINCH_CLICK_EVENTS = ("click", "double_click", "drag_start")
 SCROLL_STEP = 3.0  # wheel notches for mouse:scroll_up / scroll_down
 URL_PREFIXES = ("http://", "https://", "mailto:", "file://", "ftp://")
-HOOK_KINDS = ("dictation", "mic", "voice", "pause", "hands")
+HOOK_KINDS = ("dictation", "mic", "voice", "pause", "hands", "agent")
 
 Hook = Callable[[str, dict[str, Any]], None]
 

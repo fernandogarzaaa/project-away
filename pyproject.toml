@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "project-away"
 version = "0.1.19"
-description = "Hands-free PC control: camera hand gestures, push-to-talk dictation, active-speaker gating and experimental Wi-Fi CSI sensing. Local-first."
+description = "The bridge between you and your AI agents, controlled by your hands, face and voice: hands-free PC control, dictation, Agent Link (MCP) and more. Local-first."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -50,6 +50,15 @@ face = ["mediapipe>=0.10.14", "opencv-python>=4.8"]
 voice = ["faster-whisper>=1.1", "sounddevice>=0.4.6"]
 control = ["pynput>=1.7.6", "pyperclip>=1.8"]
 tray = ["pystray>=0.19", "Pillow>=10"]
+# v0.1.20 Agent Link: connect AI agents (MCP over stdio + Streamable HTTP, REST), QR pairing, UI Automation
+agent = [
+  "mcp>=1.26,<2",
+  "uvicorn>=0.30",
+  "starlette>=0.40",
+  "qrcode>=7.4",
+  "keyring>=24",
+  "uiautomation>=2.0.20; sys_platform == 'win32'",
+]
 train = ["torch>=2.1", "onnx>=1.15", "onnxruntime>=1.17"]
 parakeet = ["nemo_toolkit[asr]>=2.0"]
 all = [
@@ -57,6 +66,9 @@ all = [
   "faster-whisper>=1.1", "sounddevice>=0.4.6",
   "pynput>=1.7.6", "pyperclip>=1.8",
   "pystray>=0.19", "Pillow>=10",
+  # the [agent] extra (Agent Link)
+  "mcp>=1.26,<2", "uvicorn>=0.30", "starlette>=0.40", "qrcode>=7.4", "keyring>=24",
+  "uiautomation>=2.0.20; sys_platform == 'win32'",
   # the [winrt] extra (Windows only)
   "winrt-runtime>=2.0; sys_platform == 'win32'",
   "winrt-Windows.Foundation>=2.0; sys_platform == 'win32'",

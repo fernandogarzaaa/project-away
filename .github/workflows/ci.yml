@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,agent]"
       - run: ruff check src tests scripts
       - run: ruff format --check src tests scripts
       - run: mypy
@@ -47,7 +47,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       # [winrt] installs the pywinrt camera packages on Windows only (environment markers); elsewhere nothing
-      - run: pip install -e ".[dev,winrt]" Pillow opencv-python-headless
+      - run: pip install -e ".[dev,winrt,agent]" Pillow opencv-python-headless
       - name: Core tests (torch tests self-skip without the [train] extra)
         run: pytest -p no:warnings --cov=away --cov-report=term-missing:skip-covered
 

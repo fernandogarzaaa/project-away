@@ -1082,6 +1082,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     helper_id=getattr(fr, "helper_id", None),
                     promoted=bool(getattr(fr, "promoted", False)),
                 )
+                self._agent_frame(self.cfg.hands.camera_index, t, rgb, fr)
             if faces is not None and n % max(1, prof.face_every) == 0 and self.face_source.use_webcam(t):
                 obs = faces.process(rgb, t)
                 net = self._gaze_net(t, rgb, obs)
@@ -1137,6 +1138,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 if close is not None:
                     with contextlib.suppress(Exception):
                         close()
+
+    def _agent_frame(self, cam: Any, t: float, rgb: Any, fr: Any) -> None:
+        """Agent Link (v0.1.20): fps / latency / landmarks per camera, and the still for an allowed look()."""
+        al = getattr(self, "agent_link", None)
+        if al is not None:
+            with contextlib.suppress(Exception):
+                al.on_frame(cam, t, rgb, fr)
 
     def _gaze_net(self, t: float, rgb: Any, obs: list[Any]) -> tuple[float, float] | None:
         """The optional learned gaze network on the largest face (only when the calibration uses it)."""
@@ -1592,6 +1600,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                     continue
                                 t_i, rgb = item
                                 fr = trackers[i].process(rgb, t_i)
+                                self._agent_frame(i, t_i, rgb, fr)
                                 note = getattr(self.pipeline, "note_hands", None)
                                 if i == primary and note is not None:
                                     note(t_i, getattr(fr, "n_hands", 1), getattr(fr, "hands_gap", None))
@@ -1746,11 +1755,18 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             except Exception as exc:
                 self.bus.publish("autopause.unavailable", {"error": str(exc)})
         self._restart_hotkeys()
+        from away.agentlink.host import attach  # Agent Link (v0.1.20): never raises
+
+        self.agent_link = attach(self)
 
     def stop(self, join_timeout: float = 3.0) -> None:
         # Stop producing new events first, then make a best-effort release of
         # any synthetic mouse button still held by an in-progress drag.
         self.stop_event.set()
+        al = getattr(self, "agent_link", None)
+        if al is not None:  # agents lose control and the border/banner disappear first
+            with contextlib.suppress(Exception):
+                al.stop()
         # Let the camera thread finish its current frame and close MediaPipe itself before the
         # interpreter shuts the executors down ("cannot schedule new futures after shutdown").
         for th in getattr(self, "threads", []):

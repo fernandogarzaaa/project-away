@@ -109,7 +109,20 @@ class TrayController:
             "off": "voice off",
         }.get(state, state)
         text = f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
+        badge = self.agent_badge()
+        text += f" - {badge}" if badge else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
+
+    def agent_badge(self) -> str:
+        """ "Claude connected" / "Claude is using the computer" (Agent Link, v0.1.20), or ""."""
+        from away.agentlink.host import badge
+
+        return badge(getattr(self.app, "agent_link", None))
+
+    def disconnect_agents(self) -> None:
+        al = getattr(self.app, "agent_link", None)
+        if al is not None:
+            al.disconnect_all()
 
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
@@ -353,13 +366,25 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             lambda _icon, _item: ctl.retry_cameras(),
             visible=lambda _i: ctl.camera_retry_stopped(),
         ),
+        pystray.MenuItem(
+            lambda _i: f"Disconnect AI agents ({ctl.agent_badge()})",
+            lambda _icon, _item: ctl.disconnect_agents(),
+            visible=lambda _i: bool(ctl.agent_badge()),
+        ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
-    for topic in ("voice.state", "app.paused", "gesture.clutch", "cameras.retry_stopped", "cameras.retry_requested"):
+    for topic in (
+        "voice.state",
+        "app.paused",
+        "gesture.clutch",
+        "cameras.retry_stopped",
+        "cameras.retry_requested",
+        "agentlink.changed",
+    ):
         app.bus.subscribe(topic, lambda _e: _sync(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))

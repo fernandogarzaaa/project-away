@@ -1500,6 +1500,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_cameras(nb)
         self._build_performance(nb)
         self._build_test(nb)
+        from away.agentlink import gui as agent_gui  # Agent Link (v0.1.20), isolated in its own module
+
+        with contextlib.suppress(Exception):
+            agent_gui.build_tab(self, nb)
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()

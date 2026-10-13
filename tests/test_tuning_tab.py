@@ -718,7 +718,7 @@ def test_tuning_tab_smoke(tmp_path: Path) -> None:  # pragma: no cover - needs a
         w = G.SettingsWindow(root, G.SettingsModel(path=tmp_path / "config.yaml"))
         root.geometry("900x640")
         root.update()
-        assert len(w._scrollers) == 6
+        assert len(w._scrollers) == 7  # v0.1.20: + Agent Link
         titles = list(w._tune_sections)
         assert titles[:2] == ["Live view: why did a gesture (not) fire?", "Auto-tune a gesture"]
         assert [t for t in titles[2:]] == [g for g, _ in w.tuning.groups()]

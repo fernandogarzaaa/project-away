@@ -117,6 +117,7 @@ ACTION_ARGS: dict[str, tuple[str, ...] | None] = {
     "pause": ("toggle", "on", "off"),
     "hands": ("auto", "right", "left", "any"),
     "cursor": CURSOR_ARGS,
+    "agent": ("summon", "look", "screen", "wrong", "stop"),  # Agent Link (v0.1.20): tell connected AI agents
 }
 ACTION_KINDS = tuple(ACTION_ARGS)
 # continuous mouse actions only make sense on the matching continuous gesture
@@ -307,6 +308,11 @@ def default_profile() -> Profile:
             "use left hand": a("hands:left"),
             "use right hand": a("hands:right"),
             "use either hand": a("hands:auto"),
+            "hey agent": a("agent:summon"),  # Agent Link (v0.1.20): connected AI agents get these as events
+            "hey agent look": a("agent:look"),
+            "hey agent look at my screen": a("agent:screen"),
+            "that was wrong": a("agent:wrong"),
+            "stop agent": a("agent:stop"),
         },
         face={
             "brow_raise": a("dictation:toggle"),

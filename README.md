@@ -1,8 +1,15 @@
 # Project Away
 
-Hands-free PC control, free and local. Webcam hand gestures drive the cursor, push-to-talk voice typing handles text, face cues gate who is dictating, and optional Wi-Fi CSI adds coarse motion confidence.
+**The bridge between you and your AI agents, controlled by your hands, face and voice.**
 
-Nothing leaves your machine unless you point the optional LLM cleanup at an endpoint yourself.
+Project Away sees your gestures, notices whether you are at the screen and paying attention, and listens for your
+voice. You use that to run your PC hands-free (point to move the cursor, pinch to click, talk to type), and, new in
+v0.1.20, to work with the AI agent you already use (Claude, ChatGPT, Cursor or any other): it can ask you a quick
+question you answer with a thumbs up, tell you when something is done, look at your screen or camera when you allow
+it, tune Project Away to how you like it, and even use your computer while you watch. Free and local-first.
+
+Nothing leaves your machine unless you connect an agent and press **Allow** on your own screen (or point the
+optional LLM cleanup at an endpoint yourself).
 
 ## User guide (no technical knowledge needed)
 
@@ -134,6 +141,160 @@ Voice is always listening by default. Just talk, and your words are typed wherev
   it, then press **Retry cameras** (Settings → Cameras, or the tray menu).
 - **"The app crashed last time":** the details are in `crash.log` in the logs folder
   (`%LOCALAPPDATA%\ProjectAway\logs\crash.log` on Windows, next to `away.log`). Please attach it to a bug report.
+
+## Connect your AI agent
+
+### 30-second quick start
+
+1. Open **Settings → Agent Link** and press **Connect an AI agent**.
+2. Pick your AI: **Claude Desktop**, **ChatGPT**, **Cursor**, **Claude (web or phone)** or **Other**.
+3. Choose what it may do (the safe choices are already ticked) and press **Next**.
+   - **Claude Desktop / Cursor on this PC:** press **Connect**. Project Away adds itself to the app's settings
+     (a backup is kept), then restart the app.
+   - **ChatGPT, Claude.ai or anything else:** you get a private link, a QR code and a 6-digit code. Paste the link
+     into the app's "add custom connector" box (ChatGPT: *Settings → Apps & Connectors → Advanced → Developer mode →
+     Create*; Claude: *Settings → Connectors → Add custom connector*) or open it on your phone.
+4. Your PC asks **"Claude wants to connect: Allow / Deny"**. Answer with a click, a thumbs up, or by saying "allow".
+   You see **Connected to Claude ✓**. **Disconnect all** ends every connection at once.
+
+Then just talk to your agent: *"What can you see in Project Away?"*, *"The cursor is too fast, fix it"*,
+*"Ask me with a thumbs up before you send the email"*.
+
+| Permission | What it means | Default |
+|---|---|---|
+| ☝ See my gestures | your gestures, whether you are at the screen, what you said to Project Away, its settings and health | always on |
+| ◉ See my camera when I allow | one small still photo at a time; your screen flashes every time | off |
+| ▣ See my screen when I allow | one small screenshot at a time, or a slow (1 per second) live view with a badge on screen the whole time | off |
+| ⚙ Change my settings | sliders, gestures, voice commands, per-app profiles, presets; it asks you first (before/after) and everything can be undone | off |
+| ⌨ Let it use my computer | mouse and keyboard, after you allow it on the PC each time, for 30 minutes at most | off |
+| (Advanced) Run camera and speed checks | camera checks, speed tests, short gesture recordings (no video), diagnostics bundles | on |
+
+**While an agent uses your computer** a bright border and the banner *"Claude is using your computer — move your hand
+or mouse to take over"* are on screen. Touching the mouse or keyboard, or making a gesture, pauses it instantly; it
+must ask again to continue. **Ctrl+Alt+Esc**, saying **"stop"**, or holding up an **open palm** for a second stops it.
+It never types into password fields, never touches Windows security prompts, and asks you before clicking anything
+like *Send, Pay, Buy, Delete, Install* (with "Always allow for this agent"). Settings → Agent Link shows everything it
+did, with a picture of the screen for each step, and **Undo last**.
+
+**Answering your agent with your hands:** thumbs up = yes / the first choice, thumbs down = no / the last choice,
+1–4 fingers = choice 1–4, open palm = choice 5, or say the answer, or click it.
+
+**Talking to your agent with gestures/voice:** say **"hey agent"** (it is called), **"hey agent, look"** (it gets a
+camera picture, if allowed) or **"hey agent, look at my screen"**, and **"that was wrong"** when Project Away did
+something you did not want (agents can then suggest a fix). Bind them to any gesture in Settings → Bindings
+(`agent:summon`, `agent:look`, `agent:screen`, `agent:wrong`, `agent:stop`).
+
+**My preferences:** Settings → Agent Link → *My preferences* is a plain list ("I hate accidental right-clicks",
+"slower cursor in Photoshop") that you and your agents share; agents read it and cite it when they change something.
+Changes run in **Ask me first** mode by default; **Just do it and tell me** lets them make small adjustments
+(thresholds and sliders within their normal range) right away and tell you. Every change is in a history with who and
+why, with **Undo** and **Undo its changes today**, and the config is snapshotted before each batch.
+
+### Technical details
+
+**Transports.** One server, three ways in, the same permissions and rules for all of them:
+
+* **MCP over stdio** for apps on this PC: the app runs `away mcp --scopes read,diagnose` (the wizard writes it).
+  It forwards to the running Project Away app over 127.0.0.1; the first call shows the Allow prompt (proof of "same
+  user, same PC": a key file only you can read), and the token is kept until it expires (30 days) or you revoke it.
+* **MCP over Streamable HTTP** for remote agents: `https://<random>.trycloudflare.com/mcp` with
+  `Authorization: Bearer <token>`, or the pairing link `https://<random>.trycloudflare.com/c/<code>` used directly
+  as the connector URL (no header needed; ChatGPT and Claude.ai connectors). OAuth is not implemented in v1; the
+  pairing link is the credential and only becomes one after you press Allow.
+* **REST/JSON** for agents without MCP: the same tools under `/v1/...` (`POST /v1/rpc/<tool>` for any of them),
+  server-sent events at `/v1/events/stream`, OpenAPI at `/openapi.json`. Exchange a pairing code or the 6-digit code
+  for a token with `POST /v1/pair {"pin": "123456", "name": "My agent"}`.
+
+**Claude Desktop by hand** (what the wizard writes into `claude_desktop_config.json`; Windows path shown, macOS uses
+`/Applications/ProjectAway.app/Contents/MacOS/ProjectAway`, a pip install uses `away`):
+
+```json
+{"mcpServers": {"project-away": {
+  "command": "C:\\Program Files\\ProjectAway\\ProjectAway.exe",
+  "args": ["mcp", "--scopes", "read,diagnose,tune"]}}}
+```
+
+Cursor uses the same entry in `~/.cursor/mcp.json`; `away agent connect claude|cursor` writes it from the command
+line, `away agent snippets` prints them.
+
+**Remote Streamable HTTP client** (tested from a cloud sandbox through a real quick tunnel):
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") as (r, w, _):
+    async with ClientSession(r, w) as s:
+        await s.initialize()                 # the person sees "<your client name> wants to connect"
+        print(await s.call_tool("get_context", {}))
+```
+
+or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
+`ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
+
+**Tools:** `get_status`, `get_context`, `poll_events`, `wait_for_event`, `get_logs`, `get_config`, `list_settings`,
+`set_config`, `undo_change`, `change_history`, `get_preferences`/`add_preference`/`remove_preference`,
+`run_diagnose` (`cameras` | `sweep` | `benchmark`) + `get_job`, `record_session`, `get_bundle`, `download_file`,
+`look`, `get_screen` (`elements=true` adds the Windows UI Automation tree), `ask_user`, `notify_user`,
+`request_control`/`resume_control`/`stop_control`, `move`, `click`, `double_click`, `right_click`, `drag`, `scroll`,
+`type_text`, `press_keys`, `open_app`, `open_url`, `undo_last_action`, `disconnect`.
+**Resources:** `away://about` (briefing: what Project Away is, your permissions, live context, how to talk to the
+person; also sent as the MCP `instructions`), `away://preferences`, `away://context`, `away://events` and
+`away://screen/live` (both subscribable: `resources/subscribe` → `notifications/resources/updated`),
+`away://user/last-capture`. Events: `presence` (sat down / left), `attention`, `summon`, `user.look`, `user.screen`,
+`wrong`, `misfire`, `detector`, `control.*`, `prompt.*`, `change.*`.
+
+**Polite prompts.** `ask_user` with `urgency` `low`/`normal` waits until you are present, facing the screen and not
+typing (normal waits at most half its timeout); `high` shows at once.
+
+**Settings agents can change** go through a registry of domains (`settings`, `zones`, `bindings`, `custom_gestures`,
+`profiles`, `presets`, plus placeholders for features on other branches). Every value is checked with the same range
+table as the Tuning sliders, and the whole config must still validate before anything is saved.
+
+**CLI:** `away agent status|pair|start|stop|disconnect|agents|revoke ID|connect claude|cursor|snippets|prefs|changes|
+undo|github-token` (aliases `away link`, `away remote`), `away mcp`, `away replay FILE`, `away diagnose bundle`.
+
+**New config keys** (`agent_link:`): `enabled` (true), `remote_ttl_min` (60), `local_ttl_days` (30),
+`pairing_ttl_s` (600), `control_ttl_min` (30), `port` (0 = any), `rate_per_s` (10) / `rate_burst` (40),
+`action_rate_per_s` (4), `cloudflared_download` (true), `cloudflared_path`, `screen_fps` (1), `screen_max_width`
+(960), `snapshot_max_width` (320), `record_buffer_s` (30), `detectors` (true), `detector_cooldown_s` (600),
+`fps_drop_ratio` (0.5), `misfire_threshold` (4), `autofix` (`ask` | `auto_low_risk`), `stop_hotkey`
+(`ctrl+alt+esc`), `github_issues` (false), `github_repo`.
+
+**Recordings and replay.** `record_session` / the 30 s ring buffer store hand landmarks and app events (never video
+or audio) as gzip JSON lines (`.awayrec`, ~25 KB for 5 s). `away replay FILE` re-runs them through the gesture
+pipeline headless and deterministically; drop one into `tests/replays/` and run the tests once with
+`AWAY_UPDATE_REPLAYS=1` to pin it as a regression test.
+
+**Auto-detectors.** A camera frame-rate drop, a camera that will not open, a retry loop, a crash, or a spike of
+"that was wrong" / cancelled actions saves a diagnostics bundle (logs, redacted config, the last camera check,
+stats, the last 30 s of landmarks) to `<data>/diagnostics/` and tells connected agents. Optional, off by default:
+`agent_link.github_issues: true` files a GitHub issue (stats only, never the bundle) with a token you store in the OS
+keyring with `away agent github-token`.
+
+### Security notes (honest)
+
+* The local server listens on **127.0.0.1 only**. Remote access exists only while a pairing link or a remote agent is
+  active, through a Cloudflare quick tunnel; Cloudflare can see that traffic (TLS ends at their edge).
+* A pairing link / QR / 6-digit code **grants nothing by itself**: the first client to use it creates a request you
+  must Allow on the PC (permissions listed, plus the matching code). Links are single-use and expire after 10
+  minutes; a 6-digit code is guessable in principle, so failed attempts lock the server for a minute after 10 tries
+  and requests are rate-limited per client.
+* Tokens are 256-bit random, stored only as SHA-256 hashes, compared in constant time; remote access expires after
+  1 hour, local after 30 days; **Disconnect all**, the tray menu, or `away agent disconnect` revoke everything at once.
+* A connector that uses the pairing link as its URL keeps that link as its credential until it expires or is revoked:
+  treat the link like a password and do not share it.
+* Requests with a browser `Origin` header are refused (a web page cannot drive it); every request is in
+  `<data>/logs/agent-access.log` (codes and tokens never written).
+* Never possible through Agent Link: running shell commands, reading or writing your files (downloads are limited to
+  bundles, recordings and logs inside Project Away's data folder, with path-traversal and symlink checks), changing
+  `allow_shell`, hotkeys, updates or the agents' own permissions.
+* "Let it use my computer" is the riskiest permission. Its protections (approval every session, expiry, takeover
+  pause, password-field and secure-desktop blocks, risky-click confirmation, blocked Win+R / Ctrl+Alt+Del, no
+  terminals, rate limit, full action log) reduce but cannot remove risk: an allowed agent can still click and type
+  anything you could in ordinary windows. Turn it on only for agents you trust, and watch.
+* Password fields are detected with Windows UI Automation (`IsPassword`). Without UI Automation, typing is refused on
+  Windows; on macOS/Linux only window titles that look like sign-in prompts are blocked.
 
 ## Architecture
 
@@ -915,6 +1076,14 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Area | Status |
 |---|---|
 | Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 1659 tests collected on Linux (272 new in v0.1.19; on Linux without the optional extras 6 skip: torch training, faster-whisper, the real DirectShow / Media Foundation / pywinrt checks) (the Settings-window test runs under Xvfb and is skipped without a display; the real DirectShow and Media Foundation enumeration tests run only on Windows); ruff + mypy clean |
+| Agent Link: auth, pairing, permissions, rate limit, path traversal, snapshot/screen gating | Unit + integration tests: real uvicorn server on 127.0.0.1, REST, MCP Streamable HTTP (bearer and pairing link), resource subscriptions, the stdio bridge launched like Claude Desktop launches it |
+| Agent Link through a real Cloudflare quick tunnel | **Verified from the Linux build sandbox**: pinned cloudflared 2026.10.0 downloaded and SHA-256 checked, quick tunnel started, a remote MCP client and the REST example client paired and called tools through `https://*.trycloudflare.com` |
+| Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
+| Computer control (mouse/keyboard), takeover pause, password/secure-desktop blocks, risky-click confirmation | Logic unit-tested with a recording backend and fake UI Automation; **untested on a real desktop**: real pynput listeners for takeover, Windows UI Automation (`uiautomation`), the border/banner windows, Ctrl+Alt+Esc, open_app through the Start menu |
+| Prompts answered by thumbs up/down / fingers / voice | Hand-sign geometry tested on synthetic hands; **untested with real MediaPipe landmarks**; the prompt/toast/border windows are Tk, smoke-tested only |
+| Screenshots, live screen view, camera stills | JPEG scaling and gating tested; Pillow `ImageGrab` **untested on Windows/macOS here**; the live view and its badge need a real desktop |
+| Session record + replay, diagnostics bundle, auto-detectors | Tested (replay is deterministic and byte-identical files); fps/latency/CPU numbers in the frozen app **untested on real hardware**; GPU numbers need `nvidia-smi` |
+| `away mcp` from the frozen Windows exe (windowed, no console) | **Untested**: stdio is reopened from the process's standard handles; needs a real install + Claude Desktop |
 | Multi-monitor cursor | Geometry, mocked Windows enumeration, xrandr/AppKit parsing, DPI fallback chain and jump actions unit-tested; **untested on real multi-monitor / mixed-DPI hardware** |
 | Camera hand-over to Settings | Protocol and the app's camera loop tested with fake frames across two "processes"; **untested with a real exclusive Windows webcam** |
 | Hardware detection + tuning profiles | Unit-tested with recorded outputs (RTX 2060 6 GB, GTX 1050 2 GB, no-GPU 4-core 8 GB, Apple M1, old driver, `nvidia-smi` missing/timeout); detection run on the Linux aarch64 build sandbox |

@@ -1275,7 +1275,11 @@ def cmd_update(args: argparse.Namespace, fetch: Any = None, opener: Any = None, 
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="away", description="Project Away: hands-free PC control (local-first).")
+    p = argparse.ArgumentParser(
+        prog="away",
+        description="Project Away: the bridge between you and your AI agents, controlled by your hands, face and "
+        "voice. Hands-free PC control is one part of it (local-first).",
+    )
     p.add_argument("--version", action="version", version=f"project-away {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1480,7 +1484,11 @@ def build_parser() -> argparse.ArgumentParser:
     stt = sub.add_parser("selftest")  # no help= => not listed in --help
     stt.add_argument("--json", help="also write the report to this file")
     stt.set_defaults(fn=cmd_selftest)
-    sub.metavar = "{" + ",".join(c for c in sub.choices if c != "selftest") + "}"
+    from away.agentlink.cli import add_parsers  # Agent Link (v0.1.20): agent, mcp, replay, diagnose
+
+    add_parsers(sub)
+    hidden = ("selftest", "agent-ui", "link", "remote")
+    sub.metavar = "{" + ",".join(c for c in sub.choices if c not in hidden) + "}"
     return p
 
 
