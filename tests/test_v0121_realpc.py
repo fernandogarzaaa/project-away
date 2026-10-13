@@ -337,15 +337,15 @@ def test_notify_and_ask_speak_through_the_speaker() -> None:
     res = PromptManager(ui=NullUI(), tts=None).notify("x", speak=True)
     assert res["spoken"] is False and "no voice" in res["speech"]
 
-    pm.ask("Deploy to production?", ["Yes", "No"], agent="Claude", speak=True)
-    pm.tick()
+    pm.create("Deploy to production?", ["Yes", "No"], agent="Claude", speak=True)
+    pm.pump()
     assert sp.wait(5) and eng.said[-1][0] == "Claude asks: Deploy to production? Yes or No?"
 
 
 def test_question_speech_wording() -> None:
-    p = prompts.Prompt(id="p", agent="", question="Pick one", options=["A", "B", "C"])
+    p = prompts.Prompt(id="p", title="", agent="", question="Pick one", options=["A", "B", "C"])
     assert question_speech(p) == "Pick one A, B or C?"
-    p1 = prompts.Prompt(id="p", agent="Cursor", question="Okay?", options=["Fine"])
+    p1 = prompts.Prompt(id="p", title="", agent="Cursor", question="Okay?", options=["Fine"])
     assert question_speech(p1) == "Cursor asks: Okay? Fine?"
 
 
@@ -826,12 +826,15 @@ def test_his_desktop_bounds_and_wide_shot() -> None:
     ds = _displays()
     assert [d.index for d in ds] == [1, 2, 3] and ds[1].primary
     assert screenshot.desktop_bounds(ds) == (-1920, 0, 5206, 1080)
-    p = screenshot.plan(ds, (5206, 1080))
-    assert p.what == "desktop" and p.scale == 0.5 and p.out == (2603, 540) and p.origin == (-1920, 0)
-    assert p.crop == (0, 0, 5206, 1080) and not p.capped
+    p = screenshot.plan(ds, (5206, 1080))  # 0.5 of 5206 = 2603 px: just over the 2560 px cap
+    assert p.what == "desktop" and p.requested_scale == 0.5 and p.capped and p.out == (2560, 531)
+    assert p.scale == pytest.approx(2560 / 5206, abs=1e-6) and p.origin == (-1920, 0) and p.crop == (0, 0, 5206, 1080)
     assert p.to_screen(0, 0) == (-1920, 0)
-    assert p.to_screen(1301.5, 270) == (683.0, 540.0)
+    assert p.to_screen(1280, 265.5) == pytest.approx((683.0, 540.0), abs=0.5)  # the image centre (sub-pixel)
     assert p.to_image(*p.to_screen(100, 200)) == pytest.approx((100, 200))
+    small = screenshot.plan(ds, (5206, 1080), scale=0.3)  # under the cap: exactly the requested scale
+    assert small.scale == 0.3 and small.out == (1562, 324) and not small.capped
+    assert small.to_screen(1562, 324) == pytest.approx((3286.7, 1080.0), abs=0.01)
 
 
 def test_zoom_into_one_monitor_of_three() -> None:
@@ -914,7 +917,8 @@ def test_service_get_screen_lists_monitors_and_maps_from_image(core) -> None:
     core.service.screen_grab = lambda: Image.new("RGB", (5206, 1080))
     a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
     jpeg, meta = core.service.get_screen(a)
-    assert meta["showing"] == "desktop" and meta["image"]["width"] == 2603 and len(meta["monitors"]) == 3
+    assert meta["showing"] == "desktop" and meta["image"]["width"] == 2560 and len(meta["monitors"]) == 3
+    assert meta["scale_capped"] is True and meta["desktop"]["width"] == 5206
     assert "wide shot" in meta["note"]
     _, meta = core.service.get_screen(a, monitor=3, scale=1.0)
     assert meta["origin"] == {"x": 1920, "y": 0} and meta["image"]["width"] == 1366
@@ -928,9 +932,15 @@ def test_from_image_uses_the_zoomed_view_origin() -> None:
     from away.control.mouse import RecordingBackend
 
     backend = RecordingBackend()
-    ctl = ComputerControl(
-        ControlHooks(mouse=backend, ask=lambda q, o, **k: o[0], platform="linux"), clock=Clock()
+    hooks = ControlHooks(
+        backend=backend,
+        platform="linux",
+        secure_desktop=lambda: False,
+        foreground=lambda: None,
+        grab=lambda: None,
+        sleep=lambda _s: None,
     )
+    ctl = ComputerControl(hooks, lambda q, o, **k: {"answer": "Allow", "method": "click"}, clock=Clock())
     ctl.request("a1", "Claude")
     ctl.views["a1"] = (-1920.0, 0.0, 0.5)
     ctl.act("a1", "move", x=100, y=50, from_image=True)
