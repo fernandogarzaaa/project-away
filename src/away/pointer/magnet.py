@@ -9,10 +9,10 @@ curve and monitor layout keeps working) and before the OS cursor moves. Two effe
   difference builds an *offset* between hand and cursor; it is capped at ``radius_px`` and bleeds away as soon as
   the cursor moves outside targets, so hand and cursor never drift apart.
 * **Attraction.** Within ``radius_px`` of a target the shown cursor is pulled part of the way toward the target's
-  centre: ``strength`` of the way at the edge of the target, fading with distance (smoothstep) to nothing at
-  ``radius_px``. The pull is a pure function of position (never accumulated), so the cursor cannot creep.
-  Inside a target the pull fades with the depth from its edge and is capped at ``strength * radius_px``, so you
-  can still point anywhere inside a big text field.
+  core (:func:`anchor_point`; the centre of a small button): ``strength`` of the way at and inside the target's
+  edge, fading with distance (smoothstep) to nothing at ``radius_px``, and never more than
+  ``strength * radius_px``. The pull is a pure function of position (never accumulated), so the cursor cannot
+  creep, and you can still point anywhere along a big text field.
 
 A large jump in one frame (monitor jump, look-to-jump, "center", a re-anchor) resets the offset.
 """
@@ -33,6 +33,16 @@ def smoothstep(x: float) -> float:
     return x * x * (3 - 2 * x)
 
 
+def anchor_point(x: float, y: float, target: Target, radius: float) -> tuple[float, float]:
+    """Where the pull aims: the nearest point of the target's *core*, the rectangle shrunk by up to half the radius
+    on each side. A small button's core is its centre; a wide text box's core is a line along its middle, so
+    inside it the cursor is only steadied across the box, never dragged along it."""
+    left, top, right, bottom = target.rect
+    ix = min((right - left) / 2.0, radius / 2.0)
+    iy = min((bottom - top) / 2.0, radius / 2.0)
+    return min(max(x, left + ix), right - ix), min(max(y, top + iy), bottom - iy)
+
+
 def pull_vector(x: float, y: float, target: Target, radius: float, strength: float) -> tuple[float, float]:
     """How far to shift the shown cursor at ``(x, y)`` toward ``target`` (desktop px)."""
     if radius <= 0 or strength <= 0:
@@ -40,21 +50,15 @@ def pull_vector(x: float, y: float, target: Target, radius: float, strength: flo
     d = target.distance(x, y)
     if d > radius:
         return 0.0, 0.0
-    cx, cy = target.center
-    vx, vy = cx - x, cy - y
-    dist_c = math.hypot(vx, vy)
-    if dist_c < 1e-9:
+    ax, ay = anchor_point(x, y, target, radius)
+    vx, vy = ax - x, ay - y
+    dist = math.hypot(vx, vy)
+    if dist < 1e-9:
         return 0.0, 0.0
-    # outside: fades from `strength` at the edge to 0 at `radius`; inside: `strength` at the edge, fading with the
-    # depth into the target so the middle of a big text box is not dragged anywhere
-    if d > 0:
-        w = strength * (1.0 - smoothstep(d / radius))
-    else:
-        left, top, right, bottom = target.rect
-        depth = min(x - left, right - x, y - top, bottom - y)
-        w = strength * (1.0 - smoothstep(depth / radius))
-    shift = min(w * dist_c, radius * strength)
-    return vx / dist_c * shift, vy / dist_c * shift
+    # `strength` of the way at and inside the edge, fading (smoothstep) to nothing at `radius` outside it
+    w = strength * (1.0 - smoothstep(d / radius))
+    shift = min(w * dist, radius * strength)
+    return vx / dist * shift, vy / dist * shift
 
 
 class Magnet:
@@ -82,10 +86,14 @@ class Magnet:
         start again from it without the pull shifting it a second time."""
         self.reset()
         cfg = self._cfg()
-        hit = self._snapshot().nearest(shown[0], shown[1], float(cfg.radius_px))
-        if hit is not None:
-            px, py = pull_vector(shown[0], shown[1], hit, float(cfg.radius_px), float(cfg.strength))
-            self.offset = (-px, -py)
+        radius, strength = float(cfg.radius_px), float(cfg.strength)
+        snap = self._snapshot()
+        qx, qy = shown
+        for _ in range(6):  # solve q + pull(q) = shown (a few fixed-point steps converge: the pull is gentle)
+            hit = snap.nearest(qx, qy, radius)
+            px, py = pull_vector(qx, qy, hit, radius, strength) if hit is not None else (0.0, 0.0)
+            qx, qy = shown[0] - px, shown[1] - py
+        self.offset = (qx - shown[0], qy - shown[1])
         self._last_raw = shown
 
     def apply(self, x: float, y: float) -> tuple[float, float]:

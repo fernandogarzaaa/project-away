@@ -41,8 +41,8 @@ from away.hands.palmscroll import PalmScroller
 from away.hands.stabilize import ClickStabilizer, DwellDetector, pinch_progress
 from away.multicam.fusion import FusedHand, PushDetector
 from away.pointer.smart import SmartPointer
-from away.pointer.targets import NullBackend
 from away.pointer.smoothing import make_cursor_filter
+from away.pointer.targets import NullBackend
 from away.voice.always_on import GateHint
 from away.voice.clap import camera_view
 from away.wifi.classifier import CoarseCSIClassifier

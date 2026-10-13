@@ -95,7 +95,7 @@ def parse(phrase: str, choosing: bool = False) -> Command | None:
             return Command("choose", number=n)
     for prefix, action in _PREFIXES:
         if p.startswith(prefix):
-            rest = _FILLER.sub("", p[len(prefix) :]).strip()
+            rest = _FILLER.sub("", p[len(prefix) :] + " ").strip()
             if not rest:
                 return None
             if rest in THAT_WORDS:

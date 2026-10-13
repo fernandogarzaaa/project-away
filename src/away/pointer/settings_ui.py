@@ -202,9 +202,7 @@ def build_section(gui: Any, parent: Any, row: int) -> int:  # pragma: no cover -
     status = tk.StringVar(value=h.message)
     line = ttk.Frame(box)
     line.grid(row=r, column=0, sticky="w", pady=(4, 0))
-    ttk.Label(line, textvariable=status, foreground="#2e7d32" if h.ok else "#b26a00", wraplength=440).pack(
-        side="left"
-    )
+    ttk.Label(line, textvariable=status, foreground="#2e7d32" if h.ok else "#b26a00", wraplength=440).pack(side="left")
     if h.fix:
         btn = ttk.Button(line, text=h.fix_label)
 

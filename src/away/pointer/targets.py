@@ -108,16 +108,46 @@ def clean_targets(items: Iterable[Target], limit: int = MAX_TARGETS) -> tuple[Ta
     return tuple(out)
 
 
+GRID_PX = 128  # spatial index cell size: a cursor query only looks at the targets in nearby cells
+BIG = (1 << 40, 1 << 40)  # grid key of the "big" list (no real cell is that far out)
+MAX_CELLS = 64  # a target covering more cells than this (a whole-page pane) is kept on a short "big" list
+
+
 @dataclass(frozen=True)
 class Snapshot:
     targets: tuple[Target, ...] = ()
     t: float = 0.0  # when it was taken (monotonic)
     error: str = ""  # the last refresh failed with this (the previous targets are kept until stale)
+    _grid: dict[tuple[int, int], list[int]] = field(default_factory=dict, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # built once, on the thread that takes the snapshot (the cache thread), so per-frame queries stay O(nearby)
+        if self._grid:
+            return  # a copy that reuses an existing index
+        for i, tg in enumerate(self.targets):
+            left, top, right, bottom = tg.rect
+            x0, x1 = math.floor(left / GRID_PX), math.floor(right / GRID_PX)
+            y0, y1 = math.floor(top / GRID_PX), math.floor(bottom / GRID_PX)
+            if (x1 - x0 + 1) * (y1 - y0 + 1) > MAX_CELLS:
+                self._grid.setdefault(BIG, []).append(i)
+                continue
+            for cx in range(x0, x1 + 1):
+                for cy in range(y0, y1 + 1):
+                    self._grid.setdefault((cx, cy), []).append(i)
+
+    def _candidates(self, x: float, y: float, radius: float) -> list[Target]:
+        if not math.isfinite(radius):
+            return list(self.targets)
+        idx: set[int] = set(self._grid.get(BIG, ()))
+        for cx in range(math.floor((x - radius) / GRID_PX), math.floor((x + radius) / GRID_PX) + 1):
+            for cy in range(math.floor((y - radius) / GRID_PX), math.floor((y + radius) / GRID_PX) + 1):
+                idx.update(self._grid.get((cx, cy), ()))
+        return [self.targets[i] for i in sorted(idx)]
 
     def near(self, x: float, y: float, radius: float) -> list[tuple[float, Target]]:
         """``(distance, target)`` for every target within ``radius`` of the point, nearest first; when targets
         overlap (a list item inside a list), the smaller one wins a tie."""
-        hits = [(t.distance(x, y), t) for t in self.targets]
+        hits = [(t.distance(x, y), t) for t in self._candidates(x, y, radius)]
         hits = [h for h in hits if h[0] <= radius]
         hits.sort(key=lambda h: (h[0], h[1].width * h[1].height))
         return hits
@@ -162,7 +192,7 @@ class TargetCache:
     def snapshot(self) -> Snapshot:
         snap = self._snap
         if snap.targets and self.clock() - snap.t > self.stale_s:
-            return Snapshot((), snap.t, snap.error)
+            return Snapshot((), snap.t, snap.error)  # an empty one: nothing to index
         return snap
 
     def refresh_now(self) -> Snapshot:
@@ -172,7 +202,8 @@ class TargetCache:
                 found = clean_targets(self.backend.foreground_targets())
             except Exception as exc:  # a COM error, a window closing mid-walk...
                 msg = str(exc) or type(exc).__name__
-                self._snap = Snapshot(self._snap.targets, self._snap.t, msg)
+                old = self._snap
+                self._snap = Snapshot(old.targets, old.t, msg, old._grid)
                 if not self._reported and self.on_error is not None:
                     self._reported = True
                     with contextlib.suppress(Exception):

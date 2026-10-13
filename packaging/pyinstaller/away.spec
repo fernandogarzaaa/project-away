@@ -92,6 +92,9 @@ if sys.platform == "win32":
         "winrt.windows.storage.streams",
     ]
     optional("winrt", data=False, libs=True, subs=True, hidden_mods=_winrt_ns + ["winrt._winrt", "typing_extensions"])
+    # v0.1.20 smart pointer: UI Automation through comtypes (imported lazily by away.pointer.uia). comtypes writes
+    # its generated UIAutomationClient wrapper to a temp folder when frozen, so only the package itself ships.
+    optional("comtypes", data=False, subs=True, hidden_mods=["comtypes.client", "comtypes.automation"])
     _winrt_spec = importlib.util.find_spec("winrt._winrt")
     if _winrt_spec is not None and _winrt_spec.origin:
         _old_msvcp = Path(_winrt_spec.origin).parent / "msvcp140.dll"

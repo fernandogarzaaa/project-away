@@ -2230,6 +2230,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ttk.Label(f, text="More timing sliders are on the Tuning tab.", foreground="#555").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=6
         )
+        from away.pointer.settings_ui import build_section
+
+        build_section(self, f, r + 1)  # v0.1.20 smart pointer: three plain switches + status / fix button
 
     def _build_cameras(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk

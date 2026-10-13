@@ -85,7 +85,9 @@ def run(filt: CursorFilter, traj: Trajectory) -> np.ndarray:
     return np.array([filt(float(t), float(x), float(y)) for t, (x, y) in zip(traj.t, traj.measured)])
 
 
-def still_jitter(filt: CursorFilter, jitter: float = 0.002, frames: int = 150, fps: float = 30.0, seed: int = 0) -> float:
+def still_jitter(
+    filt: CursorFilter, jitter: float = 0.002, frames: int = 150, fps: float = 30.0, seed: int = 0
+) -> float:
     """RMS frame-to-frame output movement for a resting hand seen with landmark jitter (first second skipped)."""
     rng = np.random.default_rng(seed)
     filt.reset()

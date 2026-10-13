@@ -98,9 +98,9 @@ class BadgeOverlay:
                 with contextlib.suppress(tk.TclError):
                     w.attributes("-transparentcolor", key)
                 w.configure(bg=key)
-                tk.Label(
-                    w, text=str(b.number), bg="#FFD54F", fg="#111", font=("Segoe UI", 12, "bold"), width=2
-                ).pack(side="left")
+                tk.Label(w, text=str(b.number), bg="#FFD54F", fg="#111", font=("Segoe UI", 12, "bold"), width=2).pack(
+                    side="left"
+                )
                 tk.Label(w, text=b.label, bg="#111", fg="#FFD54F", font=("Segoe UI", 9), padx=4).pack(side="left")
                 w.geometry(f"+{b.x}+{b.y}")
                 w.update_idletasks()

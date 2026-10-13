@@ -61,7 +61,7 @@ class SmartPointer:
         mouse: Any,
         *,
         backend: TargetBackend | None = None,
-        publish: Callable[[str, dict[str, Any]], None] | None = None,
+        publish: Callable[[str, dict[str, Any]], Any] | None = None,
         notify: Callable[[str, str, str], Any] | None = None,
         is_bound: Callable[[str], bool] | None = None,
         paused: Callable[[], bool] | None = None,

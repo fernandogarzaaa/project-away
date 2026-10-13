@@ -10,6 +10,7 @@ Nothing is imported until the backend is used, so importing this module is safe 
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import sys
 import threading
@@ -99,10 +100,9 @@ class UIABackend:
             return
         import comtypes
 
-        try:
+        # OSError: this thread already joined an apartment (e.g. a GUI thread): use it as is
+        with contextlib.suppress(OSError):
             comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
-        except OSError:
-            pass  # this thread already joined an apartment (e.g. a GUI thread): use it as is
         self._local.com = True
 
     def _ensure(self) -> Any:
