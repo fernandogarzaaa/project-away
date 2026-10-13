@@ -187,6 +187,74 @@ class Tunnel:
                 p.kill()
 
 
+# ------------------------------------------------------------------ named tunnel (v0.1.24)
+KEYRING_SERVICE = "ProjectAway"
+KEYRING_NAMED = "cloudflare-tunnel-token"
+READY_RE = re.compile(r"Registered tunnel connection|Connection [0-9a-f-]+ registered", re.IGNORECASE)
+
+
+def named_token(keyring_mod: Any = None) -> str:
+    """The named tunnel's token from the system keyring ("" when not set or no keyring)."""
+    try:
+        kr = keyring_mod
+        if kr is None:
+            import keyring as kr  # type: ignore[no-redef]
+        return str(kr.get_password(KEYRING_SERVICE, KEYRING_NAMED) or "")
+    except Exception:
+        return ""
+
+
+def set_named_token(token: str, keyring_mod: Any = None) -> None:
+    """Keep (or with "" forget) the named tunnel's token in the system keyring, never in the config file."""
+    kr = keyring_mod
+    if kr is None:
+        import keyring as kr  # type: ignore[no-redef]
+    tok = str(token or "").strip()
+    if not tok:
+        with contextlib.suppress(Exception):
+            kr.delete_password(KEYRING_SERVICE, KEYRING_NAMED)
+        return
+    if len(tok) < 20 or any(c.isspace() for c in tok):
+        raise TunnelError("that does not look like a Cloudflare tunnel token (copy it from the tunnel's install command)")
+    kr.set_password(KEYRING_SERVICE, KEYRING_NAMED, tok)
+
+
+class NamedTunnel(Tunnel):
+    """Your own Cloudflare tunnel (free account): ``cloudflared tunnel run --token <token>``. Its public hostname
+    (set in the Cloudflare dashboard to ``http://127.0.0.1:<port>``) never changes, so agents keep the same address
+    across restarts. The token is passed through the TUNNEL_TOKEN environment variable, never on the command line."""
+
+    def __init__(self, exe: Path, token: str, hostname: str, popen: Callable[..., Any] = subprocess.Popen) -> None:
+        super().__init__(exe, popen)
+        self.token = token
+        self.hostname = hostname.strip().lower().removeprefix("https://").rstrip("/")
+
+    def start(self, port: int, timeout: float = 45.0) -> str:
+        env = dict(os.environ, TUNNEL_TOKEN=self.token)
+        kw: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE, "text": True, "env": env}
+        if sys.platform == "win32":  # pragma: no cover
+            kw["creationflags"] = 0x08000000
+        self.proc = self.popen([str(self.exe), "tunnel", "--no-autoupdate", "run"], **kw)
+        threading.Thread(target=self._read, daemon=True, name="cloudflared-named-log").start()
+        if not self._ready.wait(timeout) or not self.url:
+            tail = " | ".join(self.lines[-3:])
+            self.stop()
+            raise TunnelError(f"your Cloudflare tunnel did not start ({tail or 'no output'})")
+        return self.url
+
+    def _read(self) -> None:
+        stream = getattr(self.proc, "stderr", None)
+        if stream is None:
+            return
+        for line in stream:
+            self.lines.append(line.rstrip()[:300].replace(self.token, "***"))
+            self.lines = self.lines[-50:]
+            if READY_RE.search(line) and not self.url:
+                self.url = f"https://{self.hostname}"
+                self._ready.set()
+        self._ready.set()
+
+
 def wait_for(cond: Callable[[], bool], timeout: float, every: float = 0.2) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:

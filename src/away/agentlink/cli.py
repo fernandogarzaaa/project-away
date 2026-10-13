@@ -210,8 +210,55 @@ def cmd_agent(args: argparse.Namespace) -> int:
         keyring.set_password(KEYRING_SERVICE, KEYRING_USER, tok)
         print("saved in the OS keyring; turn on agent_link.github_issues to use it")
         return 0
+    if action == "named-tunnel":  # v0.1.24: your own Cloudflare tunnel (stable address)
+        return _named_tunnel(args)
     print(f"unknown action {action}", file=sys.stderr)
     return 2
+
+
+def _named_tunnel(args: argparse.Namespace) -> int:
+    """``away agent named-tunnel <hostname>`` (asks for the token, kept in the keyring) | ``named-tunnel clear``."""
+    from away import config as cfgmod
+    from away.agentlink import tunnel
+
+    path = cfgmod.config_path()
+    cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+    if args.value == "clear":
+        tunnel.set_named_token("")
+        cfg.agent_link.named_tunnel_hostname = ""
+        if cfg.agent_link.link_type == "named":
+            cfg.agent_link.link_type = "standard"
+        cfgmod.save(cfg, path)
+        print("Your own Cloudflare tunnel is turned off (back to the standard link).")
+        return 0
+    host = str(args.value or "").strip().removeprefix("https://").rstrip("/")
+    if not host:
+        print(
+            "usage: away agent named-tunnel <hostname>   (e.g. away.example.com; see README 'A link that survives "
+            "restarts')",
+            file=sys.stderr,
+        )
+        return 2
+    import getpass
+
+    tok = getpass.getpass("Cloudflare tunnel token (from the tunnel's install command): ").strip()
+    try:
+        tunnel.set_named_token(tok)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    cfg.agent_link.named_tunnel_hostname = host
+    cfg.agent_link.link_type = "named"
+    if not cfg.agent_link.port:
+        from away.agentlink.host import NAMED_PORT
+
+        cfg.agent_link.port = NAMED_PORT
+    cfgmod.save(cfg, path)
+    print(
+        f"Saved. In the Cloudflare dashboard, point https://{host} at http://127.0.0.1:{cfg.agent_link.port} "
+        "(Public hostname > Service: HTTP). Your agents keep this address across restarts."
+    )
+    return 0
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
@@ -281,6 +328,7 @@ def add_parsers(sub: Any) -> None:
             "changes",
             "undo",
             "github-token",
+            "named-tunnel",
         ],
     )
     ag.add_argument("value", nargs="?")
@@ -293,9 +341,10 @@ def add_parsers(sub: Any) -> None:
     ag.add_argument("--local", action="store_true", help="pair: no secure internet link (agents on this PC only)")
     ag.add_argument(
         "--relay",
-        choices=["standard", "backup"],
+        choices=["standard", "backup", "named"],
         default=None,
-        help="pair: standard = Cloudflare link; backup = an SSH relay that does not use Cloudflare (v0.1.23)",
+        help="pair: standard = Cloudflare link; backup = an SSH relay that does not use Cloudflare (v0.1.23); "
+        "named = your own Cloudflare tunnel with a fixed address (v0.1.24, `away agent named-tunnel <host>`)",
     )
     ag.add_argument("--yes", "-y", action="store_true")
     ag.set_defaults(fn=cmd_agent)

@@ -42,6 +42,8 @@ from away.agentlink.telemetry import Telemetry
 
 STOP_WORDS = ("stop", "stop it", "stop now", "agent stop", "stop agent")
 STATE_EVERY_S = 1.0
+NAMED_PORT = 47615  # v0.1.24: the fixed local port a named Cloudflare tunnel points at (agent_link.port 0)
+LINK_RETRY_S = (10.0, 30.0, 120.0, 600.0)  # v0.1.24: waits between attempts to bring the link back
 HEALTH_WANT_S = 5.0
 
 
@@ -146,7 +148,11 @@ def build_core(
 
     telemetry.on_change = emit
     recorder = RingRecorder(float(getattr(s, "record_buffer_s", 30.0)), clock)
-    registry = AgentRegistry(base / "agents.json")
+    registry = AgentRegistry(
+        base / "agents.json",
+        refresh_ttl_s=float(getattr(s, "refresh_ttl_days", 30) or 30) * 86400.0,
+        link_access_s=float(getattr(s, "remote_ttl_min", 60) or 60) * 60.0,
+    )
     prompts = PromptManager(
         ui if ui is not None else NullUI(),
         polite=telemetry.polite_moment,
@@ -271,6 +277,20 @@ class AgentLinkHost:
             cooldown_s=float(s.detector_cooldown_s),
         )
         self.core.events.listeners.append(self._on_hub_event)
+        # v0.1.24 "a link that survives restarts": tell every paired agent the current public address
+        from away.agentlink.rendezvous import LinkAnnouncer
+
+        self.announcer = LinkAnnouncer(
+            self.core.registry.reconnectable,
+            inbox=self.core.service.inbox,
+            events=self.core.events,
+            settings=lambda: self.cfg().agent_link,
+            state_path=self.base / "link.json",
+        )
+        self._link_retry_at = 0.0
+        self._link_failures = 0
+        self._link_starting = False
+        self.named: Any = None  # v0.1.24 your own named Cloudflare tunnel (stable address)
 
     # --------------------------------------------------------------- config
     def cfg(self) -> Any:
@@ -780,12 +800,16 @@ class AgentLinkHost:
                 rate=(float(s.rate_per_s), int(s.rate_burst)),
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
+                link_info=self.link_info,
             )
             mcp = mcp_tools.build(
                 api.LocalBackend(self.core.service), screen_fps=lambda: float(self.cfg().agent_link.screen_fps)
             )
             app = api.create_app(self.core.service, self.gate, mcp)
-            self.server = Server(app, int(s.port))
+            port_wanted = int(s.port)
+            if not port_wanted and str(getattr(s, "link_type", "")) == "named":
+                port_wanted = NAMED_PORT  # a named tunnel points at a fixed local address
+            self.server = Server(app, port_wanted)
             port = self.server.start()
             self.core.prompts.start()
             self._write_host()
@@ -803,11 +827,11 @@ class AgentLinkHost:
         port = self.ensure_server()
         s = self.cfg().agent_link
         kind = str(relay or getattr(s, "link_type", "standard") or "standard")
-        if kind not in ("standard", "backup"):
-            raise ValueError("link type must be standard or backup")
+        if kind not in ("standard", "backup", "named"):
+            raise ValueError("link type must be standard, backup or named")
         url = f"http://127.0.0.1:{port}"
         if remote:
-            url = self._ensure_relay(port) if kind == "backup" else self._ensure_tunnel(port, download)
+            url = self._ensure_link(kind, port, download)
         p = self.core.registry.new_pairing(perms.normalize(scopes), float(s.pairing_ttl_s))
         self.pairing = {
             "url": f"{url}/c/{p.code}",
@@ -819,6 +843,106 @@ class AgentLinkHost:
             "link_type": kind if remote else "local",
         }
         return dict(self.pairing)
+
+    # ------------------------------------------------- a link that survives restarts (v0.1.24)
+    def _ensure_link(self, kind: str, port: int, download: bool) -> str:
+        if kind == "backup":
+            url = self._ensure_relay(port)
+        elif kind == "named":
+            url = self._ensure_named(port, download)
+        else:
+            url = self._ensure_tunnel(port, download)
+        self._link_up(url, kind)
+        return url
+
+    def _ensure_named(self, port: int, download: bool) -> str:
+        from away.agentlink import tunnel
+
+        if self.named is not None and self.named.alive() and self.named.url:
+            return str(self.named.url)
+        s = self.cfg().agent_link
+        host = str(getattr(s, "named_tunnel_hostname", "") or "")
+        token = tunnel.named_token()
+        if not host or not token:
+            raise tunnel.TunnelError(
+                "your own Cloudflare tunnel is not set up yet (Settings > Agent Link > Advanced: hostname + token)"
+            )
+        exe = tunnel.find(self.data_dir, s.cloudflared_path)
+        if exe is None:
+            if not (download and s.cloudflared_download):
+                raise tunnel.TunnelError("the secure link helper (cloudflared) is not installed")
+            exe = tunnel.download(self.data_dir)
+        self.named = tunnel.NamedTunnel(exe, token, host)
+        return str(self.named.start(port))
+
+    def current_url(self) -> str:
+        """The public address agents should use now: your named tunnel, then the standard link, then the backup."""
+        for which in ("named", "tunnel", "relay"):
+            t = getattr(self, which, None)
+            if t is not None and getattr(t, "url", None):
+                with contextlib.suppress(Exception):
+                    if t.alive():
+                        return str(t.url)
+        return ""
+
+    def link_info(self) -> dict[str, Any]:
+        s = self.cfg().agent_link
+
+        def url_of(which: str) -> str | None:
+            t = getattr(self, which, None)
+            return str(t.url) if t is not None and getattr(t, "url", None) else None
+
+        return {
+            "url": self.current_url() or None,
+            "standard_url": url_of("tunnel"),
+            "backup_url": url_of("relay"),
+            "named_url": url_of("named"),
+            "link_type": str(getattr(s, "link_type", "standard")),
+            "stable": bool(url_of("named")),
+            "rendezvous": str(getattr(s, "rendezvous", "ntfy")),
+            "rendezvous_server": str(getattr(s, "rendezvous_server", "https://ntfy.sh")),
+            "keep_link": bool(getattr(s, "keep_link", True)),
+        }
+
+    def _link_up(self, url: str, kind: str) -> None:
+        self._link_failures = 0
+        with contextlib.suppress(Exception):
+            self.announcer.link_up(url, kind)
+
+    def _wants_link(self) -> str:
+        """The link type to bring back by itself ("" = none): keep_link is on and a remote agent can reconnect."""
+        s = self.cfg().agent_link
+        if not bool(getattr(s, "keep_link", True)):
+            return ""
+        if not any(a.kind != "local" for a in self.core.registry.reconnectable()):
+            return ""
+        return str(self.announcer.last_type or getattr(s, "link_type", "standard") or "standard")
+
+    def restore_link(self, reason: str = "start") -> None:
+        """Bring the secure link back in the background (Away started, or the link dropped) and announce the new
+        address. Retries with a growing wait (LINK_RETRY_S) and never downloads anything by itself."""
+        kind = self._wants_link()
+        if self.headless or not kind or self._link_starting or self.current_url():
+            return
+        if time.monotonic() < self._link_retry_at:
+            return
+        self._link_starting = True
+
+        def run() -> None:
+            try:
+                port = self.ensure_server()
+                self._ensure_link(kind, port, download=False)
+                self.errors.append(f"the secure link is back ({reason}); your agents were told the address")
+            except Exception as exc:
+                self._link_failures += 1
+                wait = LINK_RETRY_S[min(self._link_failures - 1, len(LINK_RETRY_S) - 1)]
+                self._link_retry_at = time.monotonic() + wait
+                self.errors.append(f"could not bring the secure link back: {friendly_error(exc)}")
+            finally:
+                self._link_starting = False
+                self.errors = self.errors[-20:]
+
+        threading.Thread(target=run, daemon=True, name="agentlink-restore").start()
 
     def _ensure_relay(self, port: int) -> str:
         """v0.1.23: the backup link (localhost.run or Pinggy over the system's ssh; no Cloudflare, no account)."""
@@ -841,8 +965,11 @@ class AgentLinkHost:
         p = self.pairing
         if p is not None and p.get("link_type") == "backup" and old and str(p.get("url", "")).startswith(old):
             p["url"] = new + str(p["url"])[len(old) :]
-        self.errors.append(f"the backup link restarted with a new address: {new} (paste it into your AI app again)")
-        self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
+        # v0.1.24: paired agents are told the new address (wake-up address, inbox, rendezvous)
+        self._link_up(new, "backup")
+        self.errors.append(f"the backup link restarted with a new address: {new} (your agents were told)")
+        if not any(a.kind != "local" for a in self.core.registry.reconnectable()):
+            self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
 
     def _ensure_tunnel(self, port: int, download: bool) -> str:
         from away.agentlink import tunnel
@@ -863,7 +990,7 @@ class AgentLinkHost:
         sometimes blocks one agent's servers on one temporary address (every request answers 403); a new address
         usually fixes it. Agents on this PC are not affected; remote agents need the new address."""
         kind = str(relay or getattr(self.cfg().agent_link, "link_type", "standard") or "standard")
-        which = "relay" if kind == "backup" else "tunnel"
+        which = {"backup": "relay", "named": "named"}.get(kind, "tunnel")
         cur = getattr(self, which)
         old = cur.url if cur is not None else None
         keep_scopes = scopes if scopes is not None else (self.pairing or {}).get("scopes")
@@ -893,7 +1020,7 @@ class AgentLinkHost:
         return res
 
     def stop_tunnel(self) -> None:
-        for which in ("tunnel", "relay"):
+        for which in ("tunnel", "relay", "named"):
             t = getattr(self, which, None)
             if t is not None:
                 t.stop()
@@ -919,6 +1046,8 @@ class AgentLinkHost:
             with contextlib.suppress(Exception):
                 self.ensure_server()
         self._write_host()
+        if not self.headless:
+            self.restore_link("Project Away started")  # v0.1.24: paired agents keep working after a restart
         threading.Thread(target=self._loop, daemon=True, name="agentlink-host").start()
         return self
 
@@ -947,6 +1076,17 @@ class AgentLinkHost:
         if self.relay is not None and not self.relay.alive():
             self.errors.append(str(getattr(self.relay, "gave_up", "") or "the backup link stopped; press it again"))
             self.relay = None
+        if self.named is not None and not self.named.alive():
+            self.errors.append("your Cloudflare tunnel stopped")
+            self.named = None
+        self.core.registry.refresh_ttl_s = float(getattr(self.cfg().agent_link, "refresh_ttl_days", 30)) * 86400.0
+        self.core.registry.link_access_s = float(getattr(self.cfg().agent_link, "remote_ttl_min", 60)) * 60.0
+        url = self.current_url()
+        if url:
+            with contextlib.suppress(Exception):
+                self.announcer.link_up(url, self.announcer.last_type or "standard")  # re-publish when due
+        else:
+            self.restore_link("the link dropped")  # v0.1.24: brings it back while a remote agent can reconnect
         self.write_state()
 
     def _take_requests(self) -> None:
@@ -1053,6 +1193,8 @@ class AgentLinkHost:
             "link": {
                 "url": self.tunnel.url if self.tunnel else None,
                 "backup_url": self.relay.url if self.relay else None,  # v0.1.23
+                "named_url": self.named.url if self.named else None,  # v0.1.24
+                "announced": list(self.announcer.log)[-3:],  # v0.1.24: who was told the address, and how
             },
             "pairing": {k: v for k, v in (p or {}).items() if k != "code"} or None,
             "agents": agents,
