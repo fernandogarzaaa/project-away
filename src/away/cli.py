@@ -182,6 +182,12 @@ def cmd_run(args: argparse.Namespace) -> int:  # pragma: no cover - needs device
         cfg.face.enabled = False
     if args.wifi:
         cfg.wifi.enabled = True
+    if not args.dry_run:
+        from away.app import instance
+
+        if not instance.acquire():  # v0.1.23: one app at a time (the big cursor got stuck with two)
+            print("Project Away is already running (tray icon). Quit it first to run it here.", file=sys.stderr)
+            return 1
     app = AwayApp(cfg, dry_run=args.dry_run)
     if args.cursor_overlay or cfg.cursor_overlay:
         import threading
@@ -1548,6 +1554,9 @@ def build_parser() -> argparse.ArgumentParser:
     gp.set_defaults(fn=cmd_gpu)
 
     sub.add_parser("doctor", help="show installed extras, models and paths").set_defaults(fn=cmd_doctor)
+    cu = sub.add_parser("cursor", help="reset: put the mouse pointer back to its normal size")
+    cu.add_argument("action", choices=["reset"])
+    cu.set_defaults(fn=cmd_cursor)
 
     # hidden: used by the release workflow to verify the frozen installer build
     stt = sub.add_parser("selftest")  # no help= => not listed in --help
@@ -1559,6 +1568,18 @@ def build_parser() -> argparse.ArgumentParser:
     hidden = ("selftest", "agent-ui", "link", "remote")
     sub.metavar = "{" + ",".join(c for c in sub.choices if c not in hidden) + "}"
     return p
+
+
+def cmd_cursor(args: argparse.Namespace) -> int:
+    """``away cursor reset`` (v0.1.23): the pointer back to your own size (32 px when unknown), marker cleared."""
+    from away.app.bigcursor import BigCursor, default_backend
+
+    size = BigCursor(default_backend(), 0).reset()
+    if sys.platform.startswith("win"):
+        print(f"Mouse pointer size reset to {size} px.")
+    else:
+        print("Nothing to reset: Project Away only changes the pointer size on Windows.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

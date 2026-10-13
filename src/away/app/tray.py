@@ -355,6 +355,7 @@ def update_menu_items(
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
+    import contextlib
     import logging
     import threading
 
@@ -372,6 +373,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.app import crashlog
 
     crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
+    from away.app import instance
+
+    if not instance.acquire():  # v0.1.23: already running: show its Settings instead of a second app
+        logging.getLogger("away.tray").info("Project Away is already running: opening its Settings")
+        with contextlib.suppress(Exception):
+            subprocess.Popen(TrayController.settings_command())
+        return 0
     had_config = cfgmod.config_path().exists()  # v0.1.20: an existing user is not shown the first-run guide
     cfg, _ = cfgmod.load()
     app = AwayApp(cfg)
@@ -533,6 +541,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             lambda _i: f"Disconnect AI agents ({ctl.agent_badge()})",
             lambda _icon, _item: ctl.disconnect_agents(),
             visible=lambda _i: bool(ctl.agent_badge()),
+        ),
+        pystray.MenuItem(  # v0.1.23
+            "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
         ),
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),

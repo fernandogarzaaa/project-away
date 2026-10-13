@@ -33,7 +33,9 @@ BASE_SIZE = 32  # Windows' normal cursor size (px)
 MIN_SIZE, MAX_SIZE = 32, 256  # what Windows accepts for CursorBaseSize
 SCALES = {1: 1.5, 2: 2.0, 3: 3.0, 4: 4.0, 5: 6.0}  # big_cursor_size -> multiple of 32 px
 DEBOUNCE_S = 0.3
+ENLARGE_DEBOUNCE_S = 1.5  # v0.1.23: re-enlarging waits this long after a change (restoring stays immediate)
 MARKER_NAME = "big_cursor.json"
+USER_SIZE_NAME = "cursor_user_size.json"  # v0.1.23: the last size seen that was the user's own (not ours)
 
 
 def target_size(level: int) -> int:
@@ -42,6 +44,11 @@ def target_size(level: int) -> int:
         return 0
     scale = SCALES.get(int(level), SCALES[max(SCALES)])
     return max(MIN_SIZE, min(MAX_SIZE, round(BASE_SIZE * scale)))
+
+
+def our_sizes() -> set[int]:
+    """Every size Project Away sets (big_cursor_size 1..5): never mistaken for the user's own size."""
+    return {target_size(lv) for lv in SCALES}
 
 
 def ring_scale(level: int) -> float:
@@ -122,12 +129,15 @@ class BigCursor:
         clock: Callable[[], float] = time.monotonic,
         debounce_s: float = DEBOUNCE_S,
         publish: Callable[[str, dict[str, Any]], None] | None = None,
+        enlarge_debounce_s: float = ENLARGE_DEBOUNCE_S,
     ) -> None:
         self.backend = backend
         self.level = int(level)
         self.marker = marker or default_marker()
         self.clock = clock
         self.debounce_s = debounce_s
+        self.enlarge_debounce_s = max(float(debounce_s), float(enlarge_debounce_s))
+        self.stuck = False  # v0.1.23: a restore did not take (the size read back was not the original)
         self.publish = publish or (lambda _t, _d: None)
         self.enlarged = False  # we changed the system cursor and have not restored it
         self.original: int | None = None
@@ -148,6 +158,26 @@ class BigCursor:
         with contextlib.suppress(OSError):
             self.marker.unlink()
 
+    @property
+    def user_size_file(self) -> Path:
+        return self.marker.with_name(USER_SIZE_NAME)
+
+    def _remember_user_size(self, size: int) -> None:
+        if size in our_sizes() and size != BASE_SIZE:
+            return
+        with contextlib.suppress(OSError):
+            self.user_size_file.write_text(json.dumps({"size": int(size)}), "utf-8")
+
+    def user_size(self) -> int:
+        """The last cursor size seen that was the user's own (BASE_SIZE when never seen)."""
+        try:
+            v = json.loads(self.user_size_file.read_text(encoding="utf-8")).get("size")
+            if isinstance(v, int) and MIN_SIZE <= v <= MAX_SIZE:
+                return v
+        except (OSError, ValueError, AttributeError):
+            pass
+        return BASE_SIZE
+
     def read_marker(self) -> dict[str, Any] | None:
         try:
             data = json.loads(self.marker.read_text(encoding="utf-8"))
@@ -165,6 +195,8 @@ class BigCursor:
                 self._clear_marker()
             return False
         original = int(data["original"])
+        if original in our_sizes():  # v0.1.23: a marker overwritten by a second copy of the app held our own size
+            original = self.user_size()
         ok = self.backend.set(original)
         self._clear_marker()
         self.publish("cursor.size_recovered", {"size": original, "applied": ok})
@@ -177,9 +209,11 @@ class BigCursor:
         self._want = bool(want_big) and target_size(self.level) > 0
         if self._want == self.enlarged:
             return False
-        if self.clock() - self._last_change < self.debounce_s:
+        if not self._want:  # v0.1.23: shrinking back (paused) is immediate
+            return self._restore()
+        if self.clock() - self._last_change < self.enlarge_debounce_s:
             return False
-        return self._enlarge() if self._want else self._restore()
+        return self._enlarge()
 
     def set_level(self, level: int) -> None:
         """New ``big_cursor_size`` (Settings). Re-applies the size if the cursor is big now."""
@@ -206,8 +240,19 @@ class BigCursor:
         current = self.backend.get()
         if current is None:  # no system cursor API (macOS/Linux): nothing to change or restore
             return False
-        self.original = current
-        self._write_marker(current, size)  # before touching the system: a crash right after can be undone
+        # v0.1.23: the original is never one of our own sizes. A marker left by another run (or another copy of
+        # the app) already holds the real original: keep it. A current size that is one of ours means a big
+        # cursor was left behind: the original is the last size known to be the user's (32 px when unknown).
+        marked = self.read_marker()
+        if marked is not None and int(marked["original"]) not in our_sizes() - {BASE_SIZE}:
+            original = int(marked["original"])
+        elif current in our_sizes() and current != BASE_SIZE:
+            original = self.user_size()
+        else:
+            original = current
+            self._remember_user_size(current)
+        self.original = original
+        self._write_marker(original, size)  # before touching the system: a crash right after can be undone
         if not self.backend.set(size):
             self._clear_marker()
             self.original = None
@@ -222,6 +267,7 @@ class BigCursor:
     def _restore(self) -> bool:
         original = self.original if self.original is not None else BASE_SIZE
         ok = self.backend.set(original)
+        ok = self._verify(original, ok)
         if ok:
             self._clear_marker()
         self.enlarged, self.applied = False, None
@@ -229,3 +275,42 @@ class BigCursor:
         self.changes += 1
         self.publish("cursor.size", {"size": original, "big": False, "applied": ok})
         return True
+
+    def _verify(self, original: int, ok: bool) -> bool:
+        """v0.1.23: read the size back after a restore; try once more, then report it stuck (the tray offers
+        "Reset cursor size to normal")."""
+        now = self.backend.get()
+        if now is None or now == original:
+            self.stuck = False
+            return ok
+        ok = self.backend.set(original)
+        now = self.backend.get()
+        if now is None or now == original:
+            self.stuck = False
+            return ok
+        self.stuck = True
+        self.publish(
+            "cursor.size_stuck",
+            {
+                "size": now,
+                "want": original,
+                "message": "Your mouse pointer is still bigger than normal. Use \u201cReset cursor size to "
+                "normal\u201d in the tray menu (or Settings) to fix it.",
+            },
+        )
+        return False
+
+    def reset(self) -> int:
+        """v0.1.23 "Reset cursor size to normal" (tray, Settings, ``away cursor reset``): the user's last known
+        own size (32 px when unknown); the marker is cleared. Returns the size set."""
+        marked = self.read_marker()
+        size = self.user_size()
+        if marked is not None and int(marked["original"]) not in our_sizes() - {BASE_SIZE}:
+            size = int(marked["original"])
+        self.backend.set(size)
+        self._verify(size, True)
+        self._clear_marker()
+        self.enlarged, self.applied, self.original = False, None, None
+        self._last_change = self.clock()
+        self.publish("cursor.size_reset", {"size": size})
+        return size

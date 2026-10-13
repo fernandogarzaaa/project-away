@@ -98,9 +98,11 @@ def test_big_cursor_pending_change_lands_after_the_debounce(tmp_path):
     big, be, clock, _m = make_big(tmp_path)
     big.update(True)
     clock.t += 0.1
-    assert not big.update(False)  # too soon
-    clock.t += 0.25
-    assert big.update(False) and be.sets == [64, 40]
+    assert big.update(False) and be.sets == [64, 40]  # v0.1.23: shrinking back is immediate
+    clock.t += 0.1
+    assert not big.update(True)  # ...re-enlarging waits 1.5 s (gate flapping)
+    clock.t += 1.5
+    assert big.update(True) and be.sets == [64, 40, 64]
 
 
 def test_restore_ignores_debounce(tmp_path):

@@ -593,6 +593,14 @@ class SettingsModel:
             return ""
 
     @staticmethod
+    def reset_cursor_size() -> str:
+        """v0.1.23 "Reset cursor size to normal"."""
+        from away.app.bigcursor import BigCursor, default_backend
+
+        size = BigCursor(default_backend(), 0).reset()
+        return f"mouse pointer back to {size} px" if sys.platform.startswith("win") else "nothing to reset here"
+
+    @staticmethod
     def failed_cameras(folder: Any = None) -> list[str]:
         """v0.1.23: the cameras the running app gave up on (for "Turn off")."""
         from away.app.camera_loop import read_retry_status
@@ -2336,6 +2344,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             command=lambda v: self._on_scale("hands.cursor.big_cursor_size", float(v)),
         ).grid(row=r, column=1, columnspan=2, sticky="w")
         self.scales["hands.cursor.big_cursor_size#voice"] = (cvar, None)
+        ttk.Button(  # v0.1.23: a pointer left big (two copies of the app, a crash) goes back to normal
+            f, text="Reset cursor size to normal", command=lambda: self._report(None, self.m.reset_cursor_size())
+        ).grid(row=r, column=3, sticky="w", padx=4)
         r += 1
         for cpath in ("voice.clap_sensitivity", "voice.clap_double_window"):
             cs = {t.path: t for t in self.m.tunables()}[cpath]

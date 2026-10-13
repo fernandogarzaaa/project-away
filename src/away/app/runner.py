@@ -682,11 +682,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.bus.subscribe("camera.handover", self._on_handover)
         from away.app.bigcursor import BigCursor, NullCursorBackend, default_backend
 
+        from away.app import instance
+
+        # v0.1.23: only the one app holding the single-instance lock changes the system cursor size
+        owns_cursor = not dry_run and instance.owned()
         self.big_cursor = BigCursor(
-            NullCursorBackend() if dry_run else default_backend(),
+            default_backend() if owns_cursor else NullCursorBackend(),
             cfg.hands.cursor.big_cursor_size,
             publish=self._publish_quiet,
         )
+        self.bus.subscribe("cursor.size_stuck", self._cursor_stuck)
         try:
             self.big_cursor.recover()  # a crash last time may have left the cursor big
         except Exception as exc:
@@ -889,6 +894,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self._apply_voice(new)
             self._restart_hotkeys()
             self.bus.publish("config.reloaded", {"path": str(path)})
+
+    def _cursor_stuck(self, ev: Any) -> None:
+        """v0.1.23: a restore did not take: one friendly notice (the tray menu has "Reset cursor size")."""
+        with contextlib.suppress(Exception):
+            self.notice("Project Away: mouse pointer", str(ev.data.get("message")), key="cursor-size-stuck")
+
+    def reset_cursor_size(self) -> int:
+        """v0.1.23 "Reset cursor size to normal" (tray menu)."""
+        return int(self.big_cursor.reset())
 
     def _apply_camera_switch(self, new: AppConfig) -> None:
         """v0.1.23: a camera turned off or on in Settings takes effect without restarting the app (the rest of
