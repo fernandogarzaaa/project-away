@@ -351,4 +351,5 @@ def describe(models_dir: Path) -> list[dict[str, Any]]:
             "kind": s.model.kind,
         }
         for s in status(models_dir)
+        if s.model.kind != "cleanup_next"  # v0.1.24: listed in Settings > Models > Newer models instead
     ]
