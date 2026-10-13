@@ -149,6 +149,7 @@ def run(
     for w in rep.warnings:
         out(f"  WARNING: {w}")
     out("\nDone. Start with:  away run   (or the tray app: away tray)")
+    out("New here? `away tour` walks you through a 2-minute gesture tutorial.")
     return rep
 
 

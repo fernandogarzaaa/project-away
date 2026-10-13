@@ -1182,6 +1182,17 @@ def _status_file_write(args: argparse.Namespace, data: dict[str, Any]) -> None:
             Path(path).write_text(json.dumps(data), encoding="utf-8")
 
 
+def cmd_tour(args: argparse.Namespace) -> int:
+    """``away tour``: the guided first run window (v0.1.20); ``--text`` without a window."""
+    if args.text:
+        from away.app.first_run import text_tour
+
+        return text_tour(cfgmod.load(_cfg_path(args))[0])
+    from away.app.first_run_gui import main as tour_main  # pragma: no cover - needs a display
+
+    return tour_main(_cfg_path(args))  # pragma: no cover
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
@@ -1438,6 +1449,10 @@ def build_parser() -> argparse.ArgumentParser:
     gz.add_argument("--config", help=argparse.SUPPRESS)
     gz.add_argument("--status-file", help=argparse.SUPPRESS)
     gz.set_defaults(fn=cmd_gaze)
+
+    tr = sub.add_parser("tour", help="guided first run: camera, sitting position, a 2-minute gesture tutorial")
+    tr.add_argument("--text", action="store_true", help="text version (no window): camera check and tips")
+    tr.set_defaults(fn=cmd_tour)
 
     st = sub.add_parser("settings", help="open the settings editor (needs a display + tkinter)")
     st.add_argument("--config")

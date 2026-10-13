@@ -18,6 +18,25 @@ Nothing leaves your machine unless you point the optional LLM cleanup at an endp
 4. When it's done, a hand icon appears in the system tray (bottom-right, by the clock — check the **^** arrow). Gestures and voice are on straight away.
 5. **Have an NVIDIA graphics card?** Open **Settings → Performance → Install GPU pack** (about 570 MB, once). Voice typing gets much faster and more accurate.
 
+### 1b. Your first five minutes (guided first run)
+
+The first time Project Away starts, a friendly guide opens by itself. It has big buttons, a row of dots that
+shows how far you are, and a **Skip this step** button on every page: everything already works with the standard
+settings, so skipping is always fine.
+
+1. **Find your camera:** one button checks that it turns on. If it doesn't, you get a plain explanation and a
+   button that fixes the usual cause (open the camera privacy settings, download a missing file, try again).
+2. **Sit comfortably:** a live picture and tips like "You're a bit far away" or "It's a bit dark" until it says
+   *Looks great*.
+3. **Try it out (about 2 minutes):** point at three circles, pinch to click, scroll, and pause with an open palm.
+   Each one turns green as soon as Project Away sees it. Nothing on your computer is clicked while you practise.
+4. **Make it comfortable:** two optional switches, *Only respond when I'm looking at the screen* and
+   *Switch to head control when my arm is tired* (see section 6).
+5. **Eye setup (optional):** follow a few dots with your eyes.
+
+Run it again any time: tray menu → **Guided first run...**, or **Settings → Getting started**
+(or type `away tour`). People who already used Project Away before v0.1.20 just get a one-time note about it.
+
 ### 2. Setting up your space
 
 - **Camera:** at or just above your screen, facing you, with your hand clearly visible from about 40–80 cm away.
@@ -125,7 +144,25 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Optional gaze model:** a learned eye-gaze network can be downloaded in Settings → Performance → Models. Its
   weights are for **research use only** (see below), so it is never installed automatically.
 
-### 6. If something goes wrong
+### 6. Comfort: only when you're looking, tired arms and breaks
+
+All of these are plain switches in **Settings → Getting started** (the first tab). The numbers behind them are
+under **Advanced** there, and in **Settings → Tuning**; you never need to touch them.
+
+- **Only respond when I'm looking at the screen** (off until you turn it on; also a check box in the tray menu):
+  gestures count only while you face the screen and hold your hand up in front of you. Rest your hand on the desk,
+  turn to talk to someone, or reach for your coffee, and nothing gets clicked. The ring at the cursor turns grey
+  while it waits for you, and the tray says what to do ("raise your hand a little higher"). A short glance away
+  is forgiven, so it doesn't flicker on and off. Without face tracking (or before the face model has loaded) it
+  only checks your hand.
+- **Switch to head control when my arm is tired** (off until you turn it on): after a long time with your arm up,
+  or when your hand starts to sink or shake, Project Away tells you to lower your hand and steers the pointer with
+  your head instead. Raise your hand again and it takes back over. Needs face tracking.
+- **Tell me when my arm looks tired** (on): just the gentle note, at most once every 10 minutes.
+- **Remind me to take a break** (on): a short note after 30 minutes of continuous gesture use. Being away from the
+  camera for 2 minutes counts as a break.
+
+### 7. If something goes wrong
 
 - **Models didn't finish downloading:** reopen the app (see Installing above). It resumes.
 - **Cursor doesn't move:** check another app isn't using the camera (Zoom, Teams, the Camera app), then restart Project Away from the tray.
@@ -318,6 +355,7 @@ away gpu install | status | remove           # NVIDIA GPU pack (cuBLAS 12) for W
 away iphone listen | compare [--seconds N]   # experimental iPhone face source (docs/iphone.md)
 away gaze calibrate | test [--seconds N] | clear [--all] | status    # eye tracking + the screen map
 away gaze model status | install l2cs|mobilegaze [--accept-license] | remove NAME   # optional gaze network
+away tour [--text]                           # guided first run (window); --text: camera check + tips in the terminal
 ```
 
 Invalid configs fail with every problem listed and its YAML path, e.g.
@@ -901,6 +939,71 @@ the camera frame):
 The trade-off is visible: the predictive filter is far closer to where your hand *is*, at the cost of a small
 overshoot when a fast move stops abruptly. That is why it ships off until it has been tried on real webcams.
 
+## Attention gate, arm fatigue and the guided first run (v0.1.20)
+
+New code lives in `away/comfort/` (gate, fatigue, hub, words, Settings tab) and `away/app/first_run*.py`; the shared
+files only gained small hooks (`Pipeline.comfort`, two config fields, a tray menu pair, one Settings tab call,
+`away tour`).
+
+**Attention gate** (`attention.*`, `AttentionGate`). Each hand frame is checked for: *facing* (the head pose
+from the face landmarker, compared with the calibrated screen pose box or the learned usual pose, within
+`facing_tolerance` degrees), *gaze on a screen* (only with `require_gaze` and a gaze calibration), *hand raised*
+(wrist at least `min_hand_height` above the picture bottom, palm at least `min_hand_size`), held for `onset_s`.
+Once engaged the hand may sink 0.05 lower and the head turn 5° further (hysteresis), and any failing check is
+forgiven for `grace_s`. A frame that does not count is fed to the gesture state machine as *no hand*, so a drag
+ends cleanly and the head pointer can take over. `gate_voice` also drops spoken commands while you look away
+(dictation is still the face gate's job). The state (`off | idle | arming | engaged | grace`, a hint, the checks)
+is `Pipeline.attention_state()`, published as `attention.state` on change, shown in the tray title and as a grey
+/ yellow ring tint (`attention.indicator`).
+
+**Arm fatigue** (`comfort.*`, `FatigueMonitor`). Score = time with the wrist above `raised_height` without a
+`rest_s` rest ÷ `raised_limit_s`, + ½ × hand sinking (5 s average vs. the first 10 s, full at `height_drop`),
++ ½ × tremor (RMS second difference of the palm centre while held fairly still, vs. the first 10 s, full at
+`jitter_ratio`). Tired at score ≥ 1 and at least `min_raised_s` up: with no other sign after 4 min, with one
+strong sign after 2 min, with both after 30 s. `fatigue_switch` then sets `hands.cursor.head_assist: pointer` on
+the running app only (never written to the file) and restores your own value once the hand has rested and been
+back up for `return_s`. Break reminders: `break_every_min` of continuous use; `break_reset_s` away resets it.
+**These thresholds are a reasoned starting point, not a validated fatigue model.**
+
+**Guided first run** (`away tour`, `FirstRun`, `TutorialCoach`). Steps: welcome, camera (`probe_camera`, with
+the full `away cameras diagnose` report a click away), framing (face size/centre, brightness, hand in the
+picture), a pluggable *zones* step, the tutorial (the real gesture state machine on a borrowed camera; tasks are
+ticked from its events, nothing is executed), the comfort switches, optional gaze calibration (`away gaze
+calibrate`), done. Progress is saved in `first_run.json` in the config folder. Other features add steps with
+`away.app.first_run.register_step(Step(...), after="framing")`; the module `away.studio.first_run` is imported
+when present, so Gesture Studio can register `zones` (replacing the placeholder, which is only shown when
+`away.studio` is installed) and a `custom_gesture` offer after `gaze`. Errors go through
+`away.comfort.ui.friendly_error`: a plain title, a sentence, and one fix button (`retry`, `camera_privacy`,
+`download_models`, `install_help`, `pause_app`).
+
+```yaml
+attention:
+  enabled: false          # "Only respond when I'm looking at the screen"
+  require_facing: true
+  require_gaze: false     # only used with a gaze calibration
+  min_hand_height: 0.25   # 0 = picture bottom, 1 = top
+  min_hand_size: 0.03
+  onset_s: 0.25
+  grace_s: 0.8
+  facing_tolerance: 25.0  # degrees
+  gate_voice: false
+  indicator: true
+comfort:
+  fatigue_switch: false   # "Switch to head control when my arm is tired"
+  fatigue_tips: true
+  break_reminders: true
+  raised_height: 0.30
+  raised_limit_s: 240.0
+  min_raised_s: 30.0
+  height_drop: 0.08
+  jitter_ratio: 1.8
+  rest_s: 5.0
+  return_s: 1.0
+  tip_cooldown_min: 10.0
+  break_every_min: 30.0
+  break_reset_s: 120.0
+```
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -1026,6 +1129,9 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Smart pointer: look + say (v0.1.20) | Phrase parsing, number words, fuzzy name scores, ambiguity and dedupe, the numbered chooser with timeout, gaze-or-cursor "click that", focus with click fallback, bound-phrase precedence, pause / switch-off, always-on phrase table and dictation fallback, friendly errors tested through the real Pipeline with a fake backend; **untested with a real microphone and Whisper, the numbered badge window has never been drawn on Windows, and UIA SetFocus is untested on real apps** |
 | Smart pointer: predictive smoothing (v0.1.20) | Kalman filter behaviour and the synthetic jitter/latency benchmark against the existing One Euro filter in tests (lag 8x lower, still-hand jitter under the dead zone, overshoot bounded); live switching from Settings tested; **untested with a real webcam, so it ships off** |
 | Smart pointer Settings section (v0.1.20) | Toggle / config mapping, health messages and the Install fix (with a fake pip) unit-tested; a Tk test of the section exists but needs Xvfb, which the build sandbox did not have this time and the CI test job does not start, so **the Settings section has not been rendered** |
+| Attention gate (v0.1.20) | Onset dwell, hand height/size checks, height and facing hysteresis, grace period, no-face / stale-face / never-ran-face cases, gaze on/off/stale, voice gating, hints, the pipeline treating an un-engaged hand as absent (drag ends cleanly), hot-reload, ring tint and tray title tested with synthetic hands and fake head/gaze trackers (`tests/test_v0120_attention_comfort.py`); **untested with a live webcam**: whether 0.25 picture heights is the right "hand raised" line for a real desk and camera angle, and how the head-pose facing check behaves with an off-axis webcam |
+| Arm fatigue + break reminders (v0.1.20) | Time-only, sinking-hand, tremor and combined triggers, a short dip vs. a real rest, slow drift not counted as tremor, camera stalls, switch to the head pointer and back (also across a config reload), no switch without face tracking, tip cooldown and break timing tested with synthetic hand paths and noise; **not validated on real people**: the thresholds are a starting point, MediaPipe landmark jitter on a real webcam may dominate the tremor sign, and the head-pointer hand-over has not been felt on real hardware |
+| Guided first run, Settings → Getting started, tray items (v0.1.20) | Step list, skip/back, progress dots, saved state, plug-in steps (placeholder, replacement, broken plug-ins), framing tips, the tutorial coach driven by the real gesture state machine, the camera session with a fake camera (events, preview, face sampling, hand-back, errors), friendly errors, the model download fix, `away tour --text` and the tray menu items unit-tested (`tests/test_v0120_first_run.py`); the window was walked through every step and the Settings tab rendered under Xvfb with a fake camera; **untested on a real Windows desktop and with a real webcam** (live preview speed, the 2-minute target, `ms-settings:privacy-webcam`, the auto-open on a real first start, the tray check box on Windows) |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

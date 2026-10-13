@@ -1500,6 +1500,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_cameras(nb)
         self._build_performance(nb)
         self._build_test(nb)
+        from away.comfort.settings_tab import build_tab
+
+        build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches (first tab)
         self._bind_wheel()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()

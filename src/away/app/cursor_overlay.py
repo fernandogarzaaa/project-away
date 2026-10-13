@@ -60,6 +60,11 @@ def ring_spec(state: dict[str, Any]) -> dict[str, Any]:
     dwell = float(state.get("dwell", 0.0) or 0.0)
     if s == "paused":
         return {"color": COLORS["paused"], "extent": 360.0, "filled": False, "visible": True, "width": 2}
+    if state.get("attention") in ("idle", "arming"):  # v0.1.20 attention gate: gestures are waiting for you
+        from away.comfort.ui import ATTENTION_COLORS
+
+        color = ATTENTION_COLORS[str(state["attention"])]
+        return {"color": color, "extent": 360.0, "filled": False, "visible": True, "width": 1}
     if s == "hand_lost":
         return {"color": COLORS["hand_lost"], "extent": 360.0, "filled": False, "visible": True, "width": 1}
     if s == "autoscroll":  # orange ring, plus an arrow once the hand leaves the dead zone
