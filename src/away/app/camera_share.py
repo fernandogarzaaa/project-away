@@ -90,15 +90,18 @@ class CameraShare:
         return data
 
     def _remove(self, name: str, only_mine: bool = True) -> None:
+        # v0.1.20: retried like reads. On Windows the other process reading the file at that moment made the read
+        # or the unlink fail (sharing violation), so a released request lingered until it went stale (5 s) and
+        # the app took its camera back late (seen on the Windows CI runner).
         if only_mine:
             try:
-                data = json.loads(self._path(name).read_text(encoding="utf-8"))
+                data = json.loads(_retry_sharing(lambda: self._path(name).read_text(encoding="utf-8")))
             except (OSError, ValueError):
                 return
             if isinstance(data, dict) and data.get("pid") not in (None, self.pid):
                 return
         with contextlib.suppress(OSError):
-            self._path(name).unlink()
+            _retry_sharing(self._path(name).unlink, tries=50)
 
     # ------------------------------------------------------------- app side
     def publish_owner(self, cameras: list[Any]) -> None:
