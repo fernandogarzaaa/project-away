@@ -372,6 +372,9 @@ def apply_recommendation(cfg: Any, report: dict[str, Any], data_dir: Path | None
     cfg.models_next.presets = "next"
     for k, v in reg.apply_mode(cfg, preset, ready=lambda m: _ready(m, cfg, data_dir, model_fetch)).items():
         before.setdefault(k, v)
+    from away.app import model_guard
+
+    model_guard.remember_all(before, data_dir)  # a model that later fails rolls back its own slot
     return before
 
 
@@ -488,7 +491,7 @@ SELFTEST_HOOK = {"id": "model_bench", "title": "Newer models", "check": selftest
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - prints a real benchmark
     from away import config as cfgmod
 
-    cfg = cfgmod.load() if hasattr(cfgmod, "load") else cfgmod.AppConfig()
+    cfg, _unknown = cfgmod.load()
     rep = run_bench(cfg, progress=print)
     print(json.dumps(rep.to_dict(), indent=1))
     print(summary(rep.to_dict()))
