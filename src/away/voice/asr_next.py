@@ -309,6 +309,7 @@ class RealtimeStream:
         self.finals: list[str] = []
         self.partial = ""
         self.closed = False
+        self.done = threading.Event()  # set when the server sent the final text of a committed stream
         self.ws.send_text(json.dumps({"type": "session.update", "session": {"sample_rate": sr}}))
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
@@ -331,12 +332,15 @@ class RealtimeStream:
         kind = str(ev.get("type", ""))
         if kind.endswith("input_audio_transcription.delta"):
             delta = str(ev.get("delta", ev.get("text", "")))
+            if not delta:
+                return
             self.partial = delta if ev.get("replace") or not self.partial else self.partial + delta
         elif kind.endswith("input_audio_transcription.completed"):
             text = str(ev.get("transcript", ev.get("text", ""))).strip()
             if text:
                 self.finals.append(text)
             self.partial = ""
+            self.done.set()
         else:
             return
         if self.on_partial is not None:
@@ -347,10 +351,13 @@ class RealtimeStream:
         a = np.clip(np.asarray(audio, dtype=np.float32).reshape(-1), -1.0, 1.0)
         self.ws.send_binary((a * 32767.0).astype("<i2").tobytes())
 
+    def commit(self) -> None:
+        self.ws.send_text(json.dumps({"type": "input_audio_buffer.commit"}))
+
     def close(self) -> None:
         if not self.closed:
             with contextlib.suppress(Exception):
-                self.ws.send_text(json.dumps({"type": "input_audio_buffer.commit"}))
+                self.commit()
         self.closed = True
         with contextlib.suppress(Exception):
             self.ws.close()
@@ -371,6 +378,8 @@ class NemotronASR:
         self.device = server.device.split(":", 1)[0]
         self._q: queue.Queue[Any] = queue.Queue(maxsize=200)
         self._stream: RealtimeStream | None = None
+        self._pushed = 0
+        self.final_wait_s = 3.0
         self._worker = threading.Thread(target=self._pump, daemon=True)
         self._worker.start()
 
@@ -380,6 +389,12 @@ class NemotronASR:
             if item is None:
                 return
             try:
+                if isinstance(item, tuple):  # ("commit", holder): finish the live stream, hand back its stream
+                    st, self._stream = self._stream, None
+                    if st is not None and not st.closed:
+                        st.commit()
+                        item[1].append(st)
+                    continue
                 if isinstance(item, str):  # "reset"
                     if self._stream is not None:
                         self._stream.close()
@@ -394,16 +409,41 @@ class NemotronASR:
     def push(self, chunk: Any) -> None:
         if not self.partials or self.on_partial is None:
             return
-        with contextlib.suppress(queue.Full):
-            self._q.put_nowait(np.asarray(chunk, dtype=np.float32).reshape(-1).copy())
+        a = np.asarray(chunk, dtype=np.float32).reshape(-1).copy()
+        try:
+            self._q.put_nowait(a)
+            self._pushed += len(a)
+        except queue.Full:
+            pass
 
     def reset(self) -> None:
+        self._pushed = 0
         with contextlib.suppress(queue.Full):
             self._q.put_nowait("reset")
 
+    def _streamed_final(self, n: int) -> str:
+        """The live stream's own final text when it saw (almost) the whole utterance; "" otherwise."""
+        if self._pushed < 0.8 * n or n <= 0:
+            return ""
+        holder: list[RealtimeStream] = []
+        try:
+            self._q.put(("commit", holder), timeout=0.5)
+        except queue.Full:
+            return ""
+        end = time.monotonic() + self.final_wait_s
+        while not holder and time.monotonic() < end:
+            time.sleep(0.01)
+        if not holder or not holder[0].done.wait(max(0.0, end - time.monotonic())):
+            return ""
+        st = holder[0]
+        st.close()
+        return " ".join(st.finals).strip()
+
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
+        n = len(np.asarray(audio).reshape(-1))
+        text = self._streamed_final(n)
         self.reset()
-        return self.server.transcribe(audio, self.sr, prompt)
+        return text or self.server.transcribe(audio, self.sr, prompt)
 
     def close(self) -> None:
         with contextlib.suppress(queue.Full):
