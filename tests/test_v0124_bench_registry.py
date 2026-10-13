@@ -587,3 +587,24 @@ def test_panel_advanced_lists_new_models_per_job(tmp_path):
     stt_ids = {c["id"] for c in rows["stt"]["choices"]}
     assert {NEM, MOON} <= stt_ids
     assert rows["vad"]["current"] == "vad-bundled"
+
+
+def test_panel_states_in_plain_words(tmp_path, monkeypatch):
+    from away.app.models_next_panel import state_text, title_with_flag
+    from away.voice import tts_next
+
+    reg = Registry(tmp_path)
+    assert state_text(reg.models[VAD], True) == "ready"
+    assert state_text(reg.models[VAD], False).endswith("MB to download")
+    assert state_text(reg.models["wake-livekit-custom"], False).startswith("train a model for your name")
+    assert state_text(reg.models["voice-pocket-tts"], False) == "optional install: pip install 'project-away[pocket]'"
+    assert title_with_flag({"title": "RTMPose hands (experimental)", "experimental": True}).count("experimental") == 1
+    assert title_with_flag({"title": "Nemotron", "experimental": True}) == "Nemotron (experimental)"
+    # pocket-tts is ready only once the [pocket] extra is installed
+    monkeypatch.setattr(tts_next, "pocket_available", lambda: False)
+    p, _, _ = _panel(tmp_path, ready=None)
+    assert not p.is_ready(reg.models["voice-pocket-tts"])
+    monkeypatch.setattr(tts_next, "pocket_available", lambda: True)
+    assert p.is_ready(reg.models["voice-pocket-tts"])
+    assert p.is_ready(reg.models["voice-windows"])  # built in
+    assert not p.is_ready(reg.models["wake-livekit-custom"])  # no trained file yet

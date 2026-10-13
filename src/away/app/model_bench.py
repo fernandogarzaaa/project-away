@@ -399,6 +399,10 @@ def _ready(m: Any, cfg: Any, data_dir: Path | None, model_fetch: Any) -> bool:
     if "wake_model" in (m.requires or []):
         p = str(getattr(cfg.models_next, "wake_model", "") or "")
         return bool(p) and Path(p).is_file()
+    if m.runtime == "torch":  # pocket-tts: the optional [pocket] pip extra, ready only once it is installed
+        from away.voice.tts_next import pocket_available
+
+        return pocket_available()
     if m.bundled or (m.download and not m.url and not m.files):
         return True  # built in, or downloaded by its v0.1.23 button (its engine falls back by itself)
     return bool(model_fetch.ready(m, data_dir))

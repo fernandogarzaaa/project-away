@@ -33,6 +33,25 @@ GPL_NOTE = (
 )
 
 
+def state_text(m: Any, ready: bool) -> str:
+    """Plain words for what a model still needs on this PC."""
+    if ready:
+        return "ready"
+    if "wake_model" in (getattr(m, "requires", None) or []):
+        return "train a model for your name first (Settings > Models > Wake word)"
+    dl = str(getattr(m, "download", "") or "")
+    if dl.startswith("pip install"):
+        return f"optional install: {dl}"
+    size = round(int(getattr(m, "size", 0) or 0) / 1e6)
+    return f"{size} MB to download" if size else "to download"
+
+
+def title_with_flag(c: dict[str, Any]) -> str:
+    """The title, plus "(experimental)" unless the title already says so."""
+    title = str(c.get("title", ""))
+    return title + (" (experimental)" if c.get("experimental") and "experimental" not in title.lower() else "")
+
+
 class NextModelsPanel:
     def __init__(
         self,
@@ -95,15 +114,19 @@ class NextModelsPanel:
         """New models per job (the Advanced section)."""
         rows = []
         for slot in SLOT_TITLES:
-            choices = [
-                {
-                    **m.public(),
-                    "ready": self.is_ready(m),
-                    "license_note": LICENSE_NOTES.get(m.license, m.license),
-                }
-                for m in self.reg.for_slot(slot, show_restrictive)
-                if m.source == "catalog" or m.notes
-            ]
+            choices = []
+            for m in self.reg.for_slot(slot, show_restrictive):
+                if not (m.source == "catalog" or m.notes):
+                    continue
+                ok = self.is_ready(m)
+                choices.append(
+                    {
+                        **m.public(),
+                        "ready": ok,
+                        "state": state_text(m, ok),
+                        "license_note": LICENSE_NOTES.get(m.license, m.license),
+                    }
+                )
             if choices:
                 cur = self.reg.current(self.cfg, slot)
                 rows.append(
@@ -218,7 +241,9 @@ def build(win: Any, parent: Any) -> NextModelsPanel:  # pragma: no cover - Tk wi
         in_bg(lambda: panel.test_my_pc(say), done)
 
     ttk.Button(row, text="Test my PC", command=test).pack(side="left")
-    for p in panel.presets():
+    presets_box = ttk.Frame(box)
+    presets_box.pack(fill="x", padx=6, pady=(4, 0))
+    for i, p in enumerate(panel.presets()):
 
         def pick(mode: str = p["mode"], info: dict[str, Any] = p) -> None:
             text = f"{info['title']}: {info['vram']}."
@@ -241,7 +266,8 @@ def build(win: Any, parent: Any) -> NextModelsPanel:  # pragma: no cover - Tk wi
 
             in_bg(work, finish)
 
-        ttk.Button(row, text=f"{p['title']} ({p['vram']})", command=pick).pack(side="left", padx=4)
+        ttk.Button(presets_box, text=p["title"], width=10, command=pick).grid(row=i, column=0, sticky="w", pady=1)
+        ttk.Label(presets_box, text=p["vram"]).grid(row=i, column=1, sticky="w", padx=8)
     ttk.Label(box, textvariable=status, wraplength=640, foreground="#444").pack(anchor="w", padx=6, pady=2)
 
     adv = ttk.Frame(box)
@@ -251,16 +277,18 @@ def build(win: Any, parent: Any) -> NextModelsPanel:  # pragma: no cover - Tk wi
         if shown.get():
             adv.pack_forget()
             shown.set(False)
+            adv_btn.configure(text="Advanced ▸")
             return
+        adv_btn.configure(text="Advanced ▾")
         for w in adv.winfo_children():
             w.destroy()
         for r in panel.advanced():
             ttk.Label(adv, text=r["title"], font=("", 9, "bold")).pack(anchor="w", pady=(4, 0))
             for c in r["choices"]:
-                flag = " (experimental)" if c.get("experimental") else ""
-                state = "ready" if c["ready"] else f"{c['size_mb']} MB to download"
                 ttk.Label(
-                    adv, text=f"  {c['title']}{flag} - {c['runs_on']}, {c['license_note']}, {state}", wraplength=620
+                    adv,
+                    text=f"  {title_with_flag(c)} - {c['runs_on']}, {c['license_note']}, {c['state']}",
+                    wraplength=620,
                 ).pack(anchor="w")
         ttk.Button(adv, text="Go back to the standard models", command=lambda: status.set(panel.standard())).pack(
             anchor="w", pady=4
@@ -268,5 +296,6 @@ def build(win: Any, parent: Any) -> NextModelsPanel:  # pragma: no cover - Tk wi
         adv.pack(fill="x", padx=12)
         shown.set(True)
 
-    ttk.Button(box, text="Advanced ▸", command=toggle).pack(anchor="w", padx=6, pady=(0, 6))
+    adv_btn = ttk.Button(box, text="Advanced ▸", command=toggle)
+    adv_btn.pack(anchor="w", padx=6, pady=(0, 6))
     return panel
