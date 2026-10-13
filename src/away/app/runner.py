@@ -875,7 +875,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         face_gate = self.cfg.face.enabled and self.cfg.face.gate_dictation
         fallback = effective_ambient_fallback(self.cfg)
         gate = self.pipeline.gate.allow if face_gate else None
-        sink = ListSink() if self.dry_run else make_sink(v.output)
+        if self.dry_run:
+            sink: Any = ListSink()
+        else:
+            from away.control.macro_record import MarkingBackend
+
+            sink = MarkingBackend(make_sink(v.output))  # dictated text is Away's own input: never recorded (v0.1.20)
         commands = self._run_voice_command if v.commands_enabled else None
         dictation = DictationSession(
             asr,
