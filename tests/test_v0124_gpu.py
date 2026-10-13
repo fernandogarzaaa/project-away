@@ -269,7 +269,7 @@ def test_lost_hand_goes_back_to_palm_search() -> None:
     state["present"] = 0.1
     assert tr.detect_for_video(img, 33).hand_landmarks == [] and tr.tracked == []
     tr.detect_for_video(img, 66)
-    assert palm.calls == 3
+    assert palm.calls == 2  # the next frame searches again (like MediaPipe)
 
 
 def test_onnx_face_landmarker_returns_face_obs() -> None:
