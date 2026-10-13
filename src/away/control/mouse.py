@@ -158,6 +158,9 @@ class MouseController:
         self.stabilizer = stabilizer
         # ``cursor:gaze``: returns the current gaze point on the desktop (None = not calibrated / no face)
         self.gaze_point: Callable[[], tuple[float, float] | None] | None = None
+        # v0.1.20 smart pointer (away.pointer.smart.SmartPointer): ``refine(x, y)`` adjusts the mapped position
+        # (magnetic targets), ``resync(pos)`` follows a direct cursor placement
+        self.refiner: Any = None
 
     # ------------------------------------------------------------ steady click
     def observe_pinch(self, t: float, ratio: float, pinch_on: float, pinched: bool, dragging: bool) -> None:
@@ -181,6 +184,8 @@ class MouseController:
         if (x, y) != (round(self.mapper.pos[0]), round(self.mapper.pos[1])):
             self.mapper.set_position(pos[0], pos[1])
             self.backend.move(x, y)
+            if self.refiner is not None:
+                self.refiner.resync((float(x), float(y)))
 
     def handle(self, ev: GestureEvent) -> None:
         if ev.kind == "clutch":
@@ -202,9 +207,11 @@ class MouseController:
             x, y = self.mapper.update(
                 ev.t, float(ev.data["x"]), float(ev.data["y"]), str(ev.data.get("anchor", "index"))
             )
+            if self.refiner is not None:
+                x, y = self.refiner.refine(x, y)
             self.backend.move(x, y)
             if self.stabilizer is not None:
-                self.stabilizer.record(ev.t, self.mapper.pos)
+                self.stabilizer.record(ev.t, self.mapper.pos if self.refiner is None else (float(x), float(y)))
         elif ev.kind in ("click", "double_click"):
             # double_click is the *second* tap: one more click makes the OS see a double click
             self.backend.click(1)

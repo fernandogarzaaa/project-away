@@ -25,6 +25,7 @@ STATUS_TOPICS = {
     "gesture.dwell": lambda d: "dwell click",
     "cameras.dropped": lambda d: f"camera {d.get('camera')} dropped",
     "cameras.recovered": lambda d: f"camera {d.get('camera')} back",
+    "pointer.say": lambda d: str(d.get("text", "")),  # v0.1.20 smart pointer feedback ("Clicked Save.")
 }
 
 

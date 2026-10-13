@@ -37,7 +37,7 @@ from away.control.monitors import (
     sort_monitors,
 )
 from away.hands.autocenter import AutoCenter, shift_region
-from away.hands.filters import OneEuro2D
+from away.pointer.smoothing import make_cursor_filter
 
 ACCEL_REF = 0.01  # hand-units per frame at which acceleration is neutral
 
@@ -117,7 +117,7 @@ def reach_factor(mons: Sequence[Monitor], ref: Monitor, exponent: float) -> floa
 class CursorMapper:
     def __init__(self, screen: Screen, cfg: CursorConfig | None = None) -> None:
         self.cfg = cfg or CursorConfig()
-        self.filter = OneEuro2D(self.cfg.min_cutoff, self.cfg.beta, self.cfg.d_cutoff)
+        self.filter = make_cursor_filter(self.cfg)  # One Euro, or predictive (hands.cursor.smoothing, v0.1.20)
         self.all_monitors: tuple[Monitor, ...] = ()
         self.monitors: tuple[Monitor, ...] = ()
         self.pos: tuple[float, float] = (0.0, 0.0)

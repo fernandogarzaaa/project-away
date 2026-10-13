@@ -16,6 +16,7 @@ import yaml
 from away import paths
 from away.bindings import BindingsConfig, BindingsError, parse_bindings
 from away.control.keys import KeyComboError, canonical
+from away.pointer.config import MagnetConfig, PredictiveConfig, pointer_tunables, validate_pointer
 
 
 @dataclass
@@ -98,6 +99,10 @@ class CursorConfig:
     # pointer while no hand points, for when the hands are busy; clicks with the face triggers)
     head_assist: str = "off"
     head: HeadConfig = field(default_factory=HeadConfig)
+    # smart pointer (v0.1.20, away.pointer): one_euro | predictive (Kalman + ~1 frame lookahead); magnetic targets
+    smoothing: str = "one_euro"
+    magnet: MagnetConfig = field(default_factory=MagnetConfig)
+    predictive: PredictiveConfig = field(default_factory=PredictiveConfig)
 
 
 @dataclass
@@ -248,6 +253,7 @@ class VoiceConfig:
     mute_hotkey: str = "<ctrl>+<alt>+m"  # hotkey:mute trigger (default action mic:toggle)
     wake_word_enabled: bool = False  # always_on: only act on utterances that start with the wake word
     wake_word: str = "away"
+    click_by_name: bool = True  # v0.1.20: "click <name>" / "click that" / "focus <name>" (Windows, away.pointer)
     wake_window: float = 5.0  # seconds after a bare wake word during which the next utterance needs no wake word
     intent: str = "dictation"  # always_on: dictation (type speech + run commands) | command (commands only)
     ambient_fallback: str = "commands_only"  # always_on, no wake word and no face gate: commands_only | type
@@ -610,6 +616,7 @@ def validate(cfg: AppConfig) -> None:
     if isinstance(r, bool) or not isinstance(r, (int, float)) or not 0 <= float(r) <= 300:
         raise ValueError(f"hands.cursor.monitor_refresh_s must be seconds in [0, 300] (0 = off), got {r!r}")
     validate_tracking(cfg)
+    validate_pointer(cfg)
     if cfg.hands.roles.mode not in ROLE_MODES:
         raise ValueError(f"hands.roles.mode must be {'|'.join(ROLE_MODES)}, got {cfg.hands.roles.mode!r}")
     ps = cfg.hands.palm_scroll
@@ -834,6 +841,7 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("hands.palm_scroll.friction", cfg.hands.palm_scroll.friction, 0.5, 20.0),
         ("hands.min_camera_fps", cfg.hands.min_camera_fps, 1.0, 60.0),
         *tracking_tunables(cfg),
+        *pointer_tunables(cfg),
     ]
 
 
