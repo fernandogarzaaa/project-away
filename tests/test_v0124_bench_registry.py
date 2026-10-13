@@ -430,7 +430,12 @@ def test_classic_presets_are_unchanged_by_default():
     cfg = AppConfig()
     assert not model_registry.use_next(cfg)
     reg.apply_mode(cfg, "light")
-    assert cfg.voice.asr_model == "base" and cfg.voice.device == "cpu" and cfg.speech.engine == "piper"
+    # exactly the v0.1.23 Light mode of the built-in manifest (whatever it picks), nothing from presets_next
+    for slot, mid in reg.classic_modes["light"].items():
+        if mid in reg.models:
+            for k, v in reg.models[mid].set.items():
+                assert model_registry._get(cfg, k) == v, (slot, k)
+    assert cfg.voice.asr_model == "base" and cfg.voice.device == "cpu"
     assert cfg.models_next == ModelsNextConfig()  # nothing new was switched on
     assert not model_registry.use_next(SimpleNamespace())  # an older settings object
 
