@@ -104,6 +104,12 @@ Voice is always listening by default. Just talk, and your words are typed wherev
 - **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
 - **Words not being typed?** If you're looking away from the webcam, the face check may ignore you. Turn **Face gate** off in the tray menu.
 - Speech is processed on your PC and never saved or uploaded.
+- **Click things by name (Windows):** say **"click Save"**, **"double click Photos"** or **"focus Search"**. Look at
+  something (or point at it) and say **"click that"**. If two things have the same name, numbers appear next to
+  them: say the number, or "cancel".
+- **Snap to buttons (Windows):** the pointer is gently drawn to buttons and links and holds still over them, so
+  a shaky camera image doesn't make you miss. Both are on by default; turn them off, or turn on
+  **Smoother cursor**, under Settings > Voice & input > Smart pointer.
 
 ### 5. Head and eye tracking (optional, off until you set it up)
 
@@ -845,6 +851,56 @@ gaze:
   drift_correction: true
 ```
 
+## Smart pointer (v0.1.20)
+
+Three helpers that make a webcam pointer feel like a real mouse. Each is one plain switch in Settings > Voice &
+input > **Smart pointer**; the numbers behind them are sliders in Settings > Tuning > **Advanced**. Nothing needs
+setting up.
+
+| Switch | What it does | Default |
+|---|---|---|
+| **Snap to buttons** | Magnetic targets: Windows UI Automation lists the clickable things in the foreground window (buttons, links, text boxes, menu items, list items, check boxes, tabs...). Near one, the pointer is pulled part of the way toward it; over one, small moves are slowed down (sticky friction), which cancels webcam jitter. A fast, deliberate move is never slowed, and hand and pointer never drift apart. | on (Windows; does nothing elsewhere) |
+| **Click things by saying their name** | "click <name>", "double click <name>", "focus <name>" fuzzy-match the names of the foreground window's elements; "click that" picks the element nearest your gaze point (when gaze is calibrated and your face is seen) or else the pointer. Several equally good matches show numbered badges: say the number or "cancel". Your own voice bindings always win. "click ..." is never typed as dictation; "focus ..." only counts when something matches (so "focus on the budget" is still typed). | on (Windows) |
+| **Smoother cursor** | `hands.cursor.smoothing: predictive`: a speed-adaptive constant-velocity Kalman filter that predicts about one camera frame ahead, instead of the One Euro filter. | off |
+
+```yaml
+hands:
+  cursor:
+    smoothing: one_euro            # one_euro | predictive  ("Smoother cursor")
+    magnet:                        # "Snap to buttons"
+      enabled: true
+      radius_px: 40                # how far from a target the pull starts (5..200)
+      strength: 0.35               # how far toward the target the pointer is pulled (0..1)
+      sticky: 0.5                  # how much slower small moves are over a target (0..0.95)
+    predictive:                    # only with smoothing: predictive
+      lookahead_ms: 33             # 0..100
+      process_noise: 5.0           # 0.1..50: higher follows quick turns sooner
+      measurement_noise: 0.004     # 0.0005..0.02: expected landmark jitter (hand units)
+      speed_gate: 0.3              # 0.01..2: hand speed (frame widths/s) for the full look-ahead
+voice:
+  click_by_name: true              # "Click things by saying their name"
+```
+
+How it stays out of the cursor's way: a background thread refreshes the element list 4 times a second with one
+UI Automation call (`FindAllBuildCache` with a cache request for name, type and rectangle) and publishes an
+immutable snapshot with a spatial grid; the cursor loop only reads the latest snapshot (about 0.08 ms per frame
+with 2,000 elements, measured on the build machine). Elements older than 2 s are dropped. A voice command
+refreshes once more on the voice thread before matching. UI Automation comes from
+[comtypes](https://github.com/enthought/comtypes) (MIT), part of the Windows installer and of `pip install
+"project-away[pointer]"` (also in `[all]`). Without it, Settings says so in plain words with an **Install** button.
+
+Predictive smoothing, measured with the included synthetic benchmark (`python -m away.pointer.bench`: minimum-jerk
+reaches with rests, 1 frame of latency, 0.002 landmark jitter, 5 seeds; numbers in hand units, i.e. fractions of
+the camera frame):
+
+| Filter (shipped defaults) | Lag RMSE while moving | Jitter of a still hand (per frame) | Overshoot after a reach |
+|---|---|---|---|
+| `one_euro` | 0.103 | 0.0005 | 0.0007 |
+| `predictive` | 0.0125 (8x less) | 0.0016 (below the 0.004 dead zone, so a resting cursor does not move) | 0.0092 |
+
+The trade-off is visible: the predictive filter is far closer to where your hand *is*, at the cost of a small
+overshoot when a fast move stops abruptly. That is why it ships off until it has been tried on real webcams.
+
 ## Hardware auto-tuning and GPU
 
 `away hardware` shows the detected CPU, RAM, disk and GPU (NVIDIA via NVML / `nvidia-smi`, others via
@@ -966,6 +1022,10 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
 | Settings → Tuning (sections, presets, master sensitivity, undo, per-app tuning, live gauges, auto-tune) (v0.1.19) | Grouping, presets, sensitivity mapping, threshold selection, undo, per-app tuning (parse, validate, live switch in the pipeline), the auto-tune session, clip saving and the camera worker unit-tested with fake frames (`tests/test_tuning_tab.py`, `tests/test_autotune.py`); the tab itself is smoke-tested under Xvfb; **live view and auto-tune untested with a real camera** |
 | Tuning tab with the head / gaze sliders (v0.1.19) | All 28 auto-centering, head and gaze tunables land in Head & eyes with titles, help and units; presets, master Sensitivity and Reset section keep them apart; per-app profile tuning of the auto-centering / head keys validates, applies (ints rounded) and switches live in the pipeline, `gaze.*` is refused per app; Sensitivity still orders cursor speed with soft recenter on (`tests/test_v0119_integration.py`); the merged Settings window (Tuning sections, Performance → Models) rendered under Xvfb; **untested on a real desktop with a real camera** |
+| Smart pointer: magnetic targets (v0.1.20) | Attraction (bounded, continuous at the edge, no pull along wide text boxes), sticky friction (jitter over a button cut by more than 40 %, more hover frames landing on a small button), escape on fast moves, offset cap and bleed-off, warp reset, steady-click rewind resync, spatial index equal to a full scan and fast on 2,000 elements, background cache thread, stale and error handling unit-tested with fake targets; the UI Automation backend tested against a mocked comtypes; a real UIAutomationCore smoke test (create the automation object, walk the foreground window) runs on the Windows CI runner; **untested on a real Windows desktop with a webcam: how the pull and friction feel, which apps expose their buttons (Chrome/Electron/Qt/games vary), mixed-DPI coordinates** |
+| Smart pointer: look + say (v0.1.20) | Phrase parsing, number words, fuzzy name scores, ambiguity and dedupe, the numbered chooser with timeout, gaze-or-cursor "click that", focus with click fallback, bound-phrase precedence, pause / switch-off, always-on phrase table and dictation fallback, friendly errors tested through the real Pipeline with a fake backend; **untested with a real microphone and Whisper, the numbered badge window has never been drawn on Windows, and UIA SetFocus is untested on real apps** |
+| Smart pointer: predictive smoothing (v0.1.20) | Kalman filter behaviour and the synthetic jitter/latency benchmark against the existing One Euro filter in tests (lag 8x lower, still-hand jitter under the dead zone, overshoot bounded); live switching from Settings tested; **untested with a real webcam, so it ships off** |
+| Smart pointer Settings section (v0.1.20) | Toggle / config mapping, health messages and the Install fix (with a fake pip) unit-tested; a Tk test of the section exists but needs Xvfb, which the build sandbox did not have this time and the CI test job does not start, so **the Settings section has not been rendered** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

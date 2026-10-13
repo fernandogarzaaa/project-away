@@ -895,3 +895,43 @@ def test_spatial_index_keeps_the_per_frame_magnet_cheap_on_a_huge_page() -> None
         full = sorted((t.distance(x, y), t.width * t.height, t.name) for t in snap.targets if t.distance(x, y) <= 40)
         fast = [(d, t.width * t.height, t.name) for d, t in snap.near(float(x), float(y), 40)]
         assert sorted(fast) == full
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") and __import__("os").environ.get("DISPLAY")),
+    reason="needs an X display (Xvfb)",
+)
+def test_settings_window_shows_the_three_switches_and_they_work(tmp_path: Any) -> None:
+    tk = pytest.importorskip("tkinter")
+    from away.app import settings_gui as G
+
+    try:
+        root = tk.Tk()
+    except Exception as exc:  # pragma: no cover - no Tk
+        pytest.skip(f"Tk unavailable: {exc}")
+    try:
+        w = G.SettingsWindow(root, G.SettingsModel(path=tmp_path / "config.yaml"))
+        root.update()
+
+        def walk(widget: Any) -> list[Any]:
+            out = [widget]
+            for c in widget.winfo_children():
+                out += walk(c)
+            return out
+
+        frames = [x for x in walk(root) if x.winfo_class() == "TLabelframe" and x.cget("text") == "Smart pointer"]
+        assert len(frames) == 1
+        checks = {x.cget("text"): x for x in walk(frames[0]) if x.winfo_class() == "TCheckbutton"}
+        assert list(checks) == ["Snap to buttons", "Click things by saying their name", "Smoother cursor"]
+        texts = " ".join(str(x.cget("text")) for x in walk(frames[0]) if x.winfo_class() == "TLabel")
+        assert "need Windows" in texts and "Tuning tab > Advanced" in texts  # Linux: a calm, plain explanation
+        assert checks["Snap to buttons"].instate(["disabled"])  # Windows-only switches are greyed out here
+        smooth = checks["Smoother cursor"]
+        smooth.invoke()
+        assert w.m.cfg.hands.cursor.smoothing == "predictive" and w.m.dirty
+        w.m.revert()
+        w.refresh()  # Settings' own refresh drives the switch through the adapter
+        root.update()
+        assert w.m.cfg.hands.cursor.smoothing == "one_euro" and not smooth.instate(["selected"])
+    finally:
+        root.destroy()
