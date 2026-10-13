@@ -93,7 +93,9 @@ def test_other_app_playing_sound_requires_mouth_motion() -> None:
 
 
 def test_thresholds_are_adjustable() -> None:
-    assert should_drop("It runs in the blood.", gate_info(0), 0.474, strict_confidence=0.4) != ""  # v0.1.21 rule
+    # with the strict confidence lowered, only the v0.1.21 rule is left (a longer line needs 0.45)
+    assert should_drop("It runs in the blood.", gate_info(0), 0.474, strict_confidence=0.4) == ""
+    assert should_drop("It runs in the blood.", gate_info(0), 0.44, strict_confidence=0.4) != ""
     assert should_drop("It runs in the blood.", gate_info(8), 0.474, strict_ratio=0.1) == ""
     cfg = C.AppConfig()
     assert cfg.voice.strict_motion_ratio == 0.25 and cfg.voice.strict_confidence == 0.7
@@ -742,7 +744,7 @@ def test_mcp_has_the_inbox_tool_and_resource(cfg_core) -> None:
     assert "away://inbox" in uris
     assert "inbox(action=list|read|reply)" in INSTRUCTIONS and "user.message" in INSTRUCTIONS
     a, _ = core.registry.issue("Claude", ["read"], 3600)
-    assert 'Hey Claude' in briefing(a, core.service.get_context(a), {"active": False}, "ask")
+    assert "Hey Claude" in briefing(a, core.service.get_context(a), {"active": False}, "ask")
 
 
 def test_rest_inbox_round_trip(cfg_core, monkeypatch: pytest.MonkeyPatch) -> None:
