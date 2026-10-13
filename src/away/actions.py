@@ -188,6 +188,7 @@ class Dispatcher:
         self._last_fire: dict[str, float] = {}
         self.fired: list[tuple[str, str]] = []  # (trigger_id, action) history for the GUI/tests
         self.on_fire: Callable[[str, Action], None] | None = None
+        self.on_profile: Callable[[str], None] | None = None  # the focused app switched the profile (per-app tuning)
         self.sync()
 
     # ------------------------------------------------------------ profile
@@ -202,14 +203,18 @@ class Dispatcher:
                 self.last_app = None
             name = self.bindings.profile_for_app(self.last_app)
             if name != self._profile:
-                self._profile = name
-                self.sync()
+                self._switch_profile(name)
         elif self.active_app is None:
             name = self.bindings.profile_for_app(None)
             if name != self._profile:
-                self._profile = name
-                self.sync()
+                self._switch_profile(name)
         return self._profile
+
+    def _switch_profile(self, name: str) -> None:
+        self._profile = name
+        self.sync()
+        if self.on_profile is not None:
+            self.on_profile(name)
 
     def set_bindings(self, bindings: BindingsConfig) -> None:
         self.bindings = bindings

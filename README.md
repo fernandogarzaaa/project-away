@@ -264,7 +264,8 @@ hands:
 `default` holds the full map. Any other profile names the apps (process names, case-insensitive,
 `.exe` optional) it applies to and overrides only the triggers it lists; everything else falls through
 to `default`. `active_profile: auto` switches profile with the focused app (Linux needs `xdotool`);
-`away profile use chrome` pins one.
+`away profile use chrome` pins one. A profile can also carry its own hand and face `tuning:` (Settings →
+Tuning → Save as profile..., see [The Tuning tab](#the-tuning-tab)).
 
 ### CLI
 
@@ -292,6 +293,59 @@ Invalid configs fail with every problem listed and its YAML path, e.g.
 
 Every Settings tab scrolls (scroll bar or mouse wheel over the tab); the Save / Reset / Import / Export /
 Close bar and the status line below it stay visible at any window size (v0.1.10).
+
+#### The Tuning tab
+
+**Settings → Tuning** groups every slider by area in collapsible sections: **Cursor, Clicks, Scroll, Gestures,
+Face, Head & eyes, Voice, Other** (a section with nothing in it is hidden). Each slider has a plain-language
+name, a grey line saying what raising or lowering it does, its current value with units (`0.32 palm`,
+`800 ms`, `2.2×`) and a **↺** button that puts just that slider back to its default (greyed out while it is at
+the default). Each section has **Reset section**.
+
+- **Presets: Precise / Balanced / Fast.** Balanced is the shipped defaults. Precise is a slower, steadier
+  pointer with a tighter pinch and more smoothing; Fast is a quicker pointer, less smoothing and an easier
+  pinch. The line under the buttons says which preset your values match ("custom" once you move a slider).
+- **Sensitivity** (master slider): scales cursor speed, acceleration, the hold-still zone and the pinch
+  thresholds together around their defaults (the middle = defaults; right = up to 2× speed, half the dead zone,
+  a 25 % looser pinch; left = the opposite). `pinch_off` moves with `pinch_on`, so the click hysteresis is kept.
+  It shows "mixed" once one of those sliders was moved on its own.
+- **Undo** reverts the last change (a stack of 100 steps; one slider drag or one preset is one step).
+- **Save as profile...** keeps your hand and face tuning (whatever differs from the defaults) in a per-app
+  profile, new or existing, under `tuning:` in that profile. While that app is focused the app uses those
+  values; everywhere else it uses the global ones. Voice, camera and app-wide settings stay global. Click
+  **Save** to write it to the config file. YAML:
+
+  ```yaml
+  bindings:
+    profiles:
+      chrome:
+        apps: [chrome]
+        tuning: {hands.cursor.gain: 3.0, hands.gestures.pinch_on: 0.36}
+  ```
+
+- **Live view: why did a gesture (not) fire?** Start it and the tab borrows the camera from the running app
+  (like the Test gesture tab; it is handed back when you stop or close the window), draws your hand skeleton
+  (pointer in blue, the helper hand in grey) and shows live gauges against their thresholds (the red mark):
+  **pinch distance** vs `pinch_on`, **thumb fold** vs `autoscroll_thumb_fold`, **index finger out** (fingers
+  count as out above 1.1; how many of four are up) and **fingertip to palm** vs `palm_scroll.depth_threshold`
+  (needs both hands). A gauge turns green when its condition is met, so you can see which part of a gesture
+  was missing. Moving a slider moves the red mark at once.
+- **Auto-tune a gesture** (Pinch click, Auto-scroll thumb fold, Palm scroll depth): press Start, do the
+  gesture 5 times when asked (2 s each, with a countdown), then do "something else" 5 times (for the pinch:
+  point and move without pinching; for the thumb: an open palm with the thumb out; for palm scroll: hover the
+  fingertip just above the palm). For each try the most gesture-like moment is taken (10th percentile, so one
+  bad frame does not count) and the threshold that best separates the two sets is suggested (best balanced
+  accuracy, the middle of the widest gap). You see before → after and whether the two sets overlapped;
+  **Apply** sets it (undoable; for the pinch, `pinch_off` moves by the same amount) and saves the 10 tries as
+  labelled clips in your recordings folder (`away record` format with a shared `session_id`, labels
+  `pinch_click`/`move`, `four_finger_scroll`/`palm_clutch`, `palm_scroll`/`move`) so `away calibrate` can use
+  them for your personal classifier. Note that `four_finger_scroll` and `palm_scroll` become extra classes of
+  the temporal model the next time you calibrate.
+
+New tunables added to `away.config.tunable_ranges` appear in the tab automatically: an entry in
+`away.app.tunables.TUNABLE_META` gives the section, title, help line and unit; without one the section comes
+from the setting's name (`head`, `gaze`, `eye`, `auto_center` → Head & eyes; `hands.cursor.` → Cursor;
+`voice.` → Voice...; anything else → Other).
 
 Sliders in the Settings window, or in YAML: `hands.cursor.gain` (sensitivity), `dead_zone`,
 `acceleration`, One Euro `min_cutoff` / `beta` / `d_cutoff`; `hands.gestures.pinch_on` / `pinch_off`
@@ -751,6 +805,7 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Windows `.exe` installer, macOS `.dmg` | **CI-built and smoke-tested on tag only; untested on real hardware** |
 | Auto-update (`away update`, tray item) | Version compare, asset choice, SHA-256 verify, command lines and AppImage replace unit-tested with no network (`tests/test_updater.py`); real installs on each OS **untested** |
 | iPhone face source (Live Link Face) | Parser, listener, auto fallback and CLI unit-tested with synthetic packets and a UDP loopback; **untested with a real iPhone** |
+| Settings → Tuning (sections, presets, master sensitivity, undo, per-app tuning, live gauges, auto-tune) | Grouping, presets, sensitivity mapping, threshold selection, undo, per-app tuning (parse, validate, live switch in the pipeline), the auto-tune session, clip saving and the camera worker unit-tested with fake frames (`tests/test_tuning_tab.py`, `tests/test_autotune.py`); the tab itself is smoke-tested under Xvfb; **live view and auto-tune untested with a real camera** |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
 | Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
 

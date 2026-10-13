@@ -40,6 +40,9 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
     # v0.1.16
     "autoscroll": (["src/away/hands/autoscroll.py"], ["tests/test_v0116_fixes.py", "tests/test_v019_features.py"]),
     "crashlog": (["src/away/app/crashlog.py", "src/away/app/uiqueue.py"], ["tests/test_v0116_fixes.py"]),
+    # Settings > Tuning redesign
+    "tunables": (["src/away/app/tunables.py"], ["tests/test_tuning_tab.py"]),
+    "autotune": (["src/away/hands/autotune.py", "src/away/app/tuning_live.py"], ["tests/test_autotune.py"]),
 }
 
 

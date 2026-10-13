@@ -8,6 +8,7 @@ hotkeys and Wi-Fi threads around it.
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import logging
 import sys
@@ -21,6 +22,7 @@ import numpy as np
 
 from away import paths
 from away.actions import ActionExecutor, CustomGestureDetector, Dispatcher, hotkey_map
+from away.app.tunables import profile_tuned
 from away.bindings import Action
 from away.config import AppConfig
 from away.control.mouse import MouseBackend, MouseController, RecordingBackend
@@ -119,6 +121,11 @@ class Pipeline:
             cfg.bindings, self.executor, self.gestures, active_app=active_app, paused=self.output_paused
         )
         self.dispatcher.on_fire = self._on_fire
+        self._base_cfg = copy.deepcopy(cfg)  # the global tunables, before any per-app profile tuning
+        self.dispatcher.on_profile = self._on_profile
+        first = self.dispatcher._profile
+        if cfg.bindings.profiles[first].tuning:  # a pinned profile with its own tuning
+            self.apply_config(profile_tuned(self._base_cfg, first), base=False)
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
 
     @property
@@ -129,6 +136,10 @@ class Pipeline:
     @hand_prefer.setter
     def hand_prefer(self, value: str) -> None:
         self.hand_mode = value
+
+    def _on_profile(self, name: str) -> None:
+        """The focused app picked another bindings profile: apply its tuning (or go back to the global values)."""
+        self.apply_config(profile_tuned(self._base_cfg, name), base=False)
 
     def _on_fire(self, trig: str, act: Action) -> None:
         self.bus.publish("action.fired", {"trigger": trig, "action": str(act)})
@@ -214,7 +225,14 @@ class Pipeline:
         self.bus.publish("hands.roles", {"mode": arg})
 
     # live reload of bindings + tunables (settings GUI / CLI edits) ------------
-    def apply_config(self, cfg: AppConfig) -> None:
+    def apply_config(self, cfg: AppConfig, *, base: bool = True) -> None:
+        """Take over a (re)loaded config. ``base``: it is the global config (the file); the focused app's per-app
+        profile ``tuning`` is layered on top. ``base=False``: an already layered copy (a profile switch)."""
+        if base:
+            self._base_cfg = copy.deepcopy(cfg)
+            prof = cfg.bindings.profile_for_app(self.dispatcher.last_app)
+            if cfg.bindings.profiles[prof].tuning:
+                cfg = profile_tuned(cfg, prof)
         for src, dst in ((cfg.hands.gestures, self.cfg.hands.gestures), (cfg.hands.cursor, self.cfg.hands.cursor)):
             for k, v in vars(src).items():
                 setattr(dst, k, v)
