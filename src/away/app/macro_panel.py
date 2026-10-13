@@ -508,7 +508,7 @@ class ShortcutsTab:  # pragma: no cover - widgets; needs a display
         keep = self.selected()
         self.tree.delete(*self.tree.get_children())
         for r in self.m.rows():
-            title = r.title + ("  🔒" if r.sensitive else "")
+            title = r.title + ("  (private: types text)" if r.sensitive else "")
             self.tree.insert("", "end", iid=r.name, values=(title, r.runs_when, r.steps))
         if keep and self.tree.exists(keep):
             self.tree.selection_set(keep)
@@ -599,7 +599,8 @@ class ShortcutsTab:  # pragma: no cover - widgets; needs a display
         row = 0
         name_var = tk.StringVar(value=self.m.suggested_title())
         if rename is None:
-            ttk.Label(body, text=f"Recorded {len(draft.steps)} steps. Name your shortcut:").grid(
+            n = len(draft.steps)
+            ttk.Label(body, text=f"Recorded {n} step{'s' if n != 1 else ''}. Name your shortcut:").grid(
                 row=row, column=0, columnspan=2, sticky="w"
             )
             row += 1
