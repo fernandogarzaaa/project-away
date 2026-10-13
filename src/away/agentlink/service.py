@@ -128,8 +128,13 @@ class Service:
         record_header: Callable[[], dict[str, Any]] | None = None,
         events: EventHub | None = None,
         watching: Callable[[str, bool], None] = lambda _name, _on: None,
+        monitors: Callable[[], Any] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
+        # v0.1.21: the monitor layout (away.control.monitors Monitor objects), for get_screen's monitor/region; None:
+        # the system's (one display the size of the screenshot when it cannot be read)
+        self.monitors = monitors
+        self._live_views: dict[str, dict[str, Any]] = {}  # agent id -> live screen view options
         self.registry = registry
         self.telemetry = telemetry
         self.prompts = prompts
@@ -407,21 +412,72 @@ class Service:
         self.events.publish("look.taken", {"agent": agent.name})
         return jpeg, {"camera": camera or "primary", "scale": scale}
 
-    def get_screen(self, agent: Agent, elements: bool = False, quiet: bool = False) -> tuple[bytes, dict[str, Any]]:
-        """One low-resolution screenshot (+ focused window and optionally the UI element tree). Needs "See my screen
-        when I allow"; flashes an indicator each time (``quiet`` is only used by the live view, which keeps a
-        permanent indicator on screen instead)."""
+    def _displays(self, image_size: tuple[int, int]) -> list[Any]:
+        from away.agentlink import screenshot as shot
+
+        mons: Any = None
+        try:
+            if self.monitors is not None:
+                mons = self.monitors()
+            else:
+                from away.control.monitors import enumerate_monitors
+
+                mons = enumerate_monitors().monitors
+        except Exception:
+            mons = None
+        ds = shot.displays(list(mons or []))
+        if not ds:
+            ds = [shot.Display(1, 0, 0, int(image_size[0]), int(image_size[1]), True)]
+        return ds
+
+    def get_screen(
+        self,
+        agent: Agent,
+        elements: bool = False,
+        quiet: bool = False,
+        scale: float | None = None,
+        monitor: int | None = None,
+        region: Any = None,
+    ) -> tuple[bytes, dict[str, Any]]:
+        """A screenshot (+ the focused window and optionally the UI element tree). Needs "See my screen when I
+        allow"; flashes an indicator each time (``quiet`` is only used by the live view, which keeps a permanent
+        indicator on screen instead).
+
+        v0.1.21: ``scale`` 0.1-1.0 (default 0.5), ``monitor`` 1..N (one display) or ``region`` {x, y, width,
+        height} in screen coordinates (zoom in); the longest side is capped at 2560 px (1600 for the live view).
+        The metadata lists the monitors and the area/scale used: orient with a wide shot, then zoom."""
+        from away.agentlink import screenshot as shot
+
         self.require(agent, perms.SCREEN)
+        live = quiet and scale is None and monitor is None and region in (None, "", {})
+        if live:
+            opts = self._live_views.get(agent.id, {})
+            scale, monitor, region = opts.get("scale"), opts.get("monitor"), opts.get("region")
         img = self.screen_grab()
         if img is None:
             raise NotAvailable("could not take a screenshot on this system")
-        from away.agentlink.desktop import to_jpeg
-
+        size = tuple(getattr(img, "size", None) or (img.shape[1], img.shape[0]))
+        ds = self._displays((int(size[0]), int(size[1])))
+        try:
+            p = shot.plan(
+                ds,
+                (int(size[0]), int(size[1])),
+                scale=scale,
+                monitor=monitor,
+                region=region,
+                max_side=shot.LIVE_MAX_SIDE if quiet else shot.MAX_SIDE,
+                default_scale=shot.LIVE_SCALE if quiet else shot.DEFAULT_SCALE,
+            )
+        except shot.ScreenRequestError as exc:
+            raise ValueError(str(exc)) from None
         if not quiet:
             self._flash(f"{agent.name} looked at your screen")
-        jpeg, scale = to_jpeg(img, int(self._s("screen_max_width", 960)), 55)
-        self.control.scales[agent.id] = scale
-        meta: dict[str, Any] = {"scale": scale, "size": list(getattr(img, "size", (0, 0))), "window": None}
+        jpeg = shot.render(img, p)
+        self.control.scales[agent.id] = p.scale
+        self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
+        meta: dict[str, Any] = shot.meta(p, ds, len(jpeg))
+        meta["size"] = [int(size[0]), int(size[1])]
+        meta["window"] = None
         try:
             meta["window"] = self.foreground()
         except Exception:
@@ -433,19 +489,43 @@ class Service:
             else:
                 meta["elements"] = None
                 meta["elements_note"] = getattr(self.uia, "reason", "not available")
-        meta["note"] = "image coordinates / scale = screen coordinates (or pass from_image=true to actions)"
+        meta["note"] = (
+            "Orient with a wide shot (scale 0.3-0.5), then zoom with monitor=N or region={x,y,width,height} "
+            "(screen coordinates). " + meta.pop("to_screen")
+        )
         return jpeg, meta
 
-    def screen_watch(self, agent: Agent, on: bool = True) -> dict[str, Any]:
-        """The live screen view started/stopped: a permanent on-screen badge shows while anyone is watching."""
+    def screen_watch(
+        self,
+        agent: Agent,
+        on: bool = True,
+        scale: float | None = None,
+        monitor: int | None = None,
+        region: Any = None,
+    ) -> dict[str, Any]:
+        """The live screen view started/stopped: a permanent on-screen badge shows while anyone is watching.
+        v0.1.21: ``scale`` / ``monitor`` / ``region`` choose what the live view shows (same as get_screen)."""
+        from away.agentlink import screenshot as shot
+
         self.require(agent, perms.SCREEN)
         if on:
+            opts: dict[str, Any] = {}
+            if scale is not None:
+                opts["scale"] = shot.parse_scale(scale)
+            if monitor not in (None, "", 0):
+                opts["monitor"] = int(monitor)  # type: ignore[arg-type]
+            if region not in (None, "", {}):
+                r = shot.parse_region(region)
+                opts["region"] = list(r) if r else None
+            if opts or agent.id not in self._live_views:
+                self._live_views[agent.id] = opts
             self._watchers.add(agent.id)
         else:
             self._watchers.discard(agent.id)
+            self._live_views.pop(agent.id, None)
         with contextlib.suppress(Exception):
             self.watching(agent.name if self._watchers else "", bool(self._watchers))
-        return {"watching": bool(self._watchers)}
+        return {"watching": bool(self._watchers), "view": self._live_views.get(agent.id, {})}
 
     def _flash(self, text: str) -> None:
         with contextlib.suppress(Exception):

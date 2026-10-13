@@ -30,6 +30,9 @@ from typing import Any
 from away.agentlink import perms
 from away.agentlink.auth import Agent, AgentRegistry, Pairing, clean_name, same
 from away.agentlink.control import ControlRefused
+from away.agentlink.groups import GROUPS
+from away.agentlink.groups import describe as describe_groups
+from away.agentlink.groups import resolve as resolve_group
 from away.agentlink.jobs import JobLookupError
 from away.agentlink.ratelimit import FailureLockout, TokenBucket
 from away.agentlink.registry import ChangeError
@@ -73,8 +76,13 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "list_files": ("json", "GET", "/v1/files", "Downloadable bundles/recordings/logs (diagnose)"),
     "read_file": ("bytes", "GET", "/v1/file", "Download ?rel=diagnostics/... (diagnose)"),
     "look": ("image", "GET", "/v1/look", "One camera still (snapshots)"),
-    "get_screen": ("image", "GET", "/v1/screen", "One screenshot ?elements= (screen)"),
-    "screen_watch": ("json", "POST", "/v1/screen/watch", "Live view indicator {on} (screen)"),
+    "get_screen": (
+        "image",
+        "GET",
+        "/v1/screen",
+        "Screenshot ?scale=0.1-1&monitor=N&region=x,y,w,h&elements= (screen); X-Away-Meta lists the monitors",
+    ),
+    "screen_watch": ("json", "POST", "/v1/screen/watch", "Live view {on, scale, monitor, region} (screen)"),
     "last_capture": ("image", "GET", "/v1/capture/latest", "The picture the person sent you"),
     "ask_user": ("json", "POST", "/v1/ask", "Ask the person {question, options, timeout_s, urgency}"),
     "notify_user": ("json", "POST", "/v1/notify", "Toast {text, level, speak}"),
@@ -94,9 +102,25 @@ def friendly_name(client_name: Any) -> str:
     return FRIENDLY_CLIENTS.get(raw.lower(), clean_name(raw))
 
 
+def resolve_tool(tool: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A service method name (``change_settings``) as is, or a v0.1.21 group (``settings`` + ``action``) resolved
+    to its method; KeyError for neither."""
+    if tool in TOOLS:
+        return tool, kwargs
+    if tool in GROUPS:
+        return resolve_group(tool, kwargs)
+    raise KeyError(f"unknown tool {tool!r}")
+
+
+def kind_of(tool: str, kwargs: dict[str, Any]) -> str:
+    try:
+        return TOOLS[resolve_tool(tool, kwargs)[0]][0]
+    except (KeyError, ValueError):
+        return "json"
+
+
 def dispatch(service: Service, agent: Agent, tool: str, kwargs: dict[str, Any]) -> Any:
-    if tool not in TOOLS:
-        raise KeyError(f"unknown tool {tool!r}")
+    tool, kwargs = resolve_tool(tool, kwargs)
     fn = getattr(service, tool)
     clean = {k: v for k, v in kwargs.items() if not k.startswith("_")}
     return fn(agent, **clean)
@@ -393,12 +417,14 @@ def openapi() -> dict[str, Any]:
         "/v1/rpc/{tool}": {
             "post": {
                 "summary": "Call any tool with JSON arguments",
+                "description": "Every service method below by name, or a tool group with an `action` (the MCP "
+                "tools since v0.1.21): " + "; ".join(describe_groups()),
                 "parameters": [
                     {
                         "name": "tool",
                         "in": "path",
                         "required": True,
-                        "schema": {"type": "string", "enum": sorted(TOOLS)},
+                        "schema": {"type": "string", "enum": sorted([*TOOLS, *GROUPS])},
                     }
                 ],
                 "requestBody": _body({}),
@@ -472,7 +498,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         except Exception as exc:
             status, msg = error_status(exc)
             return _json({"error": msg}, status)
-        kind = TOOLS[tool][0]
+        kind = kind_of(tool, kwargs)
         if kind == "image" and request.url.path != f"/v1/rpc/{tool}":
             raw, meta = result
             return Response(raw, media_type="image/jpeg", headers={"X-Away-Meta": json.dumps(meta, default=str)[:4000]})
@@ -520,7 +546,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
 
     async def rpc(request: Request) -> Any:
         tool = request.path_params["tool"]
-        if tool not in TOOLS:
+        if tool not in TOOLS and tool not in GROUPS:
             return _json({"error": f"unknown tool {tool!r}"}, 404)
         try:
             kwargs = await body_args(request)

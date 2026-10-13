@@ -130,6 +130,7 @@ def build_core(
     notify_fallback: Callable[[str, str], bool] | None = None,
     record_header: Callable[[], dict[str, Any]] | None = None,
     job_command: Callable[[list[str]], list[str]] | None = None,
+    monitors: Callable[[], Any] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> Core:
     from away import config as cfgmod
@@ -197,6 +198,7 @@ def build_core(
         record_header=record_header,
         events=events,
         watching=watching,
+        monitors=monitors,
     )
     return Core(base, registry, telemetry, recorder, prompts, changes, prefs, control, jobs, events, service)
 
@@ -253,6 +255,7 @@ class AgentLinkHost:
             uia=hooks.uia,
             tts=_tts(lambda: getattr(self.cfg(), "speech", None)),
             notify_fallback=self._tray_notice,
+            monitors=self._monitors if app is not None else None,
             record_header=self._record_header,
         )
         s = self.cfg().agent_link
@@ -378,6 +381,16 @@ class AgentLinkHost:
             with contextlib.suppress(Exception):
                 self.ui.flash(text)
         self._notice("Project Away", text)
+
+    def _monitors(self) -> Any:
+        """The app's monitor layout (kept current by its MonitorWatcher) for get_screen's monitor/region."""
+        lay = getattr(self.app, "monitor_layout", None)
+        mons = getattr(lay, "monitors", None)
+        if mons:
+            return mons
+        from away.control.monitors import enumerate_monitors
+
+        return enumerate_monitors().monitors
 
     def _tray_notice(self, title: str, text: str) -> bool:
         """v0.1.21: when the message window cannot show, the tray's notification balloon (Windows) / desktop

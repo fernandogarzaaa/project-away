@@ -184,21 +184,24 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
     async def body(s, init, notes):
         assert "bridge" in (init.instructions or "")
         names = {t.name for t in (await s.list_tools()).tools}
-        assert {
+        # v0.1.21: 15 grouped tools (was 37); the old names still work on REST and /v1/rpc
+        assert names == {
             "get_status",
             "get_context",
-            "ask_user",
-            "notify_user",
+            "events",
+            "settings",
+            "preferences",
+            "diagnostics",
             "look",
             "get_screen",
-            "set_config",
-            "run_diagnose",
-            "record_session",
-            "get_bundle",
-            "click",
-            "type_text",
-            "request_control",
-        } <= names
+            "ask_user",
+            "notify_user",
+            "control",
+            "pointer",
+            "keyboard",
+            "open",
+            "disconnect",
+        }
         ctx = json.loads((await s.call_tool("get_context", {})).content[0].text)
         assert "attention" in ctx
         denied = await s.call_tool("look", {})
@@ -256,7 +259,7 @@ def test_events_subscription_pushes_updates(live) -> None:
             if any("resources/updated" in str(getattr(getattr(n, "root", n), "method", "")) for n in notes):
                 break
             await asyncio.sleep(0.1)
-        res = await s.call_tool("wait_for_event", {"since": 0, "timeout_s": 1})
+        res = await s.call_tool("events", {"action": "wait", "since": 0, "timeout_s": 1})
         return notes, json.loads(res.content[0].text)
 
     notes, events = asyncio.run(_mcp(f"{live['base']}/mcp", {"Authorization": f"Bearer {tok}"}, body))
@@ -297,7 +300,7 @@ def test_stdio_bridge_like_claude_desktop(tmp_path: Path) -> None:
                 raw = (await s.call_tool("get_status", {})).content[0].text
                 assert raw.startswith("{"), raw
                 st = json.loads(raw)
-                prefs = await s.call_tool("add_preference", {"text": "slower cursor please"})
+                prefs = await s.call_tool("preferences", {"action": "add", "text": "slower cursor please"})
                 return init, st, prefs
 
         init, st, prefs = asyncio.run(asyncio.wait_for(run(), 90))
