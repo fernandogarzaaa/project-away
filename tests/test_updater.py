@@ -960,7 +960,7 @@ def test_version_parsing_orders_0_1_10_after_0_1_9() -> None:
     assert U.is_newer("0.1.10", "0.1.9") and not U.is_newer("0.1.9", "0.1.10")
     assert U.parse_version("v0.1.10") > U.parse_version("0.1.9") > U.parse_version("0.1.8")  # type: ignore[operator]
     assert max(["0.1.8", "0.1.10", "0.1.9"], key=lambda v: U.parse_version(v) or ()) == "0.1.10"
-    assert __version__ == "0.1.21"
+    assert __version__ == "0.1.22"
 
 
 def test_batch_helper_with_the_users_real_paths() -> None:
