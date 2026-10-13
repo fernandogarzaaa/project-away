@@ -117,7 +117,13 @@ Tips for smooth control:
 Voice is always listening by default. Just talk, and your words are typed wherever the text cursor is.
 
 - **Punctuation:** say "comma", "period", "question mark", "new line", "new paragraph".
-- **Mistake?** Say **"scratch that"** to remove the sentence you just said.
+- **Mistake?** Say **"scratch that"** to remove the sentence you just said, or **"no wait, make it Tuesday"** to fix the last word.
+- **Smart cleanup (optional):** Settings > Voice & input > **Smart cleanup**. Tick it, press **Download** once
+  (about 0.5-1.1 GB, shown on the button) and your dictation gets proper punctuation, and is casual in chat apps
+  and tidy in email. If it is ever slow, the basic cleanup is typed instead, so you never wait.
+- **My words:** add names and terms to the **My words** list in the same tab (or say **"add Jonie to my
+  dictionary"**). Right after a mistake you can say **"correct Jonnie to Jonie"**. Words you fix by hand are
+  learned too.
 - **Commands:** "click", "double click", "right click", "scroll up", "scroll down", "go back", "go forward", "open browser", "pause gestures", "resume gestures", "stop listening", "start listening", "use left hand", "use right hand", "use either hand", "center" (cursor to the middle of this screen), "look here" (cursor to where you're looking, after gaze calibration).
 - **Shortcuts:** `Ctrl+Alt+Space` pauses/resumes listening, `Ctrl+Alt+M` mutes the mic, `Ctrl+Alt+E` lets you edit selected text by voice.
 - **Tray icon colour:** green = listening, amber = not listening, red = mic off, blue = recording, grey = paused.
@@ -1003,6 +1009,78 @@ comfort:
   break_every_min: 30.0
   break_reset_s: 120.0
 ```
+## Smart cleanup and My words
+
+v0.1.20. Everything runs on your PC; nothing is uploaded.
+
+**Smart cleanup** (`voice.cleanup`). After Whisper, every dictation goes through three steps:
+
+1. **Rules** (always on unless `mode: off`): fillers ("um", "uh"), stutters ("the the"), spoken edits
+   ("scratch that"; "no wait, make it Tuesday" replaces the last weekday, month or time; "the total is 50 no
+   wait 60"), spoken punctuation, numbers as digits, a question mark for sentences that start like a question.
+2. **The focused app decides the tone.** The process name and window title are mapped to chat (Slack, Discord,
+   Teams, WhatsApp...), email (Outlook, Thunderbird, a Gmail tab...), docs (Word, Notion, Google Docs...), code
+   editors (VS Code, JetBrains, Visual Studio, vim...) and terminals. Chat is casual (a one-line message loses its
+   period), email and documents are formal, code editors and terminals get the text verbatim (no casing, no
+   period, and the model is never used there). When the text before the cursor can be read (Windows UI
+   Automation, read-only, no keystrokes), a dictation that continues a sentence is not capitalised.
+3. **Optional local model** (`mode: llm`, the **Smart cleanup** switch): a small instruct model polishes the rule
+   output. It only gets `timeout_ms` (default 1500 ms); slower, failing or missing engines mean the rule output
+   is typed. A guard throws the model's answer away when it adds words you did not say (beyond a few function
+   words and your dictionary), drops much of the text, changes it too much or adds a preamble, so the model
+   cannot answer questions in your text or invent content.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `voice.cleanup.mode` | `rules` | `off` (Whisper's text as heard) \| `rules` \| `llm` |
+| `voice.cleanup.backend` | `llama_cpp` | `llama_cpp` (built in, needs `pip install "project-away[cleanup]"`) \| `ollama` (a local Ollama server) \| `openai` (any OpenAI-compatible server from `AWAY_LLM_BASE_URL` / `AWAY_LLM_MODEL` / `AWAY_LLM_API_KEY`) |
+| `voice.cleanup.model` | `auto` | `auto` (the downloaded cleanup model; the standard one with an NVIDIA GPU, the light one otherwise), `qwen2.5-1.5b`, `qwen2.5-0.5b`, a path to your own `.gguf`, or the server's model name (Ollama: `qwen2.5:1.5b`) |
+| `voice.cleanup.timeout_ms` | `1500` | budget for the model; slower = the rule output is typed |
+| `voice.cleanup.tones` | `{}` | per-app tone, keyed by process name or bindings profile name: `{slack.exe: formal, chrome: casual}`; tones `auto casual neutral formal verbatim code` |
+| `voice.cleanup.context` | `true` | read the text before the cursor (UI Automation; needs `comtypes` on Windows) |
+| `voice.cleanup.context_clipboard` | `false` | also pass the selected text, read with a marker + Ctrl+C; your clipboard is restored afterwards; never in terminals/editors |
+| `voice.cleanup.gpu_layers` | `-1` | llama.cpp layers on the GPU (needs a CUDA/Metal build of llama-cpp-python) |
+| `voice.dictionary.enabled` | `true` | the personal dictionary |
+| `voice.dictionary.file` | none | default `dictionary.json` in the config folder |
+| `voice.dictionary.learn` | `true` | learn from your corrections of just-typed text (Windows, apps with UI Automation text) |
+| `voice.dictionary.learn_after` | `2` | a fix seen in your edits counts after this many times |
+| `voice.dictionary.watch_seconds` | `20` | how long after typing the field is watched for your fix |
+
+The old `voice.llm_cleanup: true` still works and means `mode: llm` with the `openai` backend.
+
+**Models** (Settings > Voice & input > Smart cleanup > Download, or Settings > Performance > Models). Downloaded
+from Hugging Face pinned to a commit, SHA-256 checked, resumable, never bundled:
+
+| Model | File | Size | License |
+|---|---|---|---|
+| Qwen2.5-1.5B-Instruct Q4_K_M ("standard", picked with an NVIDIA GPU) | `qwen2.5-1.5b-instruct-q4_k_m.gguf` | 1.12 GB | Apache-2.0 |
+| Qwen2.5-0.5B-Instruct Q4_K_M ("light", picked without one) | `qwen2.5-0.5b-instruct-q4_k_m.gguf` | 0.49 GB | Apache-2.0 |
+
+Both licenses were checked on the model cards and in the GGUF repositories' `LICENSE` files. Qwen2.5-3B is
+deliberately not offered: it uses the Qwen Research license (non-commercial).
+
+**Engine.** `llama-cpp-python` is an optional extra (`pip install "project-away[cleanup]"`); it is not in `[all]`
+and therefore **not in the one-click installers yet** (it compiles llama.cpp where no wheel exists). In an
+installer build the Smart cleanup switch says so and offers **Learn how**; you can use Ollama instead
+(`ollama pull qwen2.5:1.5b`, then Advanced > Engine > Ollama). For an NVIDIA GPU install a CUDA wheel, e.g.
+`pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`.
+
+**Measured latency** (`scripts/bench_cleanup.py`, 8 sample sentences, CPU-only llama-cpp-python 0.3.36 on 2
+shared ARM Neoverse cores, the build sandbox, which other jobs were loading at the time): light model median
+1.4 s (0.8-3.0 s) on a lightly loaded run and 2.4 s (1.2-5.6 s) at load average 7.6, model text accepted 8 of 8
+times (7 of 8 before "stand-up"/"standup" were treated as one word); standard model median 3.6 s (2.1-10.4 s),
+8 of 8. On such a CPU the default 1500 ms budget means many
+sentences fall back to the rule output. **Not measured on a GPU** (expected to be far faster on an RTX 2060, but
+unverified); run the script on your PC to see your numbers.
+
+**My words** (`voice.dictionary`). A word list stored locally as JSON. Words go to Whisper as vocabulary
+(`initial_prompt` and `hotwords`) and are re-cased after it ("jonie" -> "Jonie", except names that are also
+everyday words such as Will or May); fixes (`Jonnie -> Jonie`) are replaced after Whisper. Ways to add them: the
+**My words** list (Add / Remove / Import / Export as `.txt` or `.json`), the voice commands "add X to my
+dictionary", "remove X from my dictionary", "correct X to Y" (only when X was dictated in the last few minutes,
+so prose like "correct the plan to match the budget" is still typed) and "spell X as J O N I E", and your own
+corrections: on Windows the focused field is re-read for `watch_seconds` after a dictation, and a small word
+substitution you make in that span is learned after it was seen `learn_after` times.
 
 ## Hardware auto-tuning and GPU
 
@@ -1133,7 +1211,11 @@ did (it watches for the app for up to 10 s first, so there is never a second cop
 | Arm fatigue + break reminders (v0.1.20) | Time-only, sinking-hand, tremor and combined triggers, a short dip vs. a real rest, slow drift not counted as tremor, camera stalls, switch to the head pointer and back (also across a config reload), no switch without face tracking, tip cooldown and break timing tested with synthetic hand paths and noise; **not validated on real people**: the thresholds are a starting point, MediaPipe landmark jitter on a real webcam may dominate the tremor sign, and the head-pointer hand-over has not been felt on real hardware |
 | Guided first run, Settings → Getting started, tray items (v0.1.20) | Step list, skip/back, progress dots, saved state, plug-in steps (placeholder, replacement, broken plug-ins), framing tips, the tutorial coach driven by the real gesture state machine, the camera session with a fake camera (events, preview, face sampling, hand-back, errors), friendly errors, the model download fix, `away tour --text` and the tray menu items unit-tested (`tests/test_v0120_first_run.py`); the window was walked through every step and the Settings tab rendered under Xvfb with a fake camera; **untested on a real Windows desktop and with a real webcam** (live preview speed, the 2-minute target, `ms-settings:privacy-webcam`, the auto-open on a real first start, the tray check box on Windows) |
 | AX200/AX210 + PicoScenes live capture | **Untested** |
-| Parakeet, LLM cleanup endpoint, Wayland | **Untested** |
+| Smart cleanup rules, app categories and tones, model guard, timeout fallback (v0.1.20) | Unit-tested with a mocked model (`tests/test_v0120_voice_context.py`): accepted polish, invented content rejected, 150 ms budget kept with a 600 ms model, no queueing behind a timed-out call, engine errors, code/terminal pass-through, chat/email tone, sentence continuation, the dictation session end to end; Ollama and OpenAI-compatible engines tested against a local HTTP server |
+| Smart cleanup with the real models (v0.1.20) | Both Qwen2.5 GGUF files downloaded and SHA-256 checked; run through `SmartCleaner` with CPU-only llama-cpp-python 0.3.36 on Linux aarch64 (latency above); a real-model smoke test exists but is skipped in CI (`AWAY_TEST_GGUF`); **untested on Windows, on a GPU (CUDA/Metal llama.cpp builds) and with the frozen installers (the engine is not bundled)** |
+| Personal dictionary (v0.1.20) | Word list, fixes, casing, learn-after counting, shared file between Settings and the app, import/export, voice commands, span finding and edit learning unit-tested; **the UI Automation reads (text before the cursor, field re-read for learning) are untested on a real Windows desktop**, and many apps (Chromium/Electron editors, terminals) do not expose that text, so learning from edits only works where UIA does |
+| Settings: Smart cleanup switch, Download button, My words list, collapsed Advanced (v0.1.20) | Logic unit-tested headless (`VoicePanel`); the Voice tab was rendered under Xvfb on Linux, switch toggled ("Smart cleanup needs a download (491 MB, one time)." + **Download (491 MB)** button) and Advanced expanded, and the Settings-window test passes there; **untested on a real Windows desktop** (the download button and progress bar were not run against the real Hub from the GUI) |
+| Parakeet, Wayland | **Untested** |
 
 ## Changes in v0.1.19
 

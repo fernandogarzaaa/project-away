@@ -846,7 +846,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.app.performance import asr_plan
         from away.voice.always_on import AmbientSession, ASRQueue, StreamingEndpointer, VoiceController
         from away.voice.asr import make_asr
-        from away.voice.cleanup import LLMCleaner, RuleCleaner, Vocabulary
+        from away.voice.cleanup import RuleCleaner, Vocabulary
         from away.voice.context import active_app
         from away.voice.dictation import DictationSession, MicStream
         from away.voice.output import ListSink, make_sink
@@ -855,8 +855,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         v = self.cfg.voice
         vocab = Vocabulary.load(v.vocabulary_file)
         rules = RuleCleaner(vocab, numbers_as_digits=v.numbers_as_digits, numbers_min_value=v.numbers_min_value)
-        cleaner = LLMCleaner(rules) if v.llm_cleanup else rules
         prof = self.profile
+        # v0.1.20: smart cleanup (per-app tone, optional local LLM) + personal dictionary (away.voice.voice_setup)
+        from away.voice.voice_setup import setup_voice_context
+
+        vctx = setup_voice_context(self, rules, vocab)
+        cleaner = vctx.cleaner
         try:
             model, cpu_model, slow_note = asr_plan(self.cfg, prof)
         except Exception as exc:  # hardware detection problems must not stop voice
@@ -883,7 +887,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             prof.compute_type,
             v.language,
             str(self.models_dir / f"whisper-{model}"),
-            vocab.hotwords() if v.hotwords else None,
+            vctx.hotwords() if v.hotwords else None,
             cpu_threads=prof.cpu_threads,
             beam_size=prof.beam_size,
             on_fallback=gpu_fallback,
@@ -912,7 +916,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             v.sample_rate,
             gate,
             active_app,
-            vocab.terms(),
+            vctx.terms,
             command_handler=commands,
         )
 
@@ -965,7 +969,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             bus=self.bus,
             gate=self.pipeline.gate.allow_ambient if face_gate else None,
             context=active_app,
-            vocabulary=vocab.terms(),
+            vocabulary=vctx.terms,
             wake_word=v.wake_word if v.wake_word_enabled else None,
             wake_window=v.wake_window,
             intent=v.intent,
@@ -975,6 +979,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             gate_info=lambda: self.pipeline.gate.last_explain,
         )
         self.voice = VoiceController(v.mode, dictation, ambient, self.bus)
+        vctx.attach(asr, dictation, ambient)
         if not self.cfg.app.always_on:
             self.voice.set_muted(True)
         for kind in ("dictation", "mic", "voice"):

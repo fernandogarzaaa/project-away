@@ -270,7 +270,7 @@ def test_net_runner_survives_a_broken_model(tmp_path):
 def test_models_panel_rows_consent_install_and_gaze_status(tmp_path, monkeypatch):
     cfg = C.AppConfig()
     panel = ModelsPanel(cfg, tmp_path / "config.yaml", tmp_path / "models")
-    rows = panel.rows()
+    rows = [r for r in panel.rows() if r["kind"] == "gaze"]  # v0.1.20 also lists the cleanup models
     assert [r["key"] for r in rows] == ["l2cs", "mobilegaze"]
     assert rows[1]["size"] == "5.0 MB" and rows[1]["status"] == "not installed" and rows[1]["restricted"]
     assert "Gaze360" in (panel.needs_consent("l2cs") or "")

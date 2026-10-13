@@ -46,6 +46,14 @@ CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.]?\s*", r
 _TRAILING_CORRECTION_RE = re.compile(r"[,.]?\s*\b(?:no,? wait|actually,? no)\b[,.!?]?\s*$", re.IGNORECASE)
 _SENT_END = re.compile(r"[.!?\n]")
 _NUM = re.compile(r"^\d+(?:[.:]\d+)?$")
+# "no wait, make it Tuesday": the lead-in says "replace", the rest is the replacement
+_CORR_LEAD = re.compile(r"^(?:make (?:it|that)|change (?:it|that) to|i mean|rather|instead)\s+", re.IGNORECASE)
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_MONTHS = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)  # fmt: skip
+_TIME = re.compile(r"^(?:\d{1,2}(?::\d\d)?(?:am|pm)?|noon|midnight)$", re.IGNORECASE)
 
 
 def remove_fillers(text: str) -> str:
@@ -75,15 +83,44 @@ def apply_scratch_that(text: str) -> str:
         text = (keep + " " + text[m.end() :].lstrip()).strip()
 
 
+def _same_class(a: str, b: str, clock: bool = False) -> bool:
+    """Both weekdays, both months, or both clock times ("Monday"/"Tuesday", "3pm"/"4:30"). A bare number only
+    counts as a time when the correction says am/pm (``clock``); otherwise numbers keep their own rule."""
+    if any(a in group and b in group for group in (_WEEKDAYS, _MONTHS)):
+        return True
+    if not (_TIME.match(a) and _TIME.match(b)):
+        return False
+    return clock or not (a.isdigit() or b.isdigit())
+
+
 def _correct_once(before: str, after: str) -> str:
     words = before.split()
+    after = _CORR_LEAD.sub("", after.lstrip(), count=1)
     corr = re.split(r"[.,!?\n]", after, maxsplit=1)[0].split()
     if not corr or not words:
         return (before + " " + after).strip()
     first = corr[0].lower().strip(",.")
     cut = None
+    # 0) a weekday / month / time correction replaces the last one of its kind: a lone one keeps the rest
+    #    ("on Monday at 3, no wait, Tuesday" -> "on Tuesday at 3"), a longer one restarts there
+    ampm = len(corr) == 2 and corr[1].lower().strip(",.") in ("am", "pm")
+    said = any(w.lower().strip(",.") == first for w in words)  # "30 then 40 no wait 30 again": rule 1 anchors
+    for i in range(len(words) - 1, -1, -1) if not said else range(0):
+        if _same_class(words[i].lower().strip(",."), first, ampm):
+            if len(corr) == 1 or ampm:
+                clause = re.match(r"([^.,!?\n]*)(.*)", after, re.S)
+                rest = clause.group(2) if clause else ""
+                j = i + 1
+                if ampm and j < len(words) and words[j].lower().strip(",.") in ("am", "pm"):
+                    j += 1  # "3 pm" is replaced as a whole
+                src = words[j - 1]
+                end = src[len(src.rstrip(",.")) :]  # keep the punctuation that ended the replaced words
+                fixed = " ".join([*words[:i], " ".join(corr) + end, *words[j:]])
+                return (fixed + rest).strip()
+            cut = i
+            break
     # 1) correction starts with a word we already said -> restart from its last occurrence
-    for i in range(len(words) - 1, -1, -1):
+    for i in range(len(words) - 1, -1, -1) if cut is None else range(0):
         if words[i].lower().strip(",.") == first:
             cut = i
             break
@@ -162,8 +199,14 @@ def tidy(text: str) -> str:
     return text.strip()
 
 
+_PROPER_DATES = re.compile(
+    r"(?<![\w'])(" + "|".join(d for d in (*_WEEKDAYS, *_MONTHS) if d not in ("may", "march")) + r")(?![\w'])"
+)
+
+
 def capitalize(text: str) -> str:
     text = re.sub(r"(?<![\w'])i(?=(?:'(?:m|ve|ll|d))?(?![\w']))", "I", text)
+    text = _PROPER_DATES.sub(lambda m: m.group(1).capitalize(), text)  # "tuesday" -> "Tuesday" (not may/march)
     return re.sub(r"(^|[.!?]\s+|\n\s*)([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
 
 
