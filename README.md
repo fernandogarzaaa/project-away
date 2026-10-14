@@ -2,6 +2,8 @@
 
 **The bridge between you and your AI agents, controlled by your hands, face and voice.**
 
+**Website:** [fernandogarzaaa.github.io/project-away](https://fernandogarzaaa.github.io/project-away/) · **[Download for Windows](https://github.com/fernandogarzaaa/project-away/releases/latest)**
+
 Project Away sees your gestures, notices whether you are at the screen and paying attention, and listens for your
 voice. You use that to run your PC hands-free (point to move the cursor, pinch to click, talk to type), and, new in
 v0.1.20, to work with the AI agent you already use (Claude, ChatGPT, Cursor or any other): it can ask you a quick
