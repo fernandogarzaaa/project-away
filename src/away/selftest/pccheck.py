@@ -521,14 +521,28 @@ def with_verdicts(report: dict[str, Any]) -> dict[str, Any]:
 def redact(
     report: dict[str, Any], keep_dirs: list[Path] | None = None, users: list[str] | None = None
 ) -> dict[str, Any]:
-    """The self-test redaction (tokens, user name, paths outside the app's folders) and then Agent Link's
+    """The self-test redaction (tokens, user name, paths outside the app's folders) and Agent Link's
     ``redact_text`` on every string (e-mail addresses, home folder, pairing links, secret ``key=value``)."""
     from away.agentlink.bundle import redact as al_redact
     from away.selftest.redact import redact_report
 
-    out: dict[str, Any] = al_redact(redact_report(report, keep_dirs, users))
+    # e-mail addresses first (the user-name rule would otherwise turn fern@x.com into <user>@x.com), then the
+    # self-test's path / user / token rules, then everything else Agent Link hides
+    out: dict[str, Any] = al_redact(redact_report(_emails(report), keep_dirs, users))
     out["redacted"] = True
     return out
+
+
+def _emails(v: Any) -> Any:
+    from away.agentlink.bundle import EMAIL, HIDDEN
+
+    if isinstance(v, str):
+        return EMAIL.sub(HIDDEN + "@" + HIDDEN, v)
+    if isinstance(v, dict):
+        return {k: _emails(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_emails(x) for x in v]
+    return v
 
 
 def text(report: dict[str, Any]) -> str:

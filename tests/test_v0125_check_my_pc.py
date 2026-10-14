@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -358,7 +358,7 @@ def test_recommended_window_never_shrinks() -> None:
 
 
 class _FakeListener:
-    instances: list[_FakeListener] = []
+    instances: ClassVar[list[_FakeListener]] = []
 
     def __init__(self, on_move: Any = None, on_press: Any = None) -> None:
         self.cb = on_move or on_press
