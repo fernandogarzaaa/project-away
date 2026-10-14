@@ -126,7 +126,9 @@ def test_screen_validation_each_axis():
 
 
 def slow_abs():
-    return CursorConfig(mode="absolute", active_region=(0, 0, 1, 1), dead_zone=0.0, min_cutoff=0.01, beta=0.0)
+    return CursorConfig(
+        mode="absolute", active_region=(0, 0, 1, 1), dead_zone=0.0, min_cutoff=0.01, beta=0.0, smoothing="one_euro"
+    )
 
 
 def test_reset_clears_filter():

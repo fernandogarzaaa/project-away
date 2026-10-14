@@ -2,7 +2,8 @@
 
 ``hands.cursor.smoothing``:
 
-* ``one_euro`` (default): :class:`away.hands.filters.OneEuro2D`, unchanged.
+* ``adaptive`` (default since v0.1.25): :class:`away.hands.steady.AdaptiveFilter2D`.
+* ``one_euro``: :class:`away.hands.filters.OneEuro2D`, unchanged.
 * ``predictive``: :class:`PredictiveFilter2D`, a speed-adaptive constant-velocity Kalman filter whose output is
   extrapolated ``lookahead_ms`` into the future. A webcam pipeline shows the hand roughly one frame late (exposure,
   transfer, hand landmarking); predicting that frame ahead cancels most of the lag while the Kalman filter keeps
@@ -152,6 +153,13 @@ def predictive_from_config(p: Any) -> PredictiveFilter2D:
 
 def make_cursor_filter(cfg: Any) -> CursorFilter:
     """The hand-position filter for a ``hands.cursor`` section (``smoothing`` picks it; One Euro otherwise)."""
-    if getattr(cfg, "smoothing", "one_euro") == "predictive" and getattr(cfg, "predictive", None) is not None:
+    mode = getattr(cfg, "smoothing", "one_euro")
+    if mode == "predictive" and getattr(cfg, "predictive", None) is not None:
         return predictive_from_config(cfg.predictive)
+    if mode == "adaptive":  # v0.1.25
+        from away.hands.steady import AdaptiveFilter2D
+
+        return AdaptiveFilter2D(
+            float(cfg.min_cutoff), float(getattr(cfg, "fast_cutoff", 8.0)), float(getattr(cfg, "fast_speed", 0.5))
+        )
     return OneEuro2D(cfg.min_cutoff, cfg.beta, cfg.d_cutoff)

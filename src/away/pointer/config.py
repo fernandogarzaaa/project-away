@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-SMOOTHING_MODES = ("one_euro", "predictive")
+SMOOTHING_MODES = ("adaptive", "one_euro", "predictive")
 
 
 @dataclass

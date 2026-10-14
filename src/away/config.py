@@ -69,10 +69,12 @@ class HeadConfig:
 @dataclass
 class CursorConfig:
     mode: str = "relative"  # "relative" (trackpad) or "absolute"
-    dead_zone: float = 0.004  # normalized hand units below which motion is ignored
+    # v0.1.25: slack (hand units): the hand can wobble this much without moving the cursor, and slow moves still go
+    # through smoothly; was a per-frame threshold of 0.004 that turned slow moves into 15-20 px hops
+    dead_zone: float = 0.0015
     gain: float = 2.2  # relative-mode base speed (screen widths per hand unit)
     acceleration: float = 1.6  # exponent >1 accelerates fast motion
-    min_cutoff: float = 1.0  # One Euro filter
+    min_cutoff: float = 1.0  # One Euro filter; v0.1.25: also the adaptive filter's cutoff for a still hand (Hz)
     beta: float = 0.02
     d_cutoff: float = 1.0
     active_region: tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)  # absolute-mode box
@@ -108,7 +110,14 @@ class CursorConfig:
     head_assist: str = "off"
     head: HeadConfig = field(default_factory=HeadConfig)
     # smart pointer (v0.1.20, away.pointer): one_euro | predictive (Kalman + ~1 frame lookahead); magnetic targets
-    smoothing: str = "one_euro"
+    # v0.1.25: adaptive (default; steady when still, quick when moving, the same at any frame rate) | one_euro |
+    # predictive
+    smoothing: str = "adaptive"
+    fast_cutoff: float = 8.0  # adaptive: cutoff (Hz) once the hand moves at fast_speed or faster
+    fast_speed: float = 0.5  # adaptive: hand speed (frame widths / s) that counts as a fast move
+    hold_still: bool = True  # lock the cursor while the hand is held still; it unlocks as soon as you move
+    hold_radius: float = 0.006  # hand units: moving further than this unlocks (staying within half of it locks)
+    hold_ms: int = 250  # held still this long locks the cursor
     magnet: MagnetConfig = field(default_factory=MagnetConfig)
     predictive: PredictiveConfig = field(default_factory=PredictiveConfig)
 
@@ -255,6 +264,9 @@ class HandsConfig:
     # settings so "Turn on" puts them back exactly. They are never opened or retried while off.
     disabled_cameras: list[CameraSpec] = field(default_factory=list)
     multicam: MultiCamConfig = field(default_factory=MultiCamConfig)
+    # v0.1.25: live tracking calibration (`away calibrate`, tray > Calibrate tracking), one entry per camera
+    # (its name or index): {"cursor": {...}, "gestures": {...}, "noise_px": ..., "fps": ..., "saved": ...}
+    calibration: dict[str, Any] = field(default_factory=dict)
 
 
 VOICE_MODES = ("always_on", "push_to_talk", "toggle")
@@ -1002,6 +1014,33 @@ def validate_tracking(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be an integer, got {val!r}")
     if gz.points_per_monitor not in (5, 9, 16):
         raise ValueError(f"gaze.points_per_monitor must be 5, 9 or 16, got {gz.points_per_monitor!r}")
+    validate_steady(cfg)
+
+
+def validate_steady(cfg: AppConfig) -> None:
+    """v0.1.25: the steadier-cursor settings and the per-camera tracking calibration."""
+    c = cfg.hands.cursor
+    if not isinstance(c.hold_still, bool):
+        raise ValueError(f"hands.cursor.hold_still must be true or false, got {c.hold_still!r}")
+    for path, val, lo, hi in (
+        ("hands.cursor.fast_cutoff", c.fast_cutoff, 0.1, 30.0),
+        ("hands.cursor.fast_speed", c.fast_speed, 0.05, 5.0),
+        ("hands.cursor.hold_radius", c.hold_radius, 0.0, 0.05),
+        ("hands.cursor.hold_ms", c.hold_ms, 0, 2000),
+    ):
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= val <= hi:
+            raise ValueError(f"{path} must be a number from {lo} to {hi}, got {val!r}")
+    cal = cfg.hands.calibration
+    if cal is None:
+        cfg.hands.calibration = cal = {}
+    if not isinstance(cal, dict):
+        raise ValueError("hands.calibration must be a mapping of camera -> calibration")
+    for cam, entry in cal.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"hands.calibration[{cam!r}] must be a mapping")
+        for sec in ("cursor", "gestures"):
+            if not isinstance(entry.get(sec, {}), dict):
+                raise ValueError(f"hands.calibration[{cam!r}].{sec} must be a mapping")
 
 
 def validate_camera_device(path: str, device: Any) -> None:

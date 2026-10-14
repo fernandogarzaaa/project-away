@@ -304,13 +304,31 @@ def cmd_record(args: argparse.Namespace) -> int:  # pragma: no cover - needs a c
     )
     if args.custom and register_custom_gesture(args.label):
         print(
-            f"registered custom gesture {args.label!r}. Next: `away calibrate`, then "
+            f"registered custom gesture {args.label!r}. Next: `away calibrate --model`, then "
             f"`away bindings set gesture:{args.label} key:ctrl+t` (or use `away settings`)."
         )
     return 0
 
 
-def cmd_calibrate(args: argparse.Namespace) -> int:  # pragma: no cover - needs torch + recordings
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """``away calibrate``: the live tracking calibration window (v0.1.25); ``--reset`` forgets this camera's
+    calibration; ``--model`` (or ``--recordings``) fine-tunes the temporal gesture model as before."""
+    if args.model or args.recordings:
+        return cmd_calibrate_model(args)
+    if args.reset:
+        from away.hands import livecal
+
+        cfg, _ = cfgmod.load(_cfg_path(args))
+        key = livecal.camera_key(cfg)
+        livecal.save(_cfg_path(args), key, None)
+        print(f"tracking calibration for camera {key!r} removed; the default settings are used")
+        return 0
+    from away.app.calibrate_gui import main as calibrate_main  # pragma: no cover - needs a display
+
+    return calibrate_main(_cfg_path(args))  # pragma: no cover
+
+
+def cmd_calibrate_model(args: argparse.Namespace) -> int:  # pragma: no cover - needs torch + recordings
     from away.hands.train import calibrate
 
     cfg, _ = cfgmod.load()
@@ -1421,8 +1439,14 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--custom", action="store_true", help="record a new custom gesture and register it for bindings")
     rc.set_defaults(fn=cmd_record)
 
-    c = sub.add_parser("calibrate", help="fine-tune the temporal model on your recordings")
-    c.add_argument("--recordings")
+    c = sub.add_parser(
+        "calibrate",
+        help="calibrate tracking for your camera and hand (a short guided window); --model: tune the gesture model",
+    )
+    c.add_argument("--reset", action="store_true", help="forget this camera's tracking calibration (defaults again)")
+    c.add_argument("--model", action="store_true", help="fine-tune the temporal gesture model on your recordings")
+    c.add_argument("--recordings", help="with --model: the recordings folder")
+    c.add_argument("--config")
     c.add_argument("--epochs", type=int, default=15)
     c.set_defaults(fn=cmd_calibrate)
 

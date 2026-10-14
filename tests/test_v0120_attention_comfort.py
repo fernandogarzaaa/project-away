@@ -651,7 +651,11 @@ def test_tray_title_and_menu(tmp_path, monkeypatch) -> None:
 
     told: list[Any] = []
     items = comfort_menu_items(types.SimpleNamespace(MenuItem=FakeItem), ctl, lambda *a: told.append(a))
-    assert [i.text for i in items] == ["Only respond when I'm looking at the screen", "Guided first run..."]
+    assert [i.text for i in items] == [
+        "Only respond when I'm looking at the screen",
+        "Guided first run...",
+        "Calibrate tracking...",
+    ]
     assert items[0].kw["checked"](None) is False
     items[0].action(None, None)
     assert cfg.attention.enabled is True and C.load(tmp_path / "config.yaml")[0].attention.enabled is True

@@ -110,11 +110,11 @@ def clicks(rec: RecordingBackend) -> list[tuple[str, tuple[Any, ...]]]:
 def test_defaults_and_yaml_round_trip() -> None:
     cfg = C.AppConfig()
     c = cfg.hands.cursor
-    assert c.smoothing == "one_euro" and c.magnet.enabled and cfg.voice.click_by_name
+    assert c.smoothing == "adaptive" and c.magnet.enabled and cfg.voice.click_by_name
     assert (c.magnet.radius_px, c.magnet.strength, c.magnet.sticky) == (40.0, 0.35, 0.5)
     assert c.predictive.lookahead_ms == 33.0
     d = C.to_dict(cfg)
-    assert d["hands"]["cursor"]["magnet"]["radius_px"] == 40.0 and d["hands"]["cursor"]["smoothing"] == "one_euro"
+    assert d["hands"]["cursor"]["magnet"]["radius_px"] == 40.0 and d["hands"]["cursor"]["smoothing"] == "adaptive"
     new, unknown = C.from_dict(
         {
             "hands": {
@@ -175,7 +175,11 @@ def test_per_app_profile_tuning_accepts_the_new_sliders() -> None:
 
 # ====================================================================================== smoothing
 def test_make_cursor_filter_follows_the_setting() -> None:
+    from away.hands.steady import AdaptiveFilter2D
+
     c = C.CursorConfig()
+    assert isinstance(make_cursor_filter(c), AdaptiveFilter2D)  # v0.1.25 default
+    c.smoothing = "one_euro"
     assert isinstance(make_cursor_filter(c), OneEuro2D)
     c.smoothing = "predictive"
     c.predictive.lookahead_ms = 50
@@ -185,13 +189,16 @@ def test_make_cursor_filter_follows_the_setting() -> None:
 
 
 def test_settings_change_switches_the_filter_live() -> None:
+    from away.hands.steady import AdaptiveFilter2D
+
     p, _, _ = pipeline()
-    assert isinstance(p.mouse.mapper.filter, OneEuro2D)
+    assert isinstance(p.mouse.mapper.filter, AdaptiveFilter2D)
     new = C.AppConfig()
     new.hands.cursor.smoothing = "predictive"
     p.apply_config(new)
     assert isinstance(p.mouse.mapper.filter, PredictiveFilter2D)
     new2 = C.AppConfig()
+    new2.hands.cursor.smoothing = "one_euro"
     p.apply_config(new2)
     assert isinstance(p.mouse.mapper.filter, OneEuro2D)
 
@@ -237,9 +244,10 @@ def test_benchmark_predictive_beats_one_euro_on_lag_and_keeps_a_resting_cursor_s
     res = B.compare(B.default_filters(), seeds=range(5))
     oe, pr = res["one_euro"], res["predictive"]
     assert pr.lag_rmse < 0.3 * oe.lag_rmse  # measured: ~0.0125 vs ~0.103 hand units
-    dead_zone = C.CursorConfig().dead_zone
-    assert pr.still_jitter < dead_zone / 2  # below the cursor's dead zone: a resting cursor does not move
-    assert oe.still_jitter < dead_zone / 2
+    assert pr.still_jitter < 0.002  # small enough for the hold-still lock / dead zone to keep a resting cursor still
+    assert oe.still_jitter < 0.002
+    ad = res["adaptive"]  # v0.1.25 default: much less lag than One Euro, still steady at rest
+    assert ad.lag_rmse < 0.5 * oe.lag_rmse and ad.still_jitter < 0.002 and ad.overshoot < 0.01
     assert pr.overshoot < 0.015  # bounded overshoot at the end of a reach (~1% of the frame)
     assert B.compare(B.default_filters(), seeds=[3]) == B.compare(B.default_filters(), seeds=[3])  # deterministic
 
@@ -695,13 +703,13 @@ def test_toggles_drive_the_config_and_validate() -> None:
     assert cfg.hands.cursor.smoothing == "predictive" and not cfg.hands.cursor.magnet.enabled
     assert not cfg.voice.click_by_name
     S.set_toggle(cfg, "smooth", False)
-    assert cfg.hands.cursor.smoothing == "one_euro"
+    assert cfg.hands.cursor.smoothing == "adaptive"
     var = S._ToggleVar(
         types.SimpleNamespace(v=None, set=lambda x: setattr(var_store, "v", x), get=lambda: True), "smooth"
     )
     var.set("predictive")
     assert var_store.v is True
-    var.set("one_euro")
+    var.set("adaptive")
     assert var_store.v is False
 
 
@@ -937,6 +945,6 @@ def test_settings_window_shows_the_three_switches_and_they_work(tmp_path: Any) -
         w.m.revert()
         w.refresh()  # Settings' own refresh drives the switch through the adapter
         root.update()
-        assert w.m.cfg.hands.cursor.smoothing == "one_euro" and not smooth.instate(["selected"])
+        assert w.m.cfg.hands.cursor.smoothing == "adaptive" and not smooth.instate(["selected"])
     finally:
         root.destroy()

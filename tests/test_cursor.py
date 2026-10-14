@@ -61,12 +61,15 @@ def test_relative_motion_gain_and_axes():
     assert m.update(0.2, 0.51, 0.49) == (520, 380)  # y uses the same (width) scale
 
 
-def test_relative_dead_zone_ignores_tremor_without_moving_anchor():
-    m = CursorMapper((1000, 1000), fast_cfg(gain=1.0, acceleration=1.0, dead_zone=0.01))
+def test_relative_dead_zone_is_slack_not_a_hop():
+    """v0.1.25: tremor inside the dead zone never moves the cursor, and a slow move goes through bit by bit (it used
+    to pile up under the threshold and then jump by the whole 0.012 at once)."""
+    m = CursorMapper((1000, 1000), fast_cfg(gain=1.0, acceleration=1.0, dead_zone=0.01, hold_still=False))
     m.update(0.0, 0.5, 0.5)
-    assert m.update(0.1, 0.505, 0.5) == (500, 500)
-    # anchor stayed at 0.5, so the accumulated 0.012 now passes
-    assert m.update(0.2, 0.512, 0.5) == (512, 500)
+    assert m.update(0.1, 0.505, 0.5) == (500, 500)  # inside the slack
+    assert m.update(0.2, 0.512, 0.5) == (502, 500)  # the slack is taken up: only the 0.002 beyond it moves
+    assert m.update(0.3, 0.515, 0.5) == (505, 500)  # from now on every bit of the slow move goes through
+    assert m.update(0.4, 0.508, 0.5) == (505, 500)  # a small wobble back stays inside the slack
 
 
 def test_relative_acceleration_makes_fast_moves_bigger():
