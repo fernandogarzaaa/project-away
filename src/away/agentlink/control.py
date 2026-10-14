@@ -702,9 +702,10 @@ class ComputerControl:
             self.log.append(e)
         return e
 
-    def actions(self, limit: int = 50) -> list[dict[str, Any]]:
+    def actions(self, limit: int = 50, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """The newest actions; only ``agent_id``'s own when given (an agent's view of the log)."""
         with self._lock:
-            items = list(self.log)[-limit:]
+            items = [e for e in self.log if agent_id is None or e.agent_id == agent_id][-limit:]
         return [
             {
                 "id": e.id,

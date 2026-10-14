@@ -78,7 +78,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "about": ("text", "GET", "/v1/about", "Briefing for agents (markdown)"),
     "poll": ("json", "GET", "/v1/poll", "Events after ?since=, landmarks, health"),
     "health": ("json", "GET", "/v1/health", "fps per camera, latency, CPU/GPU, models"),
-    "get_logs": ("json", "GET", "/v1/logs", "Log tail (?lines=)"),
+    "get_logs": ("json", "GET", "/v1/logs", "Log tail, secrets hidden (?lines=) (share_logs)"),
     "get_config": ("json", "GET", "/v1/config", "Redacted configuration"),
     "list_settings": ("json", "GET", "/v1/settings", "Changeable settings (?domain=)"),
     "change_settings": ("json", "POST", "/v1/settings/change", "Change settings {ops, why} (tune)"),
@@ -89,10 +89,10 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "remove_preference": ("json", "POST", "/v1/preferences/remove", "Remove preference {number} (tune)"),
     "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds} (diagnose)"),
     "get_job": ("json", "GET", "/v1/jobs", "A check's state (?job_id=) (diagnose)"),
-    "record_session": ("json", "POST", "/v1/record", "Record landmarks {seconds, note} (diagnose)"),
-    "get_bundle": ("json", "POST", "/v1/bundle", "Build a diagnostics bundle (diagnose)"),
-    "list_files": ("json", "GET", "/v1/files", "Downloadable bundles/recordings/logs (diagnose)"),
-    "read_file": ("bytes", "GET", "/v1/file", "Download ?rel=diagnostics/... (diagnose)"),
+    "record_session": ("json", "POST", "/v1/record", "Record landmarks {seconds, note} (share_logs)"),
+    "get_bundle": ("json", "POST", "/v1/bundle", "Build a diagnostics bundle (share_logs)"),
+    "list_files": ("json", "GET", "/v1/files", "Downloadable bundles/recordings/logs (share_logs)"),
+    "read_file": ("bytes", "GET", "/v1/file", "Download ?rel=diagnostics/... (share_logs)"),
     "look": ("image", "GET", "/v1/look", "One camera still (snapshots)"),
     "get_screen": (
         "image",
@@ -113,7 +113,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "stop_control": ("json", "POST", "/v1/control/stop", "Stop using the computer"),
     "act": ("json", "POST", "/v1/control/act", "{action: move|click|...|open_url, ...} (control)"),
     "undo_last_action": ("json", "POST", "/v1/control/undo", "Undo the last undoable action (control)"),
-    "action_log": ("json", "GET", "/v1/control/log", "Computer actions log"),
+    "action_log": ("json", "GET", "/v1/control/log", "Your own computer actions"),
     "disconnect": ("json", "POST", "/v1/disconnect", "Disconnect this agent"),
 }
 

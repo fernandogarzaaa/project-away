@@ -443,7 +443,7 @@ def test_preferences(core) -> None:
 def test_record_session_writes_a_replayable_file(core) -> None:
     from away.agentlink import recording, replay
 
-    a, _ = core.registry.issue("Claude", ["read", "diagnose"], 3600)
+    a, _ = core.registry.issue("Claude", ["read", "diagnose", "share_logs"], 3600)
     import threading
 
     def feed() -> None:

@@ -142,7 +142,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         path: str | None = None,
         lines: int | None = None,
     ) -> Any:
-        """Find out what is wrong (needs "Run checks").
+        """Find out what is wrong. run/job need "Run camera and speed checks"; record, bundle, files, download
+        and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
           `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.

@@ -806,7 +806,7 @@ def test_crash_notice_can_be_dismissed_and_is_in_the_logs(cfg_core, tmp_path: Pa
     assert (logs / crashlog.CRASH_FILE).exists()  # the log itself is kept
     assert crashlog.tail(logs, 1) == ["Traceback..."]
     core, *_ = cfg_core
-    a, _ = core.registry.issue("Claude", ["read", "diagnose"], 3600)
+    a, _ = core.registry.issue("Claude", ["read", "share_logs"], 3600)
     assert core.service.get_logs(a, 5)["crash_log"][-1] == "Traceback..."
     assert crashlog.tail(tmp_path / "nowhere") == []
 

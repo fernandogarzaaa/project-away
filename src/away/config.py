@@ -448,6 +448,8 @@ class AgentLinkConfig:
     misfire_threshold: int = 4  # "that was wrong" / cancelled actions within a minute
     autofix: str = "ask"  # ask: agents' setting changes need your OK | auto_low_risk: thresholds apply at once
     stop_hotkey: str = "ctrl+alt+esc"  # stops an agent that is using the computer
+    # v0.1.24: an agent's action log shows only its own computer actions; true = every agent sees everyone's
+    share_control_history: bool = False
     github_issues: bool = False  # file a GitHub issue when a detector trips (token in the OS keyring)
     github_repo: str = "fernandogarzaaa/project-away"
     # v0.1.22 "Talk to your agent": say "Hey <agent name>, ..." (or use the summon gesture, then speak) and the words

@@ -227,18 +227,23 @@ class Service:
         return self.telemetry.health()
 
     def get_logs(self, agent: Agent, lines: int = 100) -> dict[str, Any]:
+        """Log tails, with tokens, keys, passwords, e-mail addresses and the home folder hidden. Needs "Share my
+        logs and recordings" (v0.1.24)."""
+        from away.agentlink.bundle import redact, redact_text
+
+        self.require(agent, perms.SHARE_LOGS)
         lines = max(1, min(int(lines), 2000))
-        mem = self.telemetry.log_tail(lines)
+        mem = redact(self.telemetry.log_tail(lines))
         file_lines: list[str] = []
         p = self.data_dir / "logs" / "away.log"
         if p.is_file():
             from away.agentlink.bundle import _tail
 
-            file_lines = _tail(p, 400_000).decode("utf-8", "replace").splitlines()[-lines:]
+            file_lines = redact_text(_tail(p, 400_000).decode("utf-8", "replace")).splitlines()[-lines:]
         from away.app import crashlog
 
         # v0.1.22: crash.log too (crashes and uncaught errors; the Settings notice points at it)
-        crash = crashlog.tail(self.data_dir / "logs", min(lines, 400))
+        crash = [redact_text(x) for x in crashlog.tail(self.data_dir / "logs", min(lines, 400))]
         return {"app_log": file_lines, "crash_log": crash, "events": mem}
 
     def get_config(self, agent: Agent) -> dict[str, Any]:
@@ -364,7 +369,7 @@ class Service:
 
     def record_session(self, agent: Agent, seconds: float = 10.0, note: str = "") -> dict[str, Any]:
         """Record the next ``seconds`` of landmarks + events (no video) to ``recordings/agent/<time>.awayrec``."""
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         from away.agentlink import recording as rec
 
         seconds = max(1.0, min(float(seconds), MAX_RECORD_S))
@@ -384,7 +389,7 @@ class Service:
         return {"path": f"recordings/agent/{name}", "frames": frames, "bytes": path.stat().st_size, "seconds": seconds}
 
     def get_bundle(self, agent: Agent, note: str = "") -> dict[str, Any]:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         from away.agentlink import bundle
 
         stats = {
@@ -404,14 +409,18 @@ class Service:
         return {"path": f"diagnostics/{path.name}", "bytes": path.stat().st_size}
 
     def list_files(self, agent: Agent) -> list[dict[str, Any]]:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         return safepaths.listing(self.data_dir)
 
     def read_file(self, agent: Agent, rel: str, max_bytes: int = 25_000_000) -> bytes:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         p = safepaths.resolve(self.data_dir, rel)
         if p.stat().st_size > max_bytes:
             raise ValueError("that file is too large to download")
+        if p.suffix.lower() in (".log", ".txt"):  # v0.1.24: raw logs leave the PC with secrets hidden
+            from away.agentlink.bundle import redact_text
+
+            return redact_text(p.read_bytes().decode("utf-8", "replace")).encode("utf-8")
         return p.read_bytes()
 
     # ------------------------------------------------------------ see
@@ -766,7 +775,11 @@ class Service:
         return self.control.undo_last(agent.id)
 
     def action_log(self, agent: Agent, limit: int = 30) -> list[dict[str, Any]]:
-        return self.control.actions(limit)
+        """This agent's own computer actions (v0.1.24), or everyone's when the person turned on
+        ``agent_link.share_control_history``."""
+        if bool(self._s("share_control_history", False)):
+            return self.control.actions(limit)
+        return self.control.actions(limit, agent_id=agent.id)
 
     # --------------------------------------------------------- session
     def disconnect(self, agent: Agent) -> dict[str, Any]:

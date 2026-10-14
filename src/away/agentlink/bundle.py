@@ -1,7 +1,8 @@
 """Diagnostics bundle: one zip with everything needed to understand a problem, nothing private on purpose.
 
-Contents: the tails of away.log / crash.log / update-install.log / agent-access.log, the config with secrets and
-the home folder redacted, the latest camera diagnosis, fps / latency / CPU / GPU numbers and the live context, and
+Contents: the tails of away.log / crash.log / update-install.log / agent-access.log with tokens, keys, passwords,
+e-mail addresses and the home folder hidden (:func:`redact_text`), the config with secrets and the home folder
+redacted, the latest camera diagnosis, fps / latency / CPU / GPU numbers and the live context, and
 the last 30 s of landmarks + events (a ``.awayrec``; no video, no audio, no screenshots). Saved as
 ``<data>/diagnostics/bundle-<time>.zip`` (the newest 20 are kept).
 """
@@ -25,6 +26,54 @@ TAIL_BYTES = 2_000_000
 KEEP = 20
 
 
+HIDDEN = "***"
+# v0.1.24 hardening: what is hidden in raw log text before it leaves the PC (bundles, get_logs, read_file)
+_TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]+"), "Bearer " + HIDDEN),
+    (re.compile(r"\b(?:paway|pa)_[A-Za-z0-9_\-]{16,}"), HIDDEN),  # Agent Link tokens (persistent and session)
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}"), HIDDEN),  # JWTs
+    (re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_\-]{16,}"), HIDDEN),  # OpenAI / Anthropic / Stripe style keys
+    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), HIDDEN),  # GitHub
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), HIDDEN),  # Slack
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), HIDDEN),  # AWS access key id
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}"), HIDDEN),  # Google API key
+    (re.compile(r"\bhf_[A-Za-z0-9]{20,}"), HIDDEN),  # Hugging Face
+    # key=value, key: value, "key": "value" for anything named like a secret
+    (
+        re.compile(
+            r"(?i)([\"']?\b[\w.-]*(?:token|password|passwd|pwd|secret|api[_-]?key|auth\w*|credential|cookie)[\w.-]*"
+            r"[\"']?\s*[:=]\s*)([\"']?)[^\s\"',;&]+"
+        ),
+        r"\1\2" + HIDDEN,
+    ),
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + HIDDEN + "@"),  # user:pass@ in URLs
+    (re.compile(r"/c/[a-z0-9]{6,32}\b"), "/c/" + HIDDEN),  # pairing links
+    (re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\/\s]+"), "~"),  # other people's home folders too
+    (re.compile(r"/(?:home|Users)/[^/\s]+"), "~"),
+)
+EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+
+def redact_text(text: str, home: str | None = None, emails: bool = True) -> str:
+    """Raw log text with tokens (``paway_``/``pa_``, ``Bearer``, JWTs), API keys, passwords and other secret
+    ``key=value`` pairs, credentials in URLs, pairing links, e-mail addresses (``emails``) and the home folder
+    hidden."""
+    home = home if home is not None else str(Path.home())
+    out = str(text)
+    if home and len(home) > 3:
+        for h in {home, home.replace("\\", "/"), home.replace("/", "\\")}:
+            out = re.sub(re.escape(h), "~", out, flags=re.IGNORECASE)
+    for rx, repl in _TEXT_RULES:
+        out = rx.sub(repl, out)
+    if emails:
+        out = EMAIL.sub(HIDDEN + "@" + HIDDEN, out)
+    return out
+
+
+def _redact_bytes(raw: bytes) -> bytes:
+    return redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
+
+
 def redact(obj: Any, home: str | None = None) -> Any:
     home = home if home is not None else str(Path.home())
     if isinstance(obj, dict):
@@ -34,8 +83,8 @@ def redact(obj: Any, home: str | None = None) -> Any:
         }
     if isinstance(obj, list):
         return [redact(v, home) for v in obj]
-    if isinstance(obj, str) and home and len(home) > 3 and home in obj:
-        return obj.replace(home, "~")
+    if isinstance(obj, str):
+        return redact_text(obj, home)
     return obj
 
 
@@ -74,7 +123,7 @@ def build(
         for name in LOG_FILES:
             p = data_dir / "logs" / name
             if p.is_file():
-                z.writestr(f"logs/{name}", _tail(p))
+                z.writestr(f"logs/{name}", _redact_bytes(_tail(p)))
                 included.append(f"logs/{name}")
         conf = cfgmod.to_dict(cfg) if cfg is not None else None
         if conf is None:
@@ -86,7 +135,7 @@ def build(
         included.append("config-redacted.yaml")
         diag = sorted((data_dir / "diagnostics").glob("cameras-*.txt"), key=lambda p: p.stat().st_mtime)
         if diag:
-            z.writestr("cameras-diagnose.txt", _tail(diag[-1], 500_000))
+            z.writestr("cameras-diagnose.txt", _redact_bytes(_tail(diag[-1], 500_000)))
             included.append("cameras-diagnose.txt")
         info = {
             "app": __version__,

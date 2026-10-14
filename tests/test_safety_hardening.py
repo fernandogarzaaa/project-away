@@ -6,6 +6,7 @@ Every test here failed on the code before its fix (checked by running it against
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -596,3 +597,127 @@ def test_normal_bodies_and_mcp_sized_bodies_still_work(tmp_path: Path) -> None:
     assert api.MAX_JSON_BODY == 64 * 1024 and api.MAX_JSON_BODY <= api.MAX_MCP_BODY <= 1024 * 1024
     assert api.body_limit("/mcp") == api.MAX_MCP_BODY and api.body_limit("/c/abcdefgh") == api.MAX_MCP_BODY
     assert api.body_limit("/v1/rpc/act") == api.MAX_JSON_BODY
+
+
+# ------------------------------------------------------------- 7. sharing logs is its own permission; secrets hidden
+def test_sharing_logs_and_recordings_is_a_separate_permission_off_by_default() -> None:
+    from away.agentlink import perms
+
+    p = perms.BY_SCOPE[perms.SHARE_LOGS]
+    assert p.label == "Share my logs and recordings" and p.default is False
+    assert perms.SHARE_LOGS not in perms.DEFAULT
+    assert perms.BY_SCOPE[perms.DIAGNOSE].label == "Run camera and speed checks"
+    assert perms.SHARE_LOGS in perms.normalize("read,share_logs")
+
+
+def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(tmp_path: Path) -> None:
+    from away.agentlink.service import Forbidden
+
+    core = _core(tmp_path)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "away.log").write_text("hello\n", encoding="utf-8")
+    a, _ = core.registry.issue("Agent", ["read", "diagnose"], 3600)
+    svc = core.service
+    for call in (
+        lambda: svc.get_logs(a),
+        lambda: svc.get_bundle(a),
+        lambda: svc.list_files(a),
+        lambda: svc.read_file(a, "logs/away.log"),
+        lambda: svc.record_session(a, seconds=1),
+    ):
+        with pytest.raises(Forbidden, match="Share my logs and recordings"):
+            call()
+    with pytest.raises(ValueError):
+        svc.get_job(a)  # camera checks still work (here: a missing id, not a permission error)
+
+
+def test_existing_agents_are_not_silently_given_the_new_permission(tmp_path: Path) -> None:
+    import json
+
+    from away.agentlink import auth, perms
+
+    path = tmp_path / "agents.json"
+    old = {
+        "id": "abc",
+        "name": "Claude",
+        "kind": "local",
+        "scopes": ["read", "diagnose"],
+        "token_hash": "0" * 64,
+        "created": time.time(),
+        "expires": time.time() + 3600,
+    }
+    path.write_text(json.dumps({"agents": [old]}), encoding="utf-8")
+    reg = auth.AgentRegistry(path)
+    a = reg.get("abc")
+    assert a is not None and a.has(perms.DIAGNOSE) and not a.has(perms.SHARE_LOGS)
+
+
+SECRETS = (
+    "paway_Q2hlY2tUaGlzVG9rZW5JdElzTG9uZ0Vub3VnaDEyMw",
+    "pa_dGhpcy1pcy1hLWxlZ2FjeS10b2tlbi0xMjM0NTY3OA",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ",
+    "sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "hunter2-correct-horse",
+    "s3cr3t-api-value-123",
+    "fernando@example.com",
+)
+
+
+def _secret_log(home: str) -> str:
+    return "\n".join(
+        [
+            f"2026-10-14 agent connected with token {SECRETS[0]}",
+            f"legacy token {SECRETS[1]}",
+            f"GET /v1/status Authorization: Bearer {SECRETS[2]}",
+            f"openai api_key={SECRETS[3]}",
+            f"github said: bad credentials {SECRETS[4]}",
+            f"login password: {SECRETS[5]}",
+            f'{{"apiKey": "{SECRETS[6]}"}}',
+            f"signed in as {SECRETS[7]}",
+            f"loaded {home}/AppData/Roaming/away/config.yaml",
+            "camera 0 opened at 30 fps",
+        ]
+    )
+
+
+def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_folder(tmp_path: Path) -> None:
+    import zipfile
+
+    from away.agentlink import bundle
+
+    home = str(Path.home())
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "away.log").write_text(_secret_log(home), encoding="utf-8")
+    (logs / "crash.log").write_text(_secret_log(home), encoding="utf-8")
+    core = _core(tmp_path)
+    a, _ = core.registry.issue("Agent", ["read", "share_logs"], 3600)
+    got = core.service.get_logs(a, lines=50)
+    text = "\n".join(got["app_log"] + got["crash_log"])
+    assert "camera 0 opened at 30 fps" in text  # still useful
+    for s in (*SECRETS, home):
+        assert s not in text, s
+    path = bundle.build(tmp_path, core.cfg_obj, {}, None, note="test")
+    with zipfile.ZipFile(path) as z:
+        blob = "\n".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if n.startswith("logs/"))
+    assert "camera 0 opened at 30 fps" in blob
+    for s in (*SECRETS, home):
+        assert s not in blob, s
+
+
+def test_action_log_shows_an_agent_only_its_own_actions(tmp_path: Path) -> None:
+    core = _core(tmp_path)
+    ctl = core.control
+    ctl.ask = lambda *a, **k: {"answer": "Allow"}
+    a, _ = core.registry.issue("Claude", ["read", "control"], 3600)
+    b, _ = core.registry.issue("Gemini", ["read", "control"], 3600)
+    ctl.request(a.id, a.name)
+    ctl.act(a.id, "move", x=1, y=1)
+    ctl.stop()
+    ctl.request(b.id, b.name)
+    ctl.act(b.id, "scroll", dy=-1)
+    assert [e["agent"] for e in core.service.action_log(a)] == ["Claude"]
+    assert [e["agent"] for e in core.service.action_log(b)] == ["Gemini"]
+    core.cfg_obj.agent_link.share_control_history = True  # the person allowed agents to see the whole history
+    assert {e["agent"] for e in core.service.action_log(a)} == {"Claude", "Gemini"}
