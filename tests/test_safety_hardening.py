@@ -943,3 +943,15 @@ def test_a_sound_alike_that_fits_two_agents_goes_to_neither() -> None:
     assert talk.match("hey heart are you there", agents) is None
     r = talk.match("hey hurt are you there", agents)  # an exact name always wins
     assert r is not None and r.target == "h2"
+
+
+def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(tmp_path: Path) -> None:
+    from away.agentlink import api
+
+    client, token, *_ = _api(tmp_path)
+    big = b'{"refresh_token": "' + b"r" * (api.MAX_JSON_BODY + 1) + b'"}'
+    h = {"Content-Type": "application/json"}
+    assert client.post("/v1/token/refresh", content=big, headers=h).status_code == 413
+    h["Authorization"] = f"Bearer {token}"
+    assert client.post("/v1/selftest", content=big, headers=h).status_code == 413
+    assert client.post("/v1/rpc/run_selftest", content=big, headers=h).status_code == 413

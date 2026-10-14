@@ -749,6 +749,8 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         """v0.1.24: a new access token (and a rotated refresh token) for an agent that paired before."""
         try:
             data = await body_args(request)
+        except BodyTooLarge as exc:
+            return _json({"error": str(exc)}, 413)
         except Exception:
             return _json({"error": "send JSON"}, 400)
         try:
