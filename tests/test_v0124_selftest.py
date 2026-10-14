@@ -482,7 +482,10 @@ def test_app_process_counting_skips_helpers() -> None:
 def test_model_bench_hook_is_optional_and_does_nothing_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
+    import away.app
+
     monkeypatch.setitem(sys.modules, "away.app.model_bench", None)  # import fails like a build without it
+    monkeypatch.delattr(away.app, "model_bench", raising=False)  # now on main: drop the already-imported submodule
     assert ck.model_bench_hook() is None
     assert ck.check_model_bench(FakeEnv()) == []
     if ck._BENCH is None:
