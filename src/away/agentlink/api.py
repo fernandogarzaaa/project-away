@@ -88,6 +88,13 @@ class BodyTooLarge(ValueError):
 KEEP_CONNECTED = "Keep this agent connected"  # v0.1.24: the approval choice that issues a persistent agent token
 EXPIRY_WORDS = {"never": "until you revoke it", "30d": "for 30 days", "90d": "for 90 days"}
 DROP_CHECK_S = 0.2  # how often a live request / stream checks whether its agent was disconnected
+# v0.1.25 keepalive. An agent counts as connected while it was seen in the last 90 s, but "seen" only moved when a
+# request started, so an agent sitting on a live MCP stream or event stream (open for minutes, as MCP clients do)
+# showed as disconnected after ~90 s: the tray, Agent Link and "Hey <agent>" said it was gone. A live connection
+# now marks its agent as seen every LIVE_TOUCH_S.
+LIVE_TOUCH_S = 20.0
+SSE_KEEPALIVE_S = 15.0  # /v1/events/stream sends a comment line at least this often (Cloudflare drops ~100 s idle)
+APPROVE_WAIT_S = 90.0  # the Allow / Deny prompt for a new agent; under Cloudflare's ~100 s limit for one request
 
 # tool name -> (result kind, http method for the convenience route, path, summary). "image" results are JPEG.
 TOOLS: dict[str, tuple[str, str, str, str]] = {
@@ -307,7 +314,7 @@ class Gate:
                 title="Connect an AI agent?",
                 agent=clean_name(name),
                 details=details,
-                timeout_s=120.0,
+                timeout_s=APPROVE_WAIT_S,
                 urgency="high",
                 kind="approve",
             )
@@ -684,12 +691,17 @@ async def _run_watched(
     async with anyio.create_task_group() as tg:
 
         async def watch() -> None:
+            touched = time.monotonic()
             while True:
                 await anyio.sleep(DROP_CHECK_S)
                 if gone():
                     dropped["yes"] = True
                     tg.cancel_scope.cancel()
                     return
+                if time.monotonic() - touched >= LIVE_TOUCH_S:  # v0.1.25: still connected while the stream is open
+                    touched = time.monotonic()
+                    with contextlib.suppress(Exception):
+                        g.registry.touch(agent_id)
 
         async def serve() -> None:
             await app(scope, receive, send)
@@ -1059,12 +1071,14 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
     async def stream(request: Request) -> Any:
         agent = agent_of(request)
         since = int(request.query_params.get("since", "0") or 0)
+        with contextlib.suppress(ValueError):  # v0.1.25: a reconnecting EventSource resumes where it stopped
+            since = max(since, int(request.headers.get("last-event-id", "") or 0))
 
         async def gen() -> Any:
             seq = since
             while not gate.stopped.is_set() and agent.active(time.time()):
                 res = await anyio.to_thread.run_sync(
-                    functools.partial(service.wait_for_event, agent, seq, 15.0), abandon_on_cancel=True
+                    functools.partial(service.wait_for_event, agent, seq, SSE_KEEPALIVE_S), abandon_on_cancel=True
                 )
                 for ev in res["events"]:
                     seq = max(seq, int(ev["seq"]))
