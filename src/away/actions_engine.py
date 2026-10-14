@@ -385,7 +385,8 @@ class ActionEngine:
         self._io = threading.RLock()  # one OS call at a time (a chord is never interleaved with another source)
         self._inflight: set[Action] = set()
         self._tokens: dict[threading.Event, tuple[str, str]] = {}  # tracked tokens (macro replays) -> source
-        self._held: dict[tuple[int, str, str], tuple[Any, str]] = {}  # client holds: (backend, kind, name)
+        # client holds: (backend id, "source|kind", name) -> (backend, the press arguments)
+        self._held: dict[tuple[int, str, str], tuple[Any, tuple[Any, ...]]] = {}
         self._stop_listeners: list[Callable[[str], Any]] = []
         self._takeover_listeners: list[Callable[[str], Any]] = []
 
@@ -474,16 +475,11 @@ class ActionEngine:
             a.cancel(reason)
         for t in toks:
             t.set()
-        for (_id, key, name), (backend, _s) in held:
+        for (_id, key, _name), (backend, args) in held:
             kind = key.split("|", 1)[1]
             with contextlib.suppress(Exception), self._io:
-                if kind == "button":
-                    if name == "left":
-                        backend.release()
-                    else:
-                        backend.release(name)
-                else:
-                    backend.key_up(name)
+                # released exactly the way it was pressed (``press()`` or ``press("right")``)
+                (backend.release if kind == "button" else backend.key_up)(*args)
         return len(acts) + len(toks)
 
     def stop_all(self, reason: str = "you asked to stop everything") -> int:
@@ -628,10 +624,10 @@ class ActionEngine:
         bid = id(backend)
         if op == "press":
             with self._lock:
-                self._held[(bid, f"{source}|button", str(args[0]) if args else "left")] = (backend, source)
+                self._held[(bid, f"{source}|button", str(args[0]) if args else "left")] = (backend, args)
         elif op == "key_down":
             with self._lock:
-                self._held[(bid, f"{source}|key", str(args[0]))] = (backend, source)
+                self._held[(bid, f"{source}|key", str(args[0]))] = (backend, args)
         elif op == "release":
             with self._lock:
                 self._held.pop((bid, f"{source}|button", str(args[0]) if args else "left"), None)

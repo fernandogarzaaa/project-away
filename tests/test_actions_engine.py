@@ -372,12 +372,16 @@ def test_pause_resume_shutdown() -> None:
     with pytest.raises(ActionCancelled), eng.begin(AGENT, "move", backend=rec) as a:
         a.step()
     eng.resume()
-    g.key_down("shift")
+    keys = DryRunBackend()
+    k = eng.client(MACRO, keys)
+    k.key_down("shift")
     eng.shutdown()
-    assert eng.state == SHUTDOWN and rec.calls[-1] == ("key_up", ("shift",))
+    assert eng.state == SHUTDOWN and keys.calls[-1] == ("key_up", ("shift",))
     eng.resume()  # terminal
+    k.key_down("a")
     g.click(1)
-    assert eng.state == SHUTDOWN and rec.calls[-1] == ("key_up", ("shift",))
+    assert eng.state == SHUTDOWN and keys.calls[-1] == ("key_up", ("shift",))
+    assert rec.calls[-1] == ("click", (2,))
 
 
 # ------------------------------------------------------------------------------------------- attribution
