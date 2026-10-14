@@ -993,7 +993,7 @@ class AgentLinkHost:
         if a == "control_stop":
             return {"stopped": core.control.stop("you pressed Stop")}
         if a == "control_undo":
-            return core.control.undo_last()
+            return core.control.undo_last_by_user()
         if a == "add_preference":
             return {"items": core.prefs.add(str(req.get("text")), who="you")}
         if a == "remove_preference":

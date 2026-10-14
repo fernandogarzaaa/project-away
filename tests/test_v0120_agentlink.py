@@ -650,12 +650,12 @@ def test_undo_last_action() -> None:
     ctl.request("a1", "Claude")
     ctl.act("a1", "type_text", text="hello")
     ctl.act("a1", "move", x=300, y=300)
-    ctl.undo_last()
+    ctl.undo_last("a1")
     assert backend.calls[-1] == ("move", (50, 60))
-    ctl.undo_last()
+    ctl.undo_last("a1")
     assert backend.calls[-1] == ("hotkey", ("ctrl", "z"))
     with pytest.raises(ControlRefused):
-        ctl.undo_last()
+        ctl.undo_last("a1")
 
 
 def test_from_image_coordinates_use_the_last_screenshot_scale() -> None:

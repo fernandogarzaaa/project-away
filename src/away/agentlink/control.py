@@ -85,6 +85,7 @@ class LogEntry:
     result: str
     thumb: str = ""  # file name in the action log folder (PNG), "" when no screenshot was possible
     undo: dict[str, Any] | None = None
+    agent_id: str = ""  # who did it (undo and the action log are per agent)
 
 
 @dataclass
@@ -523,7 +524,7 @@ class ComputerControl:
         b.key("enter")
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
-        e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo)
+        e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
         if self.log_folder is not None:
             try:
                 img = self.hooks.grab()
@@ -557,10 +558,26 @@ class ComputerControl:
             for e in reversed(items)
         ]
 
-    def undo_last(self, agent_id: str | None = None) -> dict[str, Any]:
-        """Reverse the newest undoable action (cursor move, scroll, typed text). Clicks and keys cannot be undone."""
+    def undo_last(self, agent_id: str) -> dict[str, Any]:
+        """An agent undoes its own newest undoable action (cursor move, scroll, typed text). It needs the same live,
+        unexpired, unpaused grant as :meth:`act`: undo is input too. Clicks and keys cannot be undone."""
+        self._require(agent_id)
+        return self._undo(agent_id)
+
+    def undo_last_by_user(self) -> dict[str, Any]:
+        """The person pressed Undo in Agent Link (no grant needed: it is their own input)."""
+        return self._undo(None)
+
+    def _undo(self, agent_id: str | None) -> dict[str, Any]:
         with self._lock:
-            e = next((x for x in reversed(self.log) if x.undo is not None and x.result == "done"), None)
+            e = next(
+                (
+                    x
+                    for x in reversed(self.log)
+                    if x.undo is not None and x.result == "done" and (agent_id is None or x.agent_id == agent_id)
+                ),
+                None,
+            )
         if e is None:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
         b = self.hooks.backend
