@@ -1493,6 +1493,7 @@ TAB_ORDER = (
     "Shortcuts",
     "Voice & input",
     "Agent Link",
+    "Live agent",
     "Cameras",
     "Tuning",
     "Performance",
@@ -1615,6 +1616,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
+        from away.liveagent import gui as live_gui  # Live agent, isolated in its own package
+
+        with contextlib.suppress(Exception):
+            self.live_agent_panel = live_gui.build_tab(self, nb)
         order_tabs(nb, TAB_ORDER)
         nb.select(0)
         self.nb = nb

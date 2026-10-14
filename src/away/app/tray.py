@@ -399,6 +399,13 @@ def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a
         open_path(ctl.settings_path())  # fall back to the YAML file in the default editor
 
 
+def _open_settings_tab(ctl: TrayController, tab: str) -> None:  # pragma: no cover - launches a GUI process
+    try:
+        subprocess.Popen([*ctl.settings_command(), "--tab", tab])
+    except Exception:
+        open_settings(ctl)
+
+
 def update_menu_items(
     pystray: Any, updates: Any, on_update: Any, on_run_installer: Any, on_check_updates: Any
 ) -> list[Any]:
@@ -524,6 +531,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         is_idle=ctl.is_idle,
     )
 
+    from away.liveagent.integrate import hook_updates
+    from away.liveagent.integrate import menu_items as live_menu_items
+
+    hook_updates(updates)  # Away's own copy of opencode is updated when Away checks for updates
+
     def on_update(_icon: Any, _item: Any) -> None:
         threading.Thread(target=updates.install_now, name="away-update-install", daemon=True).start()
 
@@ -612,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
             lambda _icon, _item: ctl.disconnect_agents(),
             visible=lambda _i: bool(ctl.agent_badge()),
         ),
+        *live_menu_items(pystray, app, lambda tab: _open_settings_tab(ctl, tab)),  # "Live agent: on (Big Pickle)"
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
         ),

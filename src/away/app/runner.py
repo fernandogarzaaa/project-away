@@ -2268,6 +2268,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.agentlink.host import attach  # Agent Link (v0.1.20): never raises
 
         self.agent_link = attach(self)
+        from away.liveagent.integrate import attach as live_attach  # Live agent: never raises, off by default
+
+        self.live_agent = live_attach(self)
 
     def stop(self, join_timeout: float = 3.0) -> None:
         # Stop producing new events first, then make a best-effort release of
