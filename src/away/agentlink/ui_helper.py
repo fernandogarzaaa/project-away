@@ -71,9 +71,15 @@ def write_ack(path: Path | None, data: dict[str, Any]) -> None:
         pass
 
 
+KINDS = ("prompt", "toast", "flash", "control")
+
+
 def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-tested under Xvfb
     import sys
 
+    if kind not in KINDS:
+        print(f"agent-ui: unknown window kind {kind!r} (expected one of {', '.join(KINDS)}).", file=sys.stderr)
+        return 2
     try:
         spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -82,8 +88,11 @@ def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-te
             file=sys.stderr,
         )
         return 2
-    except json.JSONDecodeError as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"agent-ui: unreadable session file at {spec_path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(spec, dict):
+        print(f"agent-ui: unreadable session file at {spec_path}: expected a JSON object", file=sys.stderr)
         return 2
     if kind == "toast":
         ack = Path(spec["ack"]) if spec.get("ack") else None

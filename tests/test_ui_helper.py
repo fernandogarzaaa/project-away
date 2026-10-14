@@ -38,19 +38,39 @@ def test_main_corrupt_spec_file_returns_2_with_clean_message(tmp_path, capsys):
     assert "Traceback" not in err
 
 
-def test_main_valid_spec_does_not_hit_missing_file_path(tmp_path):
-    # A well-formed spec must get past the spec-loading guard. We cannot run
-    # the GUI headless, so point at a kind that would fail later for an
-    # unrelated reason; what matters is it does NOT return 2.
+def test_main_valid_spec_passes_through_to_the_window(tmp_path, monkeypatch):
+    # A well-formed spec must get past the loading guard and reach the window code. The window itself is
+    # replaced so no Tk main loop runs (a real one would block forever on a desktop CI runner).
     spec = tmp_path / "ok.json"
-    spec.write_text(json.dumps({"title": "t", "question": "q?"}), encoding="utf-8")
-    try:
-        rc = ui_helper.main("bogus-kind", spec)
-    except Exception:
-        # Any exception here must come from AFTER spec loading (tkinter /
-        # unknown kind), never from the missing-file guard.
-        return
-    assert rc != 2
+    spec.write_text(json.dumps({"agent": "cookie", "text": "hi"}), encoding="utf-8")
+    seen = {}
+
+    def fake_message(s, ack):
+        seen["spec"], seen["ack"] = s, ack
+        return 0
+
+    monkeypatch.setattr(ui_helper, "_message", fake_message)
+    assert ui_helper.main("toast", spec) == 0
+    assert seen == {"spec": {"agent": "cookie", "text": "hi"}, "ack": None}
+
+
+def test_main_unknown_kind_fails_clean_without_opening_tk(tmp_path, capsys):
+    spec = tmp_path / "ok.json"
+    spec.write_text("{}", encoding="utf-8")
+    assert ui_helper.main("bogus-kind", spec) == 2
+    assert "unknown window kind" in capsys.readouterr().err
+
+
+def test_main_non_object_spec_returns_2(tmp_path, capsys):
+    spec = tmp_path / "list.json"
+    spec.write_text("[1, 2]", encoding="utf-8")
+    assert ui_helper.main("prompt", spec) == 2
+    assert "expected a JSON object" in capsys.readouterr().err
+
+
+def test_main_spec_path_is_a_directory_returns_2(tmp_path, capsys):
+    assert ui_helper.main("prompt", tmp_path) == 2
+    assert "unreadable session file" in capsys.readouterr().err
 
 
 def test_prompt_texts_defaults():
