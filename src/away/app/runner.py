@@ -331,7 +331,16 @@ class Pipeline:
         return hotkey_map(self.cfg.bindings, self.cfg.voice, self.dispatcher.profile)
 
     def fire(self, category: str, name: str, data: dict[str, Any] | None = None) -> Action:
-        """Fire a voice/face/hotkey trigger through the bindings."""
+        """Fire a voice/face/hotkey trigger through the bindings (the action engine logs a voice trigger's input
+        as the ``voice`` source)."""
+        if category == "voice":
+            from away.actions_engine import VOICE, attributed
+
+            with attributed(VOICE):
+                return self._fire(category, name, data)
+        return self._fire(category, name, data)
+
+    def _fire(self, category: str, name: str, data: dict[str, Any] | None = None) -> Action:
         if category == "voice":
             act = self.smart.voice(name)  # "click <name>" / "click that" ... (None: not one, or a bound phrase)
             if act is not None:
@@ -606,14 +615,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             backend = RecordingBackend()
             self.monitor_layout = monitors.single(1920, 1080, source="dry-run")
         else:
-            from away.control.mouse import PynputBackend
+            from away.actions_engine import get_engine
 
             monitors.enable_dpi_awareness()  # no-op when cli/tray main already did it (before pynput/tk)
             self.monitor_layout = monitors.enumerate_monitors()
             from away.control.macro_record import MarkingBackend
 
             # every synthetic event Away sends is marked, so a shortcut recording leaves it out (v0.1.20)
-            backend = MarkingBackend(PynputBackend())  # type: ignore[assignment]
+            backend = MarkingBackend(get_engine().os_backend())  # type: ignore[assignment]
         screen = self.monitor_layout
         self.monitor_watcher = monitors.MonitorWatcher(self.monitor_layout, float(cfg.hands.cursor.monitor_refresh_s))
         temporal = None
@@ -630,6 +639,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             self.guard = ManualInputGuard(cfg.app.auto_pause_idle_ms)
             backend = GuardedBackend(backend, self.guard)  # type: ignore[assignment]
+        if not dry_run:
+            # audit Phase 1b: the engine owns the real backend; gestures (and the voice commands that run the same
+            # bindings, attributed "voice") reach it through the engine as the "gesture" source
+            from away.actions_engine import GESTURE, get_engine
+
+            get_engine().set_backend(backend)
+            backend = get_engine().client(GESTURE)  # type: ignore[assignment]
         from away.pointer.uia import make_backend as pointer_backend
 
         self.pipeline = Pipeline(
@@ -2233,6 +2249,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         with contextlib.suppress(Exception):
             self.macros.stop_playback()
             self.macros.stop_recording()
+        if not getattr(self, "dry_run", True):
+            from away.actions_engine import get_engine
+
+            with contextlib.suppress(Exception):  # every source's in-flight action, and anything still held
+                get_engine().stop_all("Project Away is closing")
         self._restore_cursor()  # the user's own cursor size, right away (no debounce)
         with contextlib.suppress(Exception):
             self.pipeline.headgaze.save_bias()  # keep the gaze drift correction for the next start

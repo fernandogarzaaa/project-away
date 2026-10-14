@@ -288,6 +288,13 @@ class TrayController:
         if m is not None:
             m.stop_playback()
 
+    def stop_everything(self) -> int:
+        """Tray "Stop everything" (audit Phase 1b): cancels every source's in-flight action at once (a shortcut,
+        a drag, a dictation, an agent's action, which also loses its grant) and lets go of held keys/buttons."""
+        from away.actions_engine import get_engine
+
+        return get_engine().stop_all("you pressed Stop everything in the tray")
+
     def quit(self) -> None:
         self.app.stop()
 
@@ -599,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem(
             "Stop shortcut", lambda _icon, _item: ctl.stop_shortcut(), visible=lambda _i: ctl.shortcut_playing()
         ),
+        pystray.MenuItem("Stop everything", lambda _icon, _item: ctl.stop_everything()),
         pystray.MenuItem(
             lambda _i: f"Disconnect AI agents ({ctl.agent_badge()})",
             lambda _icon, _item: ctl.disconnect_agents(),

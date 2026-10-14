@@ -35,10 +35,10 @@ def _default_listener(sink: Sink) -> Any:  # pragma: no cover - desktop
     return PynputListener(sink)
 
 
-def _default_backend(mark: Callable[[], None]) -> Any:  # pragma: no cover - desktop
+def _default_backend(mark: Callable[[], None], engine: Any = None) -> Any:  # pragma: no cover - desktop
     from away.control.macro_platform import PynputMacroBackend
 
-    return PynputMacroBackend(mark)
+    return PynputMacroBackend(mark, engine=engine)
 
 
 class DryRunBackend:
@@ -69,12 +69,16 @@ class MacroService:
         on_replay: Callable[[bool], None] | None = None,
         marker: SelfInputMarker | None = None,
         threaded: bool = True,
+        engine: Any = None,
     ) -> None:
+        from away.actions_engine import get_engine
+
+        self.engine = engine or get_engine()  # replays are the ``macro`` source of the one action engine
         self.cfg = cfg or MacrosConfig()
         self.store = store or MacroStore.default(self.cfg)
         self._window_api = window_api
         self._listener_factory = listener_factory or _default_listener
-        self._backend_factory = backend_factory or _default_backend
+        self._backend_factory = backend_factory or (lambda mark: _default_backend(mark, self.engine))
         self.notify: Notify = notify or (lambda _t, _m: None)
         self.on_replay = on_replay
         self.marker = marker or MARKER
@@ -193,8 +197,12 @@ class MacroService:
         if self.on_replay is not None:
             with contextlib.suppress(Exception):
                 self.on_replay(True)
+        from away.actions_engine import MACRO
+
         try:
-            res = player.run(macro, speed=speed)
+            # Stop everything (hotkey, open palm, voice, tray) reaches the replay through its abort event
+            with self.engine.track(MACRO, player.abort, macro.name):
+                res = player.run(macro, speed=speed)
         finally:
             if lst is not None:
                 with contextlib.suppress(Exception):
@@ -250,8 +258,11 @@ class MacroService:
 
     def hook_control(self, arg: str, _data: dict[str, Any]) -> None:
         """``macro_control:record | stop_recording | toggle_recording | stop``."""
-        if arg == "stop":  # stops a replay only; "stop" alone never ends a recording (say "stop recording")
+        if arg == "stop":  # "stop" never ends a recording (say "stop recording")
             self.stop_playback()
+            # audit Phase 1b: "stop" is Stop everything: every source's in-flight action (a drag, a dictation,
+            # an agent's action) is cancelled at once
+            self.engine.stop_all("you said stop")
             return
         if arg == "toggle_recording":
             arg = "stop_recording" if self.recording else "record"

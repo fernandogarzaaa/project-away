@@ -396,11 +396,18 @@ class AgentLinkHost:
 
     # ------------------------------------------------------------ platform
     def _control_hooks(self) -> ControlHooks:
+        from away.actions_engine import SourceBackend, get_engine
         from away.agentlink import desktop
 
         backend: Any
+        engine: Any = None
         if self.app is not None:
             backend = self.app.pipeline.mouse.backend
+            if isinstance(backend, SourceBackend):
+                # audit Phase 1b: the agent acts on the engine's backend as its own source ("agent"), never through
+                # the gesture client; the shared engine owns its tokens, safety checks, stop-all and audit log
+                engine = get_engine()
+                backend = backend.target
         else:
             from away.control.mouse import RecordingBackend
 
@@ -414,13 +421,7 @@ class AgentLinkHost:
             self.input_guard = None
 
         def pos() -> tuple[int, int] | None:
-            try:
-                from pynput.mouse import Controller
-
-                x, y = Controller().position
-                return int(x), int(y)
-            except Exception:
-                return None
+            return get_engine().cursor_position()
 
         uia: Any = desktop.make_uia()
         smart = getattr(getattr(self.app, "pipeline", None), "smart", None) if self.app is not None else None
@@ -432,6 +433,7 @@ class AgentLinkHost:
             cursor_pos=pos,
             overlay_on=self._overlay_on,
             overlay_off=self._overlay_off,
+            engine=engine,
         )
 
     def _overlay_on(self, name: str) -> None:
@@ -540,7 +542,11 @@ class AgentLinkHost:
             ml = mouse.Listener(on_move=moved, on_click=clicked, on_scroll=lambda *a: clicked())
             kl = keyboard.Listener(on_press=pressed)
             hk = keyboard.GlobalHotKeys(
-                {to_pynput_hotkey(self.cfg().agent_link.stop_hotkey): lambda: ctl.stop("you pressed the stop keys")}
+                {
+                    to_pynput_hotkey(self.cfg().agent_link.stop_hotkey): lambda: ctl.engine.stop_all(
+                        "you pressed the stop keys"
+                    )
+                }
             )
             for lst in (ml, kl, hk):
                 lst.start()
@@ -656,8 +662,9 @@ class AgentLinkHost:
         if self.core.prompts.current is not None:
             self.core.prompts.feed_sign(t, sign)
         held = self._palm.update(t, sign if sign == handsigns.OPEN_PALM else None)
-        if self.core.control.grant is not None and held:
-            self.core.control.stop("you held up an open palm")
+        ctl = self.core.control
+        if held and (ctl.grant is not None or ctl.engine.busy()):
+            ctl.engine.stop_all("you held up an open palm")  # Stop everything: every source, the agent's grant too
 
     def _on_bus(self, ev: Any) -> None:
         topic, data = ev.topic, ev.data
@@ -674,8 +681,9 @@ class AgentLinkHost:
             text = str(data.get("text") or "")
             if self.core.prompts.current is not None and self.core.prompts.feed_voice(text):
                 return
-            if normalize(text) in STOP_WORDS and self.core.control.grant is not None:
-                self.core.control.stop("you said stop")
+            ctl = self.core.control
+            if normalize(text) in STOP_WORDS and (ctl.grant is not None or ctl.engine.busy()):
+                ctl.engine.stop_all("you said stop")  # Stop everything
         if topic in ("action.cancelled", "action.undone", "feedback.wrong"):
             self.core.events.publish("misfire", {"topic": topic, **{k: str(v)[:100] for k, v in data.items()}})
 
