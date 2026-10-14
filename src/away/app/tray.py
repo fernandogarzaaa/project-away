@@ -19,6 +19,27 @@ STATE_COLORS = {
 }
 
 
+# Windows keeps the tray tooltip in a 128-character UTF-16 buffer (the terminating zero included); a longer one makes
+# pystray fail ("string too long (136, maximum length 128)"). Other systems take the same, shorter text.
+TOOLTIP_MAX = 127
+
+
+def tooltip_text(text: str, limit: int = TOOLTIP_MAX) -> str:
+    """``text`` cut to ``limit`` UTF-16 units with an ellipsis, never splitting a character in two."""
+
+    def units(t: str) -> int:
+        return len(t.encode("utf-16-le")) // 2
+
+    if units(text) <= limit:
+        return text
+    out = ""
+    for ch in text:
+        if units(out + ch) + 1 > limit:  # + 1 for the ellipsis
+            break
+        out += ch
+    return out.rstrip(" -,") + "\u2026"
+
+
 def icon_state(paused: bool, voice_state: str) -> str:
     """Which colour the tray icon shows: paused wins, then mic muted/stopped/recording, else active."""
     if paused:
@@ -117,6 +138,10 @@ class TrayController:
         hint = str(getattr(self.app, "health_hint", "") or "")  # v0.1.23: busy PC / choppy tracking
         text += f" - {hint}" if hint else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
+
+    def tooltip(self) -> str:
+        """:meth:`title`, short enough for the Windows tray tooltip (the menu shows it in full)."""
+        return tooltip_text(self.title())
 
     def camera_status(self) -> str:
         """v0.1.21: "Settings is using the camera" while Settings (or a camera check) borrows it."""
@@ -400,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
 
     def _set_icon(ic: Any) -> None:
         ic.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
-        ic.title = ctl.title()
+        ic.title = ctl.tooltip()
 
     def refresh(icon: Any) -> None:
         guard.call(_set_icon, icon)
@@ -552,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
-    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
+    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
     topics = (
         "voice.state",
         "app.paused",

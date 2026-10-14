@@ -853,3 +853,33 @@ def test_the_windows_detector_reports_its_own_failure(monkeypatch: pytest.Monkey
     monkeypatch.setattr(ctypes, "windll", Broken(), raising=False)
     with pytest.raises(desktop.SecureDesktopUnknown):
         desktop.secure_desktop_active()
+
+
+# ------------------------------------------------------------- extra (a): the tray tooltip fits Windows' limit
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_tray_tooltip_never_exceeds_the_windows_limit() -> None:
+    import types
+
+    from away.app.tray import TOOLTIP_MAX, TrayController, tooltip_text
+
+    assert TOOLTIP_MAX == 127  # 128 UTF-16 units including the terminating zero
+    app = types.SimpleNamespace(
+        voice_state=lambda: "push-to-talk ready",
+        camera_status=lambda: "Settings is using the camera",
+        health_hint="your PC is busy, tracking may be choppy",
+        pipeline=None,
+    )
+    ctl = TrayController(app)
+    ctl.agent_badge = lambda: "Claude is using your computer"  # type: ignore[method-assign]
+    ctl.crash_note = "crashed"
+    assert _utf16_len(ctl.title()) > 128  # the live log: "string too long (136, maximum length 128)"
+    tip = ctl.tooltip()
+    assert _utf16_len(tip) <= TOOLTIP_MAX and tip.endswith("\u2026") and tip.startswith("Project Away - active")
+    assert tooltip_text("Project Away - active") == "Project Away - active"
+    emoji = "Project Away " + "\U0001f44b" * 80  # two UTF-16 units each; never cut in half
+    t = tooltip_text(emoji)
+    assert _utf16_len(t) <= TOOLTIP_MAX
+    t.encode("utf-16-le")  # no lone surrogate
