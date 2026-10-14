@@ -24,6 +24,11 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    session" stops asking until the session ends). Moving, scrolling and typing into a named text box never ask.
 6. **Rate limited and logged.** At most ``action_rate_per_s`` actions per second; every action is logged with a
    thumbnail of the screen; "Undo last" reverses what can be reversed (cursor moves, scrolls, typed text).
+
+Since audit Phase 1b every input goes through the one action engine (:mod:`away.actions_engine`): it owns the
+cancel tokens, the secure desktop check, the rate limit, the risk classification, held-input cleanup, "Stop
+everything" and the audit log (source ``agent``). This module keeps what is specific to agents: grants, takeover,
+the "Are you sure?" prompts, screenshots and undo.
 """
 
 from __future__ import annotations
@@ -39,28 +44,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from away.agentlink import desktop
-from away.agentlink.ratelimit import TokenBucket
-
-RISKY = re.compile(
-    r"\b(send|submit|pay|buy|purchase|delete|remove|confirm|install|uninstall|checkout|check out|place order|"
-    r"transfer|erase|format|reset|sign out|log out|publish|post|trash|recycle bin)\b",
-    re.IGNORECASE,
+from away.actions_engine import (
+    AGENT,
+    CONSEQUENTIAL_KEYS,
+    RISKY,
+    SHORTCUT_MODIFIERS,
+    USER,
+    Action,
+    ActionCancelled,
+    ActionEngine,
+    ActionRefused,
+    classify,
 )
-# v0.1.24 hardening: keys that act on whatever has the focus (Enter submits, Delete deletes a selected file)
-CONSEQUENTIAL_KEYS = ("enter", "return", "delete", "del")
-SHORTCUT_MODIFIERS = ("ctrl", "alt", "cmd", "win", "super", "windows", "option")
+from away.agentlink import desktop
+
+__all__ = [
+    "CONSEQUENTIAL_KEYS",
+    "RISKY",
+    "SHORTCUT_MODIFIERS",
+    "ComputerControl",
+    "ControlHooks",
+    "ControlRefused",
+    "Grant",
+    "LogEntry",
+    "classify",
+]
+
 UNKNOWN_NOTE = "Project Away can't tell what is there, so it is asking first."
 ALLOW_SESSION = "Allow for this session"
-
-
-def classify(label: str | None) -> str:
-    """What an action's target is, from its UI Automation name: ``risky`` (Send, Pay, Delete, Recycle Bin...),
-    ``safe`` (any other name) or ``unknown`` (no name: no UI Automation, nothing found there, coordinates only)."""
-    text = str(label or "").strip()
-    if not text:
-        return "unknown"
-    return "risky" if RISKY.search(text) else "safe"
 
 
 BLOCKED_COMBOS = ({"cmd", "r"}, {"cmd", "x"}, {"ctrl", "alt", "delete"}, {"ctrl", "shift", "esc"})
@@ -90,7 +101,7 @@ ACTIONS = (
 )
 
 
-class ControlRefused(Exception):
+class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
 
 
@@ -108,8 +119,10 @@ class Grant:
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
 
 
-class _Interrupted(Exception):
-    """The grant was paused or ended while an action was running."""
+# The grant was paused or ended while an action was running (the engine's cancellation).
+_Interrupted = ActionCancelled
+# how a user source names itself in "paused because you used the ..."
+_TAKEOVER_NAMES = {"gesture": "hand", "voice": "voice", "dictation": "keyboard", "macro": "shortcut", "user": "mouse"}
 
 
 @dataclass
@@ -123,6 +136,7 @@ class LogEntry:
     thumb: str = ""  # file name in the action log folder (PNG), "" when no screenshot was possible
     undo: dict[str, Any] | None = None
     agent_id: str = ""  # who did it (undo and the action log are per agent)
+    source: str = AGENT  # the action engine source it ran as
 
 
 @dataclass
@@ -140,6 +154,7 @@ class ControlHooks:
     overlay_on: Callable[[str], None] = lambda _name: None
     overlay_off: Callable[[], None] = lambda: None
     sleep: Callable[[float], None] = time.sleep
+    engine: Any = None  # the shared ActionEngine in the app; None = a private one (tests, headless)
 
 
 class ComputerControl:
@@ -165,7 +180,11 @@ class ComputerControl:
         self.on_event = on_event
         self.always_allowed = always_allowed
         self.allow_always = allow_always
-        self.bucket = TokenBucket(rate_per_s, max(2, int(rate_per_s * 2)), clock)
+        self.platform = hooks.platform or sys.platform
+        self.engine: ActionEngine = hooks.engine or ActionEngine(clock=clock, platform=self.platform)
+        self.engine.set_agent_rate(rate_per_s, clock)
+        self.engine.add_stop_listener(self._on_stop_all)
+        self.engine.add_takeover_listener(self._on_user_action)
         self.log_folder = log_folder
         self.log: deque[LogEntry] = deque(maxlen=300)
         self.grant: Grant | None = None
@@ -173,10 +192,23 @@ class ComputerControl:
         self._own_mouse_until = 0.0  # the agent's own mouse input may echo back until then
         self._own_keys_until = 0.0  # the agent's own key presses may echo back until then
         self._grace_until = 0.0  # just after the user approved (maybe with a thumbs up): that is not a takeover
-        self.platform = hooks.platform or sys.platform
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+
+    @property
+    def bucket(self) -> Any:
+        """The agents' rate limit (owned by the action engine)."""
+        return self.engine.bucket
+
+    def _on_stop_all(self, reason: str) -> None:
+        """ "Stop everything" from any trigger ends the grant too."""
+        if self.grant is not None:
+            self._end(reason)
+
+    def _on_user_action(self, source: str) -> bool:
+        """The user's own gesture / voice / shortcut acted while an agent action was in flight: take over."""
+        return self.user_input(_TAKEOVER_NAMES.get(source, source))
 
     # ---------------------------------------------------------------- events
     def _emit(self, topic: str, data: dict[str, Any]) -> None:
@@ -334,19 +366,12 @@ class ComputerControl:
             raise ControlRefused(f"{g.agent_name} is using the computer, not this agent")
         if g.paused:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
-        try:
-            secure = bool(self.hooks.secure_desktop())
-        except Exception:
-            if self.platform == "win32":  # v0.1.24 hardening: fail closed when Windows cannot be checked
-                raise ControlRefused(
-                    "Project Away could not check whether a Windows security prompt is on screen, so it stopped "
-                    "to be safe; try again in a moment"
-                ) from None
-            secure = False  # macOS and Linux have no secure desktop to protect: the check is a no-op there
-        if secure:
-            raise ControlRefused("a Windows security prompt is on screen; agents can never touch it")
-        if not self.bucket.allow(agent_id):
-            raise ControlRefused("too many actions; slow down (max a few per second)")
+        try:  # the engine's agent policy: secure desktop (fail closed on Windows) and the rate limit
+            self.engine.check(AGENT, agent_id, secure_desktop=self.hooks.secure_desktop, platform=self.platform)
+        except ControlRefused:
+            raise
+        except ActionRefused as exc:
+            raise ControlRefused(str(exc)) from None
         return g
 
     def _confirm_risky(self, g: Grant, label: str, what: str) -> None:
@@ -485,40 +510,16 @@ class ComputerControl:
             raise ControlRefused(f"unknown action {action!r}; use {', '.join(ACTIONS)}")
         g = self._require(agent_id)
         b = self.hooks.backend
-        tok = g.cancel
-        st = {"sent": False, "held": False, "ok": False}
-
-        def step() -> Any:
-            """The backend, after checking that the grant was not paused or ended (call before every input)."""
-            if tok.is_set():
-                raise _Interrupted
-            st["sent"] = True
-            return b
-
-        def wait(seconds: float) -> None:
-            if self.hooks.sleep is time.sleep:
-                tok.wait(seconds)  # wakes at once on a stop
-            else:
-                self.hooks.sleep(seconds)
-            if tok.is_set():
-                raise _Interrupted
-
         try:
-            return self._act(g, agent_id, action, kw, b, step, wait, st)
-        except _Interrupted:
+            with self.engine.begin(
+                AGENT, action, actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
+            ) as a:
+                return self._act(g, agent_id, action, kw, b, a)
+        except ActionCancelled:
             reason = g.paused or g.ended or "it was stopped"
             self._log(g, action, "stopped part-way", "stopped", None)
             self._emit("control.interrupted", {"agent": g.agent_name, "action": action, "reason": reason})
             raise ControlRefused(f"stopped part-way because {reason}") from None
-        finally:
-            if not st["ok"] and st["sent"]:  # never leave a mouse button or a modifier key held down
-                if st["held"]:
-                    with contextlib.suppress(Exception):
-                        b.release()
-                rm = getattr(b, "release_modifiers", None)
-                if callable(rm):
-                    with contextlib.suppress(Exception):
-                        rm()
 
     def _act(
         self,
@@ -527,10 +528,11 @@ class ComputerControl:
         action: str,
         kw: dict[str, Any],
         b: Any,
-        step: Callable[[], Any],
-        wait: Callable[[float], None],
-        st: dict[str, bool],
+        a: Action,
     ) -> dict[str, Any]:
+        """One action inside the engine's :meth:`~away.actions_engine.ActionEngine.begin`: ``a.step()`` before
+        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish."""
+        step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
         before = None
         try:
@@ -567,15 +569,13 @@ class ComputerControl:
             self._confirm_targets(g, f"drag {self._where(l1, x1, y1)} to {self._where(l2, x2, y2)}", [l1, l2])
             self.note_own_mouse()
             step().move(x1, y1)
-            step().press()
-            st["held"] = True
+            a.press_button()
             steps = 8
             for i in range(1, steps + 1):
                 self.note_own_mouse()
                 step().move(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps))
                 wait(0.02)
-            b.release()
-            st["held"] = False
+            a.release_button()
             detail = f"({x1}, {y1}) -> ({x2}, {y2})"
         elif action == "scroll":
             dy = max(-50.0, min(50.0, float(kw.get("dy") or 0.0)))
@@ -662,7 +662,7 @@ class ComputerControl:
                 raise ControlRefused("agents cannot open terminals or system tools")
             self._open_app(name, step, wait)
             detail = name
-        st["ok"] = True
+        a.ok = True
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
         return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
@@ -694,6 +694,7 @@ class ComputerControl:
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
+        self.engine.audit(AGENT, g.agent_name, action, detail, result)
         if self.log_folder is not None:
             try:
                 img = self.hooks.grab()
@@ -724,6 +725,7 @@ class ComputerControl:
                 "result": e.result,
                 "thumb": e.thumb,
                 "undoable": e.undo is not None,
+                "source": e.source,
             }
             for e in reversed(items)
         ]
@@ -756,16 +758,22 @@ class ComputerControl:
             self.note_own_keys()
         else:
             self.note_own_mouse()
-        if "move" in u:
-            b.move(int(u["move"][0]), int(u["move"][1]))
-        elif "scroll" in u:
-            dy, dx = u["scroll"]
-            if dy:
-                b.scroll(dy)
-            if dx and hasattr(b, "hscroll"):
-                b.hscroll(dx)
-        elif "keys" in u and hasattr(b, "hotkey"):
-            b.hotkey(list(u["keys"]))
+        source = USER if agent_id is None else AGENT
+        try:
+            with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
+                if "move" in u:
+                    a.step().move(int(u["move"][0]), int(u["move"][1]))
+                elif "scroll" in u:
+                    dy, dx = u["scroll"]
+                    if dy:
+                        a.step().scroll(dy)
+                    if dx and hasattr(b, "hscroll"):
+                        a.step().hscroll(dx)
+                elif "keys" in u and hasattr(b, "hotkey"):
+                    a.step().hotkey(list(u["keys"]))
+                a.ok = True
+        except ActionCancelled as exc:
+            raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         e.result = "undone"
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}

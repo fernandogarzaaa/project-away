@@ -452,52 +452,45 @@ class PynputListener:  # pragma: no cover - needs a desktop session
         self._sink("scroll", {"x": int(x), "y": int(y), "dx": int(dx), "dy": int(dy)}, self._injected)
 
 
-class PynputMacroBackend:  # pragma: no cover - needs a desktop session
-    """Replay output. Every event is reported to ``mark`` first so recorders/abort watchers ignore it."""
+class PynputMacroBackend:
+    """Replay output. Every event is reported to ``mark`` first so recorders/abort watchers ignore it, then sent
+    through the action engine as the ``macro`` source (Stop everything lets go of held keys and buttons)."""
 
-    def __init__(self, mark: Callable[[], None] = lambda: None) -> None:
-        from pynput import keyboard, mouse
+    def __init__(self, mark: Callable[[], None] = lambda: None, engine: Any = None, backend: Any = None) -> None:
+        from away.actions_engine import MACRO, get_engine
 
-        self._m = mouse.Controller()
-        self._k = keyboard.Controller()
-        self._buttons = mouse.Button
-        self._keys = keyboard.Key
+        eng = engine or get_engine()
+        self._out = eng.client(MACRO, backend if backend is not None else eng.os_backend())
         self._mark = mark
-
-    def _key(self, k: str) -> Any:
-        return getattr(self._keys, k, k)
-
-    def _button(self, b: str) -> Any:
-        return getattr(self._buttons, b, self._buttons.left)
 
     def move(self, x: int, y: int) -> None:
         self._mark()
-        self._m.position = (x, y)
+        self._out.move(x, y)
 
     def press(self, button: str = "left") -> None:
         self._mark()
-        self._m.press(self._button(button))
+        self._out.press(button)
 
     def release(self, button: str = "left") -> None:
         self._mark()
-        self._m.release(self._button(button))
+        self._out.release(button)
 
     def click(self, button: str = "left", count: int = 1) -> None:
         self._mark()
-        self._m.click(self._button(button), count)
+        self._out.click_button(button, count)
 
     def scroll(self, dx: int, dy: int) -> None:
         self._mark()
-        self._m.scroll(dx, dy)
+        self._out.scroll_xy(dx, dy)
 
     def key_down(self, k: str) -> None:
         self._mark()
-        self._k.press(self._key(k))
+        self._out.key_down(k)
 
     def key_up(self, k: str) -> None:
         self._mark()
-        self._k.release(self._key(k))
+        self._out.key_up(k)
 
     def type_text(self, text: str) -> None:
         self._mark()
-        self._k.type(text)
+        self._out.type_text(text)
