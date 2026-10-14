@@ -389,6 +389,7 @@ def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[A
             checked=lambda _i: actions.switch_value(ctl.app.cfg, "attention.enabled"),
         ),
         pystray.MenuItem("Guided first run...", lambda _icon, _item: actions.launch_first_run()),
+        pystray.MenuItem("Calibrate tracking...", lambda _icon, _item: actions.launch_calibrate()),  # v0.1.25
     ]
 
 
