@@ -859,7 +859,7 @@ class AgentLinkHost:
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
                 link_info=self.link_info,
-                token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "never") or "never"),
+                token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "90d") or "90d"),
             )
             mcp = mcp_tools.build(
                 api.LocalBackend(self.core.service), screen_fps=lambda: float(self.cfg().agent_link.screen_fps)

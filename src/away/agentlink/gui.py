@@ -88,6 +88,18 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.tokens_box = ttk.LabelFrame(f, text="Agent tokens (agents that stay connected)", padding=6)
         self.tokens_box.pack(fill="x", pady=6)
         self.token_note = tk.StringVar(value="")
+        # how long a new agent token works (agent_link.token_expiry): 90 days by default, 30 days, or until revoked
+        te = ttk.Frame(f)
+        te.pack(fill="x")
+        ttk.Label(te, text="New agent tokens last:").pack(side="left")
+        labels = dict(self.m.EXPIRY_CHOICES)
+        self.token_expiry_var = tk.StringVar(value=labels.get(self.m.token_expiry(), labels["90d"]))
+        te_box = ttk.Combobox(
+            te, textvariable=self.token_expiry_var, values=list(labels.values()), state="readonly", width=18
+        )
+        te_box.pack(side="left", padx=6)
+        te_box.bind("<<ComboboxSelected>>", lambda _e: self.m.set_token_expiry(self.token_expiry_var.get()))
+        ttk.Label(te, text="(tokens already given keep theirs)", foreground="#555").pack(side="left")
         # v0.1.22 "Talk to your agent"
         tb = ttk.LabelFrame(f, text="Talk to your agent", padding=6)
         tb.pack(fill="x", pady=6)

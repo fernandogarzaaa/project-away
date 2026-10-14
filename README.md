@@ -1618,17 +1618,21 @@ connected. Per agent:
   hour, so nothing breaks while you switch, then it stops.
 * **What it can do**: the same permission switches as for any agent.
 
-`agent_link.token_expiry` (default `never`; `30d` or `90d`) sets how long a new token works unless the agent asks
-for less. The same is on the command line, with the app running or not:
+A new token works for **90 days** by default. *New agent tokens last* (in the same section) changes that to 30 days or
+*Until I revoke it* (`agent_link.token_expiry`: `90d`, `30d` or `never`); tokens already given keep their own end
+date, and the approval dialog always says how long this one will last. The same is on the command line, with the app
+running or not:
 
 ```
 away agent tokens                       # who stays connected, what it can do, last used (when, from where)
 away agent tokens rotate Cookie         # a new token, shown once; the old one works for one more hour
 away agent tokens scopes Cookie read,tune
 away agent tokens revoke Cookie         # disconnected now
+away agent tokens expiry 30d            # new tokens last 30 days (90d is the default; never = until you revoke)
 ```
 
-**For agents.** Send `"keep_connected": true` (optionally `"token_expiry": "30d" | "90d" | "never"`) with
+**For agents.** Send `"keep_connected": true` (optionally `"token_expiry": "90d" | "30d" | "never"`; without it, the PC's setting applies, 90 days unless the person
+changed it) with
 `POST /v1/pair`. If the person chooses *Keep this agent connected*, the reply carries
 `persistent_token` (`paway_` + 32 random bytes, base64url) **this one time only**; store it safely. Send it as
 `Authorization: Bearer paway_...` on `/mcp` or any REST call: it opens (or resumes) your session with no prompt. The
@@ -1642,7 +1646,12 @@ compared in constant time; Settings, `state.json` and the CLI list never show a 
 *New token* reaches Settings or the CLI through a one-time owner-only file that is deleted as it is read (or after
 two minutes). Wrong `paway_` tokens are limited per address: five free tries, then the address waits 2 s, 4 s,
 8 s ... up to 15 minutes (`429` with `Retry-After`), while the person's own agents elsewhere keep working.
-Permissions are checked on every call exactly as before. Pairing links used as connector URLs (ChatGPT, Claude.ai)
+Permissions are checked on every call exactly as before, and a token gets "Share my logs and recordings" only if you
+switch it on for that agent (it is never part of the default permissions). Revoking a token, or replacing it with
+*New token*, ends whatever the agent had running at once: its "use my computer" session stops and lets go of any
+held mouse button or key, and its live screen view ends, so the replacement token starts clean and asks again. The
+token endpoints (`/v1/pair`, `/v1/pair/local`, `/v1/token/rotate`, `/v1/token/refresh`) have the same 64 KB request
+cap as the rest of the REST API. Pairing links used as connector URLs (ChatGPT, Claude.ai)
 already stay connected on their own and are not offered a token they could not send.
 
 ## A link that survives restarts (v0.1.24)

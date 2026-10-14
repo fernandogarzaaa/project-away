@@ -3,7 +3,8 @@
 * ``away agent status|start|stop|pair|agents|revoke|disconnect|connect|snippets|prefs|changes|undo|github-token``
   (aliases ``away link`` and ``away remote``)
 * ``away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [read,tune,...]`` - v0.1.24: agents that stay
-  connected (persistent agent tokens)
+  connected (persistent agent tokens); ``away agent tokens expiry [90d|30d|never]`` shows or sets how long a new
+  token works (default 90 days)
 * ``away mcp [--scopes read,tune] [--name NAME]`` - the stdio MCP server local agent apps launch
 * ``away replay FILE [--model] [--json]`` - re-run a recording through the gesture pipeline headless
 * ``away diagnose bundle`` - write a diagnostics bundle
@@ -295,6 +296,33 @@ def token_lines(tokens: list[dict[str, Any]], now: float | None = None) -> list[
     return out
 
 
+EXPIRY_TEXT = {"90d": "90 days", "30d": "30 days", "never": "until you revoke them"}
+
+
+def cmd_token_expiry(value: str = "") -> int:
+    """``away agent tokens expiry [90d|30d|never]``: how long a new agent token works (``agent_link.token_expiry``,
+    default 90 days). Tokens already given keep their own end date."""
+    from away import config as cfgmod
+    from away.agentlink.auth import expiry_choice
+
+    path = cfgmod.config_path()
+    cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+    if value:
+        try:
+            cfg.agent_link.token_expiry = expiry_choice(value)
+        except ValueError as exc:
+            print(f"error: {exc} (use 90d, 30d or never)", file=sys.stderr)
+            return 2
+        cfgmod.save(cfg, path)
+        print(
+            f"New agent tokens now work {EXPIRY_TEXT[cfg.agent_link.token_expiry]}. Tokens already given keep theirs."
+        )
+        return 0
+    print(f"New agent tokens work {EXPIRY_TEXT.get(cfg.agent_link.token_expiry, cfg.agent_link.token_expiry)}.")
+    print("Change it with: away agent tokens expiry 90d|30d|never")
+    return 0
+
+
 def cmd_tokens(args: argparse.Namespace, alive: Any) -> int:
     """``away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [SCOPES]``. Talks to the running app; when it
     is not running, changes the saved list directly (the app reads it when it starts)."""
@@ -305,6 +333,8 @@ def cmd_tokens(args: argparse.Namespace, alive: Any) -> int:
     sub = str(args.value or "list")
     rest = list(args.rest or [])
     ref = rest[0] if rest else ""
+    if sub == "expiry":
+        return cmd_token_expiry(ref)
     if sub not in ("list", "revoke", "rotate", "scopes"):
         print("usage: away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [read,tune,...]", file=sys.stderr)
         return 2

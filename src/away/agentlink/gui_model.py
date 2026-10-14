@@ -236,6 +236,32 @@ class AgentLinkModel:
             return Problem("The new token could not be shown. Please try again.", "Try again", "retry"), None
         return None, secret
 
+    # "New agent tokens last": the default lifetime of a token issued when you choose Keep this agent connected
+    EXPIRY_CHOICES = (("90d", "90 days"), ("30d", "30 days"), ("never", "Until I revoke it"))
+
+    def token_expiry(self) -> str:
+        """``agent_link.token_expiry`` (90 days unless you changed it)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return str(cfg.agent_link.token_expiry or "90d")
+        except Exception:
+            return "90d"
+
+    def set_token_expiry(self, choice: str) -> None:
+        """Accepts the key ("90d") or its label ("90 days"); tokens already given keep their own end date."""
+        from away import config as cfgmod
+        from away.agentlink.auth import expiry_choice
+
+        by_label = {label: key for key, label in self.EXPIRY_CHOICES}
+        value = expiry_choice(by_label.get(choice, choice))
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.token_expiry = value
+        cfgmod.save(cfg, path)
+
     def set_token_scopes(self, token_id: str, scopes: list[str]) -> None:
         self.send("token_scopes", token_id=token_id, scopes=perms.to_list(perms.normalize(scopes)))
 

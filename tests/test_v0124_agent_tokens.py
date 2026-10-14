@@ -166,9 +166,10 @@ def test_pair_once_then_restart_reconnects_with_the_token_and_nobody_is_asked(tm
         q, options, details = auto.seen[-1]
         assert q == "Cookie wants to connect and stay connected"
         assert options == ["Allow", KEEP_CONNECTED, "Deny"]
-        assert any("until you revoke it" in d for d in details)
+        assert any("for 90 days" in d for d in details)  # the default lifetime, said in the question itself
         tok, access = data["persistent_token"], data["token"]
-        assert TOKEN_RE.match(tok) and data["persistent_token_expires"] == 0  # default: never expires
+        assert TOKEN_RE.match(tok)
+        assert data["persistent_token_expires"] == pytest.approx(time.time() + 90 * DAY, abs=60)  # default: 90 days
         assert "Bearer" in data["how_to_stay_connected"]
         agent_id = data["agent"]["id"]
         assert http(base, "GET", "/v1/status", token=tok)[0] == 200
@@ -506,18 +507,24 @@ def test_expiry_choices_30_and_90_days(tmp_path: Path, choice: Any, days: int) -
     assert AgentRegistry(tmp_path / "agents.json", clock=clk).tokens == {}  # an expired token is not kept
 
 
-def test_never_is_the_default_and_bad_choices_are_refused(tmp_path: Path) -> None:
+def test_90_days_is_the_default_never_is_still_a_choice_and_bad_choices_are_refused(tmp_path: Path) -> None:
     clk = FixedClock()
     r = AgentRegistry(tmp_path / "agents.json", clock=clk)
     a, _ = r.issue("Cookie", ["read"], 3600)
     t, tok = r.issue_persistent(a.id)
-    assert t.expiry == "never" and t.expires == 0.0
+    assert t.expiry == "90d" and t.expires == pytest.approx(clk.t + 90 * DAY)
+    assert expiry_choice(None) == expiry_choice("") == "90d"  # no choice given: the default, never "never"
+    b, _ = r.issue("Hark", ["read"], 3600)
+    tn, tok_n = r.issue_persistent(b.id, "never")  # until revoked: still selectable
+    assert tn.expiry == "never" and tn.expires == 0.0
+    assert expiry_choice("0") == expiry_choice("none") == "never"
     clk.t += 5 * 365 * DAY
-    assert r.authenticate_persistent(tok) is not None
+    assert r.authenticate_persistent(tok) is None  # the 90-day token ended
+    assert r.authenticate_persistent(tok_n) is not None
     for bad in ("7d", "forever", -1):
         with pytest.raises(ValueError, match="30 days, 90 days or never"):
             expiry_choice(bad)
-    assert C.AppConfig().agent_link.token_expiry == "never"
+    assert C.AppConfig().agent_link.token_expiry == "90d"
     cfg = C.AppConfig()
     cfg.agent_link.token_expiry = "7d"
     with pytest.raises(ValueError, match="token_expiry"):
@@ -766,3 +773,178 @@ def test_agent_tokens_section_renders_under_a_display(tmp_path: Path) -> None:
         assert any("Keep this agent connected" in t for t in _texts(tab.tokens_box))
     finally:
         root.destroy()
+
+
+# ============================================================================ on top of the trust-and-safety hardening
+def _safety() -> Any:
+    """The hardening tests' helpers (a host with a live control grant and live view, the API test client)."""
+    spec = importlib.util.spec_from_file_location("_safety_helpers", ROOT / "tests" / "test_safety_hardening.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _ended(h: Any, a: Any, offs: list[int]) -> None:
+    assert h.core.control.status() == {"active": False} and offs  # control ended, border off
+    assert a.id not in h.core.service._watchers and a.id not in h.core.service._live_views
+    assert h._watch_stop is None and a.id not in h.core.control.views  # the live view and its badge are gone
+
+
+def test_revoking_a_token_ends_control_and_the_live_view(tmp_path: Path) -> None:
+    h, a, offs = _safety()._host(tmp_path)
+    t, tok = h.core.registry.issue_persistent(a.id)
+    res = h.handle({"action": "token_revoke", "token_id": t.id})  # Settings > Agent tokens > Revoke
+    assert res == {"revoked": True, "agent_id": a.id}
+    _ended(h, a, offs)
+    assert h.core.registry.authenticate_persistent(tok) is None
+
+
+def test_rotating_a_token_out_ends_what_ran_under_it_but_keeps_the_agent(tmp_path: Path) -> None:
+    h, a, offs = _safety()._host(tmp_path)
+    t, old = h.core.registry.issue_persistent(a.id)
+    res = h.handle({"action": "token_rotate", "token_id": t.id})  # Settings > Agent tokens > New token
+    assert res["token_id"] == t.id and res["secret_ref"]
+    _ended(h, a, offs)
+    assert h.core.registry.get(a.id).active(time.time())  # still connected: the new token starts clean
+    assert h.core.registry.authenticate_persistent(old) is not None  # the old one still signs in for the hour
+    assert h.core.control.request(a.id, a.name)["active"]  # and it can ask for control again (asked each time)
+
+
+def test_rotating_a_token_out_mid_typing_stops_and_lets_go_of_the_keys(tmp_path: Path) -> None:
+    from away.agentlink.control import ControlRefused
+
+    s = _safety()
+    h, a, _ = s._host(tmp_path)
+    t, _old = h.core.registry.issue_persistent(a.id)
+    backend = s.BlockingBackend("type_text", 2)
+    h.core.control.hooks.backend = backend
+    h.core.control.hooks.uia = s.FakeUIA(focused=s.TEXT_BOX)
+    th, out = s._run_in_thread(lambda: h.core.control.act(a.id, "type_text", text="abcdefgh" * 20))
+    assert backend.reached.wait(5.0)
+    h.handle({"action": "token_rotate", "token_id": t.id})
+    backend.go.set()
+    th.join(5.0)
+    assert isinstance(out.get("error"), ControlRefused)
+    assert [c[0] for c in backend.calls].count("type_text") == 2 and backend.calls[-1][0] == "release_modifiers"
+
+
+def test_an_agent_rotating_its_own_token_runs_the_same_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _token, _calls, _spy, _gate, core = _safety()._api(tmp_path)
+    a, _ = core.registry.issue("Cookie", ["read", "control"], 3600)
+    _t, tok = core.registry.issue_persistent(a.id)
+    cleaned: list[tuple[str, bool]] = []
+    orig = core.service.reconcile
+
+    def reconcile(agent_id: str, reason: str = "", end_sessions: bool = False) -> None:
+        cleaned.append((agent_id, end_sessions))
+        orig(agent_id, reason, end_sessions=end_sessions)
+
+    monkeypatch.setattr(core.service, "reconcile", reconcile)
+    h = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+    r = client.post("/v1/token/rotate", content=b"{}", headers=h)
+    assert r.status_code == 200, r.text
+    assert cleaned == [(a.id, True)]
+
+
+def test_the_agent_token_endpoints_use_the_body_cap(tmp_path: Path) -> None:
+    from away.agentlink import api
+
+    client, _token, _calls, _spy, _gate, core = _safety()._api(tmp_path)
+    a, _ = core.registry.issue("Cookie", ["read"], 3600)
+    t, tok = core.registry.issue_persistent(a.id)
+    before = t.token_hash
+    big = b'{"keep_connected": true, "name": "' + b"x" * (api.MAX_JSON_BODY + 1) + b'"}'
+    h = {"Content-Type": "application/json"}
+    for path in ("/v1/pair", "/v1/pair/local", "/v1/token/rotate"):  # no credentials: still refused before parsing
+        r = client.post(path, content=big, headers=h)
+        assert r.status_code == 413 and "too large" in r.json()["error"], path
+    h["Authorization"] = f"Bearer {tok}"
+    for path in ("/v1/token/rotate", "/v1/rpc/get_status", "/v1/pair"):
+        assert client.post(path, content=big, headers=h).status_code == 413, path
+    assert core.registry.tokens[t.id].token_hash == before and not core.registry.tokens[t.id].prev_hash  # not rotated
+    chunks = iter([b'{"x": "', b"y" * (api.MAX_JSON_BODY + 1), b'"}'])  # chunked: no Content-Length to check
+    assert client.post("/v1/token/rotate", content=chunks, headers=h).status_code == 413
+    assert client.post("/v1/token/rotate", content=b"{}", headers=h).status_code == 200  # a normal one still works
+
+
+def test_token_agents_get_share_logs_only_when_it_is_switched_on(tmp_path: Path) -> None:
+    from away.agentlink import perms
+
+    assert perms.SHARE_LOGS not in perms.DEFAULT
+    client, _token, _calls, _spy, _gate, core = _safety()._api(tmp_path)
+    a, _ = core.registry.issue("Cookie", perms.normalize(None), 3600)  # the default permissions
+    t, tok = core.registry.issue_persistent(a.id, "30d")
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/v1/status", headers=h).status_code == 200
+    for path in ("/v1/logs", "/v1/files"):
+        assert client.get(path, headers=h).status_code == 403, path  # diagnose alone does not cover logs
+    _t, tok = core.service.rotate_token(t.id)  # a new token does not widen anything
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/v1/logs", headers=h).status_code == 403
+    assert core.registry.find_token(t.id).public(core.registry.get(a.id), time.time())["scopes"] == [
+        "read",
+        "diagnose",
+    ]
+    core.service.set_scopes(a.id, ["read", "diagnose", "share_logs"])  # the person switches it on for this agent
+    assert client.get("/v1/logs", headers=h).status_code == 200
+    core.service.set_scopes(a.id, ["read", "diagnose"])
+    assert client.get("/v1/logs", headers=h).status_code == 403
+
+
+def test_a_kept_agent_gets_only_the_permissions_it_was_allowed(tmp_path: Path) -> None:
+    from away.agentlink.api import KEEP_CONNECTED
+
+    h, auto, base = start_host(tmp_path, KEEP_CONNECTED)
+    try:
+        data = pair_keep(h, base)  # the pairing allowed read + diagnose
+        tok = data["persistent_token"]
+        assert "share_logs" not in data["agent"]["scopes"]
+        assert http(base, "GET", "/v1/logs", token=tok)[0] == 403
+        h.handle({"action": "token_scopes", "token_id": data["persistent_token_id"], "scopes": ["read", "share_logs"]})
+        assert http(base, "GET", "/v1/logs", token=tok)[0] == 200
+    finally:
+        stop_host(h, auto)
+
+
+def test_the_default_expiry_can_be_changed_in_settings_and_on_the_command_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from away.agentlink.gui_model import AgentLinkModel
+    from away.cli import main as cli_main
+
+    cfgp = tmp_path / "config.yaml"
+    m = AgentLinkModel(data_dir=tmp_path, config_path=cfgp)
+    assert m.token_expiry() == "90d" and [k for k, _ in m.EXPIRY_CHOICES] == ["90d", "30d", "never"]
+    m.set_token_expiry("30 days")  # the menu's label
+    assert C.load(cfgp)[0].agent_link.token_expiry == "30d" and m.token_expiry() == "30d"
+    m.set_token_expiry("never")
+    assert m.token_expiry() == "never"
+    with pytest.raises(ValueError):
+        m.set_token_expiry("7d")
+    assert cli_main(["agent", "tokens", "expiry"]) == 0
+    assert "90 days" in capsys.readouterr().out
+    assert cli_main(["agent", "tokens", "expiry", "30d"]) == 0
+    assert "30 days" in capsys.readouterr().out
+    assert C.load(C.config_path())[0].agent_link.token_expiry == "30d"
+    assert cli_main(["agent", "tokens", "expiry", "never"]) == 0
+    assert "until you revoke" in capsys.readouterr().out
+    assert cli_main(["agent", "tokens", "expiry", "7d"]) == 2
+    assert cli_main(["agent", "tokens", "expiry", "90d"]) == 0
+    assert C.load(C.config_path())[0].agent_link.token_expiry == "90d"
+
+
+def test_the_pc_setting_decides_the_lifetime_unless_the_agent_asks(tmp_path: Path) -> None:
+    from away.agentlink.api import KEEP_CONNECTED
+
+    h, auto, base = start_host(tmp_path, KEEP_CONNECTED)
+    try:
+        h.cfg().agent_link.token_expiry = "30d"
+        data = pair_keep(h, base)
+        assert data["persistent_token_expires"] == pytest.approx(time.time() + 30 * DAY, abs=60)
+        assert any("for 30 days" in d for d in auto.seen[-1][2])
+        data = pair_keep(h, base, name="Hark", token_expiry="never")  # the agent asked; the dialog says so
+        assert data["persistent_token_expires"] == 0
+        assert any("until you revoke it (it asked for this)" in d for d in auto.seen[-1][2])
+    finally:
+        stop_host(h, auto)

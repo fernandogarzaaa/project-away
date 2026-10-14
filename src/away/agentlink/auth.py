@@ -9,7 +9,7 @@
 * v0.1.24 "Keep this agent connected": a persistent agent token (``paway_`` + 32 random bytes, base64url) bound to
   one agent record. Shown once, only its SHA-256 is stored (with the agents, so it survives restarts). It resumes
   the agent's session with no prompt (24 h sliding session), can be revoked (at once), rotated (the old one keeps
-  working for an hour) and may expire after 30 / 90 days (default: never).
+  working for an hour) and may expire after 90 days (the default), 30 days, or never.
 * MCP connectors that cannot send a header (ChatGPT / Claude.ai "add custom connector" with a plain URL) keep
   using the pairing URL after approval: the code is then bound to that one agent (``link_hash``) until the agent
   expires or is revoked. Clients that can send headers exchange it for a bearer token instead.
@@ -48,7 +48,8 @@ DEFAULT_REFRESH_TTL_S = 30 * 86400.0
 PERSIST_PREFIX = "paway_"
 TOKEN_SESSION_S = 24 * 3600.0  # a token session lasts this long after its last use (sliding)
 ROTATE_GRACE_S = 3600.0  # after "Rotate", the old token keeps working this long
-TOKEN_EXPIRY = {"never": 0.0, "30d": 30 * 86400.0, "90d": 90 * 86400.0}  # the choices offered at issuance
+TOKEN_EXPIRY = {"90d": 90 * 86400.0, "30d": 30 * 86400.0, "never": 0.0}  # the choices offered at issuance
+DEFAULT_TOKEN_EXPIRY = "90d"  # a new token works for 90 days unless the person (or the agent) chooses otherwise
 TOKEN_SAVE_EVERY_S = 60.0  # "last used" is written to disk at most this often per token (unless the source changes)
 
 
@@ -66,12 +67,18 @@ def new_persistent_token() -> str:
 
 
 def expiry_choice(value: Any) -> str:
-    """A token lifetime as one of :data:`TOKEN_EXPIRY`'s keys: "never" (also None / "" / 0), "30d" (30), "90d" (90).
-    ValueError for anything else."""
+    """A token lifetime as one of :data:`TOKEN_EXPIRY`'s keys: "90d" (90; also None / "", the default), "30d" (30),
+    "never" (also 0 / "none"). ValueError for anything else."""
     v = str(value if value is not None else "").strip().lower().replace(" ", "")
-    v = {"": "never", "0": "never", "none": "never", "30": "30d", "90": "90d", "30days": "30d", "90days": "90d"}.get(
-        v, v
-    )
+    v = {
+        "": DEFAULT_TOKEN_EXPIRY,
+        "0": "never",
+        "none": "never",
+        "30": "30d",
+        "90": "90d",
+        "30days": "30d",
+        "90days": "90d",
+    }.get(v, v)
     if v not in TOKEN_EXPIRY:
         raise ValueError("token expiry must be 30 days, 90 days or never")
     return v
@@ -175,7 +182,7 @@ class AgentToken:
     agent_id: str
     token_hash: str
     created: float
-    expiry: str = "never"  # the lifetime chosen at issuance (TOKEN_EXPIRY); kept when rotated
+    expiry: str = DEFAULT_TOKEN_EXPIRY  # the lifetime chosen at issuance (TOKEN_EXPIRY); kept when rotated
     expires: float = 0.0  # 0 = never
     last_used: float = 0.0
     last_source: str = ""  # the address the last request came from
@@ -579,7 +586,7 @@ class AgentRegistry:
         self.save()
 
     # ------------------------------------------------ persistent agent tokens (v0.1.24)
-    def issue_persistent(self, agent_id: str, expiry: Any = "never") -> tuple[AgentToken, str]:
+    def issue_persistent(self, agent_id: str, expiry: Any = DEFAULT_TOKEN_EXPIRY) -> tuple[AgentToken, str]:
         """A persistent token for this agent ("Keep this agent connected"). Returns the record and the token, which
         is never available again (only its SHA-256 is kept). An earlier token of the same agent is replaced."""
         choice = expiry_choice(expiry)

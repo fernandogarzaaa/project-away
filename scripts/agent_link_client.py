@@ -5,7 +5,8 @@ from a terminal or a cloud sandbox).
     # once: exchange the pairing code (from Settings > Agent Link, or `away agent pair`) for a token. The person
     # at the PC is asked to Allow it.
     python scripts/agent_link_client.py --url https://<name>.trycloudflare.com pair --pin 123456 --name "My agent"
-    # v0.1.24: ask to stay connected (the person chooses "Keep this agent connected"); optional --expiry 30d|90d
+    # v0.1.24: ask to stay connected (the person chooses "Keep this agent connected"); optional
+    # --expiry 90d|30d|never (default: the PC's setting, normally 90 days)
     python scripts/agent_link_client.py --url https://<name>.trycloudflare.com pair --pin 123456 --name Cookie --keep
     # or store an agent token the person gave you (Settings > Agent Link > Agent tokens > New token)
     python scripts/agent_link_client.py --url https://<name>.trycloudflare.com use-token paway_...
@@ -375,7 +376,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", default="Agent Link example client")
     p.add_argument("--why", default="")
     p.add_argument("--keep", action="store_true", help="pair: ask to stay connected (an agent token)")
-    p.add_argument("--expiry", choices=["30d", "90d", "never"], default=None, help="pair --keep: token lifetime")
+    p.add_argument(
+        "--expiry",
+        choices=["90d", "30d", "never"],
+        default=None,
+        help="pair --keep: token lifetime (default: the PC's setting, 90 days unless changed)",
+    )
     a = p.parse_args(argv)
     c = Client(a.url, a.token)
     if a.cmd == "pair":

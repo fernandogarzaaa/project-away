@@ -32,6 +32,7 @@ from typing import Any
 
 from away.agentlink import perms
 from away.agentlink.auth import (
+    DEFAULT_TOKEN_EXPIRY,
     PERSIST_PREFIX,
     ROTATE_GRACE_S,
     Agent,
@@ -207,7 +208,7 @@ class Gate:
         clock: Callable[[], float] = time.monotonic,
         tunnel_hosts: Callable[[], Any] = lambda: (),
         link_info: Callable[[], dict[str, Any]] = lambda: {},
-        token_expiry: Callable[[], Any] = lambda: "never",
+        token_expiry: Callable[[], Any] = lambda: DEFAULT_TOKEN_EXPIRY,
     ) -> None:
         self.token_expiry = token_expiry  # v0.1.24: lifetime of a new persistent token unless the agent asks
         self.link_info = link_info  # v0.1.24: the current public addresses (GET /v1/link, refresh replies)
@@ -291,7 +292,7 @@ class Gate:
             pin = f"{p.pin[:3]} {p.pin[3:]}"
             options = ["Allow", "Deny"]
             details = [*(f"Can: {d}" for d in perms.describe(p.scopes)), f"Matching code: {pin}"]
-            choice = "never"
+            choice = DEFAULT_TOKEN_EXPIRY
             if offer_keep:
                 choice = expiry_choice(expiry if expiry not in (None, "") else self.token_expiry())
                 options = ["Allow", KEEP_CONNECTED, "Deny"]
@@ -770,9 +771,9 @@ def openapi() -> dict[str, Any]:
             "post": {
                 "summary": "Exchange a pairing code or 6-digit PIN for a token (the person approves on the PC)",
                 "security": [],
-                "description": "v0.1.24: add keep_connected: true (and token_expiry: 30d | 90d | never) to ask to "
-                "stay connected; if the person chooses Keep this agent connected the reply carries persistent_token "
-                "(paway_..., shown only once)",
+                "description": "v0.1.24: add keep_connected: true (and token_expiry: 90d (default) | 30d | never) to "
+                "ask to stay connected; if the person chooses Keep this agent connected the reply carries "
+                "persistent_token (paway_..., shown only once)",
                 "requestBody": _body(
                     {
                         "code": "string",
@@ -955,7 +956,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         except Exception:
             return _json({"error": "send JSON"}, 400)
         wants_keep = bool(data.get("keep_connected"))
-        try:  # v0.1.24: 30 days / 90 days / never (default: the person's setting, normally never)
+        try:  # v0.1.24: 30 days / 90 days / never (default: the person's setting, normally 90 days)
             expiry = expiry_choice(data["token_expiry"]) if data.get("token_expiry") not in (None, "") else None
         except ValueError as exc:
             return _json({"error": str(exc)}, 400)

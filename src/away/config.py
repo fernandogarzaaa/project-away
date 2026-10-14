@@ -484,8 +484,9 @@ class AgentLinkConfig:
     # link_type: named uses it; the tunnel token is kept in the system keyring, never in this file.
     named_tunnel_hostname: str = ""
     # v0.1.24 "Keep this agent connected": how long a new agent token works unless the agent asks for less:
-    # never (until you revoke it) | 30d | 90d. Revoke, replace or change any of them in Settings > Agent Link.
-    token_expiry: str = "never"
+    # 90d (the default) | 30d | never (until you revoke it). Settings > Agent Link > Agent tokens ("New agent tokens
+    # last") or `away agent tokens expiry 30d|90d|never`. Revoke, replace or change any token there too.
+    token_expiry: str = "90d"
 
 
 SPEECH_RATES = ("slow", "normal", "fast")
@@ -531,8 +532,8 @@ def validate_agent_link(a: AgentLinkConfig) -> None:
         raise ValueError("agent_link.default_agent must be an agent's name (at most 60 characters) or empty")
     if a.link_type not in ("standard", "backup", "named"):
         raise ValueError(f"agent_link.link_type must be standard|backup|named, got {a.link_type!r}")
-    if a.token_expiry not in ("never", "30d", "90d"):
-        raise ValueError(f"agent_link.token_expiry must be never|30d|90d, got {a.token_expiry!r}")
+    if a.token_expiry not in ("90d", "30d", "never"):
+        raise ValueError(f"agent_link.token_expiry must be 90d|30d|never, got {a.token_expiry!r}")
     if a.rendezvous not in ("ntfy", "off"):
         raise ValueError(f"agent_link.rendezvous must be ntfy|off, got {a.rendezvous!r}")
     if not str(a.rendezvous_server).startswith("https://"):
