@@ -505,12 +505,16 @@ class SubprocessUI:  # pragma: no cover - starts GUI processes; smoke-tested und
     def flash(self, text: str) -> None:
         spec = self.folder / f"flash-{uuid.uuid4().hex[:8]}.json"
         spec.write_text(json.dumps({"text": text, "level": "camera", "seconds": 1.5}), encoding="utf-8")
-        self._spawn(["agent-ui", "flash", str(spec)])
+        if self._spawn(["agent-ui", "flash", str(spec)]) is None:  # v0.1.24: the capture is refused, not silent
+            raise RuntimeError(f"could not open the notice window: {self.last_spawn_error}")
 
     def overlay(self, name: str, stop_file: Path, mode: str = "control") -> Any:
         spec = self.folder / f"overlay-{uuid.uuid4().hex[:8]}.json"
         spec.write_text(json.dumps({"agent": name, "stop_file": str(stop_file), "mode": mode}), encoding="utf-8")
-        return self._spawn(["agent-ui", "control", str(spec)])
+        proc = self._spawn(["agent-ui", "control", str(spec)])
+        if proc is None:
+            raise RuntimeError(f"could not open the on-screen border: {self.last_spawn_error}")
+        return proc
 
 
 def window_process_options(platform: str | None = None, env: Any = None) -> dict[str, Any]:

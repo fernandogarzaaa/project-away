@@ -423,7 +423,7 @@ class Service:
             raise NotAvailable("no camera picture right now (is the camera running and not paused?)")
         from away.agentlink.desktop import to_jpeg
 
-        self._flash(f"{agent.name} looked through your camera")
+        self._flash(f"{agent.name} looked through your camera", "camera picture")
         jpeg, scale = to_jpeg(frame, int(self._s("snapshot_max_width", 320)), 60)
         self.events.publish("look.taken", {"agent": agent.name})
         return jpeg, {"camera": camera or "primary", "scale": scale}
@@ -486,8 +486,9 @@ class Service:
             )
         except shot.ScreenRequestError as exc:
             raise ValueError(str(exc)) from None
-        if not quiet:
-            self._flash(f"{agent.name} looked at your screen")
+        if not quiet or agent.id not in self._watchers:
+            # v0.1.24 hardening: "quiet" only skips the notice while this agent's live view badge is on screen
+            self._flash(f"{agent.name} looked at your screen", "screenshot")
         jpeg = shot.render(img, p)
         self.control.scales[agent.id] = p.scale
         self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
@@ -540,16 +541,46 @@ class Service:
             if opts or agent.id not in self._live_views:
                 self._live_views[agent.id] = opts
             self._watchers.add(agent.id)
+            try:
+                shown = self.watching(agent.name, True)
+            except Exception:
+                shown = False
+            if shown is False:
+                # v0.1.24 hardening: no live view without its "watching your screen" badge on screen
+                self.stop_watching(agent.id)
+                raise NotAvailable(
+                    "the live screen view was not started because its 'watching your screen' badge could not be "
+                    "shown on the screen"
+                )
         else:
-            self._watchers.discard(agent.id)
-            self._live_views.pop(agent.id, None)
-        with contextlib.suppress(Exception):
-            self.watching(agent.name if self._watchers else "", bool(self._watchers))
+            self.stop_watching(agent.id)
         return {"watching": bool(self._watchers), "view": self._live_views.get(agent.id, {})}
 
-    def _flash(self, text: str) -> None:
+    def stop_watching(self, agent_id: str) -> None:
+        """End this agent's live screen view (and hide the badge when nobody else is watching)."""
+        self._watchers.discard(agent_id)
+        self._live_views.pop(agent_id, None)
         with contextlib.suppress(Exception):
-            self.flash(text)
+            self.watching(self._watcher_name(), bool(self._watchers))
+
+    def _watcher_name(self) -> str:
+        for aid in self._watchers:
+            a = self.registry.get(aid)
+            if a is not None:
+                return a.name
+        return ""
+
+    def _flash(self, text: str, what: str = "picture") -> None:
+        """The on-screen notice every camera still and screenshot shows. v0.1.24 hardening: it is a precondition,
+        so when it cannot be shown the capture is refused (``flash`` raising or returning False)."""
+        try:
+            shown = self.flash(text)
+        except Exception:
+            shown = False
+        if shown is False:
+            raise NotAvailable(
+                f"the {what} was not taken because the on-screen notice that tells the person could not be shown"
+            )
 
     def user_capture(self, kind: str, jpeg: bytes, meta: dict[str, Any]) -> Capture:
         """The user pushed a capture to their agents ("hey agent, look" / the summon gesture)."""

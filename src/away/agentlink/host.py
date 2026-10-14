@@ -373,19 +373,38 @@ class AgentLinkHost:
         self._stop_input_watch()
 
     def _watching(self, name: str, on: bool) -> None:
-        if on and self._watch_stop is None and self.ui is not None and hasattr(self.ui, "overlay"):
-            self._watch_stop = self.base / "ui" / f"watch-{uuid.uuid4().hex[:6]}.stop"
-            self.ui.overlay(name, self._watch_stop, mode="watch")
+        """The live view's permanent "watching your screen" badge. Raises when it cannot be shown (the service
+        then refuses the live view)."""
+        if on and self._watch_stop is None:
+            if self.ui is None or not hasattr(self.ui, "overlay"):
+                raise RuntimeError("no on-screen badge is available here")
+            stop = self.base / "ui" / f"watch-{uuid.uuid4().hex[:6]}.stop"
+            self.ui.overlay(name, stop, mode="watch")
+            self._watch_stop = stop
         elif not on and self._watch_stop is not None:
             with contextlib.suppress(OSError):
                 self._watch_stop.write_text("stop", encoding="utf-8")
             self._watch_stop = None
 
+    def _show_notice(self, text: str) -> None:
+        """A notice for something the person did themselves (never a precondition)."""
+        with contextlib.suppress(Exception):
+            self._flash(text)
+
     def _flash(self, text: str) -> None:
+        """The notice every camera still / screenshot shows. Raises when nothing visible could be shown (the
+        flash window, or else the tray's notification), so the capture is refused."""
+        shown = False
         if self.ui is not None and hasattr(self.ui, "flash"):
-            with contextlib.suppress(Exception):
+            try:
                 self.ui.flash(text)
-        self._notice("Project Away", text)
+                shown = True
+            except Exception:
+                shown = False
+        if shown:
+            self._notice("Project Away", text)
+        elif not self._tray_notice("Project Away", text):
+            raise RuntimeError("could not show the on-screen notice")
 
     def _monitors(self) -> Any:
         """The app's monitor layout (kept current by its MonitorWatcher) for get_screen's monitor/region."""
@@ -597,7 +616,7 @@ class AgentLinkHost:
         if res.get("sent"):
             label = str(res["label"])
             note = str(res.get("note") or "")
-            self._flash(f"{label}. {note}" if note else label)
+            self._show_notice(f"{label}. {note}" if note else label)
             self._say(note or label)  # v0.1.23: spoken too, so you know it went somewhere
             return label
         reason = str(res.get("reason") or "Your message could not be sent.")
@@ -627,7 +646,7 @@ class AgentLinkHost:
 
     def _talk_armed(self, target: str) -> None:
         who = self._target_names(target)
-        self._flash(f"Listening... say your message for {who}" if who else "No AI agent is connected yet")
+        self._show_notice(f"Listening... say your message for {who}" if who else "No AI agent is connected yet")
 
     def talk_ready(self) -> bool:
         """The summon gesture can open a message: always-on listening runs and talking is turned on."""
@@ -675,7 +694,7 @@ class AgentLinkHost:
                 jpeg, scale = to_jpeg(frame, int(self.cfg().agent_link.snapshot_max_width), 60)
                 c = svc.user_capture("camera", jpeg, {"scale": scale})
                 self.core.events.publish("user.look", {"capture": c.id, "kind": "camera"})
-                self._flash("Sent a camera picture to your agent")
+                self._show_notice("Sent a camera picture to your agent")
                 return
         if self._any_agent_has(perms.SCREEN):
             img = grab_screen()
@@ -683,7 +702,7 @@ class AgentLinkHost:
                 jpeg, scale = to_jpeg(img, int(self.cfg().agent_link.screen_max_width), 55)
                 c = svc.user_capture("screen", jpeg, {"scale": scale})
                 self.core.events.publish("user.screen", {"capture": c.id, "kind": "screen"})
-                self._flash("Sent your screen to your agent")
+                self._show_notice("Sent your screen to your agent")
                 return
         self.core.events.publish("summon", {"source": kind, "note": "no agent may see the camera/screen"})
 

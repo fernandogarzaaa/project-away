@@ -380,3 +380,105 @@ def test_enter_and_shortcuts_without_a_known_focus_ask_but_typing_and_moving_do_
     ctl2.act("a1", "type_text", text="hi\nthere")
     ctl2.act("a1", "click", x=3, y=3)  # on "Canvas"
     assert len(asked2) == 1
+
+
+# ------------------------------------------------------------- 5. no picture without a visible notice
+def _core(tmp_path: Path, **kw: Any) -> Any:
+    from away import config as C
+    from away.agentlink.host import build_core
+    from away.agentlink.prompts import NullUI
+
+    cfgp = tmp_path / "config.yaml"
+    C.save(C.AppConfig(), cfgp)
+    cfg = C.load(cfgp)[0]
+    c = build_core(
+        tmp_path, cfg=lambda: cfg, settings=lambda: cfg.agent_link, config_path=lambda: cfgp, ui=NullUI(), **kw
+    )
+    c.prompts.polite = lambda: True
+    c.cfg_obj = cfg  # type: ignore[attr-defined]
+    return c
+
+
+def _broken(_text: Any = None, _on: Any = None) -> None:
+    raise RuntimeError("the notice window could not start")
+
+
+def test_no_camera_still_when_the_notice_cannot_be_shown(tmp_path: Path) -> None:
+    import numpy as np
+
+    from away.agentlink.service import NotAvailable
+
+    core = _core(tmp_path, flash=_broken, camera_frame=lambda _c: np.zeros((480, 640, 3), dtype=np.uint8))
+    a, _ = core.registry.issue("Agent", ["read", "snapshots"], 3600)
+    seq = core.events.seq
+    with pytest.raises(NotAvailable, match="notice"):
+        core.service.look(a)
+    assert not [e for e in core.events.since(seq) if e["topic"] == "look.taken"]
+
+
+def test_no_screenshot_when_the_notice_cannot_be_shown(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from away.agentlink.service import NotAvailable
+
+    core = _core(tmp_path, flash=_broken, screen_grab=lambda: Image.new("RGB", (800, 600)))
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    with pytest.raises(NotAvailable, match="notice"):
+        core.service.get_screen(a)
+    with pytest.raises(NotAvailable, match="notice"):
+        core.service.get_screen(a, quiet=True)  # "quiet" is not a way around the notice
+
+
+def test_quiet_screenshots_need_the_live_view_badge(tmp_path: Path) -> None:
+    from PIL import Image
+
+    flashes: list[str] = []
+    core = _core(tmp_path, flash=flashes.append, screen_grab=lambda: Image.new("RGB", (800, 600)))
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    core.service.get_screen(a, quiet=True)
+    assert len(flashes) == 1  # not watching: an ordinary screenshot with its notice
+    core.service.screen_watch(a, True)
+    core.service.get_screen(a, quiet=True)
+    assert len(flashes) == 1  # the live view's permanent badge is the notice
+
+
+def test_live_view_is_refused_and_unregistered_when_its_badge_fails(tmp_path: Path) -> None:
+    from away.agentlink.service import NotAvailable
+
+    core = _core(tmp_path, watching=_broken)
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    with pytest.raises(NotAvailable, match="badge"):
+        core.service.screen_watch(a, True, scale=0.5)
+    assert a.id not in core.service._watchers and a.id not in core.service._live_views
+
+
+def test_host_reports_a_notice_that_could_not_be_shown(tmp_path: Path) -> None:
+    from away.agentlink.host import AgentLinkHost
+
+    class UI:
+        def __init__(self, ok: bool) -> None:
+            self.ok, self.shown = ok, []
+
+        def flash(self, text: str) -> None:
+            if not self.ok:
+                raise RuntimeError("no display")
+            self.shown.append(text)
+
+    good = UI(True)
+    AgentLinkHost(None, data_dir=tmp_path / "a", ui=good, headless=True)._flash("Claude looked at your screen")
+    assert good.shown
+    with pytest.raises(RuntimeError):
+        AgentLinkHost(None, data_dir=tmp_path / "b", ui=UI(False), headless=True)._flash("x")
+    with pytest.raises(RuntimeError):
+        AgentLinkHost(None, data_dir=tmp_path / "c", ui=object(), headless=True)._watching("Claude", True)
+
+
+def test_the_notice_window_launcher_reports_a_failed_start(tmp_path: Path) -> None:
+    from away.agentlink.prompts import SubprocessUI
+
+    ui = SubprocessUI(tmp_path / "ui")
+    ui._spawn_argv = lambda argv: None  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        ui.flash("Claude looked at your screen")
+    with pytest.raises(RuntimeError):
+        ui.overlay("Claude", tmp_path / "stop", mode="watch")
