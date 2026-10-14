@@ -1493,6 +1493,7 @@ TAB_ORDER = (
     "Shortcuts",
     "Voice & input",
     "Agent Link",
+    "Live agent",
     "Cameras",
     "Tuning",
     "Performance",
@@ -1615,6 +1616,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
+        from away.liveagent import gui as live_gui  # Live agent, isolated in its own package
+
+        with contextlib.suppress(Exception):
+            self.live_agent_panel = live_gui.build_tab(self, nb)
         order_tabs(nb, TAB_ORDER)
         nb.select(0)
         self.nb = nb
@@ -2850,6 +2855,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.accel import settings_ui as accel_ui  # v0.1.24: where tracking runs + "Run self-test"
 
         accel_ui.build(self, f)
+        try:  # v0.1.25: newer models (Test my PC, Light / Balanced / Best, Advanced folded away)
+            from away.app import models_next_panel
+
+            models_next_panel.build(self, f)
+        except Exception as exc:
+            ttk.Label(f, text=f"Newer models are unavailable here ({exc})").pack(anchor="w")
 
     def _perf_refresh(self) -> None:
         try:

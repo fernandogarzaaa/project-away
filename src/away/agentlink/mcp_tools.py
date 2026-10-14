@@ -86,7 +86,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         topics: list[str] | None = None,
         landmarks: bool = False,
     ) -> dict:
-        """Events after event number `since`. action="wait": long-poll (up to 120 s) for user/app events
+        """Events after event number `since`. action="wait": long-poll (up to 55 s; call again) for user/app events
         (presence, attention, summon, user.look, user.screen, wrong, detector, misfire, control, prompt, change;
         filter with `topics`). action="poll": return recent gestures/events at once plus health (landmarks=true
         adds the latest hand landmarks). Call again with the returned `seq`."""

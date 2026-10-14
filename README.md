@@ -13,6 +13,9 @@ it, tune Project Away to how you like it, and even use your computer while you w
 Nothing leaves your machine unless you connect an agent and press **Allow** on your own screen (or point the
 optional LLM cleanup at an endpoint yourself).
 
+[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy) · Microsoft Store and signing setup:
+[docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md)
+
 ## User guide (no technical knowledge needed)
 
 ### 1. Installing
@@ -505,6 +508,97 @@ These are enforced by Project Away itself, whatever the agent asks for, and each
   anything you could in ordinary windows. Turn it on only for agents you trust, and watch.
 * Password fields are detected with Windows UI Automation (`IsPassword`). Without UI Automation, typing is refused on
   Windows; on macOS/Linux only window titles that look like sign-in prompts are blocked.
+
+## Live agent (optional)
+
+Talk to your computer and it talks back. Say **"Hey Away"** (you can change the name), then a question or a small
+job: "Hey Away, what's 15% of 80?", "Hey Away, open Notepad and type hello". It answers out loud, does small jobs on
+this PC, and hands big jobs (write code, research, long documents) to your other AI agents.
+
+**It is off by default.** Nothing is downloaded, nothing is sent anywhere, and nothing listens for "Hey Away" until
+you turn it on in **Settings → Live agent**.
+
+### Turn it on in one click (free models)
+
+Click **Use free models (opencode)**. That is all: no account, no key, no card.
+
+* Away uses [opencode](https://github.com/anomalyco/opencode) (free, MIT license) to reach its free models. If
+  opencode is not on your PC, the button downloads the official build (about 60 MB) and checks its fingerprint
+  (SHA-256) against the one GitHub publishes. A file that does not match is thrown away.
+* opencode runs privately, only for Away: on your PC only (127.0.0.1) with a random password, with its own settings
+  folder (your own opencode setup and keys are not touched), and with every tool it might want (shell, files, web)
+  refused. It only writes text for Away.
+* The button tries a few free models and picks one that answers quickly.
+* **Good to know:** the free models may keep what you send them. So **pictures of your screen and camera are never
+  sent to them**, nor anything typed into password fields, and e-mail addresses, phone and card numbers and keys
+  are hidden before anything is sent.
+* Free models have limits. When one says "Free usage exceeded", Away moves on to the next one right away.
+
+If opencode cannot be downloaded or started, the tab offers **Use a free key instead** (Gemini or Groq, both free
+with no card, with a link to get the key), or Ollama if it runs on your PC.
+
+### Add your own API key
+
+Under **Add my API key**: pick the provider, paste the key, click **Save and test**. Providers: Groq, Google Gemini,
+OpenAI, Anthropic (Claude), OpenRouter, OpenCode Zen, DeepSeek, Mistral, Together AI, Ollama and LM Studio on this
+PC, or any other OpenAI-compatible address.
+
+* The key is kept in your system's own safe store (Windows Credential Manager, the macOS Keychain, or the Secret
+  Service on Linux), **never in a file**, a log, or an answer to another agent.
+* Your own paid keys and models on your PC may see the screen, but only when you tick **Let it look at my screen**.
+
+### Which model answers (the fallback order)
+
+For each job Away tries models in this order, and moves to the next one if a model fails, is rate-limited, or does
+not start answering within 8 seconds:
+
+1. The model you chose for that job, or your **Preferred model**.
+2. Your other models (your API keys).
+3. Free models (opencode).
+4. Models on this PC (Ollama, LM Studio).
+
+A model that keeps failing is rested for a while (a minute, doubling up to ten; an hour for a refused key). Once a
+model starts answering, it finishes the turn. Looking at the screen only ever uses models that accept pictures and
+do not keep prompts.
+
+### Jev (quick decisions)
+
+Jev is a small, fast decision model (TypeSafe AI's "System One"). It does not write text; it answers short yes/no
+and pick-one questions in about 0.3 s. Away uses it to decide: is this a chat, a job on this PC, or a big job for
+another agent; is this action risky (send, pay, delete, anything you cannot undo, which is always confirmed on your
+PC first); which button on screen you meant; and whether the action worked. Jev's free version needs no key. Under
+**Advanced** it is set to *auto* (use it when it answers). When Jev is off or not answering, the chat model answers
+the same questions, and when that fails too, simple built-in rules do.
+
+### Daily budget
+
+Paid API keys stop for the day once today's spend reaches your daily limit: **$1.00 a day** by default, changed
+under **Advanced** (0 means paid keys are never used). Free models and models on your PC always count as $0. When a
+model's price is unknown, it is counted at a cautious $1 / $5 per million tokens so the limit still holds.
+
+### Talking over it, and what it may do
+
+* **Barge-in:** just start talking while it speaks and it stops. (The classic Windows voice finishes its current
+  few words first.)
+* By default it may not look at your screen or camera or use the mouse and keyboard. Each is a switch in the tab.
+  Mouse and keyboard use is approved on the PC each session, with the same safety rules as Agent Link.
+* **Recent turns** in the tab shows what was asked, which model answered, how fast, and what happened.
+* From a terminal: `python -m away.liveagent status | free | models | ask "..." | jev | update-engine`.
+
+### What is tested and what is not
+
+| Part | Status |
+|---|---|
+| Router, fallback order, rest periods, daily budget, redaction, fencing of screen text, Jev answers, barge-in logic, Settings tab logic, key storage | Unit-tested with fake providers, a fake opencode server, a fake key store and fake clocks (58 tests) |
+| Settings → Live agent tab | Drawn under Xvfb on Linux (a render test and a screenshot check) |
+| opencode download, SHA-256 check, private `opencode serve`, free models answering | **Verified for real on Linux (arm64)** on 2026-10-14: opencode 1.19.0 downloaded and checked, a free model answered "15% of 80 is 12" in about 3.5 s at $0, and "Free usage exceeded" moved on to the next model |
+| Jev (free) | **Verified for real** on 2026-10-14: routing and the risk check answered in about 0.3 s |
+| opencode settings isolation on Windows | **Untested** |
+| opencode installed by npm (`opencode.cmd`) on Windows | **Untested** (code path unit-tested only) |
+| Stopping opencode and its child processes on Windows (`taskkill /T`) | **Untested** |
+| Windows Credential Manager (and the macOS Keychain) | **Untested** with the real stores (a fake store in tests) |
+| The real voice loop (microphone, "Hey Away", speaking, barge-in on real audio) | **Untested** |
+| Your own API keys against the real providers (OpenAI-compatible, Anthropic) | **Untested** live (fake HTTP in tests) |
 
 ## Architecture
 
@@ -1837,11 +1931,76 @@ Config (`macros:` in config.yaml, all optional):
 | `use_ui_automation` | `true` | Windows: remember and find controls by name |
 | `store_dir` | `""` | shortcut folder (`""` = `<data dir>/macros`) |
 
+## Newer models (optional) (v0.1.24)
+
+Project Away keeps the models it has always used. Nothing changes until you ask for it. In **Settings → Performance →
+Newer models (optional)** you can try the 2026 models, which are faster or more accurate. Every one of them is an
+optional download, and you can go back with one click.
+
+### Test my PC
+
+Press **Test my PC**. It downloads nothing. It times the newer models you have already downloaded on your own
+computer: how long each takes to load, how fast it runs, how busy it keeps the processor and how much graphics memory
+it uses. Then it tells you which preset fits, in one sentence, for example "Recommended: Light - Moonshine keeps up on
+the processor". **Use it** switches to that preset. If anything later fails or runs slower than what it replaced, that
+one job switches back by itself and the tray says why (`models_next.auto_rollback`, on by default). If the test does
+not pass, nothing is changed. Agents can do the same through Agent Link: the `model_bench` domain has `run`, `apply`
+and `restore`. The v0.1.24 self-test can show the result as "Newer models" through `model_bench.SELFTEST_HOOK`.
+
+### The presets in plain words
+
+| Preset | What it is for | Graphics memory (estimate) |
+|---|---|---|
+| **Light** | Any computer, no graphics card needed for speech. Moonshine v2 Small turns speech into text on the processor, Qwen3.5 0.8B tidies it, and the Windows voice speaks. | about 0.7 GB (only if Smart cleanup runs on the graphics card) |
+| **Balanced** | A computer with an NVIDIA graphics card. Nemotron 3.5 streaming speech (experimental) and Qwen3.5 2B on the card, the Kokoro voice. | about 2.7 GB |
+| **Best** | A graphics card with room to spare (about 5 GB free, e.g. a 6 GB card). Same as Balanced, but the 8-bit Qwen3.5 2B, Kokoro in half precision on the card, and speech-to-text double-checks the wake word. | about 3.9 GB |
+
+All three also use Silero VAD v6.2 (it hears when you start and stop talking) and, once you have trained one for your
+name, a small wake-word model, so speech-to-text only runs after "Hey &lt;name&gt;". The memory figures are estimates
+(file size plus runtime overhead), not measurements on a real card. Test my PC measures the real numbers, and it only
+recommends a preset when your card has that much free memory plus 1 GB to spare. A model that is not downloaded yet
+leaves that job as it is. The preset buttons list what is still missing (and how many MB) before anything is
+downloaded.
+
+**Advanced** (closed by default) lists every newer model by job (hands, speech to text, cleanup, voice, speech
+detection, wake word) with its licence and size, and has **Go back to the standard models**. Experimental choices:
+RTMPose hands on the graphics card (A/B against MediaPipe on your own camera; switched only when it is at least as
+steady and as fast) and Kyutai pocket-tts, an instant voice for short replies.
+
+Optional pip extras (not part of the installers or `[all]`): `pip install "project-away[moonshine]"`,
+`"project-away[wakeword]"` (Python 3.11 or newer) and `"project-away[pocket]"` (pulls in PyTorch). Settings can also
+download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
+
+### Licences
+
+* **espeak-ng and Piper are GPL-3.0.** They are never bundled with Project Away. Kokoro uses espeak-ng for
+  pronunciation, and both stay separate, optional downloads, exactly as in v0.1.23.
+* **Nemotron 3.5 ASR Streaming is OpenMDW-1.1.** It is permissive but needs attribution: keep the licence text that
+  is downloaded with the model, and credit NVIDIA if you pass the model on.
+* **Kyutai pocket-tts weights are CC-BY-4.0.** Credit Kyutai. The code is MIT. Only clone a voice with the speaker's
+  consent.
+* Moonshine v2 and moonshine-voice: MIT. Qwen3.5, livekit-wakeword, NeMo-Speech.cpp, RTMPose/RTMDet and Kokoro:
+  Apache-2.0. Silero VAD: MIT. openWakeWord's own pre-trained models (CC BY-NC-SA) are never shipped or downloaded.
+
+### Verified vs untested (newer models)
+
+| What | Status |
+|---|---|
+| Engines and downloads | Tested with fakes: pinned archive per OS and CPU, sha256 mismatch rejected and removed, path traversal in zip/tar refused, only the package folder unpacked from a wheel, start-up check failure removes the engine, one click fetches files plus engine (`tests/test_v0124_engines_fetch.py`). **No real engine download was run for this PR.** |
+| Moonshine / Nemotron speech | Tested with a fake moonshine transcriber, a fake `nemo-speech serve` (a real local HTTP server started through a fake process), a fake realtime WebSocket and a real one on 127.0.0.1, including the switch to Whisper when Nemotron fails (`tests/test_v0124_asr_ws.py`). Earlier build notes report a CPU run of Nemotron through `nemo-speech serve` on Linux (0.6 s using the live stream's final text vs 6.6 s for a second request). That run was not repeated for this PR. **Untested on Windows and on any GPU (the CUDA and Vulkan builds).** |
+| Silero VAD v6.2, wake-word gate, Qwen3.5 cleanup | Tested with a fake ONNX session, a fake wake-word model and session, and a fake llama.cpp backend (`<think>` stripping, falling back to Qwen2.5) (`tests/test_v0124_voice_next.py`). Earlier build notes report Qwen3.5-0.8B Q4_K_M loading in llama-cpp-python 0.3.36 on Linux aarch64 (CPU), about 2 s per sentence. **No wake-word model has been trained, and nothing has been heard through a real microphone.** |
+| Voices (Kokoro fp16, pocket-tts) | Engine choice and the long-text hand-off are tested with fakes. **Not heard on real speakers. Kokoro fp16 has not run on a GPU.** |
+| RTMPose hands and the A/B | SimCC decoding, crop geometry and whole frames tested through fake ONNX sessions. Jitter, pinch flicker, found rate and the recommendation rule tested on synthetic hands (`tests/test_v0124_hands_next.py`). **Not run with a real camera or a real graphics card.** |
+| Test my PC, rollback, presets | The recommendation rules, the saved report, the self-test hook, the Agent Link `model_bench` domain, per-job rollback and the gating of presets are tested. Older apps see no change: the v0.1.23 catalog keys stay empty, and the newer models are only read under `models_next` / `presets_next` (`tests/test_v0124_bench_registry.py`). **Has not been run on a real PC with the real models.** |
+| Newer models panel | The logic is tested headless. The panel was rendered under Xvfb on Linux, on its own and inside Settings → Performance, with Advanced opened. That run found and fixed clipped preset buttons, a doubled "(experimental)" label and pocket-tts shown as ready when it was not installed. **Untested on a real Windows desktop.** |
+| Windows, macOS, GPU | **Nothing in this section has been tested on Windows or on a GPU.** CI runs the fake-based tests on Ubuntu, Windows and macOS. |
+
 ## Verified vs untested
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2844 tests at v0.1.25 (283 more than v0.1.24, mostly from `tests/test_v0125_live_calibration.py`, `tests/test_v0125_agent_keepalive.py`, `tests/test_msix_packaging.py`, `tests/test_updater_store.py`, `tests/test_ui_helper.py` and the live agent and newer-model tests); in the Linux build sandbox (Python 3.12, Xvfb) 2824 pass, 14 skip and 6 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Live agent (optional, off by default) | See [Live agent (optional) → What is tested and what is not](#what-is-tested-and-what-is-not): free models through opencode and Jev verified for real on Linux; the Windows-only parts (opencode isolation, `opencode.cmd`, `taskkill`, Credential Manager), the real voice loop and live API-key providers are **untested** |
 | Agent messages: truthful `shown`, tray fallback, window start-up options (v0.1.21) | The acknowledgement protocol, timeouts, exit codes, the tray fallback and the Popen options (no CREATE_NO_WINDOW, show-normal, frozen environment reset) unit-tested; a real child process writing the acknowledgement is tested on every CI OS; **untested on the user's Windows desktop**: whether the Tk message window now appears from the installed tray app, and the tray balloon on Windows |
 | Speaking (v0.1.21) | Engine order per OS, the speaker thread and queue, settings, fallbacks between engines, the PowerShell and command-line engines (text never on a command line that a shell reads) and SAPI through a fake COM object unit-tested; the Windows release self-test creates the real `SAPI.SpVoice`, sets rate and volume and synthesizes into memory; **not heard on real speakers**, and macOS `say` / Linux `spd-say` are untested on real desktops |
 | Check ids, shared registry, expiry (v0.1.21) | Unit-tested and round-tripped over a real uvicorn server (`?job_id=82557239`, `?id=`, `/v1/rpc/diagnostics`, 404 vs 410) |
@@ -1945,12 +2104,37 @@ Config (`macros:` in config.yaml, all optional):
 | Model registry, Settings → Models, catalog (v0.1.23) | Validation, catalog SHA-256 check (tampered / bad entries ignored), local models, switch / enable / modes with undo, Try-it rollback and the agent op tested; the Models tab rendered and driven under Xvfb on Linux; **untested on Windows**, and Try-it has no real benchmark wired to the GUI yet (agent op and API only) |
 | Which app holds the camera, busiest programs (v0.1.23) | ConsentStore parsing with a fake registry, NVIDIA Broadcast's source from a fake settings file, messages, psutil aggregation with a fake psutil; **untested on the user's PC** (the real ConsentStore keys and Broadcast's settings file layout are assumptions) |
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
+| Newer models (optional, v0.1.25) | Tested with fakes on every CI OS; **nothing tested on Windows or on a GPU**. See [Newer models: verified vs untested](#verified-vs-untested-newer-models) |
 | Parakeet, Wayland | **Untested** |
+| Agent window with a missing or broken session file (v0.1.25, Cookie's fix) | A missing, unreadable or non-object session file and an unknown window kind each give a plain message and exit code 2, tested in `tests/test_ui_helper.py`; the tests no longer start a Tk main loop |
+| Agents staying connected (v0.1.25) | Live streams marking the agent as seen every 20 s, 55 s long-polls, the 90 s Allow wait, `Last-Event-ID` resume and the example client's reconnect tested on a fake clock and a real local server (`tests/test_v0125_agent_keepalive.py`); **untested through a real Cloudflare link over a long session** (for example Cookie idle for 10+ minutes) |
+| Live calibration, steadier cursor (v0.1.25) | The three jitter sources, the adaptive filter, hold-still, the calibration steps and saving per camera tested with fake landmark streams (`tests/test_v0125_live_calibration.py`); **the calibration window has not been used on a real laptop and camera** |
+| Microsoft Store build (v0.1.25) | The manifest, the version as four numbers and the Store-copy update rule tested (`tests/test_msix_packaging.py`, `tests/test_updater_store.py`); CI builds a test package with a stand-in certificate and installs it. **No Store install has been done and SignPath signing is not set up yet** |
 | Stop everything / one action engine (v0.1.24) | Every mouse move, click, key press and typed character Project Away sends (gestures, voice, dictation, shortcut replays, Agent Link computer control, the Check my PC echo probe) goes through `away.actions_engine`; a test fails the build if any other module sends OS input. Stop everything (tray, hotkey, open palm, "stop") cancelling a drag, a shortcut replay, dictation and a paste and letting go of held buttons and keys, the user winning over an agent mid-action, pause / resume / shutdown and the one audit log tested with fake backends and threads in `tests/test_actions_engine.py`. **Untested on a real desktop**: real pynput input through the engine, and Stop everything pressed during a real drag or replay |
 | Self-test (v0.1.24) | Every check's pass / warn / fail rule, the time limit and crash handling, redaction, delivery to every agent, the service and the CLI tested with a fake PC environment; the optional model-benchmark hook tested with a fake module (absent: no extra line). **Untested on the user's PC**: the real environment (`away.selftest.env.RealEnv`: real cameras, microphone, speech, voices, pop-ups, link), the window and its fix buttons |
 | GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
+
+## What's new in 0.1.25
+
+* **Cookie's fix.** Opening an agent's window for a session that was never set up (seen when two copies of the app
+  fought over the same folder) used to crash with a long error. It now says plainly what is missing ("generate a
+  pairing link first") and stops cleanly.
+* **Newer models, if you want them.** Settings → Performance → *Newer models (optional)* offers the 2026-10 speech,
+  voice, wake-word and cleanup models, with *Test my PC* to pick Light / Balanced / Best. Nothing changes until you
+  choose one: the default models are the same as in 0.1.24. See *Newer models (optional)*.
+* **An optional live agent.** Project Away can run its own small agent that answers you by voice, using free models
+  or your own API key, with a daily budget you set. It is off until you turn it on. See *Live agent (optional)*.
+* **A Microsoft Store build.** The release also builds a Store package (MSIX), and a Store copy is updated by the
+  Store instead of by Project Away. See [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
+* **Agents stay connected.** An agent holding its connection open no longer shows as "not connected" after a
+  couple of minutes, long waits stay under Cloudflare's time limit, and the example client reconnects and catches up
+  by itself.
+* **Live calibration and a steadier cursor.** *Calibrate tracking* (tray, Settings → Getting started, or
+  `away calibrate`) watches your hand for a minute, measures how much it shakes, how far you reach and how you pinch
+  on this camera, and shows the cursor path before and after. The cursor no longer saves up small moves and jumps
+  15-20 pixels at once, follows fast moves more closely and holds still when you stop.
 
 ## What's new in 0.1.24
 
@@ -2163,6 +2347,22 @@ stays opt-in after calibrate:** `away calibrate` prints the metrics but no longe
 5. Live AX210 CSI capture and a learned swipe/push-pull classifier.
 6. Phone-as-second-camera / IMU fusion.
 7. Real-hardware tuning of multi-camera fusion; parallel per-camera landmark inference.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+(Being set up: until SignPath Foundation approves the project, the Windows files are unsigned; see "Installing" above.) Signed files are built only by this repository's GitHub Actions release workflow from the
+tagged source, and every signing request is approved by hand.
+
+* Committers and reviewers: [Fernando Garza](https://github.com/fernandogarzaaa) (repository owner); pull requests
+  from anyone else are reviewed by him before merging.
+* Approvers: [Fernando Garza](https://github.com/fernandogarzaaa).
+* Privacy: see the [privacy policy](PRIVACY.md). This program will not transfer any information to other networked
+  systems unless specifically requested by the user or the person installing or operating it, apart from the
+  anonymous update check and model downloads described there (both can be turned off or skipped).
+
+The Microsoft Store package (MSIX) is signed by Microsoft. Setup steps: [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
 
 ## Development
 

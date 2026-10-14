@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "release" (slug: release): the Inno Setup installer and the sideload MSIX,
+  signed AFTER they are built from the already-signed ProjectAway.exe. release.yml uploads both as one zip and
+  passes version = the release version. The MSIX is only there when the repo variable MSIX_SIDELOAD_PUBLISHER is
+  set (min-matches="0"); its manifest Publisher must equal the certificate subject or signing fails.
+  The installer's product name/version come from packaging/windows/away.iss (AppName / AppVersion).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="ProjectAway-${version}-windows-x64-setup.exe" product-name="Project Away" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+    <msix-file path="ProjectAway-${version}-windows-x64.msix" min-matches="0">
+      <authenticode-sign />
+    </msix-file>
+  </zip-file>
+</artifact-configuration>

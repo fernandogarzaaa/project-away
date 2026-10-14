@@ -42,6 +42,22 @@ def first_run_command() -> list[str]:
     return away_command(["tour"])
 
 
+def calibrate_command() -> list[str]:
+    """v0.1.25 "Calibrate tracking": the live calibration window in its own process."""
+    from away.app.frozen import away_command
+
+    return away_command(["calibrate"])
+
+
+def launch_calibrate(popen: Any = subprocess.Popen) -> str | None:
+    """Open Calibrate tracking. Returns an error text or None."""
+    try:
+        popen(calibrate_command())
+    except Exception as exc:
+        return f"could not open Calibrate tracking: {exc}"
+    return None
+
+
 def check_pc_command() -> list[str]:
     """v0.1.24 "Check my PC": the guided real-hardware check in its own window."""
     from away.app.frozen import away_command

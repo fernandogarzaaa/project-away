@@ -47,6 +47,21 @@ def build_tab(win: Any, nb: Any) -> Any:  # pragma: no cover - widgets
         cursor="hand2",
         command=lambda: win._report(actions.launch_first_run(), "opening the guided first run..."),
     ).pack(anchor="w", pady=(6, 16))
+    tk.Label(  # v0.1.25
+        f,
+        text="Cursor shaky or hard to reach the corners? Calibrate tracking takes about a minute.",
+        anchor="w",
+    ).pack(fill="x")
+    tk.Button(
+        f,
+        text="Calibrate tracking",
+        font=big,
+        relief="flat",
+        padx=22,
+        pady=8,
+        cursor="hand2",
+        command=lambda: win._report(actions.launch_calibrate(), "opening Calibrate tracking..."),
+    ).pack(anchor="w", pady=(6, 16))
     tk.Label(  # v0.1.24: one click, about 2 minutes, a report of what really works on this PC
         f,
         text="Something not working? Check my PC tests your cameras, voice and pointer in about 2 minutes.",

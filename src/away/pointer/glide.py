@@ -26,6 +26,9 @@ DEFAULT_HZ = 120
 TAU_S = 0.018  # how fast the output closes in on the predicted point
 MAX_AHEAD_S = 0.12  # never predict further than this (about one frame at 8 fps)
 STALL_FRAMES = 2.5  # no frame for this many frame intervals: hold still
+# v0.1.25: only keep moving between frames when the cursor really moves. The frame-to-frame velocity includes the
+# jitter, so extrapolating it at low speed made a still or slowly moving cursor overshoot and snap back.
+GATE_PX_S = 120.0  # full extrapolation from this cursor speed (px / s); none for a still target
 
 
 class Glide:
@@ -58,7 +61,10 @@ class Glide:
                 if dt < 1.0:
                     self.frame_dt = 0.7 * self.frame_dt + 0.3 * dt  # the camera's real frame interval
                     vx, vy = (x - self.target[0]) / dt, (y - self.target[1]) / dt
-                    self.vel = (0.5 * self.vel[0] + 0.5 * vx, 0.5 * self.vel[1] + 0.5 * vy)
+                    if abs(x - self.target[0]) < 0.5 and abs(y - self.target[1]) < 0.5:
+                        self.vel = (0.0, 0.0)  # the target stopped (held still / locked): stop at once
+                    else:
+                        self.vel = (0.5 * self.vel[0] + 0.5 * vx, 0.5 * self.vel[1] + 0.5 * vy)
                 else:
                     self.vel = (0.0, 0.0)
             if self.out is None:
@@ -84,6 +90,8 @@ class Glide:
         if gap > self.stall_frames * self.frame_dt:
             return self.target  # stalled: no more extrapolation
         ahead = max(0.0, min(gap, self.frame_dt, self.max_ahead_s))
+        g = min(1.0, math.hypot(*self.vel) / GATE_PX_S)
+        ahead *= g * g * (3 - 2 * g)  # smoothstep: no extrapolation for slow / jittery motion
         return (self.target[0] + self.vel[0] * ahead, self.target[1] + self.vel[1] * ahead)
 
     def step(self, now: float) -> tuple[int, int] | None:

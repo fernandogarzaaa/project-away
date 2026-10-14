@@ -403,6 +403,10 @@ class Speaker:
 
     def _auto_factories(self) -> list[tuple[str, Callable[[], Engine]]]:
         out: list[tuple[str, Callable[[], Engine]]] = []
+        with contextlib.suppress(Exception):  # v0.1.24: Kokoro fp16 on the GPU / pocket-tts, only when chosen
+            from away.voice.tts_next import next_factories
+
+            out += next_factories(self._cfg_or_none)
         with contextlib.suppress(Exception):
             from away.voice.natural import natural_factories
 

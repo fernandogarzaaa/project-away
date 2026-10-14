@@ -52,7 +52,7 @@ def test_new_feature_switches_and_sliders_are_agent_settings() -> None:
         "zones.enabled",
     ):
         assert items[key]["kind"] == "switch", key
-    assert items["hands.cursor.smoothing"]["choices"] == ["one_euro", "predictive"]
+    assert items["hands.cursor.smoothing"]["choices"] == ["adaptive", "one_euro", "predictive"]
     assert items["hands.cursor.magnet.strength"]["kind"] == "number"  # pointer_tunables
     assert any(k.startswith(("attention.", "comfort.")) and v["kind"] == "number" for k, v in items.items())
 
@@ -71,7 +71,7 @@ def test_switching_a_feature_through_agent_link_is_undoable(tmp_path: Path) -> N
     assert cfg.attention.enabled and cfg.hands.cursor.smoothing == "predictive" and cfg.comfort.fatigue_switch
     cm.undo_batch(r["batch"])
     cfg = C.load(cfgp)[0]
-    assert not cfg.attention.enabled and cfg.hands.cursor.smoothing == "one_euro"
+    assert not cfg.attention.enabled and cfg.hands.cursor.smoothing == "adaptive"  # v0.1.25 default
     with pytest.raises(ChangeError):
         cm.apply([Op("settings", "set", "hands.cursor.smoothing", "teleport")], "Claude")
 
@@ -168,7 +168,7 @@ def test_context_extensions_report_fatigue_attention_pointer_shortcuts_and_studi
     fatigue["head_control"] = True
     assert ext["fatigue"]() == "head_control"
     assert ext["attention_gate"]()["state"] == "engaged"
-    assert ext["smart_pointer"]()["smoothing"] == "one_euro"
+    assert ext["smart_pointer"]()["smoothing"] == "adaptive"
     assert ext["shortcuts"]() == {"recording": True, "playing": False}
     assert ext["gesture_studio"]()["gestures"] == ["thumbs_up"]
     assert integrations.fatigue_mode(SimpleNamespace()) is None

@@ -143,19 +143,26 @@ def compare(
 
 
 def default_filters() -> dict[str, Callable[[], CursorFilter]]:
-    """The shipped defaults of both ``hands.cursor.smoothing`` modes."""
+    """The shipped defaults of every ``hands.cursor.smoothing`` mode."""
     from away.config import CursorConfig
     from away.pointer.smoothing import make_cursor_filter
 
+    def adaptive() -> CursorFilter:  # v0.1.25 default
+        c = CursorConfig()
+        c.smoothing = "adaptive"
+        return make_cursor_filter(c)
+
     def one_euro() -> CursorFilter:
-        return make_cursor_filter(CursorConfig())
+        c = CursorConfig()
+        c.smoothing = "one_euro"
+        return make_cursor_filter(c)
 
     def predictive() -> CursorFilter:
         c = CursorConfig()
         c.smoothing = "predictive"
         return make_cursor_filter(c)
 
-    return {"one_euro": one_euro, "predictive": predictive}
+    return {"adaptive": adaptive, "one_euro": one_euro, "predictive": predictive}
 
 
 def main() -> None:  # pragma: no cover - prints a table

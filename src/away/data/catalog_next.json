@@ -1,0 +1,611 @@
+{
+ "about": "Shipped copy of models/catalog.json models_next + presets_next (used until the online catalog has them).",
+ "models_next": [
+  {
+   "id": "mediapipe-hands",
+   "slot": "hands",
+   "title": "MediaPipe hands (built in)",
+   "license": "Apache-2.0",
+   "runtime": "mediapipe",
+   "runs_on": "cpu",
+   "size": 7819105,
+   "set": {
+    "hands.enabled": true
+   },
+   "bundled": true,
+   "version": "float16/1 (file 2023-04-26); MediaPipe Tasks runtime 1.1.0 (2026)",
+   "released": "2023-04-26",
+   "notes": "Still the newest Google hand model (Oct 2026). Default in every preset. 21 landmarks + world coordinates + handedness. Google: 17.12 ms CPU / 12.27 ms GPU per frame on a Pixel 6.",
+   "cost": {
+    "cpu_pct": 8,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "hands-rtmpose-m-hand5",
+   "slot": "hands",
+   "title": "RTMPose hands on the graphics card (experimental)",
+   "description": "Moves hand tracking to the graphics card to free the processor. Experimental: try it next to MediaPipe first.",
+   "license": "Apache-2.0",
+   "permissive": true,
+   "runtime": "onnx",
+   "runs_on": "gpu",
+   "size": 55110481,
+   "experimental": true,
+   "files": [
+    {
+     "path": "rtmpose-m-hand5.zip",
+     "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.zip",
+     "sha256": "45c9e1aa21b8fe33859973c49bce4647645d312e7a226e398a42f9137d44a56d",
+     "size": 51270352
+    },
+    {
+     "path": "rtmdet-nano-hand.zip",
+     "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmdet_nano_8xb32-300e_hand-267f9c8f.zip",
+     "sha256": "9c0370a43c02b2fe42b4382aba7383d97cfa3ed35623b655cac4f0c25cfde402",
+     "size": 3840129
+    }
+   ],
+   "set": {
+    "models_next.hands_landmarker": "rtmpose"
+   },
+   "version": "rtmpose-m hand5 20230320-74fb594 + rtmdet-nano 267f9c8f",
+   "released": "2023-03-20",
+   "notes": "PCK@0.2 81.5 COCO-WholeBody-Hand / 96.4 Hand5 (OpenMMLab). 2D only: no world coordinates or handedness. Training data includes research-licensed sets (FreiHAND/RHD/OneHand10K): weights are Apache-2.0, dataset provenance needs a legal check. Includes the RTMDet-nano hand detector (AP 76.0 OneHand10K).",
+   "cost": {
+    "cpu_pct": 3,
+    "vram_mb": 400,
+    "estimated": true
+   }
+  },
+  {
+   "id": "hands-rtmdet-nano",
+   "slot": "hands",
+   "title": "RTMDet-nano hand finder (part of RTMPose hands)",
+   "license": "Apache-2.0",
+   "runtime": "onnx",
+   "runs_on": "either",
+   "size": 3840129,
+   "component": true,
+   "experimental": true,
+   "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmdet_nano_8xb32-300e_hand-267f9c8f.zip",
+   "sha256": "9c0370a43c02b2fe42b4382aba7383d97cfa3ed35623b655cac4f0c25cfde402",
+   "set": {
+    "models_next.hands_landmarker": "rtmpose"
+   },
+   "version": "267f9c8f",
+   "notes": "Downloaded together with RTMPose hands; runs every few frames, boxes are tracked from the landmarks in between.",
+   "cost": {
+    "cpu_pct": 1,
+    "vram_mb": 100,
+    "estimated": true
+   }
+  },
+  {
+   "id": "mediapipe-face",
+   "slot": "face",
+   "title": "MediaPipe face (built in)",
+   "license": "Apache-2.0",
+   "runtime": "mediapipe",
+   "runs_on": "cpu",
+   "size": 3758596,
+   "set": {
+    "face.enabled": true
+   },
+   "bundled": true,
+   "version": "float16/1",
+   "notes": "No newer Google face model as of Oct 2026. 478 points incl. iris, 52 blendshapes, head-pose matrix. All presets.",
+   "cost": {
+    "cpu_pct": 4,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "gaze-mobilegaze",
+   "slot": "gaze",
+   "title": "MobileGaze (small network)",
+   "license": "research-only weights",
+   "runtime": "onnx",
+   "runs_on": "either",
+   "size": 4974521,
+   "set": {
+    "gaze.model": "mobilegaze"
+   },
+   "download": "away models gaze",
+   "version": "weights release 2026-02",
+   "notes": "Code MIT; weights trained only on Gaze360 (research-only terms). Off by default; the presets use iris + per-user calibration instead (no model). MAE 12.58 deg on Gaze360 (author).",
+   "cost": {
+    "cpu_pct": 3,
+    "vram_mb": 60
+   }
+  },
+  {
+   "id": "stt-nemotron-3.5-streaming-0.6b-q8",
+   "slot": "stt",
+   "title": "Nemotron 3.5 streaming on the graphics card (experimental)",
+   "description": "Very accurate speech-to-text that types while you talk and frees the processor. Experimental on Windows.",
+   "license": "OpenMDW-1.1",
+   "permissive": true,
+   "runtime": "nemo-speech",
+   "runs_on": "gpu",
+   "size": 742090464,
+   "experimental": true,
+   "url": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf",
+   "sha256": "3fc991d3badad7277c11030a7519832cddaf2057aafed6d4b25147e953a070b1",
+   "set": {
+    "models_next.stt": "nemotron"
+   },
+   "engine": "nemo-speech",
+   "version": "v1 (2026-06-04), GGUF q8_0",
+   "released": "2026-06-04",
+   "notes": "Cache-aware true streaming (80-1120 ms chunks), punctuation and capitals built in, 40 locales. FLEURS EN WER 7.99 @560 ms / 7.91 @1.12 s (vendor). Runs in NeMo-Speech.cpp 0.2.0 (Apache-2.0), downloaded separately. OpenMDW-1.1: keep the license text and notices. The Windows CUDA build is not yet verified on an RTX 2060; any failure falls back to Whisper.",
+   "cost": {
+    "cpu_pct": 4,
+    "vram_mb": 1100,
+    "estimated": true
+   }
+  },
+  {
+   "id": "stt-moonshine-v2-medium-streaming-en",
+   "slot": "stt",
+   "title": "Moonshine v2 Medium streaming on the processor",
+   "description": "Accurate English speech-to-text that works while you talk; no graphics card needed.",
+   "license": "MIT",
+   "runtime": "moonshine",
+   "runs_on": "cpu",
+   "size": 269141623,
+   "files": [
+    {
+     "path": "medium-streaming-en/adapter.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/adapter.ort",
+     "sha256": "3f2a287def57cc094367a0eec3c4f5fc36a32ec420e86764b696920991b20281",
+     "size": 3651296
+    },
+    {
+     "path": "medium-streaming-en/cross_kv.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/cross_kv.ort",
+     "sha256": "642f6e21cd305be79342207c6f9e6b681d469d55bc48c72b27b84846fb71fd1e",
+     "size": 11643776
+    },
+    {
+     "path": "medium-streaming-en/decoder_kv.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/decoder_kv.ort",
+     "sha256": "193bb366492b74fc4ad338c6778e8d8eb916aaa11b5aa264f9057f4db7759486",
+     "size": 146972408
+    },
+    {
+     "path": "medium-streaming-en/encoder.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/encoder.ort",
+     "sha256": "12915e76ebac7dd287c5ea63965d06103a53ba1ce242a4a34f318f3958c60c37",
+     "size": 94705376
+    },
+    {
+     "path": "medium-streaming-en/frontend.model.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/frontend.model.ort",
+     "sha256": "95768855c70c8251eeecc05fedf69999da1b8ab16f605c9f457fd3354b0ad6b5",
+     "size": 28720
+    },
+    {
+     "path": "medium-streaming-en/frontend.weights.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/frontend.weights.ort",
+     "sha256": "5ac941f490cbe035b335b99a414cc393d62d4c6f9f2423495b286870d271d709",
+     "size": 11889560
+    },
+    {
+     "path": "medium-streaming-en/streaming_config.json",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/streaming_config.json",
+     "sha256": "28e83b7a28e91472692a035e0dae3116422ae43aeb2bef5ed822c44ce89b88af",
+     "size": 513
+    },
+    {
+     "path": "medium-streaming-en/tokenizer.bin",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/tokenizer.bin",
+     "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d",
+     "size": 249974
+    }
+   ],
+   "set": {
+    "models_next.stt": "moonshine",
+    "models_next.moonshine_model": "medium"
+   },
+   "engine": "moonshine",
+   "version": "quantized_26_08_21",
+   "released": "2026-08-21",
+   "notes": "Open ASR average WER 6.65 (vendor, float). 258 ms end-of-speech latency on an Apple M3 (vendor). Library: moonshine-voice 0.1.5 (MIT), downloaded separately.",
+   "cost": {
+    "cpu_pct": 30,
+    "vram_mb": 0,
+    "estimated": true
+   }
+  },
+  {
+   "id": "stt-moonshine-v2-small-streaming-en",
+   "slot": "stt",
+   "title": "Moonshine v2 Small streaming on the processor (light)",
+   "description": "Fast English speech-to-text for busy or older PCs.",
+   "license": "MIT",
+   "runtime": "moonshine",
+   "runs_on": "cpu",
+   "size": 142300974,
+   "files": [
+    {
+     "path": "small-streaming-en/adapter.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/adapter.ort",
+     "sha256": "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762",
+     "size": 2870368
+    },
+    {
+     "path": "small-streaming-en/cross_kv.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/cross_kv.ort",
+     "sha256": "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6",
+     "size": 5356536
+    },
+    {
+     "path": "small-streaming-en/decoder_kv.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/decoder_kv.ort",
+     "sha256": "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b",
+     "size": 81878600
+    },
+    {
+     "path": "small-streaming-en/encoder.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/encoder.ort",
+     "sha256": "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993",
+     "size": 44148576
+    },
+    {
+     "path": "small-streaming-en/frontend.model.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/frontend.model.ort",
+     "sha256": "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f",
+     "size": 26944
+    },
+    {
+     "path": "small-streaming-en/frontend.weights.ort",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/frontend.weights.ort",
+     "sha256": "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338",
+     "size": 7769464
+    },
+    {
+     "path": "small-streaming-en/streaming_config.json",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/streaming_config.json",
+     "sha256": "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a",
+     "size": 512
+    },
+    {
+     "path": "small-streaming-en/tokenizer.bin",
+     "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/tokenizer.bin",
+     "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d",
+     "size": 249974
+    }
+   ],
+   "set": {
+    "models_next.stt": "moonshine",
+    "models_next.moonshine_model": "small"
+   },
+   "engine": "moonshine",
+   "version": "quantized_26_08_21",
+   "released": "2026-08-21",
+   "notes": "Open ASR average WER 7.84 (vendor). 148 ms latency, ~18 % compute load on an Apple M3 (vendor). Verified on Linux CPU in this PR (offline + streaming).",
+   "cost": {
+    "cpu_pct": 18,
+    "vram_mb": 0,
+    "estimated": true
+   }
+  },
+  {
+   "id": "whisper-large-v3-turbo-gpu",
+   "slot": "stt",
+   "title": "Whisper large-v3-turbo on the graphics card",
+   "license": "MIT",
+   "runtime": "whisper",
+   "runs_on": "gpu",
+   "size": 1620000000,
+   "set": {
+    "voice.asr_model": "large-v3-turbo",
+    "voice.device": "cuda"
+   },
+   "version": "2024-10",
+   "notes": "Stays the default and the fallback for every new speech model; the multilingual choice (e.g. Tagalog).",
+   "cost": {
+    "cpu_pct": 3,
+    "vram_mb": 1700
+   }
+  },
+  {
+   "id": "cleanup-qwen3.5-2b-q4km",
+   "slot": "cleanup",
+   "title": "Smart cleanup - Qwen3.5 2B",
+   "description": "A newer small local language model that polishes punctuation and tone (non-thinking mode).",
+   "license": "Apache-2.0",
+   "runtime": "gguf",
+   "runs_on": "either",
+   "size": 1280835840,
+   "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+   "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+   "set": {
+    "voice.cleanup.mode": "llm",
+    "voice.cleanup.backend": "llama_cpp",
+    "voice.cleanup.model": "qwen3.5-2b"
+   },
+   "version": "2026-03-02 (unsloth GGUF)",
+   "released": "2026-03-02",
+   "notes": "Balanced. IFEval 61.2 non-thinking (Qwen). Runs in non-thinking mode with a token limit; any <think> output is removed. Needs llama.cpp with qwen35 support (llama-cpp-python 0.3.36 has it).",
+   "cost": {
+    "cpu_pct": 45,
+    "vram_mb": 1600,
+    "estimated": true
+   }
+  },
+  {
+   "id": "cleanup-qwen3.5-2b-q8",
+   "slot": "cleanup",
+   "title": "Smart cleanup - Qwen3.5 2B (best quality)",
+   "description": "A newer small local language model that polishes punctuation and tone (non-thinking mode).",
+   "license": "Apache-2.0",
+   "runtime": "gguf",
+   "runs_on": "either",
+   "size": 2012012800,
+   "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q8_0.gguf",
+   "sha256": "1b04acba824817554f4ce23639bc8495ff70453b8fcb047900c731521021f2c1",
+   "set": {
+    "voice.cleanup.mode": "llm",
+    "voice.cleanup.backend": "llama_cpp",
+    "voice.cleanup.model": "qwen3.5-2b-q8"
+   },
+   "version": "2026-03-02 (unsloth GGUF)",
+   "released": "2026-03-02",
+   "notes": "Best. Near-lossless 8-bit; needs a graphics card. Runs in non-thinking mode with a token limit; any <think> output is removed. Needs llama.cpp with qwen35 support (llama-cpp-python 0.3.36 has it).",
+   "cost": {
+    "cpu_pct": 55,
+    "vram_mb": 2400,
+    "estimated": true
+   }
+  },
+  {
+   "id": "cleanup-qwen3.5-0.8b-q4km",
+   "slot": "cleanup",
+   "title": "Smart cleanup - Qwen3.5 0.8B (light)",
+   "description": "A newer small local language model that polishes punctuation and tone (non-thinking mode).",
+   "license": "Apache-2.0",
+   "runtime": "gguf",
+   "runs_on": "either",
+   "size": 532517120,
+   "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf",
+   "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+   "set": {
+    "voice.cleanup.mode": "llm",
+    "voice.cleanup.backend": "llama_cpp",
+    "voice.cleanup.model": "qwen3.5-0.8b"
+   },
+   "version": "2026-03-02 (unsloth GGUF)",
+   "released": "2026-03-02",
+   "notes": "Light. IFEval 52.1 non-thinking (Qwen), above Qwen2.5-1.5B (47.4, other harness). Verified with llama-cpp-python 0.3.36 on Linux CPU in this PR. Runs in non-thinking mode with a token limit; any <think> output is removed. Needs llama.cpp with qwen35 support (llama-cpp-python 0.3.36 has it).",
+   "cost": {
+    "cpu_pct": 25,
+    "vram_mb": 700,
+    "estimated": true
+   }
+  },
+  {
+   "id": "voice-kokoro-fp16-gpu",
+   "slot": "voice",
+   "title": "Natural (Kokoro) on the graphics card",
+   "description": "The natural voice, run in half precision on the graphics card.",
+   "license": "Apache-2.0",
+   "runtime": "onnx",
+   "runs_on": "gpu",
+   "size": 177464787,
+   "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.fp16.onnx",
+   "sha256": "c1610a859f3bdea01107e73e50100685af38fff88f5cd8e5c56df109ec880204",
+   "set": {
+    "speech.engine": "kokoro",
+    "models_next.kokoro_precision": "fp16"
+   },
+   "version": "v1.0",
+   "released": "2025-01",
+   "notes": "#1 English WER (1.46) on the HF Open TTS Leaderboard (2026-09-30). Same voices file as the int8 voice. Phonemes use espeak-ng (GPL-3.0), a separate optional download, never bundled.",
+   "cost": {
+    "cpu_pct": 5,
+    "vram_mb": 400,
+    "estimated": true
+   }
+  },
+  {
+   "id": "voice-kokoro",
+   "slot": "voice",
+   "title": "Natural (Kokoro)",
+   "license": "Apache-2.0",
+   "runtime": "onnx",
+   "runs_on": "either",
+   "size": 120575669,
+   "set": {
+    "speech.engine": "kokoro"
+   },
+   "download": "voice:kokoro",
+   "version": "v1.0 int8",
+   "notes": "int8 on the processor (Balanced). CPU time to first audio ~367 ms at 6 threads / ~700 ms at 2 threads on a Ryzen 7 9700X (creativeainews) - slower on a busy i7.",
+   "cost": {
+    "cpu_pct": 30,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "voice-pocket-tts",
+   "slot": "voice",
+   "title": "Instant voice (Kyutai pocket-tts, experimental)",
+   "description": "Starts speaking almost at once; for short replies. Optional install.",
+   "license": "CC-BY-4.0 (weights, credit Kyutai); code MIT",
+   "permissive": true,
+   "runtime": "torch",
+   "runs_on": "cpu",
+   "size": 219000000,
+   "experimental": true,
+   "set": {
+    "models_next.instant_voice": true
+   },
+   "download": "pip install 'project-away[pocket]'",
+   "version": "english_2026-09",
+   "released": "2026-09",
+   "notes": "100M parameters on 2 CPU cores; time to first audio ~70 ms (creativeainews) / ~200 ms (vendor). Needs PyTorch, so it is a pip extra, not a download. Voice cloning needs the speaker's consent (Kyutai terms). Credit: Kyutai, CC-BY-4.0.",
+   "cost": {
+    "cpu_pct": 25,
+    "vram_mb": 0,
+    "estimated": true
+   }
+  },
+  {
+   "id": "voice-windows",
+   "slot": "voice",
+   "title": "Windows natural",
+   "license": "Windows",
+   "runtime": "system",
+   "runs_on": "cpu",
+   "size": 0,
+   "set": {
+    "speech.engine": "windows"
+   },
+   "bundled": true,
+   "notes": "Light preset: zero download.",
+   "cost": {
+    "cpu_pct": 2,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "vad-silero-v6.2",
+   "slot": "vad",
+   "title": "Silero VAD v6.2",
+   "description": "Hears when you start and stop talking; fewer mistakes with background noise.",
+   "license": "MIT",
+   "runtime": "onnx",
+   "runs_on": "cpu",
+   "size": 2327524,
+   "url": "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2/src/silero_vad/data/silero_vad.onnx",
+   "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+   "set": {
+    "models_next.vad": "silero6"
+   },
+   "version": "v6.2 (tag)",
+   "released": "2025-11",
+   "notes": "All presets. v6: 16% fewer errors on noisy real-life audio than v5 (vendor); <1 ms per 30 ms chunk. LICENSE is MIT; the README badge/PyPI metadata say CC BY-NC 4.0 - an upstream inconsistency to track.",
+   "cost": {
+    "cpu_pct": 1,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "wake-livekit-custom",
+   "slot": "wake",
+   "title": "Wake word model for \"Hey <name>\"",
+   "description": "A tiny model listens only for your wake word, so speech-to-text is not running all the time.",
+   "license": "Apache-2.0",
+   "runtime": "livekit-wakeword",
+   "runs_on": "cpu",
+   "size": 0,
+   "set": {
+    "models_next.wake_engine": "livekit"
+   },
+   "engine": "livekit-wakeword",
+   "requires": [
+    "wake_model"
+   ],
+   "version": "livekit-wakeword 0.3.0",
+   "released": "2026",
+   "notes": "Trained per name (conv-attention, synthetic data). Vendor eval: 0.08 false wakes/hour vs 8.50 for openWakeWord, recall 86.1%. openWakeWord's own pre-trained models are CC BY-NC-SA and are never shipped.",
+   "cost": {
+    "cpu_pct": 2,
+    "vram_mb": 0,
+    "estimated": true
+   }
+  },
+  {
+   "id": "vad-bundled",
+   "slot": "vad",
+   "title": "Silero VAD (built in)",
+   "license": "MIT",
+   "runtime": "onnx",
+   "runs_on": "cpu",
+   "size": 0,
+   "set": {
+    "models_next.vad": "bundled"
+   },
+   "bundled": true,
+   "notes": "The voice-activity detector v0.1.23 uses (voice.vad).",
+   "cost": {
+    "cpu_pct": 1,
+    "vram_mb": 0
+   }
+  },
+  {
+   "id": "wake-asr",
+   "slot": "wake",
+   "title": "Speech-to-text listens for \"Hey <name>\" (built in)",
+   "license": "MIT",
+   "runtime": "whisper",
+   "runs_on": "either",
+   "size": 0,
+   "set": {
+    "models_next.wake_engine": "asr"
+   },
+   "bundled": true,
+   "notes": "v0.1.23 behaviour.",
+   "cost": {
+    "cpu_pct": 0,
+    "vram_mb": 0
+   }
+  }
+ ],
+ "presets_next": {
+  "modes": {
+   "light": {
+    "hands": "mediapipe-hands",
+    "face": "mediapipe-face",
+    "gaze": "off",
+    "stt": "stt-moonshine-v2-small-streaming-en",
+    "cleanup": "cleanup-qwen3.5-0.8b-q4km",
+    "voice": "voice-windows",
+    "vad": "vad-silero-v6.2",
+    "wake": "wake-livekit-custom"
+   },
+   "balanced": {
+    "hands": "mediapipe-hands",
+    "face": "mediapipe-face",
+    "gaze": "gaze-iris",
+    "stt": "stt-nemotron-3.5-streaming-0.6b-q8",
+    "cleanup": "cleanup-qwen3.5-2b-q4km",
+    "voice": "voice-kokoro",
+    "vad": "vad-silero-v6.2",
+    "wake": "wake-livekit-custom"
+   },
+   "best": {
+    "hands": "mediapipe-hands",
+    "face": "mediapipe-face",
+    "gaze": "gaze-iris",
+    "stt": "stt-nemotron-3.5-streaming-0.6b-q8",
+    "cleanup": "cleanup-qwen3.5-2b-q8",
+    "voice": "voice-kokoro-fp16-gpu",
+    "vad": "vad-silero-v6.2",
+    "wake": "wake-livekit-custom"
+   }
+  },
+  "settings": {
+   "best": {
+    "models_next.nemotron_chunk_ms": 1120,
+    "models_next.wake_verify": "on"
+   },
+   "balanced": {
+    "models_next.nemotron_chunk_ms": 560,
+    "models_next.wake_verify": "auto"
+   },
+   "light": {
+    "models_next.wake_verify": "off"
+   }
+  },
+  "experimental_alternatives": {
+   "best": {
+    "hands": "hands-rtmpose-m-hand5",
+    "voice": "voice-pocket-tts"
+   }
+  },
+  "note": "VRAM figures are estimates (file size + runtime overhead), not measured on an RTX 2060. 'Test my PC' measures them."
+ }
+}

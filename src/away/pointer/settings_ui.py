@@ -80,7 +80,7 @@ def toggle_on(cfg: Any, key: str) -> bool:
 
 def set_toggle(cfg: Any, key: str, on: bool) -> None:
     t = TOGGLE_BY_KEY[key]
-    value: Any = ("predictive" if on else "one_euro") if key == "smooth" else bool(on)
+    value: Any = ("predictive" if on else "adaptive") if key == "smooth" else bool(on)
     _set(cfg, t.path, value)
 
 

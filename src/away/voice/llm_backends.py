@@ -202,6 +202,12 @@ def make_backend(cleanup: Any, models_dir: Path, gpu: bool) -> LLMBackend:
     if cleanup.backend == "openai":
         return OpenAIBackend(model=None if cleanup.model == "auto" else cleanup.model)
     key = pick_model_key(models_dir, gpu, cleanup.model)
+    from away.voice.cleanup_next import Qwen35Fallback, is_qwen35
+
+    if is_qwen35(key):  # v0.1.24: Qwen3.5 (falls back to Qwen2.5 when this llama.cpp cannot load it)
+        return Qwen35Fallback(
+            key, models_dir, lambda p: LlamaCppBackend(p, gpu_layers=cleanup.gpu_layers), om.path_of, om.installed
+        )
     try:
         path = om.path_of(key, models_dir)
     except KeyError:

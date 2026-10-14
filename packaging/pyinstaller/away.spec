@@ -216,6 +216,50 @@ a.binaries = [b for b in a.binaries if not _is_non_permissive(b[0], b[1])]
 a.datas = [d for d in a.datas if not _is_non_permissive(d[0], d[1])]
 print(f"[away.spec] dropped {before - len(a.binaries) - len(a.datas)} GPL voice files (espeak-ng / phonemizer)")
 
+
+def _windows_metadata():
+    """Windows exe version resource + icon. The version resource (product name "Project Away", product version =
+    the release version) is what SignPath's metadata restrictions check before signing (docs/SIGNING-AND-STORE.md);
+    the icon is the tray icon's glyph. Neither exists on macOS/Linux builds."""
+    if sys.platform != "win32":
+        return None, None
+    import tempfile
+
+    from PyInstaller.utils.win32 import versioninfo as vi
+
+    raw = os.environ.get("AWAY_VERSION") or re.search(
+        r'(?m)^version\s*=\s*"([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    ).group(1)
+    nums = tuple(([int(n) for n in re.findall(r"\d+", raw.split("-")[0])[:3]] + [0, 0, 0, 0])[:4])
+    strings = [
+        vi.StringStruct("CompanyName", "Fernando Garza"),
+        vi.StringStruct("FileDescription", "Project Away"),
+        vi.StringStruct("FileVersion", raw),
+        vi.StringStruct("InternalName", APP),
+        vi.StringStruct("LegalCopyright", "Copyright (c) Fernando Garza. MIT License."),
+        vi.StringStruct("OriginalFilename", f"{APP}.exe"),
+        vi.StringStruct("ProductName", "Project Away"),
+        vi.StringStruct("ProductVersion", raw),
+    ]
+    version = vi.VSVersionInfo(
+        ffi=vi.FixedFileInfo(filevers=nums, prodvers=nums),
+        kids=[vi.StringFileInfo([vi.StringTable("040904B0", strings)]), vi.VarFileInfo([vi.VarStruct("Translation", [1033, 1200])])],
+    )
+    icon = None
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from build_msix import _icon_master  # the same drawing as the MSIX tiles
+
+        icon = os.path.join(tempfile.mkdtemp(prefix="away-icon-"), "ProjectAway.ico")
+        _icon_master(256).save(icon, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    except Exception as e:  # Pillow missing: ship without an icon rather than fail the build
+        print(f"[away.spec] no exe icon: {e}")
+        icon = None
+    return version, icon
+
+
+_win_version, _win_icon = _windows_metadata()
+
 pyz = PYZ(a.pure)  # noqa: F821
 exe = EXE(  # noqa: F821
     pyz,
@@ -225,7 +269,8 @@ exe = EXE(  # noqa: F821
     name=APP,
     # Windows/macOS: windowed tray app (CLI commands open a console window on Windows, see away.app.frozen)
     console=sys.platform.startswith("linux"),
-    icon=None,
+    icon=_win_icon,
+    version=_win_version,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name=APP)  # noqa: F821
 
@@ -236,7 +281,7 @@ if sys.platform == "darwin":
         bundle_identifier="com.fernandogarzaaa.projectaway",
         info_plist={
             "CFBundleDisplayName": "Project Away",
-            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.24"),
+            "CFBundleShortVersionString": os.environ.get("AWAY_VERSION", "0.1.25"),
             "LSUIElement": True,  # menu-bar (tray) app, no Dock icon
             "NSCameraUsageDescription": "Project Away tracks your hands and face locally to control the pointer.",
             "NSMicrophoneUsageDescription": "Project Away transcribes push-to-talk dictation locally.",

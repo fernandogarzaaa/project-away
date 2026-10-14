@@ -54,7 +54,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "hands.cursor.mode": ("relative", "absolute"),
     "hands.cursor.curve": ("power", "sigmoid"),
     "hands.roles.mode": ("auto", "right", "left", "any"),
-    "hands.cursor.smoothing": ("one_euro", "predictive"),  # smart pointer: "Smoother cursor"
+    "hands.cursor.smoothing": ("adaptive", "one_euro", "predictive"),  # smart pointer: "Smoother cursor"
     "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
     "speech.rate": cfgmod.SPEECH_RATES,  # v0.1.21: how fast agents speak to you
     "speech.volume": cfgmod.SPEECH_VOLUMES,
@@ -726,6 +726,13 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
     }
     if store is not None:
         out["presets"] = make_presets_domain(store)
+    if "model_bench" not in _EXTRA:  # v0.1.24 "Test my PC" (away.app.model_bench registers itself)
+        try:
+            from away.app.model_bench import register_agent_link
+
+            register_agent_link()
+        except Exception:  # never let an optional domain break Agent Link
+            pass
     out.update(_EXTRA)
     return out
 

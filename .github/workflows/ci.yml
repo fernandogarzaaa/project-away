@@ -109,6 +109,65 @@ jobs:
           name: python-dist
           path: dist/*
 
+  msix:
+    # The real MSIX is built from the full PyInstaller app in release.yml; this proves on every PR, in a few minutes,
+    # that away.spec's Windows version resource/icon, the manifest, makepri and makeappx work, and that a signed
+    # sideload package installs (self-signed test certificate, trusted only on this throwaway runner).
+    name: MSIX package (makeappx, test install)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e . Pillow pyinstaller
+      - name: Stand-in app with the release exe's version resource and icon
+        run: python packaging/msix/ci_standin.py standin
+      - name: Version resource is what SignPath checks
+        shell: pwsh
+        run: |
+          $vi = (Get-Item standin\ProjectAway\ProjectAway.exe).VersionInfo
+          Write-Host "$($vi.ProductName) $($vi.ProductVersion) / $($vi.FileVersion)"
+          if ($vi.ProductName -ne "Project Away") { throw "ProductName is '$($vi.ProductName)'" }
+          $v = python -c "import sys; sys.path.insert(0, 'scripts'); import build_msix; print(build_msix.pyproject_version())"
+          if ($vi.ProductVersion -ne $v) { throw "ProductVersion '$($vi.ProductVersion)' is not '$v'" }
+      - name: Build the Store upload and a sideload MSIX
+        run: python scripts/build_msix.py --input standin\ProjectAway --out msix-out --publisher "CN=ProjectAway-CI" --sideload-publisher "CN=Project Away CI Test"
+      - name: Sign the sideload MSIX with a throwaway certificate, install it, check alias and startup task, remove it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $up = Get-ChildItem msix-out\*.msixupload
+          python -c "import sys, zipfile; n = zipfile.ZipFile(sys.argv[1]).namelist(); print(n); sys.exit(0 if len(n) == 1 and n[0].endswith('-store.msix') else 1)" $up.FullName
+          if ($LASTEXITCODE -ne 0) { throw "bad .msixupload" }
+          $msix = (Get-ChildItem msix-out\*-windows-x64.msix).FullName
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Project Away CI Test" -CertStoreLocation Cert:\CurrentUser\My -TextExtension @("2.5.29.19={text}")
+          $pw = ConvertTo-SecureString -String "ci-only" -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath ci.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert $cert -FilePath ci.cer | Out-Null
+          Import-Certificate -FilePath ci.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          $kit = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $signtool = (Get-ChildItem $kit -Recurse -Filter signtool.exe | Where-Object { $_.FullName -like "*\x64\*" } | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /fd SHA256 /f ci.pfx /p ci-only $msix
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          Add-AppxPackage -Path $msix
+          $pkg = Get-AppxPackage -Name FernandoGarza.ProjectAway
+          if (-not $pkg) { throw "not installed" }
+          Write-Host "installed $($pkg.PackageFullName) $($pkg.Version)"
+          $m = [xml](Get-Content (Join-Path $pkg.InstallLocation "AppxManifest.xml"))
+          $caps = $m.Package.Capabilities.ChildNodes | ForEach-Object { $_.Name }
+          foreach ($c in "internetClient", "privateNetworkClientServer", "runFullTrust", "webcam", "microphone") {
+            if ($caps -notcontains $c) { throw "capability $c missing: $caps" }
+          }
+          if (-not (Test-Path (Join-Path $pkg.InstallLocation "resources.pri"))) { throw "no resources.pri" }
+          $alias = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\away.exe"
+          if (-not (Test-Path $alias)) { throw "app execution alias missing: $alias" }
+          $task = $m.Package.Applications.Application.Extensions.Extension | Where-Object { $_.Category -eq "windows.startupTask" }
+          if ($task.StartupTask.Enabled -ne "false") { throw "startup task must be off by default" }
+          Remove-AppxPackage -Package $pkg.PackageFullName
+          Write-Host "MSIX install/remove OK"
+
   mutation:
     name: mutation score (testteeth, non-blocking)
     runs-on: ubuntu-latest

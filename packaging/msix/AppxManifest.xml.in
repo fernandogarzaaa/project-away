@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest template for Project Away. Rendered by scripts/build_msix.py; never edit the rendered copy.
+
+  {{IDENTITY_NAME}}           Partner Center > Product identity > Package/Identity/Name        (repo variable MSIX_IDENTITY_NAME)
+  {{PUBLISHER}}               Partner Center > Product identity > Package/Identity/Publisher   (repo variable MSIX_PUBLISHER)
+                              For the signed sideload package: the code signing certificate's subject
+                              (repo variable MSIX_SIDELOAD_PUBLISHER). It must match the certificate exactly.
+  {{PUBLISHER_DISPLAY_NAME}}  Partner Center > Product identity > Package/Properties/PublisherDisplayName
+  {{VERSION}}                 pyproject.toml version as four numbers (0.1.22 -> 0.1.22.0; the Store wants the last one 0)
+
+  Capabilities: runFullTrust (a normal desktop app: PyInstaller build, mouse/keyboard control, tray icon),
+  webcam (hand/face tracking), microphone (dictation), internetClient (model downloads, update check, agents)
+  and privateNetworkClientServer (Agent Link's local server, iPhone face stream over Wi-Fi).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 desktop rescap">
+
+  <Identity
+    Name="{{IDENTITY_NAME}}"
+    Publisher="{{PUBLISHER}}"
+    Version="{{VERSION}}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Project Away</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Control your PC and your AI agents with your hands, face and voice. Processed on your PC.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="ProjectAway" Executable="ProjectAway.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Project Away"
+        Description="Control your PC and your AI agents with your hands, face and voice."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          ShortName="Project Away"
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\SmallTile.png"
+          Square310x310Logo="Assets\LargeTile.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+            <uap:ShowOn Tile="wide310x150Logo" />
+            <uap:ShowOn Tile="square310x310Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- type `away doctor`, `away settings`... in any terminal (the same commands as the pip `away` CLI) -->
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="ProjectAway.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="away.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <!-- start at sign-in: off until the user turns it on (Settings > Apps > Startup) -->
+        <desktop:Extension Category="windows.startupTask" Executable="ProjectAway.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="ProjectAwayStartup" Enabled="false" DisplayName="Project Away" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+    <DeviceCapability Name="webcam" />
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+</Package>

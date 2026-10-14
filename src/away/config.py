@@ -69,10 +69,12 @@ class HeadConfig:
 @dataclass
 class CursorConfig:
     mode: str = "relative"  # "relative" (trackpad) or "absolute"
-    dead_zone: float = 0.004  # normalized hand units below which motion is ignored
+    # v0.1.25: slack (hand units): the hand can wobble this much without moving the cursor, and slow moves still go
+    # through smoothly; was a per-frame threshold of 0.004 that turned slow moves into 15-20 px hops
+    dead_zone: float = 0.0015
     gain: float = 2.2  # relative-mode base speed (screen widths per hand unit)
     acceleration: float = 1.6  # exponent >1 accelerates fast motion
-    min_cutoff: float = 1.0  # One Euro filter
+    min_cutoff: float = 1.0  # One Euro filter; v0.1.25: also the adaptive filter's cutoff for a still hand (Hz)
     beta: float = 0.02
     d_cutoff: float = 1.0
     active_region: tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)  # absolute-mode box
@@ -108,7 +110,14 @@ class CursorConfig:
     head_assist: str = "off"
     head: HeadConfig = field(default_factory=HeadConfig)
     # smart pointer (v0.1.20, away.pointer): one_euro | predictive (Kalman + ~1 frame lookahead); magnetic targets
-    smoothing: str = "one_euro"
+    # v0.1.25: adaptive (default; steady when still, quick when moving, the same at any frame rate) | one_euro |
+    # predictive
+    smoothing: str = "adaptive"
+    fast_cutoff: float = 8.0  # adaptive: cutoff (Hz) once the hand moves at fast_speed or faster
+    fast_speed: float = 0.5  # adaptive: hand speed (frame widths / s) that counts as a fast move
+    hold_still: bool = True  # lock the cursor while the hand is held still; it unlocks as soon as you move
+    hold_radius: float = 0.006  # hand units: moving further than this unlocks (staying within half of it locks)
+    hold_ms: int = 250  # held still this long locks the cursor
     magnet: MagnetConfig = field(default_factory=MagnetConfig)
     predictive: PredictiveConfig = field(default_factory=PredictiveConfig)
 
@@ -255,6 +264,9 @@ class HandsConfig:
     # settings so "Turn on" puts them back exactly. They are never opened or retried while off.
     disabled_cameras: list[CameraSpec] = field(default_factory=list)
     multicam: MultiCamConfig = field(default_factory=MultiCamConfig)
+    # v0.1.25: live tracking calibration (`away calibrate`, tray > Calibrate tracking), one entry per camera
+    # (its name or index): {"cursor": {...}, "gestures": {...}, "noise_px": ..., "fps": ..., "saved": ...}
+    calibration: dict[str, Any] = field(default_factory=dict)
 
 
 VOICE_MODES = ("always_on", "push_to_talk", "toggle")
@@ -510,6 +522,63 @@ class SpeechConfig:
     piper_voice: str = "lessac"  # lessac | amy
 
 
+NEXT_STT = ("whisper", "moonshine", "nemotron")
+
+
+@dataclass
+class ModelsNextConfig:
+    """v0.1.24 model refresh: the optional 2026-10 models. Every default below keeps v0.1.23's behaviour; nothing
+    changes until you pick one of these models, or a preset after "Test my PC" (away.app.model_bench) passes.
+    (Kept in its own section so an older Project Away still reads this settings file.)"""
+
+    # classic: Light / Balanced / Best pick the v0.1.23 models | next: they pick the 2026-10 models
+    # (set by a passing benchmark, or by you in Settings > Models > Advanced)
+    presets: str = "classic"
+    auto_rollback: bool = True  # a new model that fails or runs slower than the one before is switched back
+    rollback_tolerance: float = 0.15  # "slower" = more than 15 % worse than the model before it
+    stt: str = "whisper"  # whisper (voice.asr_*) | moonshine (CPU) | nemotron (graphics card, experimental)
+    moonshine_model: str = "small"  # small | medium
+    nemotron_device: str = "auto"  # auto (NVIDIA -> cuda) | cuda | vulkan | cpu
+    nemotron_chunk_ms: int = 560  # 80 | 160 | 320 | 560 | 1120: smaller = faster partials, a little less accurate
+    stream_partials: bool = True  # show the words while you speak (voice.partial)
+    vad: str = "bundled"  # bundled (voice.vad as before) | silero6 (Silero VAD v6.2)
+    wake_engine: str = "asr"  # asr (speech-to-text listens for "Hey <name>") | livekit (a small wake-word model)
+    wake_model: str = ""  # the livekit-wakeword .onnx for your name (Settings > Models > Wake word)
+    wake_threshold: float = 0.6
+    wake_verify: str = "auto"  # auto (on in the Best preset) | on | off: speech-to-text confirms the wake word
+    kokoro_precision: str = "auto"  # auto (fp16 on a graphics card, int8 otherwise) | int8 | fp16
+    instant_voice: bool = False  # Kyutai pocket-tts speaks short replies (optional install, experimental)
+    hands_landmarker: str = "mediapipe"  # mediapipe | rtmpose (experimental A/B on the graphics card)
+
+
+def validate_models_next(m: ModelsNextConfig) -> None:
+    choices = {
+        "presets": ("classic", "next"),
+        "stt": NEXT_STT,
+        "moonshine_model": ("small", "medium"),
+        "nemotron_device": ("auto", "cuda", "vulkan", "cpu"),
+        "vad": ("bundled", "silero6"),
+        "wake_engine": ("asr", "livekit"),
+        "wake_verify": ("auto", "on", "off"),
+        "kokoro_precision": ("auto", "int8", "fp16"),
+        "hands_landmarker": ("mediapipe", "rtmpose"),
+    }
+    for name, ok in choices.items():
+        if getattr(m, name) not in ok:
+            raise ValueError(f"models_next.{name} must be {'|'.join(ok)}, got {getattr(m, name)!r}")
+    if m.nemotron_chunk_ms not in (80, 160, 320, 560, 1120):
+        raise ValueError(f"models_next.nemotron_chunk_ms must be 80|160|320|560|1120, got {m.nemotron_chunk_ms!r}")
+    for name, lo, hi in (("rollback_tolerance", 0.0, 1.0), ("wake_threshold", 0.05, 0.99)):
+        v = getattr(m, name)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ValueError(f"models_next.{name} must be a number in [{lo}, {hi}], got {v!r}")
+    if not isinstance(m.wake_model, str) or len(m.wake_model) > 400:
+        raise ValueError("models_next.wake_model must be a file path")
+    for name in ("auto_rollback", "stream_partials", "instant_voice"):
+        if not isinstance(getattr(m, name), bool):
+            raise ValueError(f"models_next.{name} must be true or false")
+
+
 def validate_speech(s: SpeechConfig) -> None:
     if s.rate not in SPEECH_RATES:
         raise ValueError(f"speech.rate must be {'|'.join(SPEECH_RATES)}, got {s.rate!r}")
@@ -597,6 +666,7 @@ class AppConfig:
     comfort: ComfortConfig = field(default_factory=ComfortConfig)  # v0.1.20 arm fatigue + break reminders
     agent_link: AgentLinkConfig = field(default_factory=AgentLinkConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)  # v0.1.21: agents can talk to you
+    models_next: ModelsNextConfig = field(default_factory=ModelsNextConfig)  # v0.1.24: optional 2026-10 models
     overlay: bool = False
     cursor_overlay: bool = False  # ring at the cursor: pinch progress, drag, paused, dwell
     telemetry: bool = False  # never sends anything; kept explicit for the privacy doc
@@ -894,6 +964,7 @@ def validate(cfg: AppConfig) -> None:
     validate_macros_config(cfg.macros)
     validate_agent_link(cfg.agent_link)
     validate_speech(cfg.speech)
+    validate_models_next(cfg.models_next)
 
 
 def validate_profile_tuning(cfg: AppConfig) -> None:
@@ -943,6 +1014,33 @@ def validate_tracking(cfg: AppConfig) -> None:
             raise ValueError(f"{path} must be an integer, got {val!r}")
     if gz.points_per_monitor not in (5, 9, 16):
         raise ValueError(f"gaze.points_per_monitor must be 5, 9 or 16, got {gz.points_per_monitor!r}")
+    validate_steady(cfg)
+
+
+def validate_steady(cfg: AppConfig) -> None:
+    """v0.1.25: the steadier-cursor settings and the per-camera tracking calibration."""
+    c = cfg.hands.cursor
+    if not isinstance(c.hold_still, bool):
+        raise ValueError(f"hands.cursor.hold_still must be true or false, got {c.hold_still!r}")
+    for path, val, lo, hi in (
+        ("hands.cursor.fast_cutoff", c.fast_cutoff, 0.1, 30.0),
+        ("hands.cursor.fast_speed", c.fast_speed, 0.05, 5.0),
+        ("hands.cursor.hold_radius", c.hold_radius, 0.0, 0.05),
+        ("hands.cursor.hold_ms", c.hold_ms, 0, 2000),
+    ):
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= val <= hi:
+            raise ValueError(f"{path} must be a number from {lo} to {hi}, got {val!r}")
+    cal = cfg.hands.calibration
+    if cal is None:
+        cfg.hands.calibration = cal = {}
+    if not isinstance(cal, dict):
+        raise ValueError("hands.calibration must be a mapping of camera -> calibration")
+    for cam, entry in cal.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"hands.calibration[{cam!r}] must be a mapping")
+        for sec in ("cursor", "gestures"):
+            if not isinstance(entry.get(sec, {}), dict):
+                raise ValueError(f"hands.calibration[{cam!r}].{sec} must be a mapping")
 
 
 def validate_camera_device(path: str, device: Any) -> None:
