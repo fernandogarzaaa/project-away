@@ -6,7 +6,6 @@ Every test here failed on the code before its fix (checked by running it against
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -183,3 +182,107 @@ def test_approval_grace_is_short_and_never_blocks_a_deliberate_stop() -> None:
     with pytest.raises(ControlRefused):
         ctl2.act("a1", "move", x=1, y=1)
     assert backend2.calls == []
+
+
+# ------------------------------------------------------------- 3. stopping an action that is already running
+class BlockingBackend(RecordingBackend):
+    """Records like RecordingBackend, and blocks inside the ``n``-th call of ``method`` until ``go`` is set (so a
+    test can stop or take over while the action is in the middle of a drag or of typing)."""
+
+    def __init__(self, method: str, n: int) -> None:
+        super().__init__()
+        self.method, self.n, self.seen = method, n, 0
+        self.reached, self.go = threading.Event(), threading.Event()
+
+    def _maybe_block(self, name: str) -> None:
+        if name == self.method:
+            self.seen += 1
+            if self.seen == self.n:
+                self.reached.set()
+                assert self.go.wait(5.0)
+
+    def move(self, x: int, y: int) -> None:
+        super().move(x, y)
+        self._maybe_block("move")
+
+    def type_text(self, text: str) -> None:
+        super().type_text(text)
+        self._maybe_block("type_text")
+
+    def release_modifiers(self) -> None:
+        self.calls.append(("release_modifiers", ()))
+
+
+def _run_in_thread(fn: Any) -> tuple[threading.Thread, dict[str, Any]]:
+    out: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            out["result"] = fn()
+        except Exception as exc:
+            out["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def test_stop_interrupts_a_drag_in_the_middle_and_lets_go_of_the_button() -> None:
+    clock = Clock()
+    backend = BlockingBackend("move", 4)  # start point + 2 steps done, blocked in the 3rd step
+    ctl, _, _ = _control(clock, backend=backend)
+    ctl.request("a1", "Claude")
+    t, out = _run_in_thread(lambda: ctl.act("a1", "drag", x=0, y=0, x2=800, y2=0))
+    assert backend.reached.wait(5.0)
+    assert ctl.stop("you pressed the stop keys")
+    backend.go.set()
+    t.join(5.0)
+    assert isinstance(out.get("error"), ControlRefused) and "stop" in str(out["error"])
+    after = backend.calls[[c[0] for c in backend.calls].index("press") :]
+    assert [c[0] for c in after].count("move") == 3  # no step after the stop
+    assert ("release", ()) in after  # the mouse button is never left held down
+    assert ("release_modifiers", ()) in after
+    assert ctl.log[-1].result == "stopped"
+
+
+def test_moving_the_mouse_interrupts_typing_between_chunks() -> None:
+    clock = Clock()
+    backend = BlockingBackend("type_text", 2)
+    ctl, _, _ = _control(clock, backend=backend)
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    t, out = _run_in_thread(lambda: ctl.act("a1", "type_text", text="abcdefgh" * 50))
+    assert backend.reached.wait(5.0)
+    assert ctl.user_input("mouse")  # the person grabs the mouse while it types
+    backend.go.set()
+    t.join(5.0)
+    assert isinstance(out.get("error"), ControlRefused) and "mouse" in str(out["error"])
+    assert [c[0] for c in backend.calls].count("type_text") == 2  # the rest of the text is never typed
+    assert backend.calls[-1] == ("release_modifiers", ())
+
+
+def test_after_resume_a_new_action_is_not_cancelled_by_the_old_takeover() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock, ["Allow", "Continue"])
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")
+    ctl.act("a1", "type_text", text="hello world, again")
+    assert "".join(c[1][0] for c in backend.calls if c[0] == "type_text") == "hello world, again"
+
+
+def test_open_app_checks_for_a_stop_before_each_step() -> None:
+    clock = Clock()
+    stopped: dict[str, Any] = {}
+    ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
+
+    def sleep(_s: float) -> None:
+        if not stopped:
+            stopped["x"] = ctl.stop("you said stop")
+
+    ctl.hooks.sleep = sleep
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="stop"):
+        ctl.act("a1", "open_app", name="Notepad")
+    assert backend.calls == [("key", ("cmd",)), ("release_modifiers", ())]  # never typed the name or pressed Enter

@@ -83,6 +83,14 @@ class Grant:
     started: float
     expires: float
     paused: str = ""  # why it is paused ("" = running)
+    # v0.1.24 hardening: set the moment the grant is paused or ended; an action in progress checks it before every
+    # step (each drag step, each typed chunk, each key) and stops at once. A resume gets a fresh one.
+    cancel: threading.Event = field(default_factory=threading.Event)
+    ended: str = ""  # why it ended ("" = still active)
+
+
+class _Interrupted(Exception):
+    """The grant was paused or ended while an action was running."""
 
 
 @dataclass
@@ -238,6 +246,7 @@ class ComputerControl:
         with self._lock:
             if self.grant is not None:
                 self.grant.paused = ""
+                self.grant.cancel = threading.Event()  # the old takeover does not cancel new actions
                 self._grace_until = self.clock() + GRACE_S
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(g.agent_name)
@@ -247,6 +256,9 @@ class ComputerControl:
     def _end(self, reason: str) -> None:
         with self._lock:
             g, self.grant = self.grant, None
+            if g is not None:
+                g.ended = reason
+                g.cancel.set()  # an action in progress stops before its next step
         if g is not None:
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
@@ -283,6 +295,7 @@ class ComputerControl:
             if source == "keyboard" and now < self._own_keys_until:
                 return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
+            g.cancel.set()  # stop the action in progress (typing, a drag) before its next step
         with contextlib.suppress(Exception):
             self.hooks.overlay_off()
         self._emit("control.paused", {"agent": g.agent_name, "reason": g.paused})
@@ -395,6 +408,52 @@ class ComputerControl:
             raise ControlRefused(f"unknown action {action!r}; use {', '.join(ACTIONS)}")
         g = self._require(agent_id)
         b = self.hooks.backend
+        tok = g.cancel
+        st = {"sent": False, "held": False, "ok": False}
+
+        def step() -> Any:
+            """The backend, after checking that the grant was not paused or ended (call before every input)."""
+            if tok.is_set():
+                raise _Interrupted
+            st["sent"] = True
+            return b
+
+        def wait(seconds: float) -> None:
+            if self.hooks.sleep is time.sleep:
+                tok.wait(seconds)  # wakes at once on a stop
+            else:
+                self.hooks.sleep(seconds)
+            if tok.is_set():
+                raise _Interrupted
+
+        try:
+            return self._act(g, agent_id, action, kw, b, step, wait, st)
+        except _Interrupted:
+            reason = g.paused or g.ended or "it was stopped"
+            self._log(g, action, "stopped part-way", "stopped", None)
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": action, "reason": reason})
+            raise ControlRefused(f"stopped part-way because {reason}") from None
+        finally:
+            if not st["ok"] and st["sent"]:  # never leave a mouse button or a modifier key held down
+                if st["held"]:
+                    with contextlib.suppress(Exception):
+                        b.release()
+                rm = getattr(b, "release_modifiers", None)
+                if callable(rm):
+                    with contextlib.suppress(Exception):
+                        rm()
+
+    def _act(
+        self,
+        g: Grant,
+        agent_id: str,
+        action: str,
+        kw: dict[str, Any],
+        b: Any,
+        step: Callable[[], Any],
+        wait: Callable[[float], None],
+        st: dict[str, bool],
+    ) -> dict[str, Any]:
         undo: dict[str, Any] | None = None
         before = None
         try:
@@ -406,17 +465,16 @@ class ComputerControl:
             x, y, label = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
             if action != "move":
                 self._confirm_risky(g, label, f"click '{label}'")
+            if action == "right_click" and not hasattr(b, "click_button"):
+                raise ControlRefused("right click is not supported on this system")
             self.note_own_mouse()
-            b.move(x, y)
+            step().move(x, y)
             if action == "click":
-                b.click(1)
+                step().click(1)
             elif action == "double_click":
-                b.click(2)
+                step().click(2)
             elif action == "right_click":
-                if hasattr(b, "click_button"):
-                    b.click_button("right", 1)
-                else:
-                    raise ControlRefused("right click is not supported on this system")
+                step().click_button("right", 1)
             detail = f"({x}, {y})" + (f" '{label}'" if label else "")
             if action == "move" and before is not None:
                 undo = {"move": list(before)}
@@ -427,14 +485,16 @@ class ComputerControl:
             )
             self._confirm_risky(g, l1, f"drag '{l1}'")
             self.note_own_mouse()
-            b.move(x1, y1)
-            b.press()
+            step().move(x1, y1)
+            step().press()
+            st["held"] = True
             steps = 8
             for i in range(1, steps + 1):
                 self.note_own_mouse()
-                b.move(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps))
-                self.hooks.sleep(0.02)
+                step().move(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps))
+                wait(0.02)
             b.release()
+            st["held"] = False
             detail = f"({x1}, {y1}) -> ({x2}, {y2})"
         elif action == "scroll":
             dy = max(-50.0, min(50.0, float(kw.get("dy") or 0.0)))
@@ -444,12 +504,12 @@ class ComputerControl:
                     agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image"))
                 )
                 self.note_own_mouse()
-                b.move(x, y)
+                step().move(x, y)
             self.note_own_mouse()
             if dy:
-                b.scroll(dy)
+                step().scroll(dy)
             if dx and hasattr(b, "hscroll"):
-                b.hscroll(dx)
+                step().hscroll(dx)
             detail = f"dy={dy:g} dx={dx:g}"
             undo = {"scroll": [-dy, -dx]}
         elif action == "type_text":
@@ -466,7 +526,7 @@ class ComputerControl:
             for i in range(0, len(text), TYPE_CHUNK):
                 chunk = text[i : i + TYPE_CHUNK]
                 self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
-                b.type_text(chunk)
+                step().type_text(chunk)
             detail = f"{len(text)} characters"
             undo = {"keys": ["cmd" if self.platform == "darwin" else "ctrl", "z"]}
         elif action == "press_keys":
@@ -487,13 +547,13 @@ class ComputerControl:
             printable = len(keys) == 1 and len(keys[0]) == 1
             if printable:
                 self._typing_target_ok()
+            if len(keys) > 1 and not hasattr(b, "hotkey"):
+                raise ControlRefused("key combinations are not supported on this system")
             self.note_own_keys()
             if len(keys) == 1:
-                b.key(keys[0])
-            elif hasattr(b, "hotkey"):
-                b.hotkey(keys)
+                step().key(keys[0])
             else:
-                raise ControlRefused("key combinations are not supported on this system")
+                step().hotkey(keys)
             detail = combo
         elif action == "open_url":
             url = str(kw.get("url") or "").strip()
@@ -517,8 +577,9 @@ class ComputerControl:
                 "registry editor",
             ):
                 raise ControlRefused("agents cannot open terminals or system tools")
-            self._open_app(name)
+            self._open_app(name, step, wait)
             detail = name
+        st["ok"] = True
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
         return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
@@ -530,22 +591,23 @@ class ComputerControl:
             fg = {}
         return str(fg.get("title", ""))
 
-    def _open_app(self, name: str) -> None:
-        """Through the OS launcher (Start menu search / Spotlight): no command line is ever built."""
+    def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
+        """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
+        that the person has not stopped or taken over."""
         b = self.hooks.backend
+        if not (self.platform == "win32" or (self.platform == "darwin" and hasattr(b, "hotkey"))):
+            raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
         self.note_own_keys()
         if self.platform == "win32":
-            b.key("cmd")
-        elif self.platform == "darwin" and hasattr(b, "hotkey"):
-            b.hotkey(["cmd", "space"])
+            step().key("cmd")
         else:
-            raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
-        self.hooks.sleep(0.6)
+            step().hotkey(["cmd", "space"])
+        wait(0.6)
         self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(name))
-        b.type_text(name)
-        self.hooks.sleep(0.8)
+        step().type_text(name)
+        wait(0.8)
         self.note_own_keys()
-        b.key("enter")
+        step().key("enter")
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
