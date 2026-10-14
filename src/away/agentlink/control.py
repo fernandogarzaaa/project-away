@@ -335,12 +335,16 @@ class ComputerControl:
         if g.paused:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
         try:
-            if self.hooks.secure_desktop():
-                raise ControlRefused("a Windows security prompt is on screen; agents can never touch it")
-        except ControlRefused:
-            raise
+            secure = bool(self.hooks.secure_desktop())
         except Exception:
-            pass
+            if self.platform == "win32":  # v0.1.24 hardening: fail closed when Windows cannot be checked
+                raise ControlRefused(
+                    "Project Away could not check whether a Windows security prompt is on screen, so it stopped "
+                    "to be safe; try again in a moment"
+                ) from None
+            secure = False  # macOS and Linux have no secure desktop to protect: the check is a no-op there
+        if secure:
+            raise ControlRefused("a Windows security prompt is on screen; agents can never touch it")
         if not self.bucket.allow(agent_id):
             raise ControlRefused("too many actions; slow down (max a few per second)")
         return g

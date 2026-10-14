@@ -812,3 +812,44 @@ def test_the_settings_window_sends_the_change_to_the_host(tmp_path: Path) -> Non
     m.send = lambda action, **kw: sent.append((action, kw))  # type: ignore[method-assign]
     m.set_scopes("abc", ["read", "screen"])
     assert sent == [("set_scopes", {"agent_id": "abc", "scopes": ["read", "screen"]})]
+
+
+# ------------------------------------------------------------- 9. the secure-desktop check fails closed on Windows
+def _raises() -> bool:
+    raise OSError("OpenInputDesktop failed")
+
+
+def test_windows_refuses_to_act_when_the_security_prompt_check_fails() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock, secure=_raises, platform="win32")
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="security prompt"):
+        ctl.act("a1", "move", x=1, y=1)
+    with pytest.raises(ControlRefused, match="security prompt"):
+        ctl.undo_last("a1")
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_other_systems_have_no_secure_desktop_to_check(platform: str) -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock, secure=_raises, platform=platform)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "move", x=1, y=1)  # explicit: no secure desktop exists there, so a failing check is not a stop
+    assert backend.calls == [("move", (1, 1))]
+
+
+def test_the_windows_detector_reports_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ctypes
+
+    from away.agentlink import desktop
+
+    class Broken:
+        @property
+        def user32(self) -> Any:
+            raise OSError("access denied")
+
+    monkeypatch.setattr(desktop.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", Broken(), raising=False)
+    with pytest.raises(desktop.SecureDesktopUnknown):
+        desktop.secure_desktop_active()
