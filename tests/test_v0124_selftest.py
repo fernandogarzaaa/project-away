@@ -451,7 +451,7 @@ def test_glide_measurement_is_real_and_moves_no_pointer() -> None:
     env = RealEnv(cfg=C.AppConfig())
     g = env.glide()
     assert g["target_hz"] == C.AppConfig().hands.cursor.output_hz
-    assert g["hz"] > 20  # the output loop really ran (a loaded CI runner may not reach 120)
+    assert g["hz"] > 5  # the output loop really ran (a loaded macOS CI runner measured 16 Hz of 120)
 
 
 def test_app_process_counting_skips_helpers() -> None:
