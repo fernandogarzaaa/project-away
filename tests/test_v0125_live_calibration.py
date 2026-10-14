@@ -101,7 +101,7 @@ def test_deadband_is_slack_and_frame_rate_free() -> None:
 def test_hold_still_locks_and_unlocks_without_a_jump() -> None:
     h = HoldStill(radius=0.01, hold_s=0.2)
     out = [h(t, x, y) for t, x, y in still_hand(1.0, 0.001)]
-    assert h.locked and jitter_px([(x * 1000, y * 1000) for x, y in out[-10:]]) == 0.0  # locked: not a twitch
+    assert h.locked and len(set(out[-10:])) == 1  # locked: not a single twitch
     last = out[-1]
     moved = h(1.0, 0.53, 0.5)  # a real move: unlocks
     assert not h.locked and moved[0] - last[0] < 0.03  # continues from the locked point, no catch-up jump
