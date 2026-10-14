@@ -7,6 +7,7 @@ newer app; missing keys fall back to defaults.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,7 @@ class DwellConfig:
 
 
 CAMERA_ROLES = ("primary", "secondary")
+HAND_COMPUTE = ("auto", "gpu", "cpu")  # hands.compute (v0.1.24)
 CAMERA_BACKENDS = ("auto", "dshow", "msmf", "winrt")  # hands.camera_backend (Windows; elsewhere always auto)
 
 
@@ -235,6 +237,11 @@ class HandsConfig:
     camera_retry_s: float = 300.0
     camera_retry_max_s: float = 3600.0
     camera_retry_limit: int = 3
+    # v0.1.24: where hand and face tracking run: auto (the graphics card when one can run them, else the processor)
+    # | gpu | cpu. On Windows the GPU path uses ONNX Runtime DirectML (any DirectX 12 card) or CUDA with the
+    # MediaPipe models converted to ONNX (Apache-2.0, a one-time ~23 MB download); on Linux/macOS MediaPipe's own GPU
+    # delegate. Anything that fails falls back to the processor by itself.
+    compute: str = "auto"
     max_hands: int = 2  # hands MediaPipe looks for; 2 = pointer + helper hand (1 = lighter on CPU, no palm scroll)
     # hand roles (v0.1.14; replaces hands.prefer: right/left -> mode right/left, any -> auto)
     roles: RolesConfig = field(default_factory=RolesConfig)
@@ -448,6 +455,8 @@ class AgentLinkConfig:
     misfire_threshold: int = 4  # "that was wrong" / cancelled actions within a minute
     autofix: str = "ask"  # ask: agents' setting changes need your OK | auto_low_risk: thresholds apply at once
     stop_hotkey: str = "ctrl+alt+esc"  # stops an agent that is using the computer
+    # v0.1.24: an agent's action log shows only its own computer actions; true = every agent sees everyone's
+    share_control_history: bool = False
     github_issues: bool = False  # file a GitHub issue when a detector trips (token in the OS keyring)
     github_repo: str = "fernandogarzaaa/project-away"
     # v0.1.22 "Talk to your agent": say "Hey <agent name>, ..." (or use the summon gesture, then speak) and the words
@@ -460,6 +469,24 @@ class AgentLinkConfig:
     link_type: str = "standard"
     backup_relay: str = "localhost.run"  # localhost.run | pinggy
     ssh_path: str = ""  # use this ssh program for the backup link ("" = the system's)
+    # v0.1.24 "a link that survives restarts": a paired agent gets a refresh token (only its hash is kept) and keeps
+    # working after Away restarts or the PC reboots, without pairing again. It renews its access with the refresh
+    # token; the refresh token itself lasts this many days after its last use (revoke any agent in Settings).
+    refresh_ttl_days: int = 30
+    # restart the secure link by itself when Away starts (or the link drops) while a remote agent can still
+    # reconnect, and tell every connected agent the new address (wake-up address, inbox, rendezvous)
+    keep_link: bool = True
+    # where agents look up a moved address: ntfy (a free public relay, ntfy.sh by default; the message is signed so
+    # nobody else can fake it) | off. An agent with a wake-up address is told directly either way.
+    rendezvous: str = "ntfy"
+    rendezvous_server: str = "https://ntfy.sh"
+    # advanced: your own named Cloudflare tunnel (free Cloudflare account, a hostname that never changes).
+    # link_type: named uses it; the tunnel token is kept in the system keyring, never in this file.
+    named_tunnel_hostname: str = ""
+    # v0.1.24 "Keep this agent connected": how long a new agent token works unless the agent asks for less:
+    # 90d (the default) | 30d | never (until you revoke it). Settings > Agent Link > Agent tokens ("New agent tokens
+    # last") or `away agent tokens expiry 30d|90d|never`. Revoke, replace or change any token there too.
+    token_expiry: str = "90d"
 
 
 SPEECH_RATES = ("slow", "normal", "fast")
@@ -503,8 +530,17 @@ def validate_speech(s: SpeechConfig) -> None:
 def validate_agent_link(a: AgentLinkConfig) -> None:
     if not isinstance(a.default_agent, str) or len(a.default_agent) > 60:
         raise ValueError("agent_link.default_agent must be an agent's name (at most 60 characters) or empty")
-    if a.link_type not in ("standard", "backup"):
-        raise ValueError(f"agent_link.link_type must be standard|backup, got {a.link_type!r}")
+    if a.link_type not in ("standard", "backup", "named"):
+        raise ValueError(f"agent_link.link_type must be standard|backup|named, got {a.link_type!r}")
+    if a.token_expiry not in ("90d", "30d", "never"):
+        raise ValueError(f"agent_link.token_expiry must be 90d|30d|never, got {a.token_expiry!r}")
+    if a.rendezvous not in ("ntfy", "off"):
+        raise ValueError(f"agent_link.rendezvous must be ntfy|off, got {a.rendezvous!r}")
+    if not str(a.rendezvous_server).startswith("https://"):
+        raise ValueError("agent_link.rendezvous_server must start with https://")
+    host = str(a.named_tunnel_hostname or "")
+    if host and (len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", host)):
+        raise ValueError("agent_link.named_tunnel_hostname must be a hostname like away.example.com")
     if a.backup_relay not in ("localhost.run", "pinggy"):
         raise ValueError(f"agent_link.backup_relay must be localhost.run|pinggy, got {a.backup_relay!r}")
     if a.autofix not in AUTOFIX_MODES:
@@ -514,6 +550,7 @@ def validate_agent_link(a: AgentLinkConfig) -> None:
         ("local_ttl_days", 1, 365),
         ("pairing_ttl_s", 60, 3600),
         ("control_ttl_min", 1, 240),
+        ("refresh_ttl_days", 1, 365),
         ("port", 0, 65535),
         ("rate_burst", 1, 1000),
         ("screen_max_width", 160, 3840),
@@ -804,6 +841,8 @@ def validate(cfg: AppConfig) -> None:
         validate_camera_device(f"hands.disabled_cameras[{i}].device", cam.device)
     cfg.hands.camera_fourcc = validate_fourcc("hands.camera_fourcc", cfg.hands.camera_fourcc)
     h = cfg.hands
+    if h.compute not in HAND_COMPUTE:
+        raise ValueError(f"hands.compute must be {'|'.join(HAND_COMPUTE)}, got {h.compute!r}")
     if h.camera_backend not in CAMERA_BACKENDS:
         raise ValueError(f"hands.camera_backend must be {'|'.join(CAMERA_BACKENDS)}, got {h.camera_backend!r}")
     for name, lo, hi in (("camera_retry_s", 5.0, 3600.0), ("camera_retry_max_s", 5.0, 86400.0)):

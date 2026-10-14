@@ -170,6 +170,8 @@ def test_host_names_the_active_secure_and_backup_links(tmp_path: Path) -> None:
     assert host.tunnel_hosts() == ["abc.trycloudflare.com", "x1.lhr.life"]
     host.tunnel = host.relay = None
     assert host.tunnel_hosts() == []
+    host.named = types.SimpleNamespace(url="https://away.example.com")  # v0.1.24 named tunnel
+    assert host.tunnel_hosts() == ["away.example.com"]
 
 
 # ============================================================================ LLM User-Agent

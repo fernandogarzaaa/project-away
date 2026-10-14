@@ -141,9 +141,11 @@ class RestBackend:
         if status != 200:
             raise PermissionError(str((data or {}).get("error") or f"connection refused ({status})"))
         self.token = str(data["token"])
-        write_private(
-            f, json.dumps({"token": self.token, "name": self.name, "expires": float(data["agent"]["expires"])})
-        )
+        expires = float(data["agent"]["expires"])
+        if data.get("persistent_token"):  # v0.1.24: the person chose "Keep this agent connected"
+            self.token = str(data["persistent_token"])
+            expires = float(data.get("persistent_token_expires") or 0) or 1e18  # 0 = until revoked
+        write_private(f, json.dumps({"token": self.token, "name": self.name, "expires": expires}))
         return self.token
 
     def call(self, ctx: Any, method: str, **kw: Any) -> Any:

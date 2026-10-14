@@ -44,6 +44,8 @@ EVENT_TOPICS = (
     "notify",
     "user.message",  # v0.1.22: the person spoke to you (only the agents it was sent to see it)
     "inbox",
+    "selftest",  # v0.1.24: selftest.completed (the report reached every connected agent)
+    "link",  # v0.1.24: link.moved (the public address changed)
 )
 MAX_RECORD_S = 120.0
 
@@ -174,6 +176,7 @@ class Service:
         self._watchers: set[str] = set()
         self.watching = watching
         self._listening: dict[str, int] = {}  # v0.1.23: agent id -> open event waits (a live connection)
+        self.selftest: Any = None  # v0.1.24: away.selftest.service.SelftestService (set by the app's host)
         self._listen_lock = threading.Lock()
 
     # ------------------------------------------------------------- helpers
@@ -227,18 +230,23 @@ class Service:
         return self.telemetry.health()
 
     def get_logs(self, agent: Agent, lines: int = 100) -> dict[str, Any]:
+        """Log tails, with tokens, keys, passwords, e-mail addresses and the home folder hidden. Needs "Share my
+        logs and recordings" (v0.1.24)."""
+        from away.agentlink.bundle import redact, redact_text
+
+        self.require(agent, perms.SHARE_LOGS)
         lines = max(1, min(int(lines), 2000))
-        mem = self.telemetry.log_tail(lines)
+        mem = redact(self.telemetry.log_tail(lines))
         file_lines: list[str] = []
         p = self.data_dir / "logs" / "away.log"
         if p.is_file():
             from away.agentlink.bundle import _tail
 
-            file_lines = _tail(p, 400_000).decode("utf-8", "replace").splitlines()[-lines:]
+            file_lines = redact_text(_tail(p, 400_000).decode("utf-8", "replace")).splitlines()[-lines:]
         from away.app import crashlog
 
         # v0.1.22: crash.log too (crashes and uncaught errors; the Settings notice points at it)
-        crash = crashlog.tail(self.data_dir / "logs", min(lines, 400))
+        crash = [redact_text(x) for x in crashlog.tail(self.data_dir / "logs", min(lines, 400))]
         return {"app_log": file_lines, "crash_log": crash, "events": mem}
 
     def get_config(self, agent: Agent) -> dict[str, Any]:
@@ -362,9 +370,42 @@ class Service:
             raise ValueError("give the check's id: job_id (as returned by run_diagnose)")
         return self.jobs.lookup(key).public()
 
+    def run_selftest(self, agent: Agent, wait: bool = False, only: Any = None) -> dict[str, Any]:
+        """v0.1.24: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
+        The report goes to *every* connected agent (inbox, wake-up address, event selftest.completed) and is
+        readable as away://selftest/latest. ``wait``: block until it is done (at most 3 minutes) and return it."""
+        self.require(agent, perms.DIAGNOSE)
+        st = self.selftest
+        if st is None:
+            raise NotAvailable("the self-test runs inside the Project Away app; start the app and try again")
+        checks = [str(c) for c in only] if isinstance(only, (list, tuple)) else None
+        from away.selftest.run import Busy
+
+        try:
+            started = st.start(trigger=agent.name, only=checks)
+        except Busy:
+            started = {"state": "running", "note": "a self-test was already running; its report will reach you too"}
+        if not wait:
+            return started
+        st.wait(180.0)
+        return {"state": "done", "report": st.latest()}
+
+    def selftest_latest(self, agent: Agent) -> dict[str, Any]:
+        """v0.1.24: the newest self-test report (redacted), or a hint to run one."""
+        st = self.selftest
+        rep = st.latest() if st is not None else None
+        if rep is None:
+            from away.selftest.run import load_latest
+
+            rep = load_latest(self.data_dir)
+        if rep is None:
+            raise NotAvailable("no self-test has run yet; run one with diagnostics action=selftest")
+        running = bool(st is not None and st.state.get("running"))
+        return dict(rep, running_now=running)
+
     def record_session(self, agent: Agent, seconds: float = 10.0, note: str = "") -> dict[str, Any]:
         """Record the next ``seconds`` of landmarks + events (no video) to ``recordings/agent/<time>.awayrec``."""
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         from away.agentlink import recording as rec
 
         seconds = max(1.0, min(float(seconds), MAX_RECORD_S))
@@ -384,7 +425,7 @@ class Service:
         return {"path": f"recordings/agent/{name}", "frames": frames, "bytes": path.stat().st_size, "seconds": seconds}
 
     def get_bundle(self, agent: Agent, note: str = "") -> dict[str, Any]:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         from away.agentlink import bundle
 
         stats = {
@@ -404,14 +445,18 @@ class Service:
         return {"path": f"diagnostics/{path.name}", "bytes": path.stat().st_size}
 
     def list_files(self, agent: Agent) -> list[dict[str, Any]]:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         return safepaths.listing(self.data_dir)
 
     def read_file(self, agent: Agent, rel: str, max_bytes: int = 25_000_000) -> bytes:
-        self.require(agent, perms.DIAGNOSE)
+        self.require(agent, perms.SHARE_LOGS)
         p = safepaths.resolve(self.data_dir, rel)
         if p.stat().st_size > max_bytes:
             raise ValueError("that file is too large to download")
+        if p.suffix.lower() in (".log", ".txt"):  # v0.1.24: raw logs leave the PC with secrets hidden
+            from away.agentlink.bundle import redact_text
+
+            return redact_text(p.read_bytes().decode("utf-8", "replace")).encode("utf-8")
         return p.read_bytes()
 
     # ------------------------------------------------------------ see
@@ -423,7 +468,7 @@ class Service:
             raise NotAvailable("no camera picture right now (is the camera running and not paused?)")
         from away.agentlink.desktop import to_jpeg
 
-        self._flash(f"{agent.name} looked through your camera")
+        self._flash(f"{agent.name} looked through your camera", "camera picture")
         jpeg, scale = to_jpeg(frame, int(self._s("snapshot_max_width", 320)), 60)
         self.events.publish("look.taken", {"agent": agent.name})
         return jpeg, {"camera": camera or "primary", "scale": scale}
@@ -486,8 +531,9 @@ class Service:
             )
         except shot.ScreenRequestError as exc:
             raise ValueError(str(exc)) from None
-        if not quiet:
-            self._flash(f"{agent.name} looked at your screen")
+        if not quiet or agent.id not in self._watchers:
+            # v0.1.24 hardening: "quiet" only skips the notice while this agent's live view badge is on screen
+            self._flash(f"{agent.name} looked at your screen", "screenshot")
         jpeg = shot.render(img, p)
         self.control.scales[agent.id] = p.scale
         self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
@@ -540,16 +586,46 @@ class Service:
             if opts or agent.id not in self._live_views:
                 self._live_views[agent.id] = opts
             self._watchers.add(agent.id)
+            try:
+                shown = self.watching(agent.name, True)
+            except Exception:
+                shown = False
+            if shown is False:
+                # v0.1.24 hardening: no live view without its "watching your screen" badge on screen
+                self.stop_watching(agent.id)
+                raise NotAvailable(
+                    "the live screen view was not started because its 'watching your screen' badge could not be "
+                    "shown on the screen"
+                )
         else:
-            self._watchers.discard(agent.id)
-            self._live_views.pop(agent.id, None)
-        with contextlib.suppress(Exception):
-            self.watching(agent.name if self._watchers else "", bool(self._watchers))
+            self.stop_watching(agent.id)
         return {"watching": bool(self._watchers), "view": self._live_views.get(agent.id, {})}
 
-    def _flash(self, text: str) -> None:
+    def stop_watching(self, agent_id: str) -> None:
+        """End this agent's live screen view (and hide the badge when nobody else is watching)."""
+        self._watchers.discard(agent_id)
+        self._live_views.pop(agent_id, None)
         with contextlib.suppress(Exception):
-            self.flash(text)
+            self.watching(self._watcher_name(), bool(self._watchers))
+
+    def _watcher_name(self) -> str:
+        for aid in self._watchers:
+            a = self.registry.get(aid)
+            if a is not None:
+                return a.name
+        return ""
+
+    def _flash(self, text: str, what: str = "picture") -> None:
+        """The on-screen notice every camera still and screenshot shows. v0.1.24 hardening: it is a precondition,
+        so when it cannot be shown the capture is refused (``flash`` raising or returning False)."""
+        try:
+            shown = self.flash(text)
+        except Exception:
+            shown = False
+        if shown is False:
+            raise NotAvailable(
+                f"the {what} was not taken because the on-screen notice that tells the person could not be shown"
+            )
 
     def user_capture(self, kind: str, jpeg: bytes, meta: dict[str, Any]) -> Capture:
         """The user pushed a capture to their agents ("hey agent, look" / the summon gesture)."""
@@ -735,13 +811,64 @@ class Service:
         return self.control.undo_last(agent.id)
 
     def action_log(self, agent: Agent, limit: int = 30) -> list[dict[str, Any]]:
-        return self.control.actions(limit)
+        """This agent's own computer actions (v0.1.24), or everyone's when the person turned on
+        ``agent_link.share_control_history``."""
+        if bool(self._s("share_control_history", False)):
+            return self.control.actions(limit)
+        return self.control.actions(limit, agent_id=agent.id)
 
     # --------------------------------------------------------- session
     def disconnect(self, agent: Agent) -> dict[str, Any]:
-        self.control.revoke_agent(agent.id)
         self.registry.revoke(agent.id)
+        self.reconcile(agent.id, "the agent disconnected")
         return {"disconnected": True}
+
+    def set_scopes(self, agent_id: str, scopes: Any) -> Agent:
+        """The person changed this agent's permissions (Settings > Agent Link): applied to what is running now."""
+        a = self.registry.set_scopes(agent_id, scopes)
+        self.reconcile(agent_id, "you turned off its permission to use your computer")
+        return a
+
+    def revoke(self, agent_id: str) -> bool:
+        done = self.registry.revoke(agent_id)
+        self.reconcile(agent_id, "the agent was disconnected")
+        return done
+
+    def revoke_token(self, token_id: str) -> bool:
+        """v0.1.24: the person revoked a persistent agent token. The agent is disconnected and everything it had
+        running ends at once (control grant, held buttons and keys, live views), as for any disconnect."""
+        t = self.registry.tokens.get(token_id)
+        agent_id = t.agent_id if t is not None else ""
+        done = self.registry.revoke_persistent(token_id)
+        if agent_id:
+            self.reconcile(agent_id, "its agent token was revoked")
+        return done
+
+    def rotate_token(self, token_id: str) -> tuple[Any, str]:
+        """v0.1.24: a persistent agent token was replaced (by the person, or by the agent itself). The old token
+        keeps signing in for the grace hour, but nothing it started carries over: the control grant ends (input is
+        released) and live views stop, so the new token starts clean and asks again."""
+        t, secret = self.registry.rotate_persistent(token_id)
+        self.reconcile(t.agent_id, "its agent token was replaced", end_sessions=True)
+        return t, secret
+
+    def reconcile(self, agent_id: str, reason: str = "its access changed", end_sessions: bool = False) -> None:
+        """v0.1.24 hardening: live state follows the agent's permissions at once. Without "Let it use my computer"
+        (or without access at all) its control session ends (border off, any action in progress stops and lets go
+        of buttons and keys); without "See my screen" its live view stops and its view state is cleared."""
+        a = self.registry.get(agent_id)
+        active = a is not None and a.active(time.time())
+        can_control = a is not None and active and a.has(perms.CONTROL)
+        can_see = a is not None and active and a.has(perms.SCREEN)
+        if end_sessions:  # v0.1.24: a token rotated out ends what was running under it, whatever the permissions
+            can_control = can_see = False
+        if not can_control:
+            self.control.revoke_agent(agent_id, reason if active else "the agent was disconnected")
+        if not can_see:
+            if agent_id in self._watchers or agent_id in self._live_views:
+                self.stop_watching(agent_id)
+            self.control.views.pop(agent_id, None)
+            self.control.scales.pop(agent_id, None)
 
 
 def normalize_ops(ops: Any) -> list[dict[str, Any]]:

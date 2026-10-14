@@ -365,9 +365,9 @@ def action_runner(model: Any, backend: Any = None, chains: Any = None) -> Any:
     from away.studio.engine import ChainRunner
 
     if backend is None:  # pragma: no cover - real input devices
-        from away.control.mouse import PynputBackend
+        from away.actions_engine import GESTURE, get_engine
 
-        backend = PynputBackend()
+        backend = get_engine().client(GESTURE, get_engine().os_backend())
     cfg = model.cfg
     mouse = MouseController(backend, CursorMapper((1920, 1080), cfg.hands.cursor))
     executor = ActionExecutor(mouse, cfg.bindings.allow_shell)

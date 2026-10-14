@@ -53,7 +53,8 @@ How to work with the human through Project Away:
   person's approval; act with element names when available (get_screen with elements=true), else coordinates.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
   control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
-  the person first.
+  the person first, and so does a click, drag, Enter or shortcut on something Project Away cannot identify.
+- Logs, recordings and diagnostics bundles need the separate "Share my logs and recordings" permission.
 - Never ask the person for passwords; you cannot type into password fields and cannot use a shell or files.
 - Subscribe to away://events (or call events action="wait") for: presence (sat down / left), attention, the
   summon gesture or "hey agent" phrases, "that was wrong" feedback, auto-detector trips and control pauses.

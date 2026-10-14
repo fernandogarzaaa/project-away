@@ -252,6 +252,9 @@ under **Advanced** there, and in **Settings → Tuning**; you never need to touc
      Create*; Claude: *Settings → Connectors → Add custom connector*) or open it on your phone.
 4. Your PC asks **"Claude wants to connect: Allow / Deny"**. Answer with a click, a thumbs up, or by saying "allow".
    You see **Connected to Claude ✓**. **Disconnect all** ends every connection at once.
+5. *(v0.1.24, optional)* When an agent connects with the 6-digit code, the question also offers **Keep this agent
+   connected**. Choose it and that agent comes back by itself after restarts and reboots, without asking you again,
+   until you revoke it in **Settings → Agent Link → Agent tokens** (see [Keep this agent connected](#keep-this-agent-connected-v0124)).
 
 Then just talk to your agent: *"What can you see in Project Away?"*, *"The cursor is too fast, fix it"*,
 *"Ask me with a thumbs up before you send the email"*.
@@ -272,6 +275,8 @@ your screen and out loud.
 * **"Hey agent"** or the **summon gesture** (then say your message) goes to your **default agent**, chosen under
   *Talk to your agent* in Settings → Agent Link. With no default it goes to every connected agent.
 * Say only "Hey Claude" and pause: you have about 8 seconds to say the message.
+* If the computer mishears the name ("hey heart" for **Hark**, "hey cloud" for **Claude**), the message still goes
+  to that agent, as long as you started with "Hey" (or "Hi", "OK") and only one agent's name sounds like it.
 * It needs always-on listening (the default). The same rules as dictation apply, so a video playing in the
   background does not send messages.
 * **Wake-up address (optional, off by default).** Some agents can be woken up by a web address (a "webhook"). If
@@ -291,7 +296,8 @@ in memory only (the newest 200), never written to disk.
 | ▣ See my screen when I allow | one small screenshot at a time, or a slow (1 per second) live view with a badge on screen the whole time | off |
 | ⚙ Change my settings | sliders, gestures, voice commands, per-app profiles, presets; it asks you first (before/after) and everything can be undone | off |
 | ⌨ Let it use my computer | mouse and keyboard, after you allow it on the PC each time, for 30 minutes at most | off |
-| (Advanced) Run camera and speed checks | camera checks, speed tests, short gesture recordings (no video), diagnostics bundles | on |
+| ✉ Share my logs and recordings | its logs, short gesture recordings (no video) and problem reports, with passwords, keys, e-mail addresses and your user folder hidden | off |
+| (Advanced) Run camera and speed checks | camera checks and speed tests | on |
 
 **While an agent uses your computer** a bright border and the banner *"Claude is using your computer — move your hand
 or mouse to take over"* are on screen. Touching the mouse or keyboard, or making a gesture, pauses it instantly; it
@@ -365,12 +371,12 @@ or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123
 | `events` | `poll` (`since`, `landmarks`), `wait` (`since`, `timeout_s`, `topics`) | see my gestures |
 | `settings` | `list` (`domain`), `change` (`changes`, `why`), `undo` (`what`), `history` (`limit`), `config` | change my settings (`list`/`history`/`config`: see my gestures) |
 | `preferences` | `list`, `add` (`text`), `remove` (`number`) | change my settings to add/remove |
-| `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`logs`: see my gestures) |
+| `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`record`, `bundle`, `files`, `download`, `logs`: share my logs and recordings) |
 | `look` | `camera` | see my camera when I allow |
 | `get_screen` | `scale`, `monitor`, `region`, `elements` (see below) | see my screen when I allow |
 | `ask_user` | `question` (or `message`), `options`, `timeout_s`, `urgency`, `speak` | always |
 | `notify_user` | `text` (or `message`), `level`, `speak` | always |
-| `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always) |
+| `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always; `log` shows only your own actions) |
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
 | `open` | `app` (`name`), `url` (`url`) | use my computer |
@@ -450,6 +456,31 @@ stats, the last 30 s of landmarks) to `<data>/diagnostics/` and tells connected 
 `agent_link.github_issues: true` files a GitHub issue (stats only, never the bundle) with a token you store in the OS
 keyring with `away agent github-token`.
 
+### Safety guarantees
+
+These are enforced by Project Away itself, whatever the agent asks for, and each one has an automatic test:
+
+* **Nothing without your OK.** Using your computer needs your Allow every session. A click, drag, Enter, Delete or
+  shortcut on something Project Away can't identify asks you first, like Send, Pay, Delete or Install do. Dropping
+  something on the Recycle Bin or Trash asks too. You can say "Allow for this session" to stop the questions until
+  the session ends.
+* **You can always take over.** Moving your mouse pauses the agent at once, even while it is typing. Your stop keys
+  (Ctrl+Alt+Esc), saying "stop" and holding up an open palm always work, straight away. An action that is already
+  running stops before its next step (a drag, the next few letters), and Project Away lets go of the mouse button
+  and Shift, Ctrl, Alt and Win.
+* **Undo is yours or the agent's own.** An agent can only undo its own actions, and only while you are letting it use
+  your computer.
+* **No picture without a notice.** Every camera picture and screenshot shows a notice on screen. If the notice can't
+  be shown, the picture is not taken. The live screen view only runs while its "watching" badge is on screen.
+* **Turning a permission off works at once.** Turn off "Let it use my computer" and its session ends and the border
+  goes away. Turn off "See my screen" and its live view stops. Disconnect does both.
+* **Your logs are yours.** Sending logs, recordings and problem reports to an agent needs its own permission, "Share
+  my logs and recordings", off unless you turn it on (agents connected earlier don't get it either). Passwords,
+  keys, tokens, e-mail addresses and your user folder are hidden in what is sent. An agent sees only its own actions
+  in the action list.
+* **Fails safe.** If Windows can't tell whether a security prompt (UAC, Ctrl+Alt+Del) is on screen, the agent is
+  stopped. Oversized requests are refused before they are read (64 KB, 256 KB for MCP).
+
 ### Security notes (honest)
 
 * The local server listens on **127.0.0.1 only**. Remote access exists only while a pairing link or a remote agent is
@@ -465,7 +496,8 @@ keyring with `away agent github-token`.
 * Requests with a browser `Origin` header are refused (a web page cannot drive it); every request is in
   `<data>/logs/agent-access.log` (codes and tokens never written).
 * Never possible through Agent Link: running shell commands, reading or writing your files (downloads are limited to
-  bundles, recordings and logs inside Project Away's data folder, with path-traversal and symlink checks), changing
+  bundles, recordings and logs inside Project Away's data folder, with path-traversal and symlink checks, and need
+  "Share my logs and recordings"), changing
   `allow_shell`, hotkeys, updates or the agents' own permissions.
 * "Let it use my computer" is the riskiest permission. Its protections (approval every session, expiry, takeover
   pause, password-field and secure-desktop blocks, risky-click confirmation, blocked Win+R / Ctrl+Alt+Del, no
@@ -1505,6 +1537,191 @@ CPUs) and says why; the tray offers *Install GPU pack* (one notification, then a
 `voice.asr_model: large-v3-turbo` written by v0.1.4's setup is migrated to `auto` (configs now carry
 `config_version: 2`; a model you pick from now on is kept). Details: [docs/INSTALL.md](docs/INSTALL.md#hardware-auto-tuning-and-the-nvidia-gpu).
 
+## Self-test (v0.1.24)
+
+One click checks the whole PC and says, in plain words, what works and what does not, each with a fix button
+where one exists. Start it from the tray (**Run self-test**), from *Settings* (**Run self-test**), or from a
+terminal:
+
+```
+away selftest                    # every check, printed in plain words
+away selftest --window           # the same in a small window with fix buttons, Copy report, Save as file
+away selftest --only cameras,mic # some checks only
+away selftest --save report.json # write the (redacted) report as JSON
+```
+
+When the app is running, the self-test runs inside it, so the cameras are not taken away from it. The checks:
+cameras (opens each one, measures its real frame rate, names the app holding a busy camera and offers to close
+it), hand tracking speed, the graphics card (see *GPU tracking* below), the smooth pointer's update rate, the
+big pointer, that only one copy is running, the microphone level, speech to text on a short phrase, the speaking
+voices, pop-up messages, Agent Link, PC load and the models. A check that crashes or runs past its time limit
+becomes a "could not run" line; it never breaks the report.
+
+Where the report goes: to **every** connected agent (its inbox, its wake-up address when one is set, and the
+`selftest.completed` event), and it is always readable as `away://selftest/latest` (MCP) or
+`GET /v1/selftest/latest` (REST). Agents can also start one (`selftest` action / `POST /v1/selftest`). Before
+it leaves the app the report is redacted: tokens, your user name and paths outside Project Away's own folders are
+removed. With no agent connected it stays on this PC.
+
+`away selftest --json FILE` / `--bundle` is still the installer bundle check that the release workflow runs.
+When the model benchmark (`away.app.model_bench`) is part of the build, its last result appears as one more
+line ("Newer models"); the self-test only reads that result and never starts a benchmark by itself.
+
+## Check my PC (v0.1.24)
+
+One click to find out what really works on **your** PC. It takes about 2 minutes and you help a little.
+
+**Start it** from the tray (**Check my PC**), from *Settings > Getting started* (**Check my PC**), or by typing
+`away check` in a terminal (`away check --window` opens the same window as the button).
+
+**What it asks you to do**, one popup at a time: raise your hand, pinch, say "testing one two three", say your
+wake word, and answer "Did you hear the voice?" with Yes or No. When Project Away is running you can answer those
+questions with a click or a thumbs up / down; otherwise a small Yes / No window asks.
+
+**What it checks**, each one ending as **Pass**, **Fail** or **Skipped** with one plain sentence and a fix button
+where the app can fix it:
+
+| Part | What it finds out |
+|---|---|
+| Each camera | Does it open, how many pictures a second, which other app has it open. A camera that fails while no other app has it (a broken built-in camera) gets the likely reasons: its privacy switch or camera key, Windows camera privacy, its driver in Device Manager, with a button that opens camera privacy settings |
+| Hand tracking | Updates a second and milliseconds per picture, and whether it runs on the processor or the graphics card (DirectML / CUDA) |
+| Raise your hand, Pinch | Whether the camera and hand model really see your hand and your pinch, and how long it took |
+| Microphone, Test dictation | The sound level, then whether "testing one two three" comes out right |
+| Wake word | Whether saying your wake word is recognised |
+| Voices | Kokoro, Piper, WinRT (Windows natural) and SAPI each speak once and you say whether you heard it; a voice that is not installed is Skipped |
+| Tray icon | That it is showing and its tooltip fits the Windows limit (127 characters) |
+| Big pointer, one copy | That the big pointer shrinks back to your size, and that only one Project Away can run |
+| Smooth pointer | That the pointer output really runs at about 120 times a second |
+| Message windows | That the small toast and agent message windows appear on screen |
+| Lock-screen detector | That the secure-desktop check recognises your normal desktop (if it fails, agents can never use the mouse; that is safe but annoying) |
+| Takeover timing | How long Windows takes to hand Project Away's own mouse / key input back to the takeover listener, compared with the 0.25 s / 0.3 s windows, and the window it recommends for your PC |
+| Agent Link | The local link, the internet link, and three brand-new connections in a row (what an agent does when it reconnects). It does not restart your link or change its address |
+
+**The report** is saved on your PC in `<data folder>/check/` as JSON, a web page (HTML) and plain text, plus
+`verified.json`, which lists each item from *Verified vs untested* below as pass, fail or untested on this PC.
+Passwords, keys, e-mail addresses, your user name and private file paths are taken out first. **Copy report**
+copies the text version; **Open full report** opens the web page.
+
+**Nothing is sent anywhere by itself.** **Send to my agents** (or `away check --send`) sends the report only to
+connected agents you allowed to *Share my logs and recordings*; other agents (including ones that may only *Run
+camera and speed checks*) do not get it, and it is not put on the shared event stream.
+
+## GPU tracking (v0.1.24)
+
+`hands.compute: auto | gpu | cpu` (*Settings > Models*, "Tracking runs on") chooses where hand and face
+tracking run:
+
+| Path | Where | Notes |
+|---|---|---|
+| MediaPipe on the processor | every OS | the default and the fallback for anything that fails |
+| ONNX Runtime + DirectML | Windows, any DirectX 12 card (NVIDIA, AMD, Intel) | needs `onnxruntime-directml`; MediaPipe itself has no GPU support on Windows |
+| ONNX Runtime + CUDA | NVIDIA | needs `onnxruntime-gpu`; preferred over DirectML when both exist |
+
+The ONNX models are Google's MediaPipe hand and face models converted to ONNX (Apache-2.0, like the
+originals), a one-time download of about 23 MB checked against pinned SHA-256 sums. `auto` uses the graphics
+card only when a GPU runtime is present **and** the models are already downloaded, so it never downloads by
+itself; `gpu` downloads them when needed; `cpu` never touches the card. If the GPU path fails to start, tracking
+stays on the processor and the tray, *Settings* and the self-test say why.
+
+**The installers still ship plain `onnxruntime` (CPU)**, so on an installed copy `auto` stays on the processor
+until a GPU runtime is added. Pip installs: `pip install onnxruntime-directml` (Windows) or `onnxruntime-gpu`.
+
+Honest numbers. Everything below was measured in the Linux aarch64 build sandbox, **on the CPU only**; there is no
+graphics card there:
+
+| Per frame (one hand) | Time |
+|---|---|
+| MediaPipe on the processor | about 13 ms |
+| The same models through ONNX Runtime on the processor | about 25 ms |
+| Everything around the model (anchors, NMS, crop, projection, in numpy) | about 0.5 ms |
+
+So on a CPU the ONNX path is about twice as slow as MediaPipe, and the gain has to come from the graphics card.
+**How much a real card saves is not measured yet.** The point of moving tracking off the processor is to leave
+it free for speech to text and the rest of the PC; whether that pays off on a given PC is what the self-test's
+"Graphics card" line shows.
+
+## Keep this agent connected (v0.1.24)
+
+Pair an agent once and it stays connected: after Project Away restarts, the PC reboots or a day goes by, it
+reconnects by itself and you are not asked again for what you already allowed. Nothing changes for the 6-digit
+codes and pairing links themselves; this is an extra choice when you allow an agent.
+
+**For you.** When an agent connects with a 6-digit code (or `POST /v1/pair`), the question has three answers:
+**Allow**, **Keep this agent connected**, **Deny**. *Settings → Agent Link → Agent tokens* lists every agent that
+stays connected: what it can do, when it was added, when it was last used and from where, and until when it stays
+connected. Per agent:
+
+* **Revoke**: it is disconnected at once (a live connection drops within a fraction of a second) and can only
+  come back if you allow it again with a new code.
+* **New token**: a replacement token, shown once for you to give to the agent. The old one keeps working for one
+  hour, so nothing breaks while you switch, then it stops.
+* **What it can do**: the same permission switches as for any agent.
+
+A new token works for **90 days** by default. *New agent tokens last* (in the same section) changes that to 30 days or
+*Until I revoke it* (`agent_link.token_expiry`: `90d`, `30d` or `never`); tokens already given keep their own end
+date, and the approval dialog always says how long this one will last. The same is on the command line, with the app
+running or not:
+
+```
+away agent tokens                       # who stays connected, what it can do, last used (when, from where)
+away agent tokens rotate Cookie         # a new token, shown once; the old one works for one more hour
+away agent tokens scopes Cookie read,tune
+away agent tokens revoke Cookie         # disconnected now
+away agent tokens expiry 30d            # new tokens last 30 days (90d is the default; never = until you revoke)
+```
+
+**For agents.** Send `"keep_connected": true` (optionally `"token_expiry": "90d" | "30d" | "never"`; without it, the PC's setting applies, 90 days unless the person
+changed it) with
+`POST /v1/pair`. If the person chooses *Keep this agent connected*, the reply carries
+`persistent_token` (`paway_` + 32 random bytes, base64url) **this one time only**; store it safely. Send it as
+`Authorization: Bearer paway_...` on `/mcp` or any REST call: it opens (or resumes) your session with no prompt. The
+session lasts 24 hours after your last request and renews itself with every request; after a longer break the next
+request simply opens a new one. `POST /v1/token/rotate` (with the current token) replaces it; the old one works
+for one more hour. `scripts/agent_link_client.py pair --keep` and `use-token paway_...` do all of this; the stdio
+bridge (`away mcp`) keeps the token for apps on this PC.
+
+**How it is kept safe.** Only the token's SHA-256 is stored, next to the agent in `agents.json` (owner-only), and
+compared in constant time; Settings, `state.json` and the CLI list never show a token or its hash. A token from
+*New token* reaches Settings or the CLI through a one-time owner-only file that is deleted as it is read (or after
+two minutes). Wrong `paway_` tokens are limited per address: five free tries, then the address waits 2 s, 4 s,
+8 s ... up to 15 minutes (`429` with `Retry-After`), while the person's own agents elsewhere keep working.
+Permissions are checked on every call exactly as before, and a token gets "Share my logs and recordings" only if you
+switch it on for that agent (it is never part of the default permissions). Revoking a token, or replacing it with
+*New token*, ends whatever the agent had running at once: its "use my computer" session stops and lets go of any
+held mouse button or key, and its live screen view ends, so the replacement token starts clean and asks again. The
+token endpoints (`/v1/pair`, `/v1/pair/local`, `/v1/token/rotate`, `/v1/token/refresh`) have the same 64 KB request
+cap as the rest of the REST API. Pairing links used as connector URLs (ChatGPT, Claude.ai)
+already stay connected on their own and are not offered a token they could not send.
+
+## A link that survives restarts (v0.1.24)
+
+Before v0.1.24 a remote agent had to pair again whenever Project Away restarted, the PC rebooted or the network
+dropped, because the free link gets a new random address every time and the agent's access ended. Now:
+
+* **Refresh tokens.** At pairing an agent gets a long-lived refresh token next to its short access token
+  (`POST /v1/token/refresh`; each refresh hands out a new one; only its SHA-256 is kept on the PC). It lasts
+  `agent_link.refresh_ttl_days` (default 30) after its last use. Disconnecting the agent in *Settings* revokes it.
+* **`agent_link.keep_link: true`** (default). When Away starts, or the link drops, while a remote agent can still
+  reconnect, the link is started again by itself.
+* **Telling agents the new address**: through the agent's wake-up address (a `link.moved` POST), its
+  inbox, and a **rendezvous** topic (`agent_link.rendezvous: ntfy`, default; `off` turns it off). Each agent gets
+  its own random topic on `https://ntfy.sh` and its own signing key at pairing; every message is signed
+  (HMAC-SHA256), so nobody can send an agent to a fake address. A stranger who guessed a topic would only learn the
+  current address, which grants nothing without a token. `scripts/agent_link_client.py` follows a move and
+  refreshes in one call.
+* **A named tunnel** for an address that never changes (below).
+
+| Link | Cost and setup | Address after a restart | What the agent does |
+|---|---|---|---|
+| Standard (Cloudflare quick tunnel) | free, no account | new random address every start | refresh token + reads the new address from rendezvous / inbox / wake-up address |
+| Backup (localhost.run or Pinggy over SSH) | free, no account, no Cloudflare | new address every start (Pinggy's free links also end after an hour) | same as standard |
+| Named (your own Cloudflare tunnel) | free Cloudflare account and a domain on Cloudflare; one-time setup | **never changes** | refresh token only |
+
+Set up a named tunnel: create a tunnel in the Cloudflare dashboard (Zero Trust > Networks > Tunnels), add a
+public hostname whose service is HTTP `http://127.0.0.1:47615` (or your `agent_link.port`), then run `away agent named-tunnel away.example.com`
+(it asks for the tunnel token and keeps it in the system keyring, never in `config.yaml`; `away agent
+named-tunnel clear` removes it), or use *Settings > Agent Link > Advanced*.
+
 ## Updates
 
 The installed app checks GitHub Releases when the tray starts and every 24 hours. When a new version is out
@@ -1624,7 +1841,7 @@ Config (`macros:` in config.yaml, all optional):
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
 | Agent messages: truthful `shown`, tray fallback, window start-up options (v0.1.21) | The acknowledgement protocol, timeouts, exit codes, the tray fallback and the Popen options (no CREATE_NO_WINDOW, show-normal, frozen environment reset) unit-tested; a real child process writing the acknowledgement is tested on every CI OS; **untested on the user's Windows desktop**: whether the Tk message window now appears from the installed tray app, and the tray balloon on Windows |
 | Speaking (v0.1.21) | Engine order per OS, the speaker thread and queue, settings, fallbacks between engines, the PowerShell and command-line engines (text never on a command line that a shell reads) and SAPI through a fake COM object unit-tested; the Windows release self-test creates the real `SAPI.SpVoice`, sets rate and volume and synthesizes into memory; **not heard on real speakers**, and macOS `say` / Linux `spd-say` are untested on real desktops |
 | Check ids, shared registry, expiry (v0.1.21) | Unit-tested and round-tripped over a real uvicorn server (`?job_id=82557239`, `?id=`, `/v1/rpc/diagnostics`, 404 vs 410) |
@@ -1643,6 +1860,9 @@ Config (`macros:` in config.yaml, all optional):
 | Agent Link through a real Cloudflare quick tunnel | **Verified from the Linux build sandbox**: pinned cloudflared 2026.10.0 downloaded and SHA-256 checked, quick tunnel started, a remote MCP client and the REST example client paired and called tools through `https://*.trycloudflare.com` |
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
 | Computer control (mouse/keyboard), takeover pause, password/secure-desktop blocks, risky-click confirmation | Logic unit-tested with a recording backend and fake UI Automation; **untested on a real desktop**: real pynput listeners for takeover, Windows UI Automation (`uiautomation`), the border/banner windows, Ctrl+Alt+Esc, open_app through the Start menu |
+| Safety hardening (v0.1.24, external audit): undo needs a live grant; separate mouse/keyboard echo windows and a 0.75 s approval grace; stop/takeover interrupts a running drag, typing or open_app and releases the mouse button and modifier keys; unidentified click/drag/Enter/shortcut targets ask; drag destinations checked; no capture without its notice; 64 KB / 256 KB body caps (chunked too); "Share my logs and recordings" permission and log redaction; per-agent action log; permission changes end live sessions and views; secure-desktop check fails closed on Windows | 58 tests in `tests/test_safety_hardening.py`; 45 of them fail on the code before the fixes (the rest guard what must keep working). Interruption is tested with threads and a backend that blocks mid-action; the body cap through Starlette's test client and at the ASGI level. **Untested on a real desktop**: real pynput echo timing against the 0.25 s / 0.3 s windows, `release_modifiers` with real keys, the Windows secure-desktop detector failing for real, Windows UI Automation names for drag targets (Recycle Bin), and the notice/badge windows failing to start on a real PC |
+| Check my PC (v0.1.24) | Every part's Pass / Fail / Skipped rule, the guided prompts, both redactions, the saved files, `verified.json` and sending only to agents with *Share my logs* tested with fake devices in `tests/test_v0124_check_my_pc.py`; **not yet run on the user's laptop**: its first real run is what turns the untested rows here into facts (see `verified.json`) |
+| Tray tooltip limit, "hey heart" for Hark (v0.1.24) | Tooltip cut to 127 UTF-16 units (emoji never split) and the sound-alike matcher tested with fixed phrases; **untested** in the real Windows tray and with real speech |
 | Prompts answered by thumbs up/down / fingers / voice | Hand-sign geometry tested on synthetic hands; **untested with real MediaPipe landmarks**; the prompt/toast/border windows are Tk, smoke-tested only |
 | Screenshots, live screen view, camera stills | JPEG scaling and gating tested; Pillow `ImageGrab` **untested on Windows/macOS here**; the live view and its badge need a real desktop |
 | Session record + replay, diagnostics bundle, auto-detectors | Tested (replay is deterministic and byte-identical files); fps/latency/CPU numbers in the frozen app **untested on real hardware**; GPU numbers need `nvidia-smi` |
@@ -1726,6 +1946,21 @@ Config (`macros:` in config.yaml, all optional):
 | Which app holds the camera, busiest programs (v0.1.23) | ConsentStore parsing with a fake registry, NVIDIA Broadcast's source from a fake settings file, messages, psutil aggregation with a fake psutil; **untested on the user's PC** (the real ConsentStore keys and Broadcast's settings file layout are assumptions) |
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
 | Parakeet, Wayland | **Untested** |
+| Stop everything / one action engine (v0.1.24) | Every mouse move, click, key press and typed character Project Away sends (gestures, voice, dictation, shortcut replays, Agent Link computer control, the Check my PC echo probe) goes through `away.actions_engine`; a test fails the build if any other module sends OS input. Stop everything (tray, hotkey, open palm, "stop") cancelling a drag, a shortcut replay, dictation and a paste and letting go of held buttons and keys, the user winning over an agent mid-action, pause / resume / shutdown and the one audit log tested with fake backends and threads in `tests/test_actions_engine.py`. **Untested on a real desktop**: real pynput input through the engine, and Stop everything pressed during a real drag or replay |
+| Self-test (v0.1.24) | Every check's pass / warn / fail rule, the time limit and crash handling, redaction, delivery to every agent, the service and the CLI tested with a fake PC environment; the optional model-benchmark hook tested with a fake module (absent: no extra line). **Untested on the user's PC**: the real environment (`away.selftest.env.RealEnv`: real cameras, microphone, speech, voices, pop-ups, link), the window and its fix buttons |
+| GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
+| Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
+| A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
+
+## What's new in 0.1.24
+
+* **Safety hardening.** Fixes from an outside security review: an agent's Undo needs a live permission, stopping or taking over interrupts a running drag or typing and lets go of the mouse button and keys, unclear clicks and shortcuts ask first, a new *Share my logs and recordings* permission, and the Windows secure-desktop check fails closed.
+* **GPU tracking.** Hand and face tracking can run on the graphics card (ONNX Runtime with DirectML on Windows), falling back to the processor when that does not work. See *GPU tracking*.
+* **Self-test.** One click checks cameras, tracking, voices and the pointer and sends the report to your connected agents. See *Self-test*.
+* **Links that survive restarts.** A remote agent can come back after Project Away restarts or the PC reboots without pairing again. See *A link that survives restarts*.
+* **Agents stay connected.** "Keep this agent connected" gives an agent its own token that lasts 90 days by default (30 days or never are the other choices), and you can take it back any time. See *Keep this agent connected*.
+* **Check my PC.** A guided two-minute check of what really works on your PC (cameras, tracking, voices, takeover timing, the link). The report stays on your PC unless you press *Send to my agents*, and then only agents allowed to *Share my logs and recordings* get it. See *Check my PC*.
+* **Stop everything, one action engine.** Everything Project Away does with your mouse and keyboard now goes through one place. *Stop everything* (tray menu, hotkey, open palm or saying "stop") cancels whatever is running (a gesture drag, a shortcut, dictation or an agent) and lets go of any held button or key. When you move while an agent is acting, you win.
 
 ## Changes in v0.1.23
 

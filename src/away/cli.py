@@ -149,9 +149,17 @@ def cmd_gpu(args: argparse.Namespace) -> int:
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
-    from away.app import selftest
+    """v0.1.24: the one-click PC self-test (``--json``/``--bundle``: the installer bundle check, unchanged)."""
+    from away.selftest import cli as stcli
 
-    return selftest.main(args.json)
+    return stcli.main(args)
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """v0.1.24: Check my PC, the guided real-hardware report."""
+    from away.selftest import checkpc
+
+    return checkpc.main(args)
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -1579,13 +1587,20 @@ def build_parser() -> argparse.ArgumentParser:
     cu.set_defaults(fn=cmd_cursor)
 
     # hidden: used by the release workflow to verify the frozen installer build
-    stt = sub.add_parser("selftest")  # no help= => not listed in --help
-    stt.add_argument("--json", help="also write the report to this file")
+    stt = sub.add_parser("selftest", help="check cameras, tracking, pointer, microphone, voices, link and models")
+    from away.selftest.cli import add_arguments as selftest_arguments
+
+    selftest_arguments(stt)
     stt.set_defaults(fn=cmd_selftest)
+    chk = sub.add_parser("check", help="Check my PC: a guided 2-minute test of cameras, voice, pointer and link")
+    from away.selftest.checkpc import add_arguments as check_arguments
+
+    check_arguments(chk)
+    chk.set_defaults(fn=cmd_check)
     from away.agentlink.cli import add_parsers  # Agent Link (v0.1.20): agent, mcp, replay, diagnose
 
     add_parsers(sub)
-    hidden = ("selftest", "agent-ui", "link", "remote")
+    hidden = ("agent-ui", "link", "remote")
     sub.metavar = "{" + ",".join(c for c in sub.choices if c not in hidden) + "}"
     return p
 

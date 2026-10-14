@@ -331,7 +331,16 @@ class Pipeline:
         return hotkey_map(self.cfg.bindings, self.cfg.voice, self.dispatcher.profile)
 
     def fire(self, category: str, name: str, data: dict[str, Any] | None = None) -> Action:
-        """Fire a voice/face/hotkey trigger through the bindings."""
+        """Fire a voice/face/hotkey trigger through the bindings (the action engine logs a voice trigger's input
+        as the ``voice`` source)."""
+        if category == "voice":
+            from away.actions_engine import VOICE, attributed
+
+            with attributed(VOICE):
+                return self._fire(category, name, data)
+        return self._fire(category, name, data)
+
+    def _fire(self, category: str, name: str, data: dict[str, Any] | None = None) -> Action:
         if category == "voice":
             act = self.smart.voice(name)  # "click <name>" / "click that" ... (None: not one, or a bound phrase)
             if act is not None:
@@ -584,6 +593,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.dry_run = dry_run
         self.config_path = config_path
         self.stop_event = threading.Event()
+        self.tray_icon: Any = None  # v0.1.24: the pystray icon (set by the tray; Check my PC reads it)
         self.bus = EventBus()
         self.models_dir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
         try:
@@ -605,14 +615,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             backend = RecordingBackend()
             self.monitor_layout = monitors.single(1920, 1080, source="dry-run")
         else:
-            from away.control.mouse import PynputBackend
+            from away.actions_engine import get_engine
 
             monitors.enable_dpi_awareness()  # no-op when cli/tray main already did it (before pynput/tk)
             self.monitor_layout = monitors.enumerate_monitors()
             from away.control.macro_record import MarkingBackend
 
             # every synthetic event Away sends is marked, so a shortcut recording leaves it out (v0.1.20)
-            backend = MarkingBackend(PynputBackend())  # type: ignore[assignment]
+            backend = MarkingBackend(get_engine().os_backend())  # type: ignore[assignment]
         screen = self.monitor_layout
         self.monitor_watcher = monitors.MonitorWatcher(self.monitor_layout, float(cfg.hands.cursor.monitor_refresh_s))
         temporal = None
@@ -629,6 +639,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             self.guard = ManualInputGuard(cfg.app.auto_pause_idle_ms)
             backend = GuardedBackend(backend, self.guard)  # type: ignore[assignment]
+        if not dry_run:
+            # audit Phase 1b: the engine owns the real backend; gestures (and the voice commands that run the same
+            # bindings, attributed "voice") reach it through the engine as the "gesture" source
+            from away.actions_engine import GESTURE, get_engine
+
+            get_engine().set_backend(backend)
+            backend = get_engine().client(GESTURE)  # type: ignore[assignment]
         from away.pointer.uia import make_backend as pointer_backend
 
         self.pipeline = Pipeline(
@@ -1295,6 +1312,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         hand_model = self.models_dir / "hand_landmarker.task"
         face_model = self.models_dir / "face_landmarker.task"
+        accel = self._tracking_accel(hand_model)  # v0.1.24: hands.compute (graphics card or processor)
         hands = (
             HandTracker(
                 hand_model,
@@ -1302,15 +1320,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 prefer=lambda: self.pipeline.hand_mode,
                 mirrored=self.cfg.hands.mirror,
                 release_s=lambda: self.cfg.hands.roles.release_s,
+                factory=accel[0] if accel else None,
+                image_fn=accel[1] if accel else None,
             )
             if self.cfg.hands.enabled
             else None
         )
         faces = None
         if self.cfg.face.enabled and self.face_source.needs_webcam_model and face_model.exists():
-            from away.face.landmarker import FaceLandmarker
+            from away.accel.compute import face_landmarker
 
-            faces = FaceLandmarker(face_model)
+            faces = face_landmarker(self.cfg, face_model, paths.data_dir())
         prof = self.profile
 
         def process(n: int, t: float, rgb: Any) -> None:
@@ -1467,6 +1487,23 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             min_fps=float(self.cfg.hands.min_camera_fps),
             skip_held=skip_held,
         )
+
+    def _tracking_accel(self, model: Any) -> Any:
+        """v0.1.24 ``hands.compute``: (factory, image_fn) for the hand trackers when the graphics card runs them,
+        None for MediaPipe on the processor. Never raises (falls back to the processor and says why)."""
+        try:
+            from away.accel.compute import hand_factory
+
+            return hand_factory(
+                self.cfg,
+                model,
+                paths.data_dir(),
+                on_note=lambda why: self.notice(
+                    "Project Away: hand tracking on the processor", why, key="gpu-tracking"
+                ),
+            )
+        except Exception:
+            return None
 
     def _use_mode_store(self) -> None:
         """Remember per camera name a fallback mode it only works in (v0.1.15), so the next start opens it in
@@ -1897,6 +1934,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
             model = self.models_dir / "hand_landmarker.task"
             first_tracker.roles.mirrored = cams[0].mirror  # each camera's own frame orientation
+            accel = self._tracking_accel(model)  # v0.1.24
             trackers = [first_tracker] + [
                 HandTracker(
                     model,
@@ -1904,6 +1942,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     prefer=lambda: self.pipeline.hand_mode,
                     mirrored=c.mirror,
                     release_s=lambda: self.cfg.hands.roles.release_s,
+                    factory=accel[0] if accel else None,
+                    image_fn=accel[1] if accel else None,
                 )
                 for c in cams[1:]
             ]
@@ -2209,6 +2249,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         with contextlib.suppress(Exception):
             self.macros.stop_playback()
             self.macros.stop_recording()
+        if not getattr(self, "dry_run", True):
+            from away.actions_engine import get_engine
+
+            with contextlib.suppress(Exception):  # every source's in-flight action, and anything still held
+                get_engine().stop_all("Project Away is closing")
         self._restore_cursor()  # the user's own cursor size, right away (no debounce)
         with contextlib.suppress(Exception):
             self.pipeline.headgaze.save_bias()  # keep the gaze drift correction for the next start

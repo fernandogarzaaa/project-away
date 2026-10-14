@@ -42,6 +42,8 @@ from away.agentlink.telemetry import Telemetry
 
 STOP_WORDS = ("stop", "stop it", "stop now", "agent stop", "stop agent")
 STATE_EVERY_S = 1.0
+NAMED_PORT = 47615  # v0.1.24: the fixed local port a named Cloudflare tunnel points at (agent_link.port 0)
+LINK_RETRY_S = (10.0, 30.0, 120.0, 600.0)  # v0.1.24: waits between attempts to bring the link back
 HEALTH_WANT_S = 5.0
 
 
@@ -51,7 +53,9 @@ def base_dir(data_dir: Path | None = None) -> Path:
 
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    # unique per writer: two threads of one process writing the same file must not share a temp file (seen on macOS
+    # CI: one thread's os.replace took the other's temp file away before its chmod)
+    tmp = path.with_name(path.name + f".{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
     tmp.write_text(text, encoding="utf-8")
     if os.name != "nt":
         os.chmod(tmp, 0o600)
@@ -69,6 +73,41 @@ def local_key(base: Path) -> str:
     k = secrets.token_urlsafe(32)
     write_private(p, k)
     return k
+
+
+SECRET_TTL_S = 120.0  # a new agent token waits this long for Settings / the CLI to show it, then it is deleted
+
+
+def put_secret(base: Path, secret: str) -> str:
+    """v0.1.24: hand a new agent token to Settings / the CLI once: an owner-only file they read and delete
+    (:func:`take_secret`); state.json never carries it. Returns the reference to ask for."""
+    ref = uuid.uuid4().hex
+    write_private(base / "secrets" / f"{ref}.txt", secret)
+    return ref
+
+
+def take_secret(ref: str, data_dir: Path | None = None) -> str | None:
+    """The token behind ``ref``, exactly once (the file is deleted as it is read)."""
+    if not re.fullmatch(r"[0-9a-f]{32}", str(ref or "")):
+        return None
+    f = base_dir(data_dir or paths.data_dir()) / "secrets" / f"{ref}.txt"
+    try:
+        text = f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    f.unlink(missing_ok=True)
+    return text or None
+
+
+def clear_secrets(base: Path, max_age_s: float = SECRET_TTL_S) -> None:
+    folder = base / "secrets"
+    if not folder.is_dir():
+        return
+    now = time.time()
+    for f in folder.glob("*.txt"):
+        with contextlib.suppress(OSError):
+            if now - f.stat().st_mtime > max_age_s:
+                f.unlink()
 
 
 def send_request(action: str, data_dir: Path | None = None, **data: Any) -> str:
@@ -146,7 +185,11 @@ def build_core(
 
     telemetry.on_change = emit
     recorder = RingRecorder(float(getattr(s, "record_buffer_s", 30.0)), clock)
-    registry = AgentRegistry(base / "agents.json")
+    registry = AgentRegistry(
+        base / "agents.json",
+        refresh_ttl_s=float(getattr(s, "refresh_ttl_days", 30) or 30) * 86400.0,
+        link_access_s=float(getattr(s, "remote_ttl_min", 60) or 60) * 60.0,
+    )
     prompts = PromptManager(
         ui if ui is not None else NullUI(),
         polite=telemetry.polite_moment,
@@ -271,6 +314,42 @@ class AgentLinkHost:
             cooldown_s=float(s.detector_cooldown_s),
         )
         self.core.events.listeners.append(self._on_hub_event)
+        # v0.1.24 "a link that survives restarts": tell every paired agent the current public address
+        from away.agentlink.rendezvous import LinkAnnouncer
+
+        self.announcer = LinkAnnouncer(
+            self.core.registry.reconnectable,
+            inbox=self.core.service.inbox,
+            events=self.core.events,
+            settings=lambda: self.cfg().agent_link,
+            state_path=self.base / "link.json",
+        )
+        self._link_retry_at = 0.0
+        self._link_failures = 0
+        self._link_starting = False
+        self.named: Any = None  # v0.1.24 your own named Cloudflare tunnel (stable address)
+        self.selftest = self._make_selftest()  # v0.1.24 one-click self-test, reported to every connected agent
+        self.core.service.selftest = self.selftest
+
+    def _make_selftest(self) -> Any:
+        from away.agentlink.inbox import post_json
+        from away.selftest.env import RealEnv
+        from away.selftest.service import SelftestService
+
+        def done(report: dict[str, Any], delivery: dict[str, Any]) -> None:
+            who = ", ".join(r["agent"] for r in delivery.get("agents", [])) or "this PC only"
+            self._notice("Project Away self-test", f"{report.get('headline', '')} (sent to {who})")
+
+        return SelftestService(
+            self.data_dir,
+            lambda interactive: RealEnv(app=self.app, host=self, interactive=interactive),
+            agents=self.core.registry.reconnectable,
+            inbox=self.core.service.inbox,
+            events=self.core.events,
+            post=post_json,
+            keep_dirs=[self.data_dir],
+            on_done=done,
+        )
 
     # --------------------------------------------------------------- config
     def cfg(self) -> Any:
@@ -319,11 +398,18 @@ class AgentLinkHost:
 
     # ------------------------------------------------------------ platform
     def _control_hooks(self) -> ControlHooks:
+        from away.actions_engine import SourceBackend, get_engine
         from away.agentlink import desktop
 
         backend: Any
+        engine: Any = None
         if self.app is not None:
             backend = self.app.pipeline.mouse.backend
+            if isinstance(backend, SourceBackend):
+                # audit Phase 1b: the agent acts on the engine's backend as its own source ("agent"), never through
+                # the gesture client; the shared engine owns its tokens, safety checks, stop-all and audit log
+                engine = get_engine()
+                backend = backend.target
         else:
             from away.control.mouse import RecordingBackend
 
@@ -337,13 +423,7 @@ class AgentLinkHost:
             self.input_guard = None
 
         def pos() -> tuple[int, int] | None:
-            try:
-                from pynput.mouse import Controller
-
-                x, y = Controller().position
-                return int(x), int(y)
-            except Exception:
-                return None
+            return get_engine().cursor_position()
 
         uia: Any = desktop.make_uia()
         smart = getattr(getattr(self.app, "pipeline", None), "smart", None) if self.app is not None else None
@@ -355,6 +435,7 @@ class AgentLinkHost:
             cursor_pos=pos,
             overlay_on=self._overlay_on,
             overlay_off=self._overlay_off,
+            engine=engine,
         )
 
     def _overlay_on(self, name: str) -> None:
@@ -373,19 +454,38 @@ class AgentLinkHost:
         self._stop_input_watch()
 
     def _watching(self, name: str, on: bool) -> None:
-        if on and self._watch_stop is None and self.ui is not None and hasattr(self.ui, "overlay"):
-            self._watch_stop = self.base / "ui" / f"watch-{uuid.uuid4().hex[:6]}.stop"
-            self.ui.overlay(name, self._watch_stop, mode="watch")
+        """The live view's permanent "watching your screen" badge. Raises when it cannot be shown (the service
+        then refuses the live view)."""
+        if on and self._watch_stop is None:
+            if self.ui is None or not hasattr(self.ui, "overlay"):
+                raise RuntimeError("no on-screen badge is available here")
+            stop = self.base / "ui" / f"watch-{uuid.uuid4().hex[:6]}.stop"
+            self.ui.overlay(name, stop, mode="watch")
+            self._watch_stop = stop
         elif not on and self._watch_stop is not None:
             with contextlib.suppress(OSError):
                 self._watch_stop.write_text("stop", encoding="utf-8")
             self._watch_stop = None
 
+    def _show_notice(self, text: str) -> None:
+        """A notice for something the person did themselves (never a precondition)."""
+        with contextlib.suppress(Exception):
+            self._flash(text)
+
     def _flash(self, text: str) -> None:
+        """The notice every camera still / screenshot shows. Raises when nothing visible could be shown (the
+        flash window, or else the tray's notification), so the capture is refused."""
+        shown = False
         if self.ui is not None and hasattr(self.ui, "flash"):
-            with contextlib.suppress(Exception):
+            try:
                 self.ui.flash(text)
-        self._notice("Project Away", text)
+                shown = True
+            except Exception:
+                shown = False
+        if shown:
+            self._notice("Project Away", text)
+        elif not self._tray_notice("Project Away", text):
+            raise RuntimeError("could not show the on-screen notice")
 
     def _monitors(self) -> Any:
         """The app's monitor layout (kept current by its MonitorWatcher) for get_screen's monitor/region."""
@@ -444,7 +544,11 @@ class AgentLinkHost:
             ml = mouse.Listener(on_move=moved, on_click=clicked, on_scroll=lambda *a: clicked())
             kl = keyboard.Listener(on_press=pressed)
             hk = keyboard.GlobalHotKeys(
-                {to_pynput_hotkey(self.cfg().agent_link.stop_hotkey): lambda: ctl.stop("you pressed the stop keys")}
+                {
+                    to_pynput_hotkey(self.cfg().agent_link.stop_hotkey): lambda: ctl.engine.stop_all(
+                        "you pressed the stop keys"
+                    )
+                }
             )
             for lst in (ml, kl, hk):
                 lst.start()
@@ -560,8 +664,9 @@ class AgentLinkHost:
         if self.core.prompts.current is not None:
             self.core.prompts.feed_sign(t, sign)
         held = self._palm.update(t, sign if sign == handsigns.OPEN_PALM else None)
-        if self.core.control.grant is not None and held:
-            self.core.control.stop("you held up an open palm")
+        ctl = self.core.control
+        if held and (ctl.grant is not None or ctl.engine.busy()):
+            ctl.engine.stop_all("you held up an open palm")  # Stop everything: every source, the agent's grant too
 
     def _on_bus(self, ev: Any) -> None:
         topic, data = ev.topic, ev.data
@@ -578,8 +683,9 @@ class AgentLinkHost:
             text = str(data.get("text") or "")
             if self.core.prompts.current is not None and self.core.prompts.feed_voice(text):
                 return
-            if normalize(text) in STOP_WORDS and self.core.control.grant is not None:
-                self.core.control.stop("you said stop")
+            ctl = self.core.control
+            if normalize(text) in STOP_WORDS and (ctl.grant is not None or ctl.engine.busy()):
+                ctl.engine.stop_all("you said stop")  # Stop everything
         if topic in ("action.cancelled", "action.undone", "feedback.wrong"):
             self.core.events.publish("misfire", {"topic": topic, **{k: str(v)[:100] for k, v in data.items()}})
 
@@ -597,7 +703,7 @@ class AgentLinkHost:
         if res.get("sent"):
             label = str(res["label"])
             note = str(res.get("note") or "")
-            self._flash(f"{label}. {note}" if note else label)
+            self._show_notice(f"{label}. {note}" if note else label)
             self._say(note or label)  # v0.1.23: spoken too, so you know it went somewhere
             return label
         reason = str(res.get("reason") or "Your message could not be sent.")
@@ -627,7 +733,7 @@ class AgentLinkHost:
 
     def _talk_armed(self, target: str) -> None:
         who = self._target_names(target)
-        self._flash(f"Listening... say your message for {who}" if who else "No AI agent is connected yet")
+        self._show_notice(f"Listening... say your message for {who}" if who else "No AI agent is connected yet")
 
     def talk_ready(self) -> bool:
         """The summon gesture can open a message: always-on listening runs and talking is turned on."""
@@ -675,7 +781,7 @@ class AgentLinkHost:
                 jpeg, scale = to_jpeg(frame, int(self.cfg().agent_link.snapshot_max_width), 60)
                 c = svc.user_capture("camera", jpeg, {"scale": scale})
                 self.core.events.publish("user.look", {"capture": c.id, "kind": "camera"})
-                self._flash("Sent a camera picture to your agent")
+                self._show_notice("Sent a camera picture to your agent")
                 return
         if self._any_agent_has(perms.SCREEN):
             img = grab_screen()
@@ -683,7 +789,7 @@ class AgentLinkHost:
                 jpeg, scale = to_jpeg(img, int(self.cfg().agent_link.screen_max_width), 55)
                 c = svc.user_capture("screen", jpeg, {"scale": scale})
                 self.core.events.publish("user.screen", {"capture": c.id, "kind": "screen"})
-                self._flash("Sent your screen to your agent")
+                self._show_notice("Sent your screen to your agent")
                 return
         self.core.events.publish("summon", {"source": kind, "note": "no agent may see the camera/screen"})
 
@@ -734,11 +840,12 @@ class AgentLinkHost:
 
     # -------------------------------------------------------------- server
     def tunnel_hosts(self) -> list[str]:
-        """v0.1.23: hostnames of the active secure link and backup link (the only non-local Host headers accepted)."""
+        """v0.1.23: hostnames of the active secure link and backup link (the only non-local Host headers accepted).
+        v0.1.24: and your own named tunnel's fixed hostname."""
         from away.agentlink.api import hostname_of
 
         out = []
-        for t in (getattr(self, "tunnel", None), getattr(self, "relay", None)):
+        for t in (getattr(self, "tunnel", None), getattr(self, "relay", None), getattr(self, "named", None)):
             h = hostname_of(getattr(t, "url", None)) if t is not None else ""
             if h:
                 out.append(h)
@@ -761,12 +868,17 @@ class AgentLinkHost:
                 rate=(float(s.rate_per_s), int(s.rate_burst)),
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
+                link_info=self.link_info,
+                token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "90d") or "90d"),
             )
             mcp = mcp_tools.build(
                 api.LocalBackend(self.core.service), screen_fps=lambda: float(self.cfg().agent_link.screen_fps)
             )
             app = api.create_app(self.core.service, self.gate, mcp)
-            self.server = Server(app, int(s.port))
+            port_wanted = int(s.port)
+            if not port_wanted and str(getattr(s, "link_type", "")) == "named":
+                port_wanted = NAMED_PORT  # a named tunnel points at a fixed local address
+            self.server = Server(app, port_wanted)
             port = self.server.start()
             self.core.prompts.start()
             self._write_host()
@@ -784,11 +896,11 @@ class AgentLinkHost:
         port = self.ensure_server()
         s = self.cfg().agent_link
         kind = str(relay or getattr(s, "link_type", "standard") or "standard")
-        if kind not in ("standard", "backup"):
-            raise ValueError("link type must be standard or backup")
+        if kind not in ("standard", "backup", "named"):
+            raise ValueError("link type must be standard, backup or named")
         url = f"http://127.0.0.1:{port}"
         if remote:
-            url = self._ensure_relay(port) if kind == "backup" else self._ensure_tunnel(port, download)
+            url = self._ensure_link(kind, port, download)
         p = self.core.registry.new_pairing(perms.normalize(scopes), float(s.pairing_ttl_s))
         self.pairing = {
             "url": f"{url}/c/{p.code}",
@@ -800,6 +912,106 @@ class AgentLinkHost:
             "link_type": kind if remote else "local",
         }
         return dict(self.pairing)
+
+    # ------------------------------------------------- a link that survives restarts (v0.1.24)
+    def _ensure_link(self, kind: str, port: int, download: bool) -> str:
+        if kind == "backup":
+            url = self._ensure_relay(port)
+        elif kind == "named":
+            url = self._ensure_named(port, download)
+        else:
+            url = self._ensure_tunnel(port, download)
+        self._link_up(url, kind)
+        return url
+
+    def _ensure_named(self, port: int, download: bool) -> str:
+        from away.agentlink import tunnel
+
+        if self.named is not None and self.named.alive() and self.named.url:
+            return str(self.named.url)
+        s = self.cfg().agent_link
+        host = str(getattr(s, "named_tunnel_hostname", "") or "")
+        token = tunnel.named_token()
+        if not host or not token:
+            raise tunnel.TunnelError(
+                "your own Cloudflare tunnel is not set up yet (Settings > Agent Link > Advanced: hostname + token)"
+            )
+        exe = tunnel.find(self.data_dir, s.cloudflared_path)
+        if exe is None:
+            if not (download and s.cloudflared_download):
+                raise tunnel.TunnelError("the secure link helper (cloudflared) is not installed")
+            exe = tunnel.download(self.data_dir)
+        self.named = tunnel.NamedTunnel(exe, token, host)
+        return str(self.named.start(port))
+
+    def current_url(self) -> str:
+        """The public address agents should use now: your named tunnel, then the standard link, then the backup."""
+        for which in ("named", "tunnel", "relay"):
+            t = getattr(self, which, None)
+            if t is not None and getattr(t, "url", None):
+                with contextlib.suppress(Exception):
+                    if t.alive():
+                        return str(t.url)
+        return ""
+
+    def link_info(self) -> dict[str, Any]:
+        s = self.cfg().agent_link
+
+        def url_of(which: str) -> str | None:
+            t = getattr(self, which, None)
+            return str(t.url) if t is not None and getattr(t, "url", None) else None
+
+        return {
+            "url": self.current_url() or None,
+            "standard_url": url_of("tunnel"),
+            "backup_url": url_of("relay"),
+            "named_url": url_of("named"),
+            "link_type": str(getattr(s, "link_type", "standard")),
+            "stable": bool(url_of("named")),
+            "rendezvous": str(getattr(s, "rendezvous", "ntfy")),
+            "rendezvous_server": str(getattr(s, "rendezvous_server", "https://ntfy.sh")),
+            "keep_link": bool(getattr(s, "keep_link", True)),
+        }
+
+    def _link_up(self, url: str, kind: str) -> None:
+        self._link_failures = 0
+        with contextlib.suppress(Exception):
+            self.announcer.link_up(url, kind)
+
+    def _wants_link(self) -> str:
+        """The link type to bring back by itself ("" = none): keep_link is on and a remote agent can reconnect."""
+        s = self.cfg().agent_link
+        if not bool(getattr(s, "keep_link", True)):
+            return ""
+        if not any(a.kind != "local" for a in self.core.registry.reconnectable()):
+            return ""
+        return str(self.announcer.last_type or getattr(s, "link_type", "standard") or "standard")
+
+    def restore_link(self, reason: str = "start") -> None:
+        """Bring the secure link back in the background (Away started, or the link dropped) and announce the new
+        address. Retries with a growing wait (LINK_RETRY_S) and never downloads anything by itself."""
+        kind = self._wants_link()
+        if self.headless or not kind or self._link_starting or self.current_url():
+            return
+        if time.monotonic() < self._link_retry_at:
+            return
+        self._link_starting = True
+
+        def run() -> None:
+            try:
+                port = self.ensure_server()
+                self._ensure_link(kind, port, download=False)
+                self.errors.append(f"the secure link is back ({reason}); your agents were told the address")
+            except Exception as exc:
+                self._link_failures += 1
+                wait = LINK_RETRY_S[min(self._link_failures - 1, len(LINK_RETRY_S) - 1)]
+                self._link_retry_at = time.monotonic() + wait
+                self.errors.append(f"could not bring the secure link back: {friendly_error(exc)}")
+            finally:
+                self._link_starting = False
+                self.errors = self.errors[-20:]
+
+        threading.Thread(target=run, daemon=True, name="agentlink-restore").start()
 
     def _ensure_relay(self, port: int) -> str:
         """v0.1.23: the backup link (localhost.run or Pinggy over the system's ssh; no Cloudflare, no account)."""
@@ -822,8 +1034,11 @@ class AgentLinkHost:
         p = self.pairing
         if p is not None and p.get("link_type") == "backup" and old and str(p.get("url", "")).startswith(old):
             p["url"] = new + str(p["url"])[len(old) :]
-        self.errors.append(f"the backup link restarted with a new address: {new} (paste it into your AI app again)")
-        self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
+        # v0.1.24: paired agents are told the new address (wake-up address, inbox, rendezvous)
+        self._link_up(new, "backup")
+        self.errors.append(f"the backup link restarted with a new address: {new} (your agents were told)")
+        if not any(a.kind != "local" for a in self.core.registry.reconnectable()):
+            self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
 
     def _ensure_tunnel(self, port: int, download: bool) -> str:
         from away.agentlink import tunnel
@@ -844,7 +1059,7 @@ class AgentLinkHost:
         sometimes blocks one agent's servers on one temporary address (every request answers 403); a new address
         usually fixes it. Agents on this PC are not affected; remote agents need the new address."""
         kind = str(relay or getattr(self.cfg().agent_link, "link_type", "standard") or "standard")
-        which = "relay" if kind == "backup" else "tunnel"
+        which = {"backup": "relay", "named": "named"}.get(kind, "tunnel")
         cur = getattr(self, which)
         old = cur.url if cur is not None else None
         keep_scopes = scopes if scopes is not None else (self.pairing or {}).get("scopes")
@@ -874,7 +1089,7 @@ class AgentLinkHost:
         return res
 
     def stop_tunnel(self) -> None:
-        for which in ("tunnel", "relay"):
+        for which in ("tunnel", "relay", "named"):
             t = getattr(self, which, None)
             if t is not None:
                 t.stop()
@@ -884,7 +1099,10 @@ class AgentLinkHost:
     def disconnect_all(self) -> int:
         n = self.core.registry.revoke_all()
         self.core.control.stop("Disconnect all")
+        for a in self.core.registry.list(include_inactive=True):
+            self.core.service.reconcile(a.id, "Disconnect all")
         self.core.service._watchers.clear()
+        self.core.service._live_views.clear()
         self._watching("", False)
         self.stop_tunnel()
         self.core.events.publish("agent.disconnected", {"all": True})
@@ -893,10 +1111,13 @@ class AgentLinkHost:
     # --------------------------------------------------------- control loop
     def start(self) -> AgentLinkHost:
         self.core.prompts.start()
-        if any(a.kind == "local" for a in self.core.registry.list()):
+        # v0.1.24: an agent that stays connected (persistent token) finds the server up after a restart too
+        if any(a.kind == "local" for a in self.core.registry.list()) or self.core.registry.tokens:
             with contextlib.suppress(Exception):
                 self.ensure_server()
         self._write_host()
+        if not self.headless:
+            self.restore_link("Project Away started")  # v0.1.24: paired agents keep working after a restart
         threading.Thread(target=self._loop, daemon=True, name="agentlink-host").start()
         return self
 
@@ -925,6 +1146,18 @@ class AgentLinkHost:
         if self.relay is not None and not self.relay.alive():
             self.errors.append(str(getattr(self.relay, "gave_up", "") or "the backup link stopped; press it again"))
             self.relay = None
+        if self.named is not None and not self.named.alive():
+            self.errors.append("your Cloudflare tunnel stopped")
+            self.named = None
+        clear_secrets(self.base)  # v0.1.24: a rotated token nobody picked up is not kept
+        self.core.registry.refresh_ttl_s = float(getattr(self.cfg().agent_link, "refresh_ttl_days", 30)) * 86400.0
+        self.core.registry.link_access_s = float(getattr(self.cfg().agent_link, "remote_ttl_min", 60)) * 60.0
+        url = self.current_url()
+        if url:
+            with contextlib.suppress(Exception):
+                self.announcer.link_up(url, self.announcer.last_type or "standard")  # re-publish when due
+        else:
+            self.restore_link("the link dropped")  # v0.1.24: brings it back while a remote agent can reconnect
         self.write_state()
 
     def _take_requests(self) -> None:
@@ -974,10 +1207,30 @@ class AgentLinkHost:
             )
             return ag.public()
         if a == "revoke":
-            core.control.revoke_agent(str(req.get("agent_id")))
-            return {"revoked": core.registry.revoke(str(req.get("agent_id")))}
-        if a == "set_scopes":
-            return core.registry.set_scopes(str(req.get("agent_id")), req.get("scopes") or []).public()
+            return {"revoked": core.service.revoke(str(req.get("agent_id")))}
+        if a == "set_scopes":  # v0.1.24: applied to running sessions and live views at once
+            return core.service.set_scopes(str(req.get("agent_id")), req.get("scopes") or []).public()
+        # v0.1.24 Settings > Agent Link > Agent tokens (and `away agent tokens ...`)
+        if a == "tokens":
+            return {"tokens": core.registry.tokens_public()}
+        if a == "token_revoke":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                return {"revoked": False}
+            return {"revoked": core.service.revoke_token(t.id), "agent_id": t.agent_id}
+        if a == "token_rotate":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                raise KeyError("no such agent token")
+            t, secret = core.service.rotate_token(t.id)
+            ref = put_secret(self.base, secret)  # handed to whoever asked, once, never through state.json
+            return {"token_id": t.id, "secret_ref": ref, "old_key_until": t.prev_until, "expires": t.expires}
+        if a == "token_scopes":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                raise KeyError("no such agent token")
+            core.service.set_scopes(t.agent_id, req.get("scopes") or [])
+            return next((x for x in core.registry.tokens_public() if x["id"] == t.id), {})
         if a == "disconnect_all":
             return {"disconnected": self.disconnect_all()}
         if a == "answer":
@@ -993,7 +1246,7 @@ class AgentLinkHost:
         if a == "control_stop":
             return {"stopped": core.control.stop("you pressed Stop")}
         if a == "control_undo":
-            return core.control.undo_last()
+            return core.control.undo_last_by_user()
         if a == "add_preference":
             return {"items": core.prefs.add(str(req.get("text")), who="you")}
         if a == "remove_preference":
@@ -1009,6 +1262,31 @@ class AgentLinkHost:
                 note="requested by you",
             )
             return {"path": f"diagnostics/{path.name}"}
+        if a == "selftest":  # v0.1.24: Settings / `away selftest` while the app runs
+            from away.selftest.run import Busy
+
+            try:
+                return self.selftest.start(trigger=str(req.get("trigger") or "you"), only=req.get("only"))
+            except Busy as exc:
+                return {"state": "running", "note": str(exc)}
+        if a == "selftest_state":
+            return {"state": dict(self.selftest.state), "latest": self.selftest.latest()}
+        if a == "selftest_fix":  # v0.1.24: a fix button in the report window
+            from away.selftest import fixes
+
+            return fixes.apply(str(req.get("fix") or ""), app=self.app, host=self)
+        if a == "pccheck_probe":  # v0.1.24 Check my PC: one measurement inside the app (fixed list of steps)
+            from away.selftest import pcenv
+
+            return pcenv.probe(self.app, self, str(req.get("probe") or ""), list(req.get("args") or []))
+        if a == "pccheck_share":  # v0.1.24: only to agents with share_logs, never the event stream
+            from away.agentlink.inbox import post_json
+            from away.selftest import pccheck
+
+            rep = req.get("report")
+            if not isinstance(rep, dict):
+                raise ValueError("no report to send")
+            return pccheck.share(rep, self.core.registry.reconnectable(), inbox=self.core.service.inbox, post=post_json)
         if a == "want_health":
             self._health_until = time.monotonic() + HEALTH_WANT_S
             return {}
@@ -1032,10 +1310,13 @@ class AgentLinkHost:
             "link": {
                 "url": self.tunnel.url if self.tunnel else None,
                 "backup_url": self.relay.url if self.relay else None,  # v0.1.23
+                "named_url": self.named.url if self.named else None,  # v0.1.24
+                "announced": list(self.announcer.log)[-3:],  # v0.1.24: who was told the address, and how
             },
             "pairing": {k: v for k, v in (p or {}).items() if k != "code"} or None,
             "agents": agents,
             "waiting": waiting,
+            "tokens": core.registry.tokens_public(),  # v0.1.24 (never a token or a hash)
             "prompts": core.prompts.pending(),
             "control": core.control.status(),
             "actions": core.control.actions(20),

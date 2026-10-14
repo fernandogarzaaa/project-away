@@ -134,8 +134,13 @@ def foreground_window() -> dict[str, Any] | None:  # pragma: no cover - platform
         return None
 
 
-def secure_desktop_active() -> bool:  # pragma: no cover - Windows only
-    """True while Windows shows the secure desktop (UAC, Ctrl+Alt+Del, lock screen) or a credential dialog."""
+class SecureDesktopUnknown(RuntimeError):
+    """The secure-desktop check itself failed (v0.1.24: agents are then stopped, never let through)."""
+
+
+def secure_desktop_active() -> bool:
+    """True while Windows shows the secure desktop (UAC, Ctrl+Alt+Del, lock screen) or a credential dialog.
+    Raises :class:`SecureDesktopUnknown` when it cannot tell (the caller fails closed)."""
     if sys.platform != "win32":
         return False
     try:
@@ -155,8 +160,8 @@ def secure_desktop_active() -> bool:  # pragma: no cover - Windows only
             user32.CloseDesktop(hdesk)
         fg = foreground_window() or {}
         return fg.get("class") in SECURE_CLASSES or str(fg.get("process", "")).lower() == "consent.exe"
-    except Exception:
-        return False
+    except Exception as exc:
+        raise SecureDesktopUnknown(str(exc)) from exc
 
 
 def is_terminal(process: str | None) -> bool:

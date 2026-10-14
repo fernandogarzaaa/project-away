@@ -165,6 +165,106 @@ class AgentLinkModel:
     def set_scopes(self, agent_id: str, scopes: list[str]) -> None:
         self.send("set_scopes", agent_id=agent_id, scopes=perms.to_list(perms.normalize(scopes)))
 
+    # ------------------------------------------------- agent tokens (v0.1.24)
+    @staticmethod
+    def _ago(t: float, now: float) -> str:
+        d = now - t
+        if d < 120:
+            return "just now"
+        if d < 7200:
+            return f"{int(d // 60)} minutes ago"
+        if d < 2 * 86400:
+            return f"{int(d // 3600)} hours ago"
+        return time.strftime("%b %d", time.localtime(t))
+
+    @classmethod
+    def token_rows(cls, st: dict[str, Any], now: float | None = None) -> list[dict[str, Any]]:
+        """Settings > Agent Link > "Agent tokens": one row per agent that stays connected, in plain words."""
+        now = time.time() if now is None else now
+        rows = []
+        for t in st.get("tokens") or []:
+            used = "not used yet"
+            if t.get("last_used"):
+                used = f"last used {cls._ago(float(t['last_used']), now)}"
+                if t.get("last_source"):
+                    used += f" from {t['last_source']}"
+                if t.get("last_host") and t["last_host"] not in ("127.0.0.1", "localhost", "::1"):
+                    used += f" (through {t['last_host']})"
+            ends = (
+                "Stays connected until you revoke it"
+                if not t.get("expires")
+                else f"Stays connected until {time.strftime('%b %d, %Y', time.localtime(float(t['expires'])))}"
+            )
+            old = ""
+            if t.get("old_key_until"):
+                old = f"The old token still works until {time.strftime('%H:%M', time.localtime(t['old_key_until']))}"
+            rows.append(
+                {
+                    "id": t["id"],
+                    "agent_id": t.get("agent_id", ""),
+                    "name": t.get("agent") or "AI agent",
+                    "connected": bool(t.get("connected")),
+                    "scopes": list(t.get("scopes") or []),
+                    "can": "Can: " + (", ".join(t.get("permissions") or []) or "nothing yet"),
+                    "when": f"Added {time.strftime('%b %d', time.localtime(float(t.get('created') or now)))}; {used}",
+                    "ends": ends,
+                    "old_key": old,
+                }
+            )
+        return rows
+
+    def revoke_token(self, token_id: str) -> str:
+        """Revoke: it stops working at once and the agent is disconnected."""
+        p = self.not_running()
+        if p is not None:
+            return p.text
+        res = self.wait_result(self.send("token_revoke", token_id=token_id), 15.0)
+        if res.get("ok") and (res.get("result") or {}).get("revoked"):
+            return "Revoked. It is disconnected now; it can only come back if you allow it again."
+        return str(res.get("error") or "That agent was already disconnected.")
+
+    def rotate_token(self, token_id: str) -> tuple[Problem | None, str | None]:
+        """A replacement token, shown once (the old one keeps working for an hour)."""
+        p = self.not_running()
+        if p is not None:
+            return p, None
+        res = self.wait_result(self.send("token_rotate", token_id=token_id), 15.0)
+        if not res.get("ok"):
+            return Problem(str(res.get("error") or "Something went wrong."), "Try again", "retry"), None
+        secret = hostmod.take_secret(str((res.get("result") or {}).get("secret_ref") or ""), self.data_dir)
+        if not secret:
+            return Problem("The new token could not be shown. Please try again.", "Try again", "retry"), None
+        return None, secret
+
+    # "New agent tokens last": the default lifetime of a token issued when you choose Keep this agent connected
+    EXPIRY_CHOICES = (("90d", "90 days"), ("30d", "30 days"), ("never", "Until I revoke it"))
+
+    def token_expiry(self) -> str:
+        """``agent_link.token_expiry`` (90 days unless you changed it)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return str(cfg.agent_link.token_expiry or "90d")
+        except Exception:
+            return "90d"
+
+    def set_token_expiry(self, choice: str) -> None:
+        """Accepts the key ("90d") or its label ("90 days"); tokens already given keep their own end date."""
+        from away import config as cfgmod
+        from away.agentlink.auth import expiry_choice
+
+        by_label = {label: key for key, label in self.EXPIRY_CHOICES}
+        value = expiry_choice(by_label.get(choice, choice))
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.token_expiry = value
+        cfgmod.save(cfg, path)
+
+    def set_token_scopes(self, token_id: str, scopes: list[str]) -> None:
+        self.send("token_scopes", token_id=token_id, scopes=perms.to_list(perms.normalize(scopes)))
+
     def answer(self, prompt_id: str, answer: str) -> None:
         self.send("answer", prompt_id=prompt_id, answer=answer)
 

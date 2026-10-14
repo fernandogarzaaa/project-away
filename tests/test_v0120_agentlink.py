@@ -443,7 +443,7 @@ def test_preferences(core) -> None:
 def test_record_session_writes_a_replayable_file(core) -> None:
     from away.agentlink import recording, replay
 
-    a, _ = core.registry.issue("Claude", ["read", "diagnose"], 3600)
+    a, _ = core.registry.issue("Claude", ["read", "diagnose", "share_logs"], 3600)
     import threading
 
     def feed() -> None:
@@ -520,7 +520,8 @@ def test_control_needs_approval_and_expires() -> None:
     with pytest.raises(ControlRefused):
         ctl.request("a1", "Claude")  # denied
     assert backend.calls == []
-    ctl2, backend2, asked2 = _control(clock, ["Allow"])
+    canvas = FakeUIA(at=Element("Canvas", "PaneControl", rect=(0, 0, 99, 99)))  # a named target: no question
+    ctl2, backend2, asked2 = _control(clock, ["Allow"], uia=canvas)
     st = ctl2.request("a1", "Claude", why="fill the form")
     assert st["active"] and asked2[0]["kind"] == "approve" and asked2[0]["urgency"] == "high"
     ctl2.act("a1", "click", x=10, y=20)
@@ -535,7 +536,8 @@ def test_control_needs_approval_and_expires() -> None:
 
 def test_takeover_pauses_and_resume_needs_approval() -> None:
     clock = Clock()
-    ctl, backend, asked = _control(clock, ["Allow", "Continue"])
+    canvas = FakeUIA(at=Element("Canvas", "PaneControl", rect=(0, 0, 99, 99)))
+    ctl, backend, asked = _control(clock, ["Allow", "Continue"], uia=canvas)
     ctl.request("a1", "Claude")
     assert not ctl.user_input("hand")  # the thumbs up that approved it is not a takeover (2 s grace)
     clock.advance(2.5)
@@ -650,12 +652,12 @@ def test_undo_last_action() -> None:
     ctl.request("a1", "Claude")
     ctl.act("a1", "type_text", text="hello")
     ctl.act("a1", "move", x=300, y=300)
-    ctl.undo_last()
+    ctl.undo_last("a1")
     assert backend.calls[-1] == ("move", (50, 60))
-    ctl.undo_last()
+    ctl.undo_last("a1")
     assert backend.calls[-1] == ("hotkey", ("ctrl", "z"))
     with pytest.raises(ControlRefused):
-        ctl.undo_last()
+        ctl.undo_last("a1")
 
 
 def test_from_image_coordinates_use_the_last_screenshot_scale() -> None:

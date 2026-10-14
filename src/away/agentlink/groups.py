@@ -48,6 +48,8 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "files": GroupAction("list_files"),
         "download": GroupAction("read_file", ("path",), {"path": "rel"}),
         "logs": GroupAction("get_logs", ("lines",)),
+        "selftest": GroupAction("run_selftest", ("wait", "only")),  # v0.1.24
+        "selftest_latest": GroupAction("selftest_latest"),
     },
     "control": {
         "request": GroupAction("request_control", ("why", "minutes")),

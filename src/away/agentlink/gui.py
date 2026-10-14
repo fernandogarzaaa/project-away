@@ -84,6 +84,22 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.prompt_box = ttk.LabelFrame(f, text="Waiting for your answer", padding=6)
         self.agents_box = ttk.LabelFrame(f, text="Your agents", padding=6)
         self.agents_box.pack(fill="x", pady=6)
+        # v0.1.24: agents that stay connected (persistent agent tokens)
+        self.tokens_box = ttk.LabelFrame(f, text="Agent tokens (agents that stay connected)", padding=6)
+        self.tokens_box.pack(fill="x", pady=6)
+        self.token_note = tk.StringVar(value="")
+        # how long a new agent token works (agent_link.token_expiry): 90 days by default, 30 days, or until revoked
+        te = ttk.Frame(f)
+        te.pack(fill="x")
+        ttk.Label(te, text="New agent tokens last:").pack(side="left")
+        labels = dict(self.m.EXPIRY_CHOICES)
+        self.token_expiry_var = tk.StringVar(value=labels.get(self.m.token_expiry(), labels["90d"]))
+        te_box = ttk.Combobox(
+            te, textvariable=self.token_expiry_var, values=list(labels.values()), state="readonly", width=18
+        )
+        te_box.pack(side="left", padx=6)
+        te_box.bind("<<ComboboxSelected>>", lambda _e: self.m.set_token_expiry(self.token_expiry_var.get()))
+        ttk.Label(te, text="(tokens already given keep theirs)", foreground="#555").pack(side="left")
         # v0.1.22 "Talk to your agent"
         tb = ttk.LabelFrame(f, text="Talk to your agent", padding=6)
         tb.pack(fill="x", pady=6)
@@ -220,6 +236,7 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self._show_problem(self.m.not_running())
         self._render_prompts(st.get("prompts") or [])
         self._render_agents(st.get("agents") or [])
+        self._render_tokens(st)
         self.inbox_text.set("\n".join(self.m.inbox_lines(st)))
         ctl = st.get("control") or {}
         if ctl.get("active"):
@@ -316,6 +333,118 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         from away.agentlink.gui_model import AgentLinkModel
 
         self.default_cb["values"] = AgentLinkModel.default_choices(agents)
+
+    def _render_tokens(self, st: dict[str, Any]) -> None:
+        """v0.1.24 "Agent tokens": who stays connected, what it can do, when it was last used and from where."""
+        rows = self.m.token_rows(st)
+        key = [(r["id"], r["can"], r["when"], r["ends"], r["old_key"], r["connected"]) for r in rows]
+        key.append(("note", self.token_note.get(), "", "", "", False))
+        if getattr(self, "_tokens_key", None) == key:
+            return
+        self._tokens_key = key
+        box = self.tokens_box
+        for w in box.winfo_children():
+            w.destroy()
+        if self.token_note.get():
+            self.ttk.Label(box, textvariable=self.token_note, foreground="#1a7f37", wraplength=640).pack(anchor="w")
+        if not rows:
+            self.ttk.Label(
+                box,
+                text="None. When you allow an agent, choose \u201cKeep this agent connected\u201d and it comes back "
+                "by itself after restarts, without asking again.",
+                wraplength=640,
+                justify="left",
+                foreground="#555",
+            ).pack(anchor="w")
+            return
+        for r in rows:
+            row = self.ttk.Frame(box)
+            row.pack(fill="x", pady=3)
+            head = self.ttk.Frame(row)
+            head.pack(fill="x")
+            mark = "\u2713" if r["connected"] else "\u2022"
+            self.ttk.Label(head, text=f"{mark} {r['name']}", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+            self.ttk.Button(head, text="Revoke", command=lambda x=r: self._revoke_token(x)).pack(side="right")
+            self.ttk.Button(head, text="New token", command=lambda x=r: self._rotate_token(x)).pack(
+                side="right", padx=2
+            )
+            self.ttk.Button(head, text="What it can do", command=lambda x=r: self._edit_token_perms(x)).pack(
+                side="right"
+            )
+            for line in (r["can"], r["when"], r["ends"], r["old_key"]):
+                if line:
+                    self.ttk.Label(row, text="   " + line, foreground="#555").pack(anchor="w")
+
+    def _revoke_token(self, r: dict[str, Any]) -> None:
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Revoke?",
+            f"{r['name']} will be disconnected right away and can only come back if you allow it again.",
+            parent=self.frame,
+        ):
+            return
+        self._bg(lambda: self.m.revoke_token(r["id"]), lambda msg: self.token_note.set(str(msg)))
+
+    def _rotate_token(self, r: dict[str, Any]) -> None:
+        def done(res: Any) -> None:
+            if isinstance(res, Exception):
+                self.token_note.set(f"Something went wrong: {res}")
+                return
+            problem, secret = res
+            if problem is not None or not secret:
+                self.token_note.set(problem.text if problem is not None else "Something went wrong.")
+                return
+            self._show_token_once(r["name"], secret)
+
+        self._bg(lambda: self.m.rotate_token(r["id"]), done)
+
+    def _show_token_once(self, name: str, secret: str) -> None:
+        tk, ttk = self.tk, self.ttk
+        top = tk.Toplevel(self.frame)
+        top.title(f"New token for {name}")
+        ttk.Label(
+            top,
+            text=f"Give this new token to {name}. It is shown only now; after you close this window nobody can see "
+            "it again. The old token keeps working for one hour, then stops.",
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+        var = tk.StringVar(value=secret)
+        ent = ttk.Entry(top, textvariable=var, width=60)
+        ent.state(["readonly"])
+        ent.pack(padx=12, pady=4)
+
+        def copy() -> None:
+            top.clipboard_clear()
+            top.clipboard_append(secret)
+            copied.set("Copied")
+
+        copied = tk.StringVar(value="")
+        row = ttk.Frame(top)
+        row.pack(pady=8)
+        ttk.Button(row, text="Copy", command=copy).pack(side="left")
+        ttk.Label(row, textvariable=copied, foreground="#1a7f37").pack(side="left", padx=6)
+        ttk.Button(row, text="Done", command=top.destroy).pack(side="left", padx=6)
+
+    def _edit_token_perms(self, r: dict[str, Any]) -> None:
+        tk, ttk = self.tk, self.ttk
+        top = tk.Toplevel(self.frame)
+        top.title(f"What {r['name']} can do")
+        vars_: dict[str, Any] = {}
+        for p in perms.PERMISSIONS:
+            v = tk.BooleanVar(value=p.scope in r["scopes"])
+            vars_[p.scope] = v
+            cb = ttk.Checkbutton(top, text=f"{p.icon}  {p.label}", variable=v)
+            if p.locked:
+                cb.state(["disabled"])
+            cb.pack(anchor="w", padx=12, pady=3)
+
+        def save() -> None:
+            self.m.set_token_scopes(r["id"], [s for s, v in vars_.items() if v.get()])
+            top.destroy()
+
+        ttk.Button(top, text="Save", command=save).pack(pady=8)
 
     def _edit_perms(self, agent: dict[str, Any]) -> None:
         tk, ttk = self.tk, self.ttk

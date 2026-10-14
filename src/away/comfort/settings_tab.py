@@ -47,6 +47,21 @@ def build_tab(win: Any, nb: Any) -> Any:  # pragma: no cover - widgets
         cursor="hand2",
         command=lambda: win._report(actions.launch_first_run(), "opening the guided first run..."),
     ).pack(anchor="w", pady=(6, 16))
+    tk.Label(  # v0.1.24: one click, about 2 minutes, a report of what really works on this PC
+        f,
+        text="Something not working? Check my PC tests your cameras, voice and pointer in about 2 minutes.",
+        anchor="w",
+    ).pack(fill="x")
+    tk.Button(
+        f,
+        text="Check my PC",
+        font=big,
+        relief="flat",
+        padx=22,
+        pady=8,
+        cursor="hand2",
+        command=lambda: win._report(actions.launch_check_pc(), "opening Check my PC..."),
+    ).pack(anchor="w", pady=(6, 16))
     ttk.Separator(f).pack(fill="x", pady=4)
     vars_: dict[str, Any] = {}
 
