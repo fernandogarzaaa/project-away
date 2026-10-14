@@ -721,3 +721,94 @@ def test_action_log_shows_an_agent_only_its_own_actions(tmp_path: Path) -> None:
     assert [e["agent"] for e in core.service.action_log(b)] == ["Gemini"]
     core.cfg_obj.agent_link.share_control_history = True  # the person allowed agents to see the whole history
     assert {e["agent"] for e in core.service.action_log(a)} == {"Claude", "Gemini"}
+
+
+# ------------------------------------------------------------- 8. taking a permission away ends what it allowed
+def _host(tmp_path: Path) -> Any:
+    from away.agentlink.host import AgentLinkHost
+    from away.agentlink.prompts import NullUI
+
+    class UI(NullUI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.overlays: list[tuple[str, str]] = []
+
+        def flash(self, text: str) -> None:
+            pass
+
+        def overlay(self, name: str, stop_file: Path, mode: str = "control") -> None:
+            self.overlays.append((name, mode))
+
+    ui = UI()
+    h = AgentLinkHost(None, data_dir=tmp_path, ui=ui, headless=True)
+    h.core.control.ask = lambda *a, **k: {"answer": "Allow"}
+    offs: list[int] = []
+    orig_off = h.core.control.hooks.overlay_off
+
+    def off() -> None:
+        offs.append(1)
+        orig_off()
+
+    h.core.control.hooks.overlay_off = off
+    a, _ = h.core.registry.issue("Claude", ["read", "control", "screen"], 3600)
+    h.core.control.request(a.id, a.name)
+    h.core.service.screen_watch(a, True, scale=0.5)
+    h.core.control.views[a.id] = (0.0, 0.0, 0.5)
+    assert h.core.control.status()["active"] and h._watch_stop is not None
+    return h, a, offs
+
+
+def test_removing_control_ends_the_session_and_turns_the_border_off(tmp_path: Path) -> None:
+    h, a, offs = _host(tmp_path)
+    h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "screen"]})
+    assert h.core.control.status() == {"active": False} and offs
+    with pytest.raises(ControlRefused):
+        h.core.control.act(a.id, "move", x=1, y=1)
+    assert a.id in h.core.service._watchers  # the screen permission is still on: its live view stays
+
+
+def test_removing_screen_stops_the_live_view_and_forgets_the_view(tmp_path: Path) -> None:
+    h, a, _ = _host(tmp_path)
+    h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "control"]})
+    assert a.id not in h.core.service._watchers and a.id not in h.core.service._live_views
+    assert h._watch_stop is None  # the badge is gone
+    assert a.id not in h.core.control.views
+    assert h.core.control.status()["active"]  # control is still allowed
+
+
+@pytest.mark.parametrize("how", ["revoke", "disconnect", "disconnect_all"])
+def test_revoke_and_disconnect_end_control_and_the_live_view(tmp_path: Path, how: str) -> None:
+    h, a, offs = _host(tmp_path)
+    if how == "revoke":
+        h.handle({"action": "revoke", "agent_id": a.id})
+    elif how == "disconnect":
+        h.core.service.disconnect(a)
+    else:
+        h.handle({"action": "disconnect_all"})
+    assert h.core.control.status() == {"active": False} and offs
+    assert a.id not in h.core.service._watchers and h._watch_stop is None
+    assert a.id not in h.core.control.views
+
+
+def test_removing_control_mid_typing_stops_and_lets_go_of_the_keys(tmp_path: Path) -> None:
+    h, a, _ = _host(tmp_path)
+    backend = BlockingBackend("type_text", 2)
+    h.core.control.hooks.backend = backend
+    h.core.control.hooks.uia = FakeUIA(focused=TEXT_BOX)
+    t, out = _run_in_thread(lambda: h.core.control.act(a.id, "type_text", text="abcdefgh" * 20))
+    assert backend.reached.wait(5.0)
+    h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read"]})
+    backend.go.set()
+    t.join(5.0)
+    assert isinstance(out.get("error"), ControlRefused)
+    assert [c[0] for c in backend.calls].count("type_text") == 2 and backend.calls[-1][0] == "release_modifiers"
+
+
+def test_the_settings_window_sends_the_change_to_the_host(tmp_path: Path) -> None:
+    from away.agentlink.gui_model import AgentLinkModel
+
+    m = AgentLinkModel(data_dir=tmp_path, config_path=tmp_path / "config.yaml")
+    sent: list[tuple[str, dict[str, Any]]] = []
+    m.send = lambda action, **kw: sent.append((action, kw))  # type: ignore[method-assign]
+    m.set_scopes("abc", ["read", "screen"])
+    assert sent == [("set_scopes", {"agent_id": "abc", "scopes": ["read", "screen"]})]

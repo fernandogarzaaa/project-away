@@ -903,7 +903,10 @@ class AgentLinkHost:
     def disconnect_all(self) -> int:
         n = self.core.registry.revoke_all()
         self.core.control.stop("Disconnect all")
+        for a in self.core.registry.list(include_inactive=True):
+            self.core.service.reconcile(a.id, "Disconnect all")
         self.core.service._watchers.clear()
+        self.core.service._live_views.clear()
         self._watching("", False)
         self.stop_tunnel()
         self.core.events.publish("agent.disconnected", {"all": True})
@@ -993,10 +996,9 @@ class AgentLinkHost:
             )
             return ag.public()
         if a == "revoke":
-            core.control.revoke_agent(str(req.get("agent_id")))
-            return {"revoked": core.registry.revoke(str(req.get("agent_id")))}
-        if a == "set_scopes":
-            return core.registry.set_scopes(str(req.get("agent_id")), req.get("scopes") or []).public()
+            return {"revoked": core.service.revoke(str(req.get("agent_id")))}
+        if a == "set_scopes":  # v0.1.24: applied to running sessions and live views at once
+            return core.service.set_scopes(str(req.get("agent_id")), req.get("scopes") or []).public()
         if a == "disconnect_all":
             return {"disconnected": self.disconnect_all()}
         if a == "answer":

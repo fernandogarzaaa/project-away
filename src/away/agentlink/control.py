@@ -290,9 +290,13 @@ class ComputerControl:
         self._end(reason)
         return had
 
-    def revoke_agent(self, agent_id: str) -> None:
+    def revoke_agent(self, agent_id: str, reason: str = "the agent was disconnected") -> None:
+        """End this agent's grant now (an action in progress stops and lets go of buttons and keys) and forget
+        its screenshot geometry."""
         if self.grant is not None and self.grant.agent_id == agent_id:
-            self._end("the agent was disconnected")
+            self._end(reason)
+        self.views.pop(agent_id, None)
+        self.scales.pop(agent_id, None)
 
     # -------------------------------------------------------------- takeover
     def note_own_mouse(self, seconds: float = MOUSE_ECHO_S) -> None:

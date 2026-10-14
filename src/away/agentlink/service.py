@@ -783,9 +783,36 @@ class Service:
 
     # --------------------------------------------------------- session
     def disconnect(self, agent: Agent) -> dict[str, Any]:
-        self.control.revoke_agent(agent.id)
         self.registry.revoke(agent.id)
+        self.reconcile(agent.id, "the agent disconnected")
         return {"disconnected": True}
+
+    def set_scopes(self, agent_id: str, scopes: Any) -> Agent:
+        """The person changed this agent's permissions (Settings > Agent Link): applied to what is running now."""
+        a = self.registry.set_scopes(agent_id, scopes)
+        self.reconcile(agent_id, "you turned off its permission to use your computer")
+        return a
+
+    def revoke(self, agent_id: str) -> bool:
+        done = self.registry.revoke(agent_id)
+        self.reconcile(agent_id, "the agent was disconnected")
+        return done
+
+    def reconcile(self, agent_id: str, reason: str = "its access changed") -> None:
+        """v0.1.24 hardening: live state follows the agent's permissions at once. Without "Let it use my computer"
+        (or without access at all) its control session ends (border off, any action in progress stops and lets go
+        of buttons and keys); without "See my screen" its live view stops and its view state is cleared."""
+        a = self.registry.get(agent_id)
+        active = a is not None and a.active(time.time())
+        can_control = a is not None and active and a.has(perms.CONTROL)
+        can_see = a is not None and active and a.has(perms.SCREEN)
+        if not can_control:
+            self.control.revoke_agent(agent_id, reason if active else "the agent was disconnected")
+        if not can_see:
+            if agent_id in self._watchers or agent_id in self._live_views:
+                self.stop_watching(agent_id)
+            self.control.views.pop(agent_id, None)
+            self.control.scales.pop(agent_id, None)
 
 
 def normalize_ops(ops: Any) -> list[dict[str, Any]]:
