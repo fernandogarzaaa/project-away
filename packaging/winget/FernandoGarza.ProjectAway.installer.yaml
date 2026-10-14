@@ -1,0 +1,21 @@
+# winget installer manifest. Replace "{{VERSION}}" and "{{SHA256}}" (the installer's line in SHA256SUMS.txt).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: FernandoGarza.ProjectAway
+PackageVersion: "{{VERSION}}"
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+# silent installs skip the 1.6 GB model download (the app fetches the models on first launch instead)
+InstallerSwitches:
+  Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=autostart,desktopicon
+  SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=autostart,desktopicon
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/fernandogarzaaa/project-away/releases/download/v{{VERSION}}/ProjectAway-{{VERSION}}-windows-x64-setup.exe
+    InstallerSha256: "{{SHA256}}"
+ManifestType: installer
+ManifestVersion: 1.9.0
