@@ -9,8 +9,10 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
 2. **Visible.** While a grant is active a bright border and the banner "<agent> is using your computer - move
    your hand or mouse to take over" are on screen (``away agent-ui control``).
 3. **Takeover.** Any real input (physical mouse/keyboard - told apart from the agent's own input by
-   :class:`~away.app.autopause.ManualInputGuard` - or a hand gesture) pauses the agent instantly; resuming needs
-   a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or holding an open palm ~1 s.
+   :class:`~away.app.autopause.ManualInputGuard` and short echo windows: typing never hides a real mouse movement,
+   and each typed chunk hides key presses for a moment only - or a hand gesture) pauses the agent instantly and
+   interrupts the action in progress; resuming needs a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or
+   holding an open palm ~1 s (never delayed by the short grace right after approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
    secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
@@ -47,7 +49,15 @@ BLOCKED_COMBOS = ({"cmd", "r"}, {"cmd", "x"}, {"ctrl", "alt", "delete"}, {"ctrl"
 BLOCKED_APPS = desktop.TERMINAL_PROCESSES
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+&'-]{0,39}$")
 ENTER_KEYS = ("enter", "return")
-GRACE_S = 2.0
+# v0.1.24 hardening: the moment after approval (the click or thumbs up that allowed it) is not a takeover, but only
+# briefly; a deliberate stop (hotkey, "stop", open palm) never waits for it (:meth:`ComputerControl.stop`).
+GRACE_S = 0.75
+# The agent's own input echoes back through the OS listeners. Mouse and keyboard echoes are told apart: typing never
+# hides a real mouse movement, and each typed chunk hides key presses for a short moment only.
+MOUSE_ECHO_S = 0.25
+KEY_ECHO_S = 0.3
+KEY_ECHO_PER_CHAR_S = 0.02
+TYPE_CHUNK = 8  # characters typed at a time (each chunk can be interrupted)
 ACTIONS = (
     "move",
     "click",
@@ -133,7 +143,8 @@ class ComputerControl:
         self.log: deque[LogEntry] = deque(maxlen=300)
         self.grant: Grant | None = None
         self._lock = threading.RLock()
-        self._own_input_until = 0.0
+        self._own_mouse_until = 0.0  # the agent's own mouse input may echo back until then
+        self._own_keys_until = 0.0  # the agent's own key presses may echo back until then
         self._grace_until = 0.0  # just after the user approved (maybe with a thumbs up): that is not a takeover
         self.platform = hooks.platform or sys.platform
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
@@ -252,8 +263,11 @@ class ComputerControl:
             self._end("the agent was disconnected")
 
     # -------------------------------------------------------------- takeover
-    def note_own_input(self, seconds: float = 0.25) -> None:
-        self._own_input_until = self.clock() + seconds
+    def note_own_mouse(self, seconds: float = MOUSE_ECHO_S) -> None:
+        self._own_mouse_until = self.clock() + seconds
+
+    def note_own_keys(self, seconds: float = KEY_ECHO_S) -> None:
+        self._own_keys_until = self.clock() + seconds
 
     def user_input(self, source: str) -> bool:
         """Real user input (mouse, keyboard, gesture). Pauses an active grant. True when it paused."""
@@ -264,8 +278,10 @@ class ComputerControl:
             now = self.clock()
             if now < self._grace_until:
                 return False  # the approval itself (a click, a thumbs up) is not a takeover
-            if source in ("mouse", "keyboard") and now < self._own_input_until:
-                return False  # our own synthetic input echoing back through the OS listener
+            if source == "mouse" and now < self._own_mouse_until:
+                return False  # our own mouse input echoing back through the OS listener
+            if source == "keyboard" and now < self._own_keys_until:
+                return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
         with contextlib.suppress(Exception):
             self.hooks.overlay_off()
@@ -390,7 +406,7 @@ class ComputerControl:
             x, y, label = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
             if action != "move":
                 self._confirm_risky(g, label, f"click '{label}'")
-            self.note_own_input()
+            self.note_own_mouse()
             b.move(x, y)
             if action == "click":
                 b.click(1)
@@ -410,11 +426,12 @@ class ComputerControl:
                 agent_id, kw.get("x2"), kw.get("y2"), kw.get("to_element"), bool(kw.get("from_image"))
             )
             self._confirm_risky(g, l1, f"drag '{l1}'")
-            self.note_own_input(1.0)
+            self.note_own_mouse()
             b.move(x1, y1)
             b.press()
             steps = 8
             for i in range(1, steps + 1):
+                self.note_own_mouse()
                 b.move(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps))
                 self.hooks.sleep(0.02)
             b.release()
@@ -426,8 +443,9 @@ class ComputerControl:
                 x, y, _l = self._point(
                     agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image"))
                 )
+                self.note_own_mouse()
                 b.move(x, y)
-            self.note_own_input()
+            self.note_own_mouse()
             if dy:
                 b.scroll(dy)
             if dx and hasattr(b, "hscroll"):
@@ -441,10 +459,14 @@ class ComputerControl:
             self._typing_target_ok()
             if "\n" in text:
                 self._confirm_risky(g, self._focused_label() or self._window_title(), "press Enter")
-            self.note_own_input(0.5 + len(text) * 0.02)
             if not hasattr(b, "type_text"):
                 raise ControlRefused("typing is not supported on this system")
-            b.type_text(text)
+            with self._lock:
+                self._own_mouse_until = 0.0  # while it types, any real mouse movement is the person
+            for i in range(0, len(text), TYPE_CHUNK):
+                chunk = text[i : i + TYPE_CHUNK]
+                self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
+                b.type_text(chunk)
             detail = f"{len(text)} characters"
             undo = {"keys": ["cmd" if self.platform == "darwin" else "ctrl", "z"]}
         elif action == "press_keys":
@@ -465,7 +487,7 @@ class ComputerControl:
             printable = len(keys) == 1 and len(keys[0]) == 1
             if printable:
                 self._typing_target_ok()
-            self.note_own_input()
+            self.note_own_keys()
             if len(keys) == 1:
                 b.key(keys[0])
             elif hasattr(b, "hotkey"):
@@ -511,7 +533,7 @@ class ComputerControl:
     def _open_app(self, name: str) -> None:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built."""
         b = self.hooks.backend
-        self.note_own_input(2.0)
+        self.note_own_keys()
         if self.platform == "win32":
             b.key("cmd")
         elif self.platform == "darwin" and hasattr(b, "hotkey"):
@@ -519,8 +541,10 @@ class ComputerControl:
         else:
             raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
         self.hooks.sleep(0.6)
+        self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(name))
         b.type_text(name)
         self.hooks.sleep(0.8)
+        self.note_own_keys()
         b.key("enter")
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
@@ -581,8 +605,11 @@ class ComputerControl:
         if e is None:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
         b = self.hooks.backend
-        self.note_own_input()
         u = e.undo or {}
+        if "keys" in u:
+            self.note_own_keys()
+        else:
+            self.note_own_mouse()
         if "move" in u:
             b.move(int(u["move"][0]), int(u["move"][1]))
         elif "scroll" in u:

@@ -133,3 +133,53 @@ def test_service_undo_passes_the_agent(tmp_path: Path) -> None:
     a, _ = core.registry.issue("Claude", ["read", "control"], 3600)
     core.service.undo_last_action(a)
     assert seen == [((a.id,), {})]
+
+
+# --------------------------------------------------------------- 2. takeover windows (mouse vs keyboard echo)
+def test_real_mouse_movement_pauses_the_agent_while_it_types_a_long_text() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock)
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    ctl.act("a1", "type_text", text="x" * 2000)  # used to hide every mouse movement for 40.5 s
+    clock.advance(0.05)
+    assert ctl.user_input("mouse")
+    assert ctl.status()["paused"]
+
+
+def test_keyboard_echo_is_ignored_only_briefly_after_each_typed_chunk() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock)
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    ctl.act("a1", "type_text", text="y" * 2000)
+    assert not ctl.user_input("keyboard")  # the agent's own keys echoing back
+    typed = [c for c in backend.calls if c[0] == "type_text"]
+    assert len(typed) > 1 and all(len(c[1][0]) <= 16 for c in typed)  # small chunks, one short window each
+    clock.advance(1.0)
+    assert ctl.user_input("keyboard")  # one second later a key press is the person
+
+
+def test_mouse_echo_of_the_agents_own_move_is_ignored_but_not_for_long() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock)
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    ctl.act("a1", "move", x=5, y=5)
+    assert not ctl.user_input("mouse")
+    assert ctl.user_input("keyboard")  # a key press during a mouse move is never the agent's echo
+
+
+def test_approval_grace_is_short_and_never_blocks_a_deliberate_stop() -> None:
+    clock = Clock()
+    ctl, _, _ = _control(clock)
+    ctl.request("a1", "Claude")
+    assert not ctl.user_input("hand")  # the thumbs up that approved it
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")  # a second later, moving the mouse takes over
+    ctl2, backend2, _ = _control(clock)
+    ctl2.request("a1", "Claude")
+    assert ctl2.stop("you held up an open palm")  # inside the grace window: the stop still works at once
+    with pytest.raises(ControlRefused):
+        ctl2.act("a1", "move", x=1, y=1)
+    assert backend2.calls == []
