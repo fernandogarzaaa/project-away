@@ -482,3 +482,117 @@ def test_the_notice_window_launcher_reports_a_failed_start(tmp_path: Path) -> No
         ui.flash("Claude looked at your screen")
     with pytest.raises(RuntimeError):
         ui.overlay("Claude", tmp_path / "stop", mode="watch")
+
+
+# ------------------------------------------------------------- 6. request body size limit
+def _api(tmp_path: Path) -> Any:
+    pytest.importorskip("starlette")
+    pytest.importorskip("httpx")
+    from starlette.testclient import TestClient
+
+    from away.agentlink import api
+
+    core = _core(tmp_path)
+    gate = api.Gate(core.service, core.registry, local_key="k" * 43, rate=(100.0, 200))
+    calls: list[str] = []
+    orig = api.dispatch
+
+    def spy(service: Any, agent: Any, tool: str, kwargs: dict[str, Any]) -> Any:
+        calls.append(tool)
+        return orig(service, agent, tool, kwargs)
+
+    app = api.create_app(core.service, gate)
+    a, token = core.registry.issue("Agent", ["read", "tune"], 3600)
+    client = TestClient(app, base_url="http://127.0.0.1:8765")
+    return client, token, calls, spy, gate, core
+
+
+def test_an_oversized_json_body_is_refused_with_413_before_parsing(tmp_path: Path, monkeypatch: Any) -> None:
+    from away.agentlink import api
+
+    client, token, calls, spy, _gate, _core_ = _api(tmp_path)
+    monkeypatch.setattr(api, "dispatch", spy)
+    parsed: list[int] = []
+    real_loads = api.json.loads
+
+    def loads(raw: Any, *a: Any, **k: Any) -> Any:
+        parsed.append(len(raw))
+        return real_loads(raw, *a, **k)
+
+    monkeypatch.setattr(api.json, "loads", loads)
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    big = b'{"text": "' + b"x" * (api.MAX_JSON_BODY + 10) + b'"}'
+    for path in ("/v1/notify", "/v1/rpc/notify_user", "/v1/pair"):
+        r = client.post(path, content=big, headers=h)
+        assert r.status_code == 413, path
+        assert not [n for n in parsed if n > api.MAX_JSON_BODY]  # never parsed
+        assert "too large" in r.json()["error"]
+    assert calls == []
+
+
+def test_a_chunked_body_without_content_length_cannot_get_past_the_limit(tmp_path: Path, monkeypatch: Any) -> None:
+    from away.agentlink import api
+
+    client, token, calls, spy, _gate, _core_ = _api(tmp_path)
+    monkeypatch.setattr(api, "dispatch", spy)
+
+    def chunks() -> Any:
+        yield b'{"text": "'
+        for _ in range(40):
+            yield b"y" * 4096
+        yield b'"}'
+
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    r = client.post("/v1/rpc/notify_user", content=chunks(), headers=h)
+    assert r.status_code == 413 and calls == []
+
+
+def test_a_body_bigger_than_its_content_length_is_cut_off_at_the_asgi_level(tmp_path: Path) -> None:
+    import asyncio
+
+    from away.agentlink import api
+
+    core = _core(tmp_path)
+    gate = api.Gate(core.service, core.registry, local_key="k" * 43, rate=(100.0, 200))
+    reached: list[int] = []
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(1)
+
+    a, token = core.registry.issue("Agent", ["read"], 3600)
+    sent: list[dict[str, Any]] = []
+    pieces = [b"{" + b" " * 30_000] * 4 + [b"}"]
+
+    async def receive() -> dict[str, Any]:
+        body = pieces.pop(0)
+        return {"type": "http.request", "body": body, "more_body": bool(pieces)}
+
+    async def send(msg: dict[str, Any]) -> None:
+        sent.append(msg)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/rpc/notify_user",
+        "headers": [
+            (b"host", b"127.0.0.1:8765"),
+            (b"content-type", b"application/json"),
+            (b"content-length", b"10"),  # a lie
+            (b"authorization", f"Bearer {token}".encode()),
+        ],
+        "client": ("127.0.0.1", 5000),
+    }
+    asyncio.run(api.AuthMiddleware(inner, gate)(scope, receive, send))
+    assert sent[0]["status"] == 413 and reached == []
+
+
+def test_normal_bodies_and_mcp_sized_bodies_still_work(tmp_path: Path) -> None:
+    from away.agentlink import api
+
+    client, token, *_ = _api(tmp_path)
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    r = client.post("/v1/preferences", content=b'{"text": "' + b"z" * 500 + b'"}', headers=h)
+    assert r.status_code == 200
+    assert api.MAX_JSON_BODY == 64 * 1024 and api.MAX_JSON_BODY <= api.MAX_MCP_BODY <= 1024 * 1024
+    assert api.body_limit("/mcp") == api.MAX_MCP_BODY and api.body_limit("/c/abcdefgh") == api.MAX_MCP_BODY
+    assert api.body_limit("/v1/rpc/act") == api.MAX_JSON_BODY

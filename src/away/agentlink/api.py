@@ -53,6 +53,23 @@ FRIENDLY_CLIENTS = {
     "mcp": "AI agent",
 }
 CODE_PATH = re.compile(r"^/c/([a-z0-9]{6,32})/?(?:mcp/?)?$")
+# v0.1.24 hardening: request bodies are capped before anything reads or parses them (Content-Length is checked first,
+# then the stream is counted, so a chunked body or a wrong Content-Length cannot get past). Every REST/JSON tool
+# argument fits easily in 64 KB (the largest, type_text, is 2000 characters). MCP JSON-RPC gets 256 KB: clients may
+# batch several calls and send long capability lists in ``initialize``; it replaces the old 4 MB pairing-read cap.
+MAX_JSON_BODY = 64 * 1024
+MAX_MCP_BODY = 256 * 1024
+TOO_LARGE = "the request is too large (at most {} KB)"
+
+
+def body_limit(path: str) -> int:
+    """The body size cap for a request path: MCP endpoints (``/mcp``, the pairing link ``/c/<code>``) or JSON."""
+    return MAX_MCP_BODY if path == "/mcp" or path.startswith(("/mcp/", "/c/")) else MAX_JSON_BODY
+
+
+class BodyTooLarge(ValueError):
+    pass
+
 
 # tool name -> (result kind, http method for the convenience route, path, summary). "image" results are JPEG.
 TOOLS: dict[str, tuple[str, str, str, str]] = {
@@ -377,6 +394,21 @@ class AuthMiddleware:
             if why == "content-type":  # v0.1.23: no form / text/plain posts
                 await reply(415, "send JSON (Content-Type: application/json)")
                 return
+            limit = body_limit(path)
+            try:
+                declared = int(headers.get("content-length", "") or 0)
+            except ValueError:
+                declared = 0
+            if declared > limit:  # v0.1.24: refused before a single byte is read
+                await reply(413, TOO_LARGE.format(limit // 1024))
+                return
+            if method in JSON_BODY:  # read (and count) the whole body now; the app gets it replayed
+                try:
+                    buffered = await _read_body(receive, limit)
+                except BodyTooLarge:
+                    await reply(413, TOO_LARGE.format(limit // 1024))
+                    return
+                receive = _replay_body(buffered, receive)
             if g.lockout.locked():
                 await reply(429, "too many failed attempts; wait a minute")
                 return
@@ -402,7 +434,7 @@ class AuthMiddleware:
                             g.lockout.fail()
                             await reply(404, "this link has expired or was already used; make a new one in Agent Link")
                             return
-                        body = await _read_body(receive)
+                        body = await _read_body(receive, MAX_MCP_BODY)
                         name, client = _client_info(body)
                         if name is None:
                             await reply(401, "connect first (MCP initialize)")
@@ -435,7 +467,8 @@ class AuthMiddleware:
             g.log(str(ip), agent_name["name"], method, path, status_box["status"], (time.monotonic() - t0) * 1000.0)
 
 
-async def _read_body(receive: Any, limit: int = 4_000_000) -> bytes:
+async def _read_body(receive: Any, limit: int = MAX_MCP_BODY) -> bytes:
+    """The whole request body; :class:`BodyTooLarge` as soon as it passes ``limit`` (never truncated silently)."""
     chunks: list[bytes] = []
     size = 0
     while True:
@@ -445,7 +478,7 @@ async def _read_body(receive: Any, limit: int = 4_000_000) -> bytes:
         chunk = msg.get("body", b"")
         size += len(chunk)
         if size > limit:
-            break
+            raise BodyTooLarge(TOO_LARGE.format(limit // 1024))
         chunks.append(chunk)
         if not msg.get("more_body"):
             break
@@ -611,7 +644,11 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         return out
 
     async def body_args(request: Request) -> dict[str, Any]:
-        raw = await request.body()
+        raw = b""
+        async for chunk in request.stream():  # counted as it arrives (the middleware has capped it already)
+            raw += chunk
+            if len(raw) > MAX_JSON_BODY:
+                raise BodyTooLarge(TOO_LARGE.format(MAX_JSON_BODY // 1024))
         if not raw:
             return {}
         data = json.loads(raw)
@@ -623,6 +660,8 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
         async def endpoint(request: Request) -> Any:
             try:
                 kwargs = query_args(request) if method == "GET" else await body_args(request)
+            except BodyTooLarge as exc:
+                return _json({"error": str(exc)}, 413)
             except Exception as exc:
                 return _json({"error": f"bad request: {exc}"}, 400)
             return await run(request, tool, kwargs)
@@ -635,6 +674,8 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             return _json({"error": f"unknown tool {tool!r}"}, 404)
         try:
             kwargs = await body_args(request)
+        except BodyTooLarge as exc:
+            return _json({"error": str(exc)}, 413)
         except Exception as exc:
             return _json({"error": f"bad request: {exc}"}, 400)
         return await run(request, tool, kwargs)
@@ -642,6 +683,8 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
     async def pair(request: Request) -> Any:
         try:
             data = await body_args(request)
+        except BodyTooLarge as exc:
+            return _json({"error": str(exc)}, 413)
         except Exception:
             return _json({"error": "send JSON"}, 400)
         p = gate.registry.find_pairing(code=data.get("code"), pin=str(data["pin"]) if data.get("pin") else None)
@@ -659,6 +702,11 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
     async def pair_local(request: Request) -> Any:
         try:
             data = await body_args(request)
+        except BodyTooLarge as exc:
+            return _json({"error": str(exc)}, 413)
+        except ValueError as exc:
+            return _json({"error": str(exc)}, 400)
+        try:
             key = request.headers.get("x-away-local-key", "")
             agent, token = await anyio.to_thread.run_sync(
                 lambda: gate.pair_local(key, friendly_name(data.get("name") or "Local agent"), data.get("scopes"))
