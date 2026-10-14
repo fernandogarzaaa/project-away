@@ -48,6 +48,10 @@ EVENT_TOPICS = (
     "link",  # v0.1.24: link.moved (the public address changed)
 )
 MAX_RECORD_S = 120.0
+# v0.1.25: a long-poll (``/v1/events``, the ``wait_for_event`` tool) answers within this time, even when the agent
+# asks for longer. Cloudflare's quick tunnel ends a request that sends nothing for ~100 s (error 524), which the agent
+# saw as being disconnected; an empty answer before that just means "ask again".
+LONG_POLL_MAX_S = 55.0
 
 
 class Forbidden(PermissionError):
@@ -90,7 +94,7 @@ class EventHub:
         return evs
 
     def wait(self, seq: int, timeout: float, topics: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-        deadline = time.monotonic() + max(0.0, min(float(timeout), 120.0))
+        deadline = time.monotonic() + max(0.0, min(float(timeout), LONG_POLL_MAX_S))
         while True:
             evs = self.since(seq, topics)
             left = deadline - time.monotonic()
@@ -690,7 +694,7 @@ class Service:
     ) -> dict[str, Any]:
         """Events after ``since``. v0.1.22: an event addressed to some agents (a ``user.message``) is only seen by
         them; the wait goes on while only other agents' events arrive."""
-        deadline = time.monotonic() + max(0.0, min(float(timeout_s), 120.0))
+        deadline = time.monotonic() + max(0.0, min(float(timeout_s), LONG_POLL_MAX_S))
         seq = int(since)
         tp = tuple(topics) if topics else None
         with self._listen_lock:

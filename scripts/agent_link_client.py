@@ -13,7 +13,7 @@ from a terminal or a cloud sandbox).
 
     # then (everything is kept in ~/.away-agent.json: address, token, refresh token, rendezvous)
     python scripts/agent_link_client.py status
-    python scripts/agent_link_client.py stream                 # live events (server-sent events)
+    python scripts/agent_link_client.py stream                 # live events (reconnects by itself)
     python scripts/agent_link_client.py context
     python scripts/agent_link_client.py ask "Ready to start?" Yes No
     python scripts/agent_link_client.py notify "Done!"
@@ -133,6 +133,9 @@ class State:
 
 
 Opener = Callable[[urllib.request.Request, float], Any]
+
+
+STREAM_IDLE_S = 45.0  # no byte (not even the 15 s keep-alive) for this long: the stream is dead, reconnect
 
 
 def _default_open(req: urllib.request.Request, timeout: float) -> Any:
@@ -324,17 +327,62 @@ class Client:
         )
         return res
 
-    def stream(self, since: int = 0) -> None:
-        req = urllib.request.Request(
-            f"{self.url}/v1/events/stream?since={since}",
-            headers={"Authorization": f"Bearer {self.bearer()}", "Accept": "text/event-stream"},
-        )
-        with self.open(req, 3600) as resp:
-            for line in resp:
-                text = line.decode("utf-8").rstrip()
-                if text.startswith("data: "):
-                    ev = json.loads(text[6:])
-                    print(f"#{ev['seq']} {ev['topic']}: {json.dumps(ev['data'])}", flush=True)
+    def stream(
+        self,
+        since: int = 0,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        max_tries: int | None = None,
+    ) -> int:
+        """Live events, reconnecting by itself (v0.1.25). The PC sends a keep-alive line every 15 s, so a link
+        that is silent for STREAM_IDLE_S is treated as dropped. After a drop it waits a little (1 s, 2 s, 4 s ...
+        up to 30 s), follows a moved address, renews access on a 401 and resumes after the last event it saw
+        (``since`` + ``Last-Event-ID``), so nothing is missed. Stops when the agent was disconnected for good or
+        after ``max_tries`` failed attempts in a row (None = keep trying). Returns the last event number."""
+        show = on_event or (lambda ev: print(f"#{ev['seq']} {ev['topic']}: {json.dumps(ev['data'])}", flush=True))
+        seq, fails, renewed = int(since), 0, False
+        while max_tries is None or fails < max_tries:
+            got_any = False
+            try:
+                req = urllib.request.Request(
+                    f"{self.url}/v1/events/stream?since={seq}",
+                    headers={
+                        "Authorization": f"Bearer {self.bearer()}",
+                        "Accept": "text/event-stream",
+                        "Last-Event-ID": str(seq),
+                        "User-Agent": "away-agent-client",
+                    },
+                )
+                with self.open(req, STREAM_IDLE_S) as resp:
+                    for line in resp:
+                        got_any = True
+                        text = line.decode("utf-8").rstrip()
+                        if text.startswith("data: "):
+                            renewed = False
+                            ev = json.loads(text[6:])
+                            seq = max(seq, int(ev.get("seq", seq)))
+                            show(ev)
+                self.notes.append("the live stream ended; reconnecting")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401 and not renewed:
+                    renewed = True  # renew once; refused again before any event means it really was disconnected
+                    if self.state.get("persistent_token"):
+                        self.state.data.pop("persistent_token", None)
+                        self.state.save()
+                    if not self.refresh():
+                        raise LinkError("this agent was disconnected on the PC; pair again") from None
+                    continue
+                if exc.code == 401:
+                    raise LinkError("this agent was disconnected on the PC; pair again") from None
+                if exc.code in MOVED_STATUSES:
+                    self.find_address()
+                self.notes.append(f"the live stream stopped (error {exc.code}); reconnecting")
+            except (urllib.error.URLError, OSError) as exc:  # includes a read timeout: the link went silent
+                self.notes.append(f"the live stream dropped ({exc}); reconnecting")
+                self.find_address()
+            fails = 0 if got_any else fails + 1
+            sleep(min(30.0, 2.0 ** max(0, fails - 1)) if fails else 1.0)
+        return seq
 
 
 def save_image(result: dict[str, Any], out: str) -> None:

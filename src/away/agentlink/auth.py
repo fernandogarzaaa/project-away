@@ -511,6 +511,17 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Agent | None:
         return self.agents.get(agent_id)
 
+    def touch(self, agent_id: str) -> bool:
+        """v0.1.25: the agent still has a live connection open (an MCP stream, an event stream, a long call), so it
+        counts as connected now. Only ``last_seen`` moves (in memory); access, tokens and expiry are unchanged."""
+        now = self.clock()
+        with self._lock:
+            a = self.agents.get(agent_id)
+            if a is None or not a.active(now):
+                return False
+            a.last_seen = max(a.last_seen, now)
+        return True
+
     def list(self, include_inactive: bool = False) -> builtins.list[Agent]:
         now = self.clock()
         with self._lock:
