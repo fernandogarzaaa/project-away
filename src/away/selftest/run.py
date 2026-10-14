@@ -63,6 +63,8 @@ def run(
     progress: Callable[[str, int, int], Any] | None = None,
     limits: dict[str, float] | None = None,
     clock: Callable[[], float] = time.time,
+    checks: tuple[tuple[str, str, Callable[[Any], list[Result]]], ...] | None = None,
+    kind: str = "away.selftest",
 ) -> Report:
     from away import __version__
 
@@ -70,9 +72,10 @@ def run(
         raise Busy("a self-test is already running")
     try:
         lim = {**LIMITS_S, **(limits or {})}
-        want = set(only or ck.CHECK_IDS)
-        todo = [c for c in ck.CHECKS if c[0] in want]
-        rep = Report(__version__, _platform(), clock(), trigger=trigger, id=uuid.uuid4().hex[:10])
+        table = ck.CHECKS if checks is None else checks  # v0.1.25: "Check my PC" runs its own list through here
+        want = set(only or [c[0] for c in table])
+        todo = [c for c in table if c[0] in want]
+        rep = Report(__version__, _platform(), clock(), trigger=trigger, id=uuid.uuid4().hex[:10], kind=kind)
         for i, (cid, label, fn) in enumerate(todo):
             if progress is not None:
                 with contextlib.suppress(Exception):

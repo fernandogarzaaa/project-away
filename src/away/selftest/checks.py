@@ -324,22 +324,23 @@ def match(phrase: str, heard: str) -> float:
     return sum(1 for w in want if w in got) / len(want) if want else 0.0
 
 
-def check_stt(env: Env) -> list[Result]:
-    s = env.stt(PHRASE)
+def check_stt(env: Env, phrase: str = PHRASE, s: dict[str, Any] | None = None) -> list[Result]:
+    """``s``: an already-made recording result (v0.1.25 Check my PC records after its own prompt)."""
+    s = env.stt(phrase) if s is None else s
     if s.get("skipped"):
         return [_r("stt", "Speech to text", SKIP, str(s["skipped"]))]
     if s.get("error"):
         msg = f"Speech recognition did not run: {s['error']}"
         return [_r("stt", "Speech to text", FAIL, msg, Fix("repair_models", "Download the speech model again"))]
     heard = str(s.get("heard") or "")
-    score = match(PHRASE, heard)
+    score = match(phrase, heard)
     how = {"loopback": "spoken by the computer", "spoken": "said by you"}.get(str(s.get("method")), "")
-    d = {"heard": heard, "expected": PHRASE, "match": round(score, 2), "method": s.get("method"), "ms": s.get("ms")}
+    d = {"heard": heard, "expected": phrase, "match": round(score, 2), "method": s.get("method"), "ms": s.get("ms")}
     if score >= STT_MATCH:
         secs = float(s.get("ms") or 0) / 1000
         return [_r("stt", "Speech to text", PASS, f"Understood the test phrase ({how}) in {secs:.1f} s.", **d)]
     if heard:
-        msg = f"Heard \u201c{heard[:60]}\u201d instead of \u201c{PHRASE}\u201d. Speak closer to the microphone."
+        msg = f"Heard \u201c{heard[:60]}\u201d instead of \u201c{phrase}\u201d. Speak closer to the microphone."
         return [_r("stt", "Speech to text", WARN, msg, **d)]
     msg = "Heard nothing back. Run the self-test at the PC and say the phrase when asked."
     return [_r("stt", "Speech to text", WARN, msg, Fix("open:sound_settings", "Open sound settings"), **d)]

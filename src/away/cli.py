@@ -155,6 +155,13 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     return stcli.main(args)
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """v0.1.25: Check my PC, the guided real-hardware report."""
+    from away.selftest import checkpc
+
+    return checkpc.main(args)
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     from away.app import setup_wizard
 
@@ -1585,6 +1592,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest_arguments(stt)
     stt.set_defaults(fn=cmd_selftest)
+    chk = sub.add_parser("check", help="Check my PC: a guided 2-minute test of cameras, voice, pointer and link")
+    from away.selftest.checkpc import add_arguments as check_arguments
+
+    check_arguments(chk)
+    chk.set_defaults(fn=cmd_check)
     from away.agentlink.cli import add_parsers  # Agent Link (v0.1.20): agent, mcp, replay, diagnose
 
     add_parsers(sub)

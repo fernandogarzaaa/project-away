@@ -63,13 +63,14 @@ def deliver(
     events: Any = None,
     post: Callable[[str, dict[str, Any]], Any] | None = None,
     background: bool = True,
+    event: str = "selftest.completed",
 ) -> dict[str, Any]:
     """Send ``report`` (already redacted) to every agent in ``agents``. Returns what went where."""
     targets = list(agents)
     out: dict[str, Any] = {"delivered": bool(targets), "agents": []}
     if events is not None:
         with contextlib.suppress(Exception):
-            ev = events.publish("selftest.completed", compact(report))
+            ev = events.publish(event, compact(report))
             out["event_seq"] = ev.get("seq") if isinstance(ev, dict) else None
     if not targets:
         out["local_only"] = True
@@ -84,7 +85,7 @@ def deliver(
         url = str(getattr(a, "wake_url", "") or "")
         if url and post is not None:
             row["webhook"] = "sending"
-            payload = {"event": "selftest.completed", "agent": getattr(a, "name", ""), "report": report}
+            payload = {"event": event, "agent": getattr(a, "name", ""), "report": report}
 
             def send(u: str = url, p: dict[str, Any] = payload, r: dict[str, Any] = row) -> None:
                 try:

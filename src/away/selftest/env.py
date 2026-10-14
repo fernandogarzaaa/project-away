@@ -358,44 +358,51 @@ class RealEnv:
                 with contextlib.suppress(Exception):
                     eng.close()
 
-    def tts(self) -> list[dict[str, Any]]:
+    def tts_factories(self) -> list[tuple[str, Callable[[], Any]]]:
+        """Every voice engine this PC has (natural voices first, then the classic ones), each name once."""
         from away.voice import natural, speech
 
-        out: list[dict[str, Any]] = []
         fac: list[tuple[str, Callable[[], Any]]] = []
         with contextlib.suppress(Exception):
             fac += natural.natural_factories(lambda: getattr(self.cfg, "speech", None), self.data_dir)
         fac += speech.engine_factories()
-        seen = set()
+        seen: set[str] = set()
+        out = []
         for name, make in fac:
-            if name in seen:
-                continue
-            seen.add(name)
-            row: dict[str, Any] = {"name": name}
-            try:
-                eng = make()
-                first: dict[str, float] = {}
-                t0 = time.perf_counter()
-                play = getattr(eng, "play", None)
-                if callable(play):  # natural voices: time to the first audio chunk exactly
-
-                    def timed(
-                        *a: Any, _p: Callable[..., Any] = play, _first: dict[str, float] = first, **k: Any
-                    ) -> Any:
-                        _first.setdefault("t", time.perf_counter())
-                        return _p(*a, **k)
-
-                    eng.play = timed
-                eng.speak("Test.", speech.Voice("normal", "quiet", ""))
-                end = first.get("t", time.perf_counter())
-                row["first_audio_ms"] = round((end - t0) * 1000.0)
-                row["measured"] = "first sound" if "t" in first else "until it finished speaking"
-                with contextlib.suppress(Exception):
-                    eng.close()
-            except Exception as exc:
-                row["error"] = str(exc)[:200]
-            out.append(row)
+            if name not in seen:
+                seen.add(name)
+                out.append((name, make))
         return out
+
+    def speak_one(self, name: str, make: Callable[[], Any], text: str = "Test.") -> dict[str, Any]:
+        """Speak ``text`` with one engine; time to its first sound (natural voices) or until it finished."""
+        from away.voice import speech
+
+        row: dict[str, Any] = {"name": name}
+        try:
+            eng = make()
+            first: dict[str, float] = {}
+            t0 = time.perf_counter()
+            play = getattr(eng, "play", None)
+            if callable(play):  # natural voices: time to the first audio chunk exactly
+
+                def timed(*a: Any, _p: Callable[..., Any] = play, _first: dict[str, float] = first, **k: Any) -> Any:
+                    _first.setdefault("t", time.perf_counter())
+                    return _p(*a, **k)
+
+                eng.play = timed
+            eng.speak(text, speech.Voice("normal", "quiet", ""))
+            end = first.get("t", time.perf_counter())
+            row["first_audio_ms"] = round((end - t0) * 1000.0)
+            row["measured"] = "first sound" if "t" in first else "until it finished speaking"
+            with contextlib.suppress(Exception):
+                eng.close()
+        except Exception as exc:
+            row["error"] = str(exc)[:200]
+        return row
+
+    def tts(self) -> list[dict[str, Any]]:
+        return [self.speak_one(name, make) for name, make in self.tts_factories()]
 
     def notification(self) -> dict[str, Any]:
         h = self.host or getattr(self.app, "agent_link", None)
