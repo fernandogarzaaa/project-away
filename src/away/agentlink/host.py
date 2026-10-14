@@ -795,11 +795,12 @@ class AgentLinkHost:
 
     # -------------------------------------------------------------- server
     def tunnel_hosts(self) -> list[str]:
-        """v0.1.23: hostnames of the active secure link and backup link (the only non-local Host headers accepted)."""
+        """v0.1.23: hostnames of the active secure link and backup link (the only non-local Host headers accepted).
+        v0.1.24: and your own named tunnel's fixed hostname."""
         from away.agentlink.api import hostname_of
 
         out = []
-        for t in (getattr(self, "tunnel", None), getattr(self, "relay", None)):
+        for t in (getattr(self, "tunnel", None), getattr(self, "relay", None), getattr(self, "named", None)):
             h = hostname_of(getattr(t, "url", None)) if t is not None else ""
             if h:
                 out.append(h)
