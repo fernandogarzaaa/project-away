@@ -427,3 +427,11 @@ def test_winget_manifests_are_valid_yaml_with_the_installer_name():
     inst = yaml.safe_load((d / "FernandoGarza.ProjectAway.installer.yaml").read_text())
     url = inst["Installers"][0]["InstallerUrl"]
     assert url.endswith("ProjectAway-{{VERSION}}-windows-x64-setup.exe")
+
+
+def test_release_msix_step_never_blocks_the_normal_release():
+    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    step = text.split("- name: MSIX packages", 1)[1].split("- name:", 1)[0]
+    assert "continue-on-error: true" in step
+    # signing switches itself on only with every SignPath secret/variable present, and only on version tags
+    assert "SIGNPATH_ENABLED: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNPATH_API_TOKEN != ''" in text

@@ -1318,6 +1318,9 @@ def cmd_update(args: argparse.Namespace, fetch: Any = None, opener: Any = None, 
     if res.error:
         print(f"error: {res.error}", file=sys.stderr)
         return 1
+    if res.target.kind == "store":  # v0.1.25: a Microsoft Store copy is updated by the Store only
+        print(res.summary())
+        return 0
     if not res.update_available:
         print("Project Away is up to date.")
         return 0

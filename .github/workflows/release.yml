@@ -233,6 +233,8 @@ jobs:
           python scripts/check_selftest.py --max-size-mb 1900 $setup
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: MSIX packages (Store upload always; a sideload .msix too once signing is set up)
+        # v0.1.25: a failed MSIX build must never block the normal installer release (it is an extra asset)
+        continue-on-error: true
         shell: pwsh
         env:
           MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}

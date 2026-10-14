@@ -61,6 +61,18 @@ STILL_RUNNING_S = 600.0  # a helper log written this recently, with no exit code
 RUN_INSTALLER_LABEL = "Run update installer"
 TIMEOUT_S = 10.0
 PIP_HINT = "pipx upgrade project-away   (or: pip install -U project-away)"
+# v0.1.25: a Microsoft Store (MSIX) copy lives under C:\Program Files\WindowsApps\ and is updated by the Store only.
+# The in-app updater never checks, downloads or runs an installer there (the package folder is read-only, and an
+# Inno setup.exe would install a second, separate copy beside the Store one).
+STORE_HINT = "installed from the Microsoft Store, which keeps it up to date"
+
+
+def is_store_install(executable: str | os.PathLike[str] | None = None) -> bool:
+    """True when this executable runs from a packaged (MSIX / Microsoft Store) install: a ``WindowsApps`` folder."""
+    exe = str(executable if executable is not None else sys.executable)
+    parts = exe.replace("/", "\\").lower().split("\\")
+    return "windowsapps" in parts[:-1]
+
 
 # Inno Setup silent install. /AUTOUPDATE=1 makes away.iss relaunch the tray app and skip the model
 # download when the models are already there; /NORESTARTAPPLICATIONS avoids a second launch by the
@@ -253,6 +265,8 @@ def detect_install(
     if plat.startswith("win"):
         # the Inno install folder ({localappdata}\Programs\ProjectAway) holds ProjectAway.exe + unins000.exe;
         # a portable copy is updated in place the same way (/DIR= its folder)
+        if is_store_install(executable or sys.executable):  # v0.1.25: the Store updates it, never the app
+            return InstallTarget("store", exe, arch)
         return InstallTarget("windows", exe, arch)
     if plat == "darwin":
         bundle = next((p for p in (exe, *exe.parents) if p.suffix == ".app"), None)
@@ -307,6 +321,8 @@ class CheckResult:
         return self.update_available and self.asset is not None and self.target.kind in INSTALLABLE
 
     def summary(self) -> str:
+        if self.target.kind == "store":
+            return f"Project Away {self.current}: {STORE_HINT}"
         if self.error:
             return f"Project Away {self.current}: {self.error}"
         if not self.update_available:
@@ -337,6 +353,8 @@ def check(
     """Compare the newest release with ``current``. Never raises."""
     tgt = target or detect_install()
     res = CheckResult(current=current, target=tgt)
+    if tgt.kind == "store":  # v0.1.25: no GitHub check at all for a Store copy
+        return res
     try:
         rel = fetch_release(channel, fetch, timeout)
     except UpdateError as exc:
@@ -886,6 +904,8 @@ def install(
     kind = target.kind
     if kind == "pip":
         raise UpdateError(f"installed with pip/pipx; upgrade with: {PIP_HINT}")
+    if kind == "store":
+        raise UpdateError(f"this copy was {STORE_HINT}; update it from the Microsoft Store")
     if kind not in INSTALLABLE:
         raise UpdateError(f"this copy cannot update itself; download the new version from {RELEASES_PAGE}")
     if kind == "windows":
@@ -1273,6 +1293,8 @@ class UpdateManager:
 
     def tick(self, now: float) -> None:
         if not getattr(self.cfg, "check", True):
+            return
+        if self.result is not None and self.result.target.kind == "store":  # v0.1.25: the Store updates it
             return
         wait = self.error_retry_s if self.last_check_failed else self.interval_s
         if self.last_check is None or now - self.last_check >= wait:
