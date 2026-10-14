@@ -18,8 +18,10 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
    blocked.
 5. **Risky clicks ask first.** Clicking an element named like Send / Submit / Pay / Buy / Purchase / Delete /
-   Confirm / Install / Uninstall..., or pressing Enter while one is focused, asks the user first (with "Always
-   allow for this agent").
+   Confirm / Install / Uninstall..., dragging onto or from one (the Recycle Bin, the Trash), or pressing Enter while
+   one is focused, asks the user first (with "Always allow for this agent"). A click, drag, Enter, Delete or
+   shortcut whose target it cannot identify (no UI Automation name, coordinates only) asks too ("Allow for this
+   session" stops asking until the session ends). Moving, scrolling and typing into a named text box never ask.
 6. **Rate limited and logged.** At most ``action_rate_per_s`` actions per second; every action is logged with a
    thumbnail of the screen; "Undo last" reverses what can be reversed (cursor moves, scrolls, typed text).
 """
@@ -42,9 +44,25 @@ from away.agentlink.ratelimit import TokenBucket
 
 RISKY = re.compile(
     r"\b(send|submit|pay|buy|purchase|delete|remove|confirm|install|uninstall|checkout|check out|place order|"
-    r"transfer|erase|format|reset|sign out|log out|publish|post)\b",
+    r"transfer|erase|format|reset|sign out|log out|publish|post|trash|recycle bin)\b",
     re.IGNORECASE,
 )
+# v0.1.24 hardening: keys that act on whatever has the focus (Enter submits, Delete deletes a selected file)
+CONSEQUENTIAL_KEYS = ("enter", "return", "delete", "del")
+SHORTCUT_MODIFIERS = ("ctrl", "alt", "cmd", "win", "super", "windows", "option")
+UNKNOWN_NOTE = "Project Away can't tell what is there, so it is asking first."
+ALLOW_SESSION = "Allow for this session"
+
+
+def classify(label: str | None) -> str:
+    """What an action's target is, from its UI Automation name: ``risky`` (Send, Pay, Delete, Recycle Bin...),
+    ``safe`` (any other name) or ``unknown`` (no name: no UI Automation, nothing found there, coordinates only)."""
+    text = str(label or "").strip()
+    if not text:
+        return "unknown"
+    return "risky" if RISKY.search(text) else "safe"
+
+
 BLOCKED_COMBOS = ({"cmd", "r"}, {"cmd", "x"}, {"ctrl", "alt", "delete"}, {"ctrl", "shift", "esc"})
 BLOCKED_APPS = desktop.TERMINAL_PROCESSES
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+&'-]{0,39}$")
@@ -87,6 +105,7 @@ class Grant:
     # step (each drag step, each typed chunk, each key) and stops at once. A resume gets a fresh one.
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
+    trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
 
 
 class _Interrupted(Exception):
@@ -198,7 +217,8 @@ class ComputerControl:
         details = [
             f"For up to {int(ttl // 60)} minutes.",
             "Move your hand or mouse to take over at any time.",
-            "It will ask before sending, paying, deleting or installing anything.",
+            "It will ask before sending, paying, deleting or installing anything,",
+            "and before clicking something it can't identify.",
         ]
         if why:
             details.insert(0, f"Why: {str(why)[:150]}")
@@ -346,6 +366,55 @@ class ComputerControl:
             self._emit("control.risky_denied", {"agent": g.agent_name, "target": label})
             raise ControlRefused(f"the user did not allow '{label[:60]}'")
 
+    def _confirm_unknown(self, g: Grant, what: str) -> None:
+        """A consequential action whose target has no name (no UI Automation, nothing found there, coordinates
+        only): the person decides, once or for the rest of this session."""
+        if g.trust_unknown:
+            return
+        res = self.ask(
+            f"{g.agent_name} wants to {what}",
+            ["Allow", "Deny", ALLOW_SESSION],
+            title="Are you sure?",
+            agent=g.agent_name,
+            details=[UNKNOWN_NOTE],
+            timeout_s=60.0,
+            urgency="high",
+            kind="confirm",
+        )
+        ans = res.get("answer")
+        if ans == ALLOW_SESSION:
+            g.trust_unknown = True
+            return
+        if ans != "Allow":
+            self._emit("control.unknown_denied", {"agent": g.agent_name, "what": what})
+            raise ControlRefused(f"the user did not allow it ({what[:80]})")
+
+    def _confirm_targets(self, g: Grant, what: str, labels: list[str]) -> None:
+        """Clicks and drags: a risky target (either end of a drag) asks as before; a target it cannot identify
+        asks too; named, harmless targets go ahead."""
+        kinds = [classify(label) for label in labels]
+        if "risky" in kinds:
+            for label, kind in zip(labels, kinds):
+                if kind == "risky":
+                    self._confirm_risky(g, label, what)
+            return
+        if "unknown" in kinds:
+            self._confirm_unknown(g, what)
+
+    def _confirm_keys(self, g: Grant, what: str) -> None:
+        """Enter, Delete or a shortcut acts on whatever has the focus: risky focus asks as before; with no known
+        focus (no UI Automation, nothing focused) it asks too. A named text box goes ahead."""
+        label = self._focused_label()
+        context = label or self._window_title()
+        if classify(context) == "risky":
+            self._confirm_risky(g, context, what)
+        elif not label.strip():
+            self._confirm_unknown(g, what)
+
+    @staticmethod
+    def _where(label: str, x: int, y: int) -> str:
+        return f"'{label[:60]}'" if label.strip() else f"the spot at ({x}, {y})"
+
     def _point(self, agent_id: str, x: Any, y: Any, element: str | None, from_image: bool) -> tuple[int, int, str]:
         if element:
             if not getattr(self.hooks.uia, "available", False):
@@ -463,8 +532,11 @@ class ComputerControl:
         detail = ""
         if action in ("move", "click", "double_click", "right_click"):
             x, y, label = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
-            if action != "move":
-                self._confirm_risky(g, label, f"click '{label}'")
+            if action == "right_click":  # it only opens a menu: asks for a risky target only
+                self._confirm_risky(g, label, f"right-click '{label}'")
+            elif action != "move":
+                verb = "double-click" if action == "double_click" else "click"
+                self._confirm_targets(g, f"{verb} {self._where(label, x, y)}", [label])
             if action == "right_click" and not hasattr(b, "click_button"):
                 raise ControlRefused("right click is not supported on this system")
             self.note_own_mouse()
@@ -480,10 +552,11 @@ class ComputerControl:
                 undo = {"move": list(before)}
         elif action == "drag":
             x1, y1, l1 = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
-            x2, y2, _l2 = self._point(
+            x2, y2, l2 = self._point(
                 agent_id, kw.get("x2"), kw.get("y2"), kw.get("to_element"), bool(kw.get("from_image"))
             )
-            self._confirm_risky(g, l1, f"drag '{l1}'")
+            # both ends count: dropping a file on the Recycle Bin is as risky as clicking Delete
+            self._confirm_targets(g, f"drag {self._where(l1, x1, y1)} to {self._where(l2, x2, y2)}", [l1, l2])
             self.note_own_mouse()
             step().move(x1, y1)
             step().press()
@@ -518,7 +591,7 @@ class ComputerControl:
                 raise ControlRefused("type between 1 and 2000 characters at a time")
             self._typing_target_ok()
             if "\n" in text:
-                self._confirm_risky(g, self._focused_label() or self._window_title(), "press Enter")
+                self._confirm_keys(g, "press Enter")
             if not hasattr(b, "type_text"):
                 raise ControlRefused("typing is not supported on this system")
             with self._lock:
@@ -542,8 +615,10 @@ class ComputerControl:
                 raise ControlRefused(f"{combo} is blocked for agents")
             if not keys:
                 raise ControlRefused("no keys given")
-            if any(k in ENTER_KEYS for k in keys):
-                self._confirm_risky(g, self._focused_label() or self._window_title(), "press Enter")
+            if any(k in ENTER_KEYS for k in keys) and len(keys) == 1:
+                self._confirm_keys(g, "press Enter")
+            elif any(k in CONSEQUENTIAL_KEYS for k in keys) or any(k in SHORTCUT_MODIFIERS for k in keys):
+                self._confirm_keys(g, f"press {combo}")
             printable = len(keys) == 1 and len(keys[0]) == 1
             if printable:
                 self._typing_target_ok()

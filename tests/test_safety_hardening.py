@@ -286,3 +286,97 @@ def test_open_app_checks_for_a_stop_before_each_step() -> None:
     with pytest.raises(ControlRefused, match="stop"):
         ctl.act("a1", "open_app", name="Notepad")
     assert backend.calls == [("key", ("cmd",)), ("release_modifiers", ())]  # never typed the name or pressed Enter
+
+
+# ------------------------------------------------------------- 4. clicks, drags and keys it cannot classify
+class NoUIA:
+    available = False
+    reason = "UI Automation is not available"
+
+    def focused(self) -> None:
+        return None
+
+    def element_at(self, x: int, y: int) -> None:
+        return None
+
+
+class BrokenUIA(FakeUIA):
+    def element_at(self, x: int, y: int) -> Element | None:
+        raise RuntimeError("COM error")
+
+    def focused(self) -> Element | None:
+        raise RuntimeError("COM error")
+
+
+@pytest.mark.parametrize("uia", [NoUIA(), FakeUIA(focused=TEXT_BOX, at=None), BrokenUIA()])
+def test_a_click_on_something_it_cannot_identify_asks_first(uia: Any) -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="did not allow"):
+        ctl.act("a1", "click", x=640, y=300)
+    assert asked[-1]["kind"] == "confirm" and "(640, 300)" in asked[-1]["question"]
+    assert any("can't tell" in d for d in asked[-1]["details"])
+    assert backend.calls == []
+
+
+def test_allow_for_this_session_covers_unlabelled_clicks_until_the_grant_ends() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Allow for this session", "Allow"], uia=NoUIA())
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "click", x=1, y=1)
+    n = len(asked)
+    ctl.act("a1", "double_click", x=2, y=2)
+    assert len(asked) == n and backend.calls[-1] == ("click", (2,))
+    ctl.stop()
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "click", x=1, y=1)  # a new session asks again (and nobody answers)
+
+
+def test_a_drag_ending_on_a_risky_target_asks_with_the_destination() -> None:
+    clock = Clock()
+    file_el = Element("report.docx", "ListItemControl", rect=(0, 0, 40, 40))
+    bin_el = Element("Recycle Bin", "ListItemControl", rect=(400, 0, 440, 40))
+    uia = FakeUIA(at=lambda x, y: file_el if x < 100 else bin_el, elements=[file_el, bin_el])
+    ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="did not allow"):
+        ctl.act("a1", "drag", x=20, y=20, x2=420, y2=20)
+    assert "Recycle Bin" in asked[-1]["question"] and "press" not in [c[0] for c in backend.calls]
+
+
+def test_a_drag_to_an_unidentified_place_asks_and_a_labelled_drag_does_not() -> None:
+    clock = Clock()
+    a = Element("Layer 1", "ListItemControl", rect=(0, 0, 40, 40))
+    b = Element("Layer 2", "ListItemControl", rect=(0, 50, 40, 90))
+    uia = FakeUIA(at=lambda x, y: a if y < 45 else (b if y < 100 else None))
+    ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "drag", x=20, y=20, x2=20, y2=70)  # both ends have a name: no question
+    assert len(asked) == 1
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "drag", x=20, y=20, x2=20, y2=500)
+    assert "(20, 500)" in asked[-1]["question"]
+
+
+def test_enter_and_shortcuts_without_a_known_focus_ask_but_typing_and_moving_do_not() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Deny", "Deny"], uia=NoUIA())
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "move", x=5, y=5)
+    ctl.act("a1", "scroll", dy=-3)
+    ctl.act("a1", "type_text", text="hello")  # Linux: no UI Automation, typing itself is allowed
+    assert len(asked) == 1
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "press_keys", keys="enter")
+    assert asked[-1]["question"] == "Claude wants to press Enter"
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "press_keys", keys="ctrl+s")
+    assert "ctrl+s" in asked[-1]["question"]
+    ctl2, _, asked2 = _control(clock, ["Allow"])  # focus on a labelled text box: no questions
+    ctl2.request("a1", "Claude")
+    ctl2.act("a1", "press_keys", keys="ctrl+a")
+    ctl2.act("a1", "type_text", text="hi\nthere")
+    ctl2.act("a1", "click", x=3, y=3)  # on "Canvas"
+    assert len(asked2) == 1
