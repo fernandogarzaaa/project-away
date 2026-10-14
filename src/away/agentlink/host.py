@@ -73,6 +73,41 @@ def local_key(base: Path) -> str:
     return k
 
 
+SECRET_TTL_S = 120.0  # a new agent token waits this long for Settings / the CLI to show it, then it is deleted
+
+
+def put_secret(base: Path, secret: str) -> str:
+    """v0.1.24: hand a new agent token to Settings / the CLI once: an owner-only file they read and delete
+    (:func:`take_secret`); state.json never carries it. Returns the reference to ask for."""
+    ref = uuid.uuid4().hex
+    write_private(base / "secrets" / f"{ref}.txt", secret)
+    return ref
+
+
+def take_secret(ref: str, data_dir: Path | None = None) -> str | None:
+    """The token behind ``ref``, exactly once (the file is deleted as it is read)."""
+    if not re.fullmatch(r"[0-9a-f]{32}", str(ref or "")):
+        return None
+    f = base_dir(data_dir or paths.data_dir()) / "secrets" / f"{ref}.txt"
+    try:
+        text = f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    f.unlink(missing_ok=True)
+    return text or None
+
+
+def clear_secrets(base: Path, max_age_s: float = SECRET_TTL_S) -> None:
+    folder = base / "secrets"
+    if not folder.is_dir():
+        return
+    now = time.time()
+    for f in folder.glob("*.txt"):
+        with contextlib.suppress(OSError):
+            if now - f.stat().st_mtime > max_age_s:
+                f.unlink()
+
+
 def send_request(action: str, data_dir: Path | None = None, **data: Any) -> str:
     """Settings / CLI -> the running app. Returns the request id (its result appears in state.json)."""
     rid = uuid.uuid4().hex[:10]
@@ -824,6 +859,7 @@ class AgentLinkHost:
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
                 link_info=self.link_info,
+                token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "never") or "never"),
             )
             mcp = mcp_tools.build(
                 api.LocalBackend(self.core.service), screen_fps=lambda: float(self.cfg().agent_link.screen_fps)
@@ -1065,7 +1101,8 @@ class AgentLinkHost:
     # --------------------------------------------------------- control loop
     def start(self) -> AgentLinkHost:
         self.core.prompts.start()
-        if any(a.kind == "local" for a in self.core.registry.list()):
+        # v0.1.24: an agent that stays connected (persistent token) finds the server up after a restart too
+        if any(a.kind == "local" for a in self.core.registry.list()) or self.core.registry.tokens:
             with contextlib.suppress(Exception):
                 self.ensure_server()
         self._write_host()
@@ -1102,6 +1139,7 @@ class AgentLinkHost:
         if self.named is not None and not self.named.alive():
             self.errors.append("your Cloudflare tunnel stopped")
             self.named = None
+        clear_secrets(self.base)  # v0.1.24: a rotated token nobody picked up is not kept
         self.core.registry.refresh_ttl_s = float(getattr(self.cfg().agent_link, "refresh_ttl_days", 30)) * 86400.0
         self.core.registry.link_access_s = float(getattr(self.cfg().agent_link, "remote_ttl_min", 60)) * 60.0
         url = self.current_url()
@@ -1162,6 +1200,27 @@ class AgentLinkHost:
             return {"revoked": core.service.revoke(str(req.get("agent_id")))}
         if a == "set_scopes":  # v0.1.24: applied to running sessions and live views at once
             return core.service.set_scopes(str(req.get("agent_id")), req.get("scopes") or []).public()
+        # v0.1.24 Settings > Agent Link > Agent tokens (and `away agent tokens ...`)
+        if a == "tokens":
+            return {"tokens": core.registry.tokens_public()}
+        if a == "token_revoke":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                return {"revoked": False}
+            return {"revoked": core.service.revoke_token(t.id), "agent_id": t.agent_id}
+        if a == "token_rotate":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                raise KeyError("no such agent token")
+            t, secret = core.service.rotate_token(t.id)
+            ref = put_secret(self.base, secret)  # handed to whoever asked, once, never through state.json
+            return {"token_id": t.id, "secret_ref": ref, "old_key_until": t.prev_until, "expires": t.expires}
+        if a == "token_scopes":
+            t = core.registry.find_token(str(req.get("token_id") or ""))
+            if t is None:
+                raise KeyError("no such agent token")
+            core.service.set_scopes(t.agent_id, req.get("scopes") or [])
+            return next((x for x in core.registry.tokens_public() if x["id"] == t.id), {})
         if a == "disconnect_all":
             return {"disconnected": self.disconnect_all()}
         if a == "answer":
@@ -1235,6 +1294,7 @@ class AgentLinkHost:
             "pairing": {k: v for k, v in (p or {}).items() if k != "code"} or None,
             "agents": agents,
             "waiting": waiting,
+            "tokens": core.registry.tokens_public(),  # v0.1.24 (never a token or a hash)
             "prompts": core.prompts.pending(),
             "control": core.control.status(),
             "actions": core.control.actions(20),

@@ -252,6 +252,9 @@ under **Advanced** there, and in **Settings → Tuning**; you never need to touc
      Create*; Claude: *Settings → Connectors → Add custom connector*) or open it on your phone.
 4. Your PC asks **"Claude wants to connect: Allow / Deny"**. Answer with a click, a thumbs up, or by saying "allow".
    You see **Connected to Claude ✓**. **Disconnect all** ends every connection at once.
+5. *(v0.1.24, optional)* When an agent connects with the 6-digit code, the question also offers **Keep this agent
+   connected**. Choose it and that agent comes back by itself after restarts and reboots, without asking you again,
+   until you revoke it in **Settings → Agent Link → Agent tokens** (see [Keep this agent connected](#keep-this-agent-connected-v0124)).
 
 Then just talk to your agent: *"What can you see in Project Away?"*, *"The cursor is too fast, fix it"*,
 *"Ask me with a thumbs up before you send the email"*.
@@ -1598,6 +1601,50 @@ So on a CPU the ONNX path is about twice as slow as MediaPipe, and the gain has 
 it free for speech to text and the rest of the PC; whether that pays off on a given PC is what the self-test's
 "Graphics card" line shows.
 
+## Keep this agent connected (v0.1.24)
+
+Pair an agent once and it stays connected: after Project Away restarts, the PC reboots or a day goes by, it
+reconnects by itself and you are not asked again for what you already allowed. Nothing changes for the 6-digit
+codes and pairing links themselves; this is an extra choice when you allow an agent.
+
+**For you.** When an agent connects with a 6-digit code (or `POST /v1/pair`), the question has three answers:
+**Allow**, **Keep this agent connected**, **Deny**. *Settings → Agent Link → Agent tokens* lists every agent that
+stays connected: what it can do, when it was added, when it was last used and from where, and until when it stays
+connected. Per agent:
+
+* **Revoke**: it is disconnected at once (a live connection drops within a fraction of a second) and can only
+  come back if you allow it again with a new code.
+* **New token**: a replacement token, shown once for you to give to the agent. The old one keeps working for one
+  hour, so nothing breaks while you switch, then it stops.
+* **What it can do**: the same permission switches as for any agent.
+
+`agent_link.token_expiry` (default `never`; `30d` or `90d`) sets how long a new token works unless the agent asks
+for less. The same is on the command line, with the app running or not:
+
+```
+away agent tokens                       # who stays connected, what it can do, last used (when, from where)
+away agent tokens rotate Cookie         # a new token, shown once; the old one works for one more hour
+away agent tokens scopes Cookie read,tune
+away agent tokens revoke Cookie         # disconnected now
+```
+
+**For agents.** Send `"keep_connected": true` (optionally `"token_expiry": "30d" | "90d" | "never"`) with
+`POST /v1/pair`. If the person chooses *Keep this agent connected*, the reply carries
+`persistent_token` (`paway_` + 32 random bytes, base64url) **this one time only**; store it safely. Send it as
+`Authorization: Bearer paway_...` on `/mcp` or any REST call: it opens (or resumes) your session with no prompt. The
+session lasts 24 hours after your last request and renews itself with every request; after a longer break the next
+request simply opens a new one. `POST /v1/token/rotate` (with the current token) replaces it; the old one works
+for one more hour. `scripts/agent_link_client.py pair --keep` and `use-token paway_...` do all of this; the stdio
+bridge (`away mcp`) keeps the token for apps on this PC.
+
+**How it is kept safe.** Only the token's SHA-256 is stored, next to the agent in `agents.json` (owner-only), and
+compared in constant time; Settings, `state.json` and the CLI list never show a token or its hash. A token from
+*New token* reaches Settings or the CLI through a one-time owner-only file that is deleted as it is read (or after
+two minutes). Wrong `paway_` tokens are limited per address: five free tries, then the address waits 2 s, 4 s,
+8 s ... up to 15 minutes (`429` with `Retry-After`), while the person's own agents elsewhere keep working.
+Permissions are checked on every call exactly as before. Pairing links used as connector URLs (ChatGPT, Claude.ai)
+already stay connected on their own and are not offered a token they could not send.
+
 ## A link that survives restarts (v0.1.24)
 
 Before v0.1.24 a remote agent had to pair again whenever Project Away restarted, the PC rebooted or the network
@@ -1852,6 +1899,7 @@ Config (`macros:` in config.yaml, all optional):
 | Parakeet, Wayland | **Untested** |
 | Self-test (v0.1.24) | Every check's pass / warn / fail rule, the time limit and crash handling, redaction, delivery to every agent, the service and the CLI tested with a fake PC environment; the optional model-benchmark hook tested with a fake module (absent: no extra line). **Untested on the user's PC**: the real environment (`away.selftest.env.RealEnv`: real cameras, microphone, speech, voices, pop-ups, link), the window and its fix buttons |
 | GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
+| Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
 ## Changes in v0.1.23

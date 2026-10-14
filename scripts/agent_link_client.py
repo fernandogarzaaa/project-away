@@ -5,6 +5,10 @@ from a terminal or a cloud sandbox).
     # once: exchange the pairing code (from Settings > Agent Link, or `away agent pair`) for a token. The person
     # at the PC is asked to Allow it.
     python scripts/agent_link_client.py --url https://<name>.trycloudflare.com pair --pin 123456 --name "My agent"
+    # v0.1.24: ask to stay connected (the person chooses "Keep this agent connected"); optional --expiry 30d|90d
+    python scripts/agent_link_client.py --url https://<name>.trycloudflare.com pair --pin 123456 --name Cookie --keep
+    # or store an agent token the person gave you (Settings > Agent Link > Agent tokens > New token)
+    python scripts/agent_link_client.py --url https://<name>.trycloudflare.com use-token paway_...
 
     # then (everything is kept in ~/.away-agent.json: address, token, refresh token, rendezvous)
     python scripts/agent_link_client.py status
@@ -19,6 +23,7 @@ from a terminal or a cloud sandbox).
     python scripts/agent_link_client.py selftest               # run the PC self-test (needs "Run checks")
     python scripts/agent_link_client.py selftest-latest        # the newest self-test report
     python scripts/agent_link_client.py reconnect              # find the current address + renew access now
+    python scripts/agent_link_client.py rotate                 # replace the agent token (old one works 1 more hour)
     python scripts/agent_link_client.py call <tool> '{"json": "args"}'   # any tool (see /openapi.json)
 
 v0.1.24 "a link that survives restarts": after Away restarts or the PC reboots the free secure link gets a new
@@ -31,6 +36,11 @@ address and the short access token may have expired. This client then:
 
 No re-pairing unless the person disconnected the agent in Settings or it was away longer than the refresh lifetime
 (30 days by default). ``--url`` is only needed for ``pair`` (or to override the saved address).
+
+v0.1.24 "Keep this agent connected": with ``pair --keep`` (and the person's OK) the client gets a persistent agent
+token (``paway_...``, shown only once, kept in the state file). It is sent as the bearer token on every call and
+works after restarts and reboots with no prompt and no refresh, until the person revokes it. If it stops working
+(revoked, expired, or replaced more than an hour ago) the client says so plainly.
 
 MCP clients do not need this: point them at ``URL/mcp`` with ``Authorization: Bearer <token>``, or at the pairing
 link itself (``URL/c/<code>``), which works as a connector URL with no header at all.
@@ -55,6 +65,7 @@ from typing import Any
 STATE_FILE = Path(os.environ.get("AWAY_AGENT_STATE") or (Path.home() / ".away-agent.json"))
 TOKEN_FILE = Path.home() / ".away-agent-token"  # v0.1.20-v0.1.23 clients kept only the token here
 MOVED_STATUSES = (404, 502, 503, 521, 523, 530)  # Cloudflare / relays answer these when the old link is gone
+PERSIST_PREFIX = "paway_"  # v0.1.24 persistent agent token
 
 
 class LinkError(SystemExit):
@@ -140,6 +151,9 @@ class Client:
         self.state = state if state is not None else State()
         base = url or self.state.get("url") or ""
         self.url = self._base(base)
+        if token and token.startswith(PERSIST_PREFIX):  # v0.1.24: an agent token given on the command line
+            self.state.update(persistent_token=token)
+            token = None
         self.token = token or self.state.get("token")
         self.timeout = timeout
         self.open = opener
@@ -156,8 +170,9 @@ class Client:
         if not self.url:
             raise LinkError("no address yet: run `pair --url <link>` first")
         headers = {"Content-Type": "application/json", "User-Agent": "away-agent-client"}
-        if auth and self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        bearer = self.bearer()
+        if auth and bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.url + path, data=data, headers=headers, method=method)
         try:
@@ -165,6 +180,10 @@ class Client:
                 return int(resp.status), resp.read(), dict(resp.headers)
         except urllib.error.HTTPError as exc:
             return int(exc.code), exc.read() or b"", dict(exc.headers or {})
+
+    def bearer(self) -> str | None:
+        """The persistent agent token when there is one (v0.1.24), else the access token."""
+        return str(self.state.get("persistent_token") or "") or self.token
 
     @staticmethod
     def _error(status: int, payload: bytes) -> str:
@@ -230,6 +249,8 @@ class Client:
             url=self.url,
             token=self.token,
             refresh_token=res.get("refresh_token"),
+            persistent_token=res.get("persistent_token"),  # v0.1.24: only in the reply that issued it
+            persistent_token_expires=res.get("persistent_token_expires"),
             refresh_expires=res.get("refresh_expires"),
             token_expires=res.get("token_expires"),
             rendezvous=res.get("rendezvous") or None,
@@ -248,6 +269,13 @@ class Client:
                     moved = True
                     continue
                 raise LinkError(f"cannot reach Project Away ({exc}); is the PC on and the app running?") from None
+            if status == 401 and self.state.get("persistent_token"):
+                # v0.1.24: the agent token was revoked, expired or replaced more than an hour ago
+                self.state.data.pop("persistent_token", None)
+                self.state.save()
+                self.notes.append(f"the agent token stopped working: {self._error(status, payload)}")
+                if not self.state.get("refresh_token"):
+                    raise LinkError("the agent token stopped working (the person revoked or replaced it); pair again")
             if status == 401 and not refreshed:
                 refreshed = True
                 if self.refresh():
@@ -263,18 +291,42 @@ class Client:
     def call(self, tool: str, **kwargs: Any) -> Any:
         return self.request("POST", f"/v1/rpc/{tool}", kwargs)
 
-    def pair(self, pin: str | None, code: str | None, name: str) -> dict[str, Any]:
-        status, payload, _h = self._send("POST", "/v1/pair", {"pin": pin, "code": code, "name": name}, auth=False)
+    def pair(
+        self, pin: str | None, code: str | None, name: str, keep: bool = False, expiry: str | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"pin": pin, "code": code, "name": name}
+        if keep:  # v0.1.24: ask to stay connected (the person decides)
+            body["keep_connected"] = True
+            if expiry:
+                body["token_expiry"] = expiry
+        status, payload, _h = self._send("POST", "/v1/pair", body, auth=False)
         if status != 200:
             raise LinkError(f"error {status}: {self._error(status, payload)}")
         res = dict(json.loads(payload.decode("utf-8")))
         self._keep(res)
         return res
 
+    def use_token(self, token: str) -> None:
+        """v0.1.24: keep an agent token the person gave you (Settings > Agent Link > Agent tokens)."""
+        token = str(token or "").strip()
+        if not token.startswith(PERSIST_PREFIX) or len(token) < len(PERSIST_PREFIX) + 40:
+            raise LinkError("that is not an agent token (it starts with paway_)")
+        self.state.update(persistent_token=token, url=self.url or None)
+
+    def rotate(self) -> dict[str, Any]:
+        """v0.1.24: replace the agent token; the old one keeps working for an hour (so nothing breaks midway)."""
+        if not self.state.get("persistent_token"):
+            raise LinkError("no agent token to replace: pair with --keep or use-token first")
+        res = dict(self.request("POST", "/v1/token/rotate", {}))
+        self.state.update(
+            persistent_token=res["persistent_token"], persistent_token_expires=res.get("persistent_token_expires")
+        )
+        return res
+
     def stream(self, since: int = 0) -> None:
         req = urllib.request.Request(
             f"{self.url}/v1/events/stream?since={since}",
-            headers={"Authorization": f"Bearer {self.token}", "Accept": "text/event-stream"},
+            headers={"Authorization": f"Bearer {self.bearer()}", "Accept": "text/event-stream"},
         )
         with self.open(req, 3600) as resp:
             for line in resp:
@@ -306,6 +358,8 @@ COMMANDS = [
     "selftest",
     "selftest-latest",
     "reconnect",
+    "rotate",
+    "use-token",
     "call",
 ]
 
@@ -320,18 +374,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--code")
     p.add_argument("--name", default="Agent Link example client")
     p.add_argument("--why", default="")
+    p.add_argument("--keep", action="store_true", help="pair: ask to stay connected (an agent token)")
+    p.add_argument("--expiry", choices=["30d", "90d", "never"], default=None, help="pair --keep: token lifetime")
     a = p.parse_args(argv)
     c = Client(a.url, a.token)
     if a.cmd == "pair":
         if not a.url:
             raise SystemExit("pair needs --url (the pairing link)")
         code = a.code or (a.url.split("/c/")[1].split("/")[0] if "/c/" in a.url else None)
-        res = c.pair(a.pin, code, a.name)
+        res = c.pair(a.pin, code, a.name, keep=a.keep, expiry=a.expiry)
         keep = " and a refresh token (survives restarts)" if res.get("refresh_token") else ""
+        if res.get("persistent_token"):
+            keep = " and an agent token: it stays connected until the person revokes it"
+        elif a.keep:
+            keep += "; the person chose not to keep it connected"
         print(f"connected as {res['agent']['name']}: {', '.join(res['agent']['permissions'])} (token{keep} saved)")
         return 0
-    if not c.token and not c.state.get("refresh_token"):
+    if a.cmd == "use-token":
+        if not a.args:
+            raise SystemExit("usage: use-token paway_...")
+        c.use_token(a.args[0])
+        print("agent token saved; it is used for every call from now on")
+        return 0
+    if not c.bearer() and not c.state.get("refresh_token"):
         raise SystemExit("no token: run `pair` first or pass --token")
+    if a.cmd == "rotate":
+        c.rotate()
+        print("new agent token saved; the old one keeps working for another hour")
+        return 0
     if a.cmd == "reconnect":
         moved = c.find_address()
         ok = c.refresh()

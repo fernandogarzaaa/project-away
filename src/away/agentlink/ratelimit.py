@@ -58,3 +58,49 @@ class FailureLockout:
     def reset(self) -> None:
         with self._lock:
             self._fails = []
+
+
+class SourceBackoff:
+    """v0.1.24: failed sign-ins per source (client address) with exponential backoff.
+
+    The first ``free`` failures within ``window_s`` cost nothing; each one after that blocks the source for
+    ``base_s * 2**n`` seconds (capped at ``max_s``). A success clears the source. Other sources are not affected, so
+    a stranger guessing tokens cannot lock the person's own agents out.
+    """
+
+    def __init__(
+        self,
+        free: int = 5,
+        base_s: float = 2.0,
+        max_s: float = 900.0,
+        window_s: float = 600.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.free, self.base_s, self.max_s, self.window_s, self.clock = int(free), base_s, max_s, window_s, clock
+        self._state: dict[str, tuple[int, float, float]] = {}  # source -> (failures, last failure, blocked until)
+        self._lock = threading.Lock()
+
+    def retry_after(self, key: str = "") -> float:
+        """Seconds this source still has to wait (0 = it may try)."""
+        now = self.clock()
+        with self._lock:
+            st = self._state.get(key)
+            return max(0.0, st[2] - now) if st else 0.0
+
+    def fail(self, key: str = "") -> float:
+        """Count a failure; returns the wait it now has (0 while it is within the free attempts)."""
+        now = self.clock()
+        with self._lock:
+            n, last, until = self._state.get(key, (0, now, 0.0))
+            if now - last > self.window_s and now >= until:
+                n = 0  # quiet for a while: start over
+            n += 1
+            wait = 0.0 if n <= self.free else min(self.max_s, self.base_s * (2 ** (n - self.free - 1)))
+            self._state[key] = (n, now, now + wait if wait else until)
+            if len(self._state) > 4096:
+                self._state = dict(list(self._state.items())[-1024:])
+            return wait
+
+    def ok(self, key: str = "") -> None:
+        with self._lock:
+            self._state.pop(key, None)

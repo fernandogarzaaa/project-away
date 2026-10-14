@@ -834,7 +834,25 @@ class Service:
         self.reconcile(agent_id, "the agent was disconnected")
         return done
 
-    def reconcile(self, agent_id: str, reason: str = "its access changed") -> None:
+    def revoke_token(self, token_id: str) -> bool:
+        """v0.1.24: the person revoked a persistent agent token. The agent is disconnected and everything it had
+        running ends at once (control grant, held buttons and keys, live views), as for any disconnect."""
+        t = self.registry.tokens.get(token_id)
+        agent_id = t.agent_id if t is not None else ""
+        done = self.registry.revoke_persistent(token_id)
+        if agent_id:
+            self.reconcile(agent_id, "its agent token was revoked")
+        return done
+
+    def rotate_token(self, token_id: str) -> tuple[Any, str]:
+        """v0.1.24: a persistent agent token was replaced (by the person, or by the agent itself). The old token
+        keeps signing in for the grace hour, but nothing it started carries over: the control grant ends (input is
+        released) and live views stop, so the new token starts clean and asks again."""
+        t, secret = self.registry.rotate_persistent(token_id)
+        self.reconcile(t.agent_id, "its agent token was replaced", end_sessions=True)
+        return t, secret
+
+    def reconcile(self, agent_id: str, reason: str = "its access changed", end_sessions: bool = False) -> None:
         """v0.1.24 hardening: live state follows the agent's permissions at once. Without "Let it use my computer"
         (or without access at all) its control session ends (border off, any action in progress stops and lets go
         of buttons and keys); without "See my screen" its live view stops and its view state is cleared."""
@@ -842,6 +860,8 @@ class Service:
         active = a is not None and a.active(time.time())
         can_control = a is not None and active and a.has(perms.CONTROL)
         can_see = a is not None and active and a.has(perms.SCREEN)
+        if end_sessions:  # v0.1.24: a token rotated out ends what was running under it, whatever the permissions
+            can_control = can_see = False
         if not can_control:
             self.control.revoke_agent(agent_id, reason if active else "the agent was disconnected")
         if not can_see:

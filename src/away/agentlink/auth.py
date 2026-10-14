@@ -6,6 +6,10 @@
 * A pairing link carries a random code (``/c/<code>``) plus a 6-digit PIN for typing. Neither grants anything:
   the first client that uses it creates a *pending* request that the user must approve on the PC. A pairing is
   single-use (approved or denied, it is spent) and expires after ``pairing_ttl_s`` (default 10 minutes).
+* v0.1.24 "Keep this agent connected": a persistent agent token (``paway_`` + 32 random bytes, base64url) bound to
+  one agent record. Shown once, only its SHA-256 is stored (with the agents, so it survives restarts). It resumes
+  the agent's session with no prompt (24 h sliding session), can be revoked (at once), rotated (the old one keeps
+  working for an hour) and may expire after 30 / 90 days (default: never).
 * MCP connectors that cannot send a header (ChatGPT / Claude.ai "add custom connector" with a plain URL) keep
   using the pairing URL after approval: the code is then bound to that one agent (``link_hash``) until the agent
   expires or is revoked. Clients that can send headers exchange it for a bearer token instead.
@@ -14,6 +18,7 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import hashlib
 import hmac
 import json
@@ -39,6 +44,12 @@ REMEMBER_S = 30 * 86400.0
 REFRESH_PREFIX = "par_"
 REFRESH_GRACE_S = 120.0  # the refresh token before the newest still works this long (a reply lost on the way)
 DEFAULT_REFRESH_TTL_S = 30 * 86400.0
+# v0.1.24 persistent agent tokens ("Keep this agent connected")
+PERSIST_PREFIX = "paway_"
+TOKEN_SESSION_S = 24 * 3600.0  # a token session lasts this long after its last use (sliding)
+ROTATE_GRACE_S = 3600.0  # after "Rotate", the old token keeps working this long
+TOKEN_EXPIRY = {"never": 0.0, "30d": 30 * 86400.0, "90d": 90 * 86400.0}  # the choices offered at issuance
+TOKEN_SAVE_EVERY_S = 60.0  # "last used" is written to disk at most this often per token (unless the source changes)
 
 
 class RefreshError(PermissionError):
@@ -47,6 +58,23 @@ class RefreshError(PermissionError):
 
 def new_token() -> str:
     return TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def new_persistent_token() -> str:
+    """``paway_`` + 32 random bytes as base64url (43 characters, no padding)."""
+    return PERSIST_PREFIX + secrets.token_urlsafe(32)
+
+
+def expiry_choice(value: Any) -> str:
+    """A token lifetime as one of :data:`TOKEN_EXPIRY`'s keys: "never" (also None / "" / 0), "30d" (30), "90d" (90).
+    ValueError for anything else."""
+    v = str(value if value is not None else "").strip().lower().replace(" ", "")
+    v = {"": "never", "0": "never", "none": "never", "30": "30d", "90": "90d", "30days": "30d", "90days": "90d"}.get(
+        v, v
+    )
+    if v not in TOKEN_EXPIRY:
+        raise ValueError("token expiry must be 30 days, 90 days or never")
+    return v
 
 
 def digest(secret: str) -> str:
@@ -140,6 +168,46 @@ class Agent:
 
 
 @dataclass
+class AgentToken:
+    """v0.1.24: a persistent token bound to one agent record (only hashes are kept)."""
+
+    id: str  # public handle ("tok_..."), shown in Settings and the CLI; not a secret
+    agent_id: str
+    token_hash: str
+    created: float
+    expiry: str = "never"  # the lifetime chosen at issuance (TOKEN_EXPIRY); kept when rotated
+    expires: float = 0.0  # 0 = never
+    last_used: float = 0.0
+    last_source: str = ""  # the address the last request came from
+    last_host: str = ""  # the address it reached (this PC, or the secure link's name)
+    prev_hash: str = ""  # after Rotate: the replaced token, valid until prev_until
+    prev_until: float = 0.0
+    rotated: float = 0.0
+
+    def expired(self, now: float) -> bool:
+        return bool(self.expires) and now >= self.expires
+
+    def public(self, agent: Agent | None, now: float | None = None) -> dict[str, Any]:
+        """For Settings, the CLI and state.json: never a hash or a token."""
+        now = time.time() if now is None else now
+        return {
+            "id": self.id,
+            "agent_id": self.agent_id,
+            "agent": agent.name if agent else "?",
+            "scopes": perms.to_list(agent.scopes) if agent else [],
+            "permissions": perms.describe(agent.scopes) if agent else [],
+            "created": self.created,
+            "expiry": self.expiry,
+            "expires": self.expires,
+            "last_used": self.last_used,
+            "last_source": self.last_source,
+            "last_host": self.last_host,
+            "old_key_until": self.prev_until if self.prev_hash and now < self.prev_until else 0.0,
+            "connected": bool(agent and agent.active(now) and now - agent.last_seen < 90),
+        }
+
+
+@dataclass
 class Pairing:
     code: str
     pin: str
@@ -172,7 +240,11 @@ class AgentRegistry:
         self.link_access_s = float(link_access_s)  # access a connector URL gets when it renews itself
         self._lock = threading.RLock()
         self.agents: dict[str, Agent] = {}
+        self.tokens: dict[str, AgentToken] = {}  # v0.1.24 persistent agent tokens by id
         self.pairings: list[Pairing] = []
+        # v0.1.24: called with an agent id after it was disconnected / its token revoked (Gate drops live streams)
+        self.on_revoke: builtins.list[Callable[[str], None]] = []
+        self._token_saved: dict[str, tuple[float, str]] = {}  # token id -> (last write, source written)
         self._load()
 
     # ------------------------------------------------------------- persistence
@@ -184,22 +256,38 @@ class AgentRegistry:
             for item in data.get("agents", []):
                 a = Agent(**{k: v for k, v in item.items() if k in Agent.__dataclass_fields__})
                 self.agents[a.id] = a
+            for item in data.get("tokens", []):  # v0.1.24
+                t = AgentToken(**{k: v for k, v in item.items() if k in AgentToken.__dataclass_fields__})
+                if t.agent_id in self.agents and t.token_hash:
+                    self.tokens[t.id] = t
         except Exception:
-            self.agents = {}  # a corrupt file means everyone pairs again; never crash the app over it
+            self.agents, self.tokens = {}, {}  # a corrupt file means everyone pairs again; never crash the app
 
     @staticmethod
     def _ended(a: Agent) -> float:
         return a.expires  # revoke() moves expires to the moment it was disconnected
 
     def _forget_old(self, now: float) -> None:
+        for tid in [i for i, t in self.tokens.items() if t.expired(now) or t.agent_id not in self.agents]:
+            del self.tokens[tid]
         for aid in [
             i
             for i, a in self.agents.items()
             if not a.active(now)
             and not a.can_refresh(now)
+            and not self._has_token(i, now)
             and now - max(self._ended(a), a.refresh_expires) > REMEMBER_S
         ]:
             del self.agents[aid]
+
+    def _has_token(self, agent_id: str, now: float) -> bool:
+        """v0.1.24: the agent holds a persistent token that still works (it can come back at any time)."""
+        a = self.agents.get(agent_id)
+        return (
+            a is not None
+            and not a.revoked
+            and any(t.agent_id == agent_id and not t.expired(now) for t in self.tokens.values())
+        )
 
     def save(self) -> None:
         if self.path is None:
@@ -216,9 +304,15 @@ class AgentRegistry:
                         d["link_hash"] = ""
                         d.update(refresh_hash="", prev_refresh_hash="", refresh_expires=0.0, prev_refresh_until=0.0)
                 keep.append(d)
+            toks = []
+            for t in self.tokens.values():
+                d = asdict(t)
+                if not (t.prev_hash and now < t.prev_until):  # a rotated-away token past its hour is gone for good
+                    d.update(prev_hash="", prev_until=0.0)
+                toks.append(d)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"agents": keep}, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps({"agents": keep, "tokens": toks}, indent=1), encoding="utf-8")
         if os.name != "nt":
             os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
@@ -335,14 +429,20 @@ class AgentRegistry:
             return [
                 a
                 for a in self.agents.values()
-                if a.active(now) or a.can_refresh(now) or now - self._ended(a) <= REMEMBER_S
+                if a.active(now)
+                or a.can_refresh(now)
+                or self._has_token(a.id, now)
+                or now - self._ended(a) <= REMEMBER_S
             ]
 
     def reconnectable(self) -> builtins.list[Agent]:
-        """v0.1.24: agents that can reach this PC again without pairing (active, or a valid refresh token / link)."""
+        """v0.1.24: agents that can reach this PC again without pairing (active, a valid refresh token / link, or a
+        persistent agent token)."""
         now = self.clock()
         with self._lock:
-            return [a for a in self.agents.values() if a.active(now) or a.can_refresh(now)]
+            return [
+                a for a in self.agents.values() if a.active(now) or a.can_refresh(now) or self._has_token(a.id, now)
+            ]
 
     # ------------------------------------------------------------- refresh (v0.1.24)
     def new_refresh(self, agent_id: str) -> str:
@@ -433,8 +533,16 @@ class AgentRegistry:
             a.revoked = True
             a.expires = min(a.expires, self.clock())
             _drop_refresh(a)
+            for tid in [i for i, t in self.tokens.items() if t.agent_id == agent_id]:
+                del self.tokens[tid]  # v0.1.24: its persistent token stops working at once
         self.save()
+        self._revoked(agent_id)
         return True
+
+    def _revoked(self, agent_id: str) -> None:
+        for fn in builtins.list(self.on_revoke):
+            with contextlib.suppress(Exception):  # a listener never stops a revocation
+                fn(agent_id)
 
     def revoke_all(self) -> int:
         with self._lock:
@@ -445,9 +553,13 @@ class AgentRegistry:
                     a.expires = min(a.expires, self.clock())
                     n += 1
                 _drop_refresh(a)
+            self.tokens.clear()  # v0.1.24
             for p in self.pairings:
                 p.used = True
+            ids = builtins.list(self.agents)
         self.save()
+        for aid in ids:
+            self._revoked(aid)
         return n
 
     def set_scopes(self, agent_id: str, scopes: Iterable[str]) -> Agent:
@@ -465,6 +577,142 @@ class AgentRegistry:
             if a is not None and category not in a.always_allow:
                 a.always_allow.append(category)
         self.save()
+
+    # ------------------------------------------------ persistent agent tokens (v0.1.24)
+    def issue_persistent(self, agent_id: str, expiry: Any = "never") -> tuple[AgentToken, str]:
+        """A persistent token for this agent ("Keep this agent connected"). Returns the record and the token, which
+        is never available again (only its SHA-256 is kept). An earlier token of the same agent is replaced."""
+        choice = expiry_choice(expiry)
+        secret = new_persistent_token()
+        now = self.clock()
+        with self._lock:
+            a = self.agents.get(agent_id)
+            if a is None or a.revoked:
+                raise KeyError(f"unknown agent {agent_id!r}")
+            for tid in [i for i, t in self.tokens.items() if t.agent_id == agent_id]:
+                del self.tokens[tid]
+            life = TOKEN_EXPIRY[choice]
+            t = AgentToken(
+                id="tok_" + secrets.token_hex(4),
+                agent_id=agent_id,
+                token_hash=digest(secret),
+                created=now,
+                expiry=choice,
+                expires=now + life if life else 0.0,
+            )
+            self.tokens[t.id] = t
+        self.save()
+        return t, secret
+
+    def authenticate_persistent(
+        self, secret: str | None, source: str = "", host: str = ""
+    ) -> tuple[Agent, AgentToken, str] | None:
+        """The agent a persistent token belongs to, its token record and the hash that matched (the current token
+        or, within the hour after Rotate, the replaced one). Constant time over every stored hash. A valid token
+        (re)opens the agent's session for :data:`TOKEN_SESSION_S` from now (sliding), with no prompt. Records when
+        and from where it was used."""
+        if not secret or not str(secret).startswith(PERSIST_PREFIX):
+            return None
+        h = digest(str(secret))
+        now = self.clock()
+        found: AgentToken | None = None
+        used = ""
+        with self._lock:
+            for t in self.tokens.values():
+                hit_new = same(t.token_hash, h)
+                hit_old = bool(t.prev_hash) and same(t.prev_hash, h)
+                if (hit_new or hit_old) and found is None:
+                    found, used = t, (t.token_hash if hit_new else t.prev_hash)
+            if found is None or found.expired(now):
+                return None
+            if used != found.token_hash and now >= found.prev_until:
+                return None  # rotated away more than an hour ago
+            a = self.agents.get(found.agent_id)
+            if a is None or a.revoked:
+                return None
+            a.expires = max(a.expires, now + TOKEN_SESSION_S)
+            a.last_seen = now
+            found.last_used = now
+            src = str(source or "")[:64]
+            found.last_source, found.last_host = src, str(host or "")[:120]
+            last_write, last_src = self._token_saved.get(found.id, (-1e18, ""))
+            write = now - last_write >= TOKEN_SAVE_EVERY_S or last_src != src
+            if write:
+                self._token_saved[found.id] = (now, src)
+        if write:
+            self.save()
+        return a, found, used
+
+    def persistent_valid(self, token_id: str, used_hash: str) -> bool:
+        """Does a token (as matched by :meth:`authenticate_persistent`) still work? Live streams check this."""
+        now = self.clock()
+        with self._lock:
+            t = self.tokens.get(token_id)
+            if t is None or t.expired(now):
+                return False
+            a = self.agents.get(t.agent_id)
+            if a is None or a.revoked:
+                return False
+            if same(used_hash, t.token_hash):
+                return True
+            return bool(t.prev_hash) and same(used_hash, t.prev_hash) and now < t.prev_until
+
+    def rotate_persistent(self, token_id: str) -> tuple[AgentToken, str]:
+        """A replacement token (shown once); the old one keeps working for :data:`ROTATE_GRACE_S`, then never.
+        The replacement gets the same lifetime choice, counted from now."""
+        secret = new_persistent_token()
+        now = self.clock()
+        with self._lock:
+            t = self.tokens.get(token_id)
+            if t is None or t.expired(now):
+                raise KeyError(f"unknown token {token_id!r}")
+            t.prev_hash, t.prev_until = t.token_hash, now + ROTATE_GRACE_S
+            t.token_hash = digest(secret)
+            t.rotated = now
+            life = TOKEN_EXPIRY.get(t.expiry, 0.0)
+            t.expires = now + life if life else 0.0
+        self.save()
+        return t, secret
+
+    def revoke_persistent(self, token_id: str) -> bool:
+        """Revoke a persistent token: it stops working at once and its agent is disconnected (live sessions drop;
+        it has to pair again with a one-time code)."""
+        with self._lock:
+            t = self.tokens.get(token_id)
+            if t is None:
+                return False
+            agent_id = t.agent_id
+            del self.tokens[token_id]
+        if not self.revoke(agent_id):
+            self.save()
+            self._revoked(agent_id)
+        return True
+
+    def find_token(self, ref: str) -> AgentToken | None:
+        """A token by its id, or by its agent's id or name (any case); for the CLI and Settings."""
+        want = str(ref or "").strip()
+        with self._lock:
+            if want in self.tokens:
+                return self.tokens[want]
+            low = want.lower()
+            for t in self.tokens.values():
+                a = self.agents.get(t.agent_id)
+                if t.agent_id == want or (a is not None and a.name.strip().lower() == low):
+                    return t
+        return None
+
+    def token_of(self, agent_id: str) -> AgentToken | None:
+        with self._lock:
+            return next((t for t in self.tokens.values() if t.agent_id == agent_id), None)
+
+    def tokens_public(self) -> builtins.list[dict[str, Any]]:
+        now = self.clock()
+        with self._lock:
+            return [
+                t.public(self.agents.get(t.agent_id), now)
+                for t in sorted(self.tokens.values(), key=lambda x: x.created)
+                if not t.expired(now)
+            ]
 
     # ---------------------------------------------------------------- pairings
     def new_pairing(self, scopes: Iterable[str], ttl_s: float = 600.0, kind: str = "remote") -> Pairing:
