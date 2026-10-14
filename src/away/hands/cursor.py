@@ -37,6 +37,7 @@ from away.control.monitors import (
     sort_monitors,
 )
 from away.hands.autocenter import AutoCenter, shift_region
+from away.hands.steady import HoldStill, deadband, hold_from_config
 from away.pointer.smoothing import make_cursor_filter
 
 ACCEL_REF = 0.01  # hand-units per frame at which acceleration is neutral
@@ -128,6 +129,9 @@ class CursorMapper:
         self.autocenter: AutoCenter | None = AutoCenter(ac_cfg) if ac_cfg is not None else None
         self.region_center: tuple[float, float] | None = None  # learned comfort zone, applied at re-anchor
         self.clutched = False  # edge clutch active: hand moves do not move the cursor
+        self.hold: HoldStill | None = None  # v0.1.25: lock while the hand is held still
+        self._hold_key: tuple[object, ...] | None = None
+        self._sync_hold()
 
     # ------------------------------------------------------------------ monitors
     def set_monitors(self, screen: Screen, keep_position: bool = True) -> None:
@@ -190,8 +194,18 @@ class CursorMapper:
         return round(self.pos[0]), round(self.pos[1])
 
     # ------------------------------------------------------------------ mapping
+    def _sync_hold(self) -> HoldStill | None:
+        """Follow live config changes of hands.cursor.hold_still / hold_radius / hold_ms / mode."""
+        c = self.cfg
+        key = (getattr(c, "hold_still", False), getattr(c, "hold_radius", 0.0), getattr(c, "hold_ms", 0), c.mode)
+        if key != self._hold_key:
+            self._hold_key, self.hold = key, hold_from_config(c)
+        return self.hold
+
     def reset(self) -> None:
         self.filter.reset()
+        if self.hold is not None:
+            self.hold.reset()
         self._prev = None
         self._anchor = None
         self.clutched = False
@@ -228,11 +242,16 @@ class CursorMapper:
         self.pos = clamp_to_monitors(x, y, self.monitors)
 
     def update(self, t: float, x: float, y: float, anchor: str = "index") -> tuple[int, int]:
+        hold = self._sync_hold()
         if anchor != self._anchor:
             self.filter.reset()
+            if hold is not None:
+                hold.reset()
             self._prev = None
             self._anchor = anchor
         fx, fy = self.filter(t, x, y)
+        if hold is not None:
+            fx, fy = hold(t, fx, fy)
         ac = self._sync_autocenter()
         if ac is not None:
             st = ac.observe(t, fx, fy, clutch=self.cfg.mode != "absolute")
@@ -248,11 +267,11 @@ class CursorMapper:
         x0, y0, x1, y1 = self.region
         u = min(max((fx - x0) / (x1 - x0), 0.0), 1.0)
         v = min(max((fy - y0) / (y1 - y0), 0.0), 1.0)
+        if self._prev is not None:  # v0.1.25: slack, not a threshold (no hops)
+            fx, fy = deadband(self._prev, (fx, fy), self.cfg.dead_zone)
+            u = min(max((fx - x0) / (x1 - x0), 0.0), 1.0)
+            v = min(max((fy - y0) / (y1 - y0), 0.0), 1.0)
         target = clamp_to_monitors(self.x0 + u * (self.w - 1), self.y0 + v * (self.h - 1), self.monitors)
-        if self._prev is not None:
-            ddx, ddy = apply_dead_zone(fx - self._prev[0], fy - self._prev[1], self.cfg.dead_zone)
-            if ddx == 0.0 and ddy == 0.0:
-                return round(self.pos[0]), round(self.pos[1])
         self._prev = (fx, fy)
         self.pos = target
         return round(self.pos[0]), round(self.pos[1])
@@ -261,11 +280,15 @@ class CursorMapper:
         if self._prev is None:
             self._prev = (fx, fy)
             return round(self.pos[0]), round(self.pos[1])
-        dx, dy = apply_dead_zone(fx - self._prev[0], fy - self._prev[1], self.cfg.dead_zone)
+        # v0.1.25: the dead zone is slack the hand takes up before the cursor moves, then every bit of a slow move
+        # goes through. (It used to drop moves under dead_zone without moving _prev, so they piled up and went
+        # through in one 15-20 px hop: the "jitter" of slow, careful moves.)
+        start = self._prev
+        nxt = deadband(start, (fx, fy), self.cfg.dead_zone)
+        dx, dy = nxt[0] - start[0], nxt[1] - start[1]
         if dx == 0.0 and dy == 0.0:
             return round(self.pos[0]), round(self.pos[1])
-        start = self._prev
-        self._prev = (fx, fy)
+        self._prev = nxt
         c = self.cfg
         soft = self.autocenter.gain(start, (dx, dy)) if self.autocenter is not None else 1.0
         if c.curve == "sigmoid":

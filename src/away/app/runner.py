@@ -93,6 +93,13 @@ class Pipeline:
         guard: Any = None,
         pointer_backend: Any = None,
     ) -> None:
+        from away.hands.livecal import calibrated
+
+        cal = calibrated(cfg)  # v0.1.25: this camera's tracking calibration (`away calibrate`)
+        if cal is not cfg:
+            for src, dst in ((cal.hands.cursor, cfg.hands.cursor), (cal.hands.gestures, cfg.hands.gestures)):
+                for k, v in vars(src).items():
+                    setattr(dst, k, v)
         self.cfg = cfg
         self.bus = bus or EventBus()
         self.gestures = GestureStateMachine(cfg.hands.gestures)
@@ -286,6 +293,9 @@ class Pipeline:
         """Take over a (re)loaded config. ``base``: it is the global config (the file); the focused app's per-app
         profile ``tuning`` is layered on top. ``base=False``: an already layered copy (a profile switch)."""
         if base:
+            from away.hands.livecal import calibrated
+
+            cfg = calibrated(cfg)  # v0.1.25: this camera's tracking calibration (`away calibrate`)
             self._base_cfg = copy.deepcopy(cfg)
             prof = cfg.bindings.profile_for_app(self.dispatcher.last_app)
             if cfg.bindings.profiles[prof].tuning:

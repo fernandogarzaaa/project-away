@@ -54,7 +54,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "hands.cursor.mode": ("relative", "absolute"),
     "hands.cursor.curve": ("power", "sigmoid"),
     "hands.roles.mode": ("auto", "right", "left", "any"),
-    "hands.cursor.smoothing": ("one_euro", "predictive"),  # smart pointer: "Smoother cursor"
+    "hands.cursor.smoothing": ("adaptive", "one_euro", "predictive"),  # smart pointer: "Smoother cursor"
     "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
     "speech.rate": cfgmod.SPEECH_RATES,  # v0.1.21: how fast agents speak to you
     "speech.volume": cfgmod.SPEECH_VOLUMES,
