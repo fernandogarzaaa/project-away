@@ -42,6 +42,22 @@ def first_run_command() -> list[str]:
     return away_command(["tour"])
 
 
+def check_pc_command() -> list[str]:
+    """v0.1.25 "Check my PC": the guided real-hardware check in its own window."""
+    from away.app.frozen import away_command
+
+    return away_command(["check", "--window", "--trigger", "Settings"])
+
+
+def launch_check_pc(popen: Any = subprocess.Popen) -> str | None:
+    """Open Check my PC. Returns an error text or None."""
+    try:
+        popen(check_pc_command())
+    except Exception as exc:
+        return f"could not open Check my PC: {exc}"
+    return None
+
+
 def launch_first_run(popen: Any = subprocess.Popen) -> str | None:
     """Open the guided first run. Returns an error text or None."""
     try:

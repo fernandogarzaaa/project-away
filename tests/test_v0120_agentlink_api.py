@@ -149,7 +149,7 @@ def test_openapi_lists_the_tools(live) -> None:
 
 def test_rest_files_and_traversal(live) -> None:
     core, base = live["core"], live["base"]
-    a, tok = core.registry.issue("Diag", ["read", "diagnose"], 3600)
+    a, tok = core.registry.issue("Diag", ["read", "diagnose", "share_logs"], 3600)
     st, body, _ = http(base, "POST", "/v1/bundle", {}, token=tok)
     assert st == 200
     path = json.loads(body)["path"]

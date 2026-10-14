@@ -192,7 +192,9 @@ class Inbox:
         except OSError:
             pass
 
-    def add(self, text: str, targets: Iterable[Any], source: str = "voice") -> Message:
+    def add(self, text: str, targets: Iterable[Any], source: str = "voice", wake: bool = True) -> Message:
+        """``source``: voice | gesture | system (v0.1.24: notes from Project Away itself, such as a moved address
+        or a self-test report). ``wake``: also POST it to each agent's wake-up address."""
         ts = list(targets)
         m = Message(
             id=uuid.uuid4().hex[:10],
@@ -206,7 +208,7 @@ class Inbox:
         with self._lock:
             self.messages.append(m)
         self.save()
-        for a in ts:
+        for a in ts if wake else []:
             url = str(_attr(a, "wake_url", "") or "")
             if url:
                 self.wake(a, url, m)

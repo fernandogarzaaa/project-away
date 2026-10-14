@@ -10,14 +10,17 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-READ = "read"  # status, gestures, landmarks, health, logs, config (redacted), context
-DIAGNOSE = "diagnose"  # camera checks, benchmarks, recordings, diagnostics bundles
+READ = "read"  # status, gestures, landmarks, health, config (redacted), context
+DIAGNOSE = "diagnose"  # camera checks and speed benchmarks (run them, read their results)
+# v0.1.24 hardening: taking logs, landmark recordings and diagnostics bundles off the PC is its own permission, off
+# by default. Agents connected before it existed do not get it (their saved permissions simply lack it).
+SHARE_LOGS = "share_logs"
 TUNE = "tune"  # change settings, zones, bindings, profiles, presets, preferences (undoable)
 SNAPSHOTS = "snapshots"  # one camera still at a time, each one flashes an on-screen indicator
 SCREEN = "screen"  # one screenshot or a low-fps screen view, with the same indicator
 CONTROL = "control"  # use the mouse/keyboard; approved on the PC every session, expires, takeover pauses it
 
-ALL = (READ, DIAGNOSE, TUNE, SNAPSHOTS, SCREEN, CONTROL)
+ALL = (READ, DIAGNOSE, SHARE_LOGS, TUNE, SNAPSHOTS, SCREEN, CONTROL)
 DEFAULT = frozenset({READ, DIAGNOSE})
 
 
@@ -39,6 +42,13 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(TUNE, "Change my settings", "\u2699", False, help="Every change can be undone."),
     Permission(CONTROL, "Let it use my computer", "\u2328", False, help="You approve it each time. Move to stop."),
     Permission(DIAGNOSE, "Run camera and speed checks", "\u2695", True, advanced=True),
+    Permission(
+        SHARE_LOGS,
+        "Share my logs and recordings",
+        "\u2709",
+        False,
+        help="Logs, hand-movement recordings and problem reports. Passwords and keys are hidden.",
+    ),
 )
 BY_SCOPE = {p.scope: p for p in PERMISSIONS}
 

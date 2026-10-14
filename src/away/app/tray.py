@@ -19,6 +19,27 @@ STATE_COLORS = {
 }
 
 
+# Windows keeps the tray tooltip in a 128-character UTF-16 buffer (the terminating zero included); a longer one makes
+# pystray fail ("string too long (136, maximum length 128)"). Other systems take the same, shorter text.
+TOOLTIP_MAX = 127
+
+
+def tooltip_text(text: str, limit: int = TOOLTIP_MAX) -> str:
+    """``text`` cut to ``limit`` UTF-16 units with an ellipsis, never splitting a character in two."""
+
+    def units(t: str) -> int:
+        return len(t.encode("utf-16-le")) // 2
+
+    if units(text) <= limit:
+        return text
+    out = ""
+    for ch in text:
+        if units(out + ch) + 1 > limit:  # + 1 for the ellipsis
+            break
+        out += ch
+    return out.rstrip(" -,") + "\u2026"
+
+
 def icon_state(paused: bool, voice_state: str) -> str:
     """Which colour the tray icon shows: paused wins, then mic muted/stopped/recording, else active."""
     if paused:
@@ -118,6 +139,10 @@ class TrayController:
         text += f" - {hint}" if hint else ""
         return text + (" - crashed last time, see crash.log" if self.crash_note else "")
 
+    def tooltip(self) -> str:
+        """:meth:`title`, short enough for the Windows tray tooltip (the menu shows it in full)."""
+        return tooltip_text(self.title())
+
     def camera_status(self) -> str:
         """v0.1.21: "Settings is using the camera" while Settings (or a camera check) borrows it."""
         fn = getattr(self.app, "camera_status", None)
@@ -146,6 +171,41 @@ class TrayController:
 
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
+
+    @staticmethod
+    def selftest_command() -> list[str]:
+        """v0.1.24 "Run self-test": the report window in its own process (it runs the checks inside this app)."""
+        from away.app.frozen import away_command
+
+        return away_command(["selftest", "--window", "--trigger", "tray"])
+
+    @staticmethod
+    def check_pc_command() -> list[str]:
+        """v0.1.25 "Check my PC": the guided real-hardware check window (measurements run inside this app)."""
+        from away.app.frozen import away_command
+
+        return away_command(["check", "--window", "--trigger", "tray"])
+
+    def run_check_pc(self) -> None:  # pragma: no cover - launches a GUI process
+        import subprocess
+
+        try:
+            subprocess.Popen(self.check_pc_command())
+        except Exception:
+            import logging
+
+            logging.getLogger("away.tray").warning("could not open Check my PC", exc_info=True)
+
+    def run_selftest(self) -> None:  # pragma: no cover - launches a GUI process
+        import subprocess
+
+        try:
+            subprocess.Popen(self.selftest_command())
+        except Exception:
+            al = getattr(self.app, "agent_link", None)
+            st = getattr(al, "selftest", None)
+            if st is not None:
+                st.start(trigger="tray")
 
     @staticmethod
     def settings_command() -> list[str]:
@@ -400,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
 
     def _set_icon(ic: Any) -> None:
         ic.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
-        ic.title = ctl.title()
+        ic.title = ctl.tooltip()
 
     def refresh(icon: Any) -> None:
         guard.call(_set_icon, icon)
@@ -547,12 +607,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
         ),
+        pystray.MenuItem("Check my PC", lambda _icon, _item: ctl.run_check_pc()),  # v0.1.25
+        pystray.MenuItem("Run self-test", lambda _icon, _item: ctl.run_selftest()),  # v0.1.24
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
         *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
         pystray.MenuItem("Quit", on_quit),
     )
-    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.title(), menu)
+    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
+    app.tray_icon = icon  # v0.1.25: Check my PC reads whether it shows and its tooltip
     topics = (
         "voice.state",
         "app.paused",

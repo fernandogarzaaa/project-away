@@ -2,6 +2,9 @@
 
 * ``away agent status|start|stop|pair|agents|revoke|disconnect|connect|snippets|prefs|changes|undo|github-token``
   (aliases ``away link`` and ``away remote``)
+* ``away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [read,tune,...]`` - v0.1.24: agents that stay
+  connected (persistent agent tokens); ``away agent tokens expiry [90d|30d|never]`` shows or sets how long a new
+  token works (default 90 days)
 * ``away mcp [--scopes read,tune] [--name NAME]`` - the stdio MCP server local agent apps launch
 * ``away replay FILE [--model] [--json]`` - re-run a recording through the gesture pipeline headless
 * ``away diagnose bundle`` - write a diagnostics bundle
@@ -210,8 +213,183 @@ def cmd_agent(args: argparse.Namespace) -> int:
         keyring.set_password(KEYRING_SERVICE, KEYRING_USER, tok)
         print("saved in the OS keyring; turn on agent_link.github_issues to use it")
         return 0
+    if action == "named-tunnel":  # v0.1.24: your own Cloudflare tunnel (stable address)
+        return _named_tunnel(args)
+    if action == "tokens":  # v0.1.24: agents that stay connected
+        return cmd_tokens(args, alive)
     print(f"unknown action {action}", file=sys.stderr)
     return 2
+
+
+def _named_tunnel(args: argparse.Namespace) -> int:
+    """``away agent named-tunnel <hostname>`` (asks for the token, kept in the keyring) | ``named-tunnel clear``."""
+    from away import config as cfgmod
+    from away.agentlink import tunnel
+
+    path = cfgmod.config_path()
+    cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+    if args.value == "clear":
+        tunnel.set_named_token("")
+        cfg.agent_link.named_tunnel_hostname = ""
+        if cfg.agent_link.link_type == "named":
+            cfg.agent_link.link_type = "standard"
+        cfgmod.save(cfg, path)
+        print("Your own Cloudflare tunnel is turned off (back to the standard link).")
+        return 0
+    host = str(args.value or "").strip().removeprefix("https://").rstrip("/")
+    if not host:
+        print(
+            "usage: away agent named-tunnel <hostname>   (e.g. away.example.com; see README 'A link that survives "
+            "restarts')",
+            file=sys.stderr,
+        )
+        return 2
+    import getpass
+
+    tok = getpass.getpass("Cloudflare tunnel token (from the tunnel's install command): ").strip()
+    try:
+        tunnel.set_named_token(tok)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    cfg.agent_link.named_tunnel_hostname = host
+    cfg.agent_link.link_type = "named"
+    if not cfg.agent_link.port:
+        from away.agentlink.host import NAMED_PORT
+
+        cfg.agent_link.port = NAMED_PORT
+    cfgmod.save(cfg, path)
+    print(
+        f"Saved. In the Cloudflare dashboard, point https://{host} at http://127.0.0.1:{cfg.agent_link.port} "
+        "(Public hostname > Service: HTTP). Your agents keep this address across restarts."
+    )
+    return 0
+
+
+def _when(t: float, now: float | None = None) -> str:
+    if not t:
+        return "never"
+    now = time.time() if now is None else now
+    d = now - t
+    if 0 <= d < 120:
+        return "just now"
+    if 0 <= d < 7200:
+        return f"{int(d // 60)} min ago"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+
+
+def token_lines(tokens: list[dict[str, Any]], now: float | None = None) -> list[str]:
+    """``away agent tokens`` in plain words, one agent per block (never a token or a hash)."""
+    if not tokens:
+        return ["No agent stays connected. Choose \u201cKeep this agent connected\u201d when you allow one."]
+    out = []
+    for t in tokens:
+        used = _when(t.get("last_used") or 0, now)
+        where = f" from {t['last_source']}" if t.get("last_source") and t.get("last_used") else ""
+        via = f" (via {t['last_host']})" if t.get("last_host") and t.get("last_used") else ""
+        ends = "never expires" if not t.get("expires") else f"expires {_when(t['expires'], -1)}"
+        out.append(f"{t['agent']}  [{t['id']}]")
+        out.append(f"  can: {', '.join(t.get('permissions') or []) or 'nothing'}")
+        out.append(f"  added {_when(t.get('created') or 0, -1)}; last used {used}{where}{via}; {ends}")
+        if t.get("old_key_until"):
+            out.append(f"  the replaced token still works until {_when(t['old_key_until'], -1)}")
+    return out
+
+
+EXPIRY_TEXT = {"90d": "90 days", "30d": "30 days", "never": "until you revoke them"}
+
+
+def cmd_token_expiry(value: str = "") -> int:
+    """``away agent tokens expiry [90d|30d|never]``: how long a new agent token works (``agent_link.token_expiry``,
+    default 90 days). Tokens already given keep their own end date."""
+    from away import config as cfgmod
+    from away.agentlink.auth import expiry_choice
+
+    path = cfgmod.config_path()
+    cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+    if value:
+        try:
+            cfg.agent_link.token_expiry = expiry_choice(value)
+        except ValueError as exc:
+            print(f"error: {exc} (use 90d, 30d or never)", file=sys.stderr)
+            return 2
+        cfgmod.save(cfg, path)
+        print(
+            f"New agent tokens now work {EXPIRY_TEXT[cfg.agent_link.token_expiry]}. Tokens already given keep theirs."
+        )
+        return 0
+    print(f"New agent tokens work {EXPIRY_TEXT.get(cfg.agent_link.token_expiry, cfg.agent_link.token_expiry)}.")
+    print("Change it with: away agent tokens expiry 90d|30d|never")
+    return 0
+
+
+def cmd_tokens(args: argparse.Namespace, alive: Any) -> int:
+    """``away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [SCOPES]``. Talks to the running app; when it
+    is not running, changes the saved list directly (the app reads it when it starts)."""
+    from away import paths
+    from away.agentlink import host
+    from away.agentlink.auth import AgentRegistry
+
+    sub = str(args.value or "list")
+    rest = list(args.rest or [])
+    ref = rest[0] if rest else ""
+    if sub == "expiry":
+        return cmd_token_expiry(ref)
+    if sub not in ("list", "revoke", "rotate", "scopes"):
+        print("usage: away agent tokens [list|revoke|rotate|scopes] [AGENT_OR_TOKEN] [read,tune,...]", file=sys.stderr)
+        return 2
+    if sub != "list" and not ref:
+        print(f"usage: away agent tokens {sub} AGENT_OR_TOKEN (see `away agent tokens`)", file=sys.stderr)
+        return 2
+    scopes = perms.to_list(perms.normalize(rest[1] if len(rest) > 1 else args.scopes)) if sub == "scopes" else []
+    if alive:
+        action = {"list": "tokens", "revoke": "token_revoke", "rotate": "token_rotate", "scopes": "token_scopes"}[sub]
+        kw: dict[str, Any] = {"token_id": ref} if ref else {}
+        if sub == "scopes":
+            kw["scopes"] = scopes
+        res = _wait_result(host.send_request(action, **kw), 15.0)
+        if res is None:
+            print("error: Project Away did not answer", file=sys.stderr)
+            return 1
+        if not res.get("ok"):
+            print(f"error: {res.get('error')}", file=sys.stderr)
+            return 1
+        out = dict(res.get("result") or {})
+        if sub == "rotate":
+            out["token"] = host.take_secret(str(out.get("secret_ref") or ""))
+    else:
+        reg = AgentRegistry(host.base_dir(paths.data_dir()) / "agents.json")
+        t = reg.find_token(ref) if ref else None
+        if sub != "list" and t is None:
+            print(f"no agent token for {ref!r} (see `away agent tokens`)", file=sys.stderr)
+            return 1
+        if sub == "list":
+            out = {"tokens": reg.tokens_public()}
+        elif sub == "revoke":
+            assert t is not None
+            out = {"revoked": reg.revoke_persistent(t.id)}
+        elif sub == "rotate":
+            assert t is not None
+            t, secret = reg.rotate_persistent(t.id)
+            out = {"token": secret, "old_key_until": t.prev_until}
+        else:
+            assert t is not None
+            reg.set_scopes(t.agent_id, scopes)
+            out = next((x for x in reg.tokens_public() if x["id"] == t.id), {})
+    if sub == "list":
+        print("\n".join(token_lines(list(out.get("tokens") or []))))
+    elif sub == "revoke":
+        print("revoked: it is disconnected now and has to pair again" if out.get("revoked") else "no such token")
+    elif sub == "rotate":
+        if not out.get("token"):
+            print("error: the new token could not be read; rotate again", file=sys.stderr)
+            return 1
+        print("New agent token (shown only this once; give it to your agent):")
+        print(f"  {out['token']}")
+        print(f"The old token keeps working until {_when(float(out.get('old_key_until') or 0), -1)}.")
+    else:
+        print(f"{out.get('agent', ref)} can now: {', '.join(out.get('permissions') or []) or 'nothing'}")
+    return 0
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
@@ -281,6 +459,8 @@ def add_parsers(sub: Any) -> None:
             "changes",
             "undo",
             "github-token",
+            "named-tunnel",
+            "tokens",
         ],
     )
     ag.add_argument("value", nargs="?")
@@ -293,9 +473,10 @@ def add_parsers(sub: Any) -> None:
     ag.add_argument("--local", action="store_true", help="pair: no secure internet link (agents on this PC only)")
     ag.add_argument(
         "--relay",
-        choices=["standard", "backup"],
+        choices=["standard", "backup", "named"],
         default=None,
-        help="pair: standard = Cloudflare link; backup = an SSH relay that does not use Cloudflare (v0.1.23)",
+        help="pair: standard = Cloudflare link; backup = an SSH relay that does not use Cloudflare (v0.1.23); "
+        "named = your own Cloudflare tunnel with a fixed address (v0.1.24, `away agent named-tunnel <host>`)",
     )
     ag.add_argument("--yes", "-y", action="store_true")
     ag.set_defaults(fn=cmd_agent)

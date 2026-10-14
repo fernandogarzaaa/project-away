@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from collections.abc import Callable
@@ -56,6 +57,9 @@ class RecordingBackend:
 
     def type_text(self, text: str) -> None:
         self.calls.append(("type_text", (text,)))
+
+    def release_modifiers(self) -> None:
+        self.calls.append(("release_modifiers", ()))
 
 
 class PynputBackend:  # pragma: no cover - needs a desktop session
@@ -137,6 +141,15 @@ class PynputBackend:  # pragma: no cover - needs a desktop session
 
     def type_text(self, text: str) -> None:
         self._k.type(text)
+
+    def release_modifiers(self) -> None:
+        """Let go of Shift / Ctrl / Alt / Win-Cmd (both sides) after an interrupted action. Releasing a key that is
+        not down does nothing."""
+        for name in ("shift", "shift_r", "ctrl", "ctrl_r", "alt", "alt_r", "alt_gr", "cmd", "cmd_r"):
+            k = getattr(self._keys, name, None)
+            if k is not None:
+                with contextlib.suppress(Exception):
+                    self._k.release(k)
 
 
 # swipe -> key binding (browser/back-forward style by default)
