@@ -53,7 +53,9 @@ def base_dir(data_dir: Path | None = None) -> Path:
 
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    # unique per writer: two threads of one process writing the same file must not share a temp file (seen on macOS
+    # CI: one thread's os.replace took the other's temp file away before its chmod)
+    tmp = path.with_name(path.name + f".{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
     tmp.write_text(text, encoding="utf-8")
     if os.name != "nt":
         os.chmod(tmp, 0o600)
