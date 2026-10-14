@@ -1014,4 +1014,4 @@ def test_version_is_0_1_17() -> None:
     assert '#define AppVersion "0.1.24"' in (root / "packaging" / "windows" / "away.iss").read_text()
     assert '"AWAY_VERSION", "0.1.24"' in (root / "packaging" / "pyinstaller" / "away.spec").read_text()
     for script in ("linux/build_appimage.sh", "linux/build_deb.sh", "macos/build_dmg.sh"):
-        assert 'VERSION="${1:-0.1.23}"' in (root / "packaging" / script).read_text()
+        assert 'VERSION="${1:-0.1.24}"' in (root / "packaging" / script).read_text()
