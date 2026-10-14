@@ -595,6 +595,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.stop_event = threading.Event()
         self.tray_icon: Any = None  # v0.1.24: the pystray icon (set by the tray; Check my PC reads it)
         self.bus = EventBus()
+        with contextlib.suppress(Exception):  # v0.1.24: the 2026-10 voices read models_next (only when chosen)
+            from away.app.next_wiring import configure_voices
+
+            configure_voices(lambda: self.cfg)
         self.models_dir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
         try:
             from away.app.performance import current_profile
@@ -1064,20 +1068,34 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.notice("Project Away: GPU not used", reason, key="gpu-fallback")
 
         self.asr_device = prof.device
-        asr = make_asr(
-            v.asr_backend,
-            model,
-            prof.device,
-            prof.compute_type,
-            v.language,
-            str(self.models_dir / f"whisper-{model}"),
-            vctx.hotwords() if v.hotwords else None,
-            cpu_threads=prof.cpu_threads,
-            beam_size=prof.beam_size,
-            on_fallback=gpu_fallback,
-            cpu_model=cpu_model,
-            cpu_download_root=str(self.models_dir / f"whisper-{cpu_model}") if cpu_model else None,
+        from away.app import next_wiring  # v0.1.24: optional 2026-10 models (nothing changes until one is chosen)
+
+        def build_whisper() -> Any:
+            return make_asr(
+                v.asr_backend,
+                model,
+                prof.device,
+                prof.compute_type,
+                v.language,
+                str(self.models_dir / f"whisper-{model}"),
+                vctx.hotwords() if v.hotwords else None,
+                cpu_threads=prof.cpu_threads,
+                beam_size=prof.beam_size,
+                on_fallback=gpu_fallback,
+                cpu_model=cpu_model,
+                cpu_download_root=str(self.models_dir / f"whisper-{cpu_model}") if cpu_model else None,
+            )
+
+        asr = next_wiring.next_asr(
+            self.cfg,
+            build_whisper,
+            lambda title, msg: self.notice(title, msg, key="next-model"),
+            v.sample_rate,
+            self._save_cfg,
         )
+        if hasattr(asr, "push"):  # a streaming backend (Moonshine / Nemotron) was chosen
+            self.asr_model = str(getattr(asr, "name", self.asr_model))
+            self.asr_device = str(getattr(asr, "device", self.asr_device))
         self.bus.publish(
             "voice.asr_ready",
             {
@@ -1100,7 +1118,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             asr,
             cleaner,
             sink,
-            make_vad(v.vad, v.sample_rate),
+            make_vad(next_wiring.vad_kind(self.cfg, v.vad), v.sample_rate),
             self.bus,
             v.sample_rate,
             gate,
@@ -1180,7 +1198,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 ambient.other_audio = meter.playing_during
         except Exception as exc:
             self._publish_quiet("voice.other_audio_unavailable", {"error": str(exc)})
-        self.voice = VoiceController(v.mode, dictation, ambient, self.bus)
+        # v0.1.24: words while you speak (streaming backends), and the wake-word model in front of always-on
+        self._partials = next_wiring.partial_tap(asr, ambient, self._publish_quiet)
+        gated = next_wiring.wrap_ambient(self.cfg, ambient, lambda title, msg: self.notice(title, msg, key="wake"))
+        self.voice = VoiceController(v.mode, dictation, gated, self.bus)
         self.voice.echo = ECHO  # v0.1.22: the microphone ignores the computer's own voice
         vctx.attach(asr, dictation, ambient)
         if not self.cfg.app.always_on:
@@ -1241,6 +1262,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.editor.feed(chunk)
                 return
             self.voice.feed(chunk)
+            tap = getattr(self, "_partials", None)
+            if tap is not None and not self.voice.muted:
+                with contextlib.suppress(Exception):
+                    tap(chunk)
 
         def mic_loop() -> None:
             with MicStream(on_chunk, v.sample_rate):
@@ -1313,6 +1338,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         hand_model = self.models_dir / "hand_landmarker.task"
         face_model = self.models_dir / "face_landmarker.task"
         accel = self._tracking_accel(hand_model)  # v0.1.24: hands.compute (graphics card or processor)
+        nxt = self._next_hands() if self.cfg.hands.enabled else {}
         hands = (
             HandTracker(
                 hand_model,
@@ -1320,8 +1346,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 prefer=lambda: self.pipeline.hand_mode,
                 mirrored=self.cfg.hands.mirror,
                 release_s=lambda: self.cfg.hands.roles.release_s,
-                factory=accel[0] if accel else None,
-                image_fn=accel[1] if accel else None,
+                # v0.1.25: RTMPose (experimental, models_next) wins only when chosen and downloaded; else the
+                # v0.1.24 hands.compute choice (graphics card or processor)
+                **(nxt or {"factory": accel[0] if accel else None, "image_fn": accel[1] if accel else None}),
             )
             if self.cfg.hands.enabled
             else None
@@ -1643,6 +1670,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """v0.1.23: every failing camera was turned off (Turn off / an agent): stop probing them."""
         off = {str(c.device) for c in getattr(self.cfg.hands, "disabled_cameras", [])}
         return bool(off) and all(str(getattr(s, "device", s)) in off for s in specs)
+
+    def _save_cfg(self) -> None:
+        """Save the settings file now (v0.1.24: after an automatic model rollback)."""
+        from away import config as cfgmod
+
+        with contextlib.suppress(Exception):
+            cfgmod.save(self.cfg, getattr(self, "config_path", None) or cfgmod.config_path())
+
+    def _next_hands(self) -> dict[str, Any]:
+        from away.app import next_wiring
+
+        return next_wiring.hand_kwargs(
+            self.cfg, lambda title, msg: self.notice(title, msg, key="next-hands"), self._save_cfg
+        )
 
     def turn_off_camera(self, device: Any) -> str:
         """ "Turn off" next to a failing camera (tray / Settings > Cameras): saved to the config file."""

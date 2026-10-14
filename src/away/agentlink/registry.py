@@ -726,6 +726,13 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
     }
     if store is not None:
         out["presets"] = make_presets_domain(store)
+    if "model_bench" not in _EXTRA:  # v0.1.24 "Test my PC" (away.app.model_bench registers itself)
+        try:
+            from away.app.model_bench import register_agent_link
+
+            register_agent_link()
+        except Exception:  # never let an optional domain break Agent Link
+            pass
     out.update(_EXTRA)
     return out
 

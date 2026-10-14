@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-SLOTS = ("hands", "face", "gaze", "stt", "cleanup", "voice")
+SLOTS = ("hands", "face", "gaze", "stt", "cleanup", "voice", "vad", "wake")
 SLOT_TITLES = {
     "hands": "Hand tracking",
     "face": "Face / attention",
@@ -42,6 +42,8 @@ SLOT_TITLES = {
     "stt": "Speech to text",
     "cleanup": "Smart cleanup",
     "voice": "Voice (agents speaking)",
+    "vad": "Speech detection",  # v0.1.24
+    "wake": "Wake word",  # v0.1.24
 }
 # the On/Off switch of each optional slot (hand tracking is always on)
 TOGGLES = {"face": "face.enabled", "gaze": "gaze.enabled", "cleanup": "voice.cleanup.mode", "voice": "speech.enabled"}
@@ -55,11 +57,18 @@ ALLOWED_HOSTS = (
     "huggingface.co",
     "files.pythonhosted.org",
     "storage.googleapis.com",
+    "download.openmmlab.com",  # v0.1.24: RTMPose hands (OpenMMLab's official model downloads)
 )
 CATALOG_URL = "https://raw.githubusercontent.com/fernandogarzaaa/project-away/main/models/catalog.json"
 CATALOG_SHA_URL = "https://raw.githubusercontent.com/fernandogarzaaa/project-away/main/models/catalog.sha256"
 CHECK_EVERY_S = 86400.0
 RUNTIMES = ("mediapipe", "onnx", "gguf", "whisper", "rules", "ollama", "system")
+# v0.1.24 (models_next only): engines fetched at runtime by away.app.engines, or a pip extra (torch)
+NEXT_RUNTIMES = ("moonshine", "nemo-speech", "livekit-wakeword", "torch")
+SET_PREFIXES = ("hands.", "face.", "gaze.", "voice.", "speech.")
+NEXT_SET_PREFIXES = (*SET_PREFIXES, "models_next.")
+# fields a models_next entry may add to a model that already exists (its settings and title stay as they are)
+INFO_FIELDS = ("notes", "version", "released", "sha256_note")
 
 
 @dataclass
@@ -81,6 +90,16 @@ class Model:
     path: str = ""  # a local file the user added
     permissive: bool | None = None
     source: str = "built-in"
+    # v0.1.24 (models_next)
+    files: list[dict[str, Any]] = field(default_factory=list)  # a pinned multi-file bundle: path, url, sha256, size
+    experimental: bool = False
+    component: bool = False  # part of another model (downloaded with it), not a choice of its own
+    engine: str = ""  # away.app.engines key the model runs in
+    requires: list[str] = field(default_factory=list)  # e.g. wake_model (a trained file of yours)
+    notes: str = ""
+    version: str = ""
+    released: str = ""
+    from_next: bool = False  # came from the catalog's models_next (offered by the Newer models panel, not the hint)
 
     @property
     def is_permissive(self) -> bool:
@@ -101,11 +120,16 @@ class Model:
             "size_mb": round(self.size / 1e6) if self.size else 0,
             "cost": dict(self.cost),
             "source": self.source,
+            "experimental": self.experimental,
+            "notes": self.notes,
         }
 
 
-def validate(item: Any) -> Model:
-    """A manifest entry -> :class:`Model`; ValueError with a plain reason when it is not acceptable."""
+def validate(item: Any, next_entry: bool = False) -> Model:
+    """A manifest entry -> :class:`Model`; ValueError with a plain reason when it is not acceptable.
+
+    ``next_entry``: a v0.1.24 ``models_next`` entry, which may also use the new runtimes, a ``files`` bundle and
+    ``models_next.*`` settings."""
     if not isinstance(item, dict):
         raise ValueError("a model entry must be an object")
     mid, slot = str(item.get("id") or ""), str(item.get("slot") or "")
@@ -116,24 +140,42 @@ def validate(item: Any) -> Model:
     sets = item.get("set") or {}
     if not isinstance(sets, dict) or not sets:
         raise ValueError(f"{mid}: 'set' must name the settings this model uses")
+    prefixes = NEXT_SET_PREFIXES if next_entry else SET_PREFIXES
     for k in sets:
-        if not str(k).startswith(("hands.", "face.", "gaze.", "voice.", "speech.")) or "agent_link" in str(k):
+        if not str(k).startswith(prefixes) or "agent_link" in str(k):
             raise ValueError(f"{mid}: a model may not change {k}")
     url = str(item.get("url") or "")
     if url:
-        host = (urlparse(url).hostname or "").lower()
-        if urlparse(url).scheme != "https" or not any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS):
-            raise ValueError(f"{mid}: downloads must come from an allowed https host, not {host or url!r}")
-        sha = str(item.get("sha256") or "")
-        if len(sha) != 64 or not all(c in "0123456789abcdef" for c in sha.lower()):
-            raise ValueError(f"{mid}: a download needs its sha256")
+        _check_download(mid, url, item.get("sha256"))
+    files = item.get("files") or []
+    if files and not next_entry:
+        raise ValueError(f"{mid}: file bundles need Project Away 0.1.24 (models_next)")
+    if not isinstance(files, list):
+        raise ValueError(f"{mid}: 'files' must be a list")
+    for f in files:
+        if not isinstance(f, dict) or not str(f.get("path") or ""):
+            raise ValueError(f"{mid}: every file needs a path")
+        rel = str(f["path"])
+        if rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/") or ":" in rel:
+            raise ValueError(f"{mid}: unsafe file path {rel!r}")
+        _check_download(mid, str(f.get("url") or ""), f.get("sha256"))
     runtime = str(item.get("runtime") or "")
-    if runtime and runtime not in RUNTIMES:
+    allowed = (*RUNTIMES, *NEXT_RUNTIMES) if next_entry else RUNTIMES
+    if runtime and runtime not in allowed:
         raise ValueError(f"{mid}: unknown runtime {runtime!r}")
     known = set(Model.__dataclass_fields__)
-    m = Model(**{k: v for k, v in item.items() if k in known and k != "source"})
+    m = Model(**{k: v for k, v in item.items() if k in known and k not in ("source", "from_next")})
     m.size = int(m.size or 0)
     return m
+
+
+def _check_download(mid: str, url: str, sha: Any) -> None:
+    host = (urlparse(url).hostname or "").lower()
+    if urlparse(url).scheme != "https" or not any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS):
+        raise ValueError(f"{mid}: downloads must come from an allowed https host, not {host or url!r}")
+    sha = str(sha or "")
+    if len(sha) != 64 or not all(c in "0123456789abcdef" for c in sha.lower()):
+        raise ValueError(f"{mid}: a download needs its sha256")
 
 
 # ------------------------------------------------------------------------------------------------ sources
@@ -164,6 +206,9 @@ class Registry:
         self.errors: list[str] = []
         self.models: dict[str, Model] = {}
         self.modes: dict[str, dict[str, str]] = dict(self.builtin.get("modes") or {})
+        self.classic_modes: dict[str, dict[str, str]] = dict(self.modes)
+        # v0.1.24: the 2026-10 presets (catalog "presets_next"); used only when models_next.presets is "next"
+        self.presets_next: dict[str, Any] = {}
         self.reload()
 
     @property
@@ -184,18 +229,47 @@ class Registry:
         self.models, self.errors = {}, []
         self._add(self.builtin.get("models"), "built-in")
         cat = _read_json(self.folder / "catalog.json")
+        if not isinstance(cat, dict) or "models_next" not in cat:
+            cat = _merge_next(cat, shipped_catalog())  # until the online catalog has them: the copy in the app
         if isinstance(cat, dict):
             self._add(cat.get("models"), "catalog")
             for k, v in (cat.get("modes") or {}).items():
                 if k in MODES and isinstance(v, dict):
                     self.modes[k] = {s: str(i) for s, i in v.items() if s in SLOTS}
+            self.classic_modes = dict(self.modes)
+            self._add_next(cat.get("models_next"))
+            pn = cat.get("presets_next")
+            self.presets_next = dict(pn) if isinstance(pn, dict) else {}
         local = _read_json(self.folder / "local.json")
         if isinstance(local, dict):
             self._add(local.get("models"), "your file")
 
+    def _add_next(self, items: Any) -> None:
+        """v0.1.24 ``models_next``: new models are added; for a model that already exists only its notes /
+        version are filled in (its settings, title and download never change)."""
+        for item in items or []:
+            try:
+                m = validate(item, next_entry=True)
+            except ValueError as exc:
+                self.errors.append(f"catalog (new models): {exc}")
+                continue
+            old = self.models.get(m.id)
+            if old is not None:
+                for f in INFO_FIELDS:
+                    if getattr(m, f, "") and hasattr(old, f):
+                        setattr(old, f, getattr(m, f))
+                continue
+            m.source = "catalog"
+            m.from_next = True
+            self.models[m.id] = m
+
     # ----------------------------------------------------------------- reads
     def for_slot(self, slot: str, show_restrictive: bool = False) -> list[Model]:
-        return [m for m in self.models.values() if m.slot == slot and (show_restrictive or m.is_permissive)]
+        return [
+            m
+            for m in self.models.values()
+            if m.slot == slot and not m.component and (show_restrictive or m.is_permissive)
+        ]
 
     def get(self, mid: str) -> Model:
         if mid not in self.models:
@@ -206,6 +280,8 @@ class Registry:
         """The model whose settings match the configuration now (the most specific match)."""
         best, score = None, -1
         for m in self.for_slot(slot, True):
+            if not all(_has(cfg, k) for k in m.set):
+                continue
             if all(_get(cfg, k) == v for k, v in m.set.items()) and len(m.set) > score:
                 best, score = m, len(m.set)
         return best
@@ -241,8 +317,14 @@ class Registry:
             _set(cfg, key, bool(on))
         return before
 
-    def apply_mode(self, cfg: Any, mode: str) -> dict[str, Any]:
-        """Performance mode (Light / Balanced / Best): one model per slot. Returns the undo."""
+    def apply_mode(self, cfg: Any, mode: str, ready: Callable[[Model], bool] | None = None) -> dict[str, Any]:
+        """Performance mode (Light / Balanced / Best): one model per slot. Returns the undo.
+
+        v0.1.24: with ``models_next.presets: next`` (after a passing "Test my PC", or chosen by you) the modes pick
+        the 2026-10 models of ``presets_next``; a model that is not ``ready`` yet (not downloaded, no wake-word
+        model of yours) keeps that slot as it is. Otherwise the v0.1.23 modes are used unchanged."""
+        if use_next(cfg) and self.presets_next.get("modes"):
+            return self.apply_next_preset(cfg, mode, ready)
         if mode not in self.modes:
             raise ValueError(f"mode must be one of {', '.join(self.modes)}")
         before: dict[str, Any] = {}
@@ -250,6 +332,59 @@ class Registry:
             if mid in self.models:
                 for k, v in self.switch(cfg, slot, mid).items():
                     before.setdefault(k, v)
+        return before
+
+    # ----------------------------------------------------------------- v0.1.24 presets
+    def next_modes(self) -> dict[str, dict[str, str]]:
+        modes = self.presets_next.get("modes") or {}
+        return {k: dict(v) for k, v in modes.items() if k in MODES and isinstance(v, dict)}
+
+    def preset_plan(self, mode: str, ready: Callable[[Model], bool] | None = None) -> list[dict[str, Any]]:
+        """One row per slot of a 2026-10 preset: the model, whether it is ready here, its estimated VRAM."""
+        modes = self.next_modes()
+        if mode not in modes:
+            raise ValueError(f"mode must be one of {', '.join(modes) or 'light, balanced, best'}")
+        rows = []
+        for slot, mid in modes[mode].items():
+            if mid == "off":
+                rows.append({"slot": slot, "model": None, "title": "Off", "ready": True, "vram_mb": 0})
+                continue
+            m = self.models.get(mid)
+            ok = m is not None and (ready(m) if ready is not None else True)
+            rows.append(
+                {
+                    "slot": slot,
+                    "model": mid,
+                    "title": m.title if m else mid,
+                    "ready": bool(ok),
+                    "experimental": bool(m and m.experimental),
+                    "vram_mb": int((m.cost or {}).get("vram_mb", 0)) if m else 0,
+                    "size_mb": round(m.size / 1e6) if m and m.size else 0,
+                }
+            )
+        return rows
+
+    def preset_vram_mb(self, mode: str) -> int:
+        """Estimated graphics memory of a 2026-10 preset (sum of its models' estimates)."""
+        return sum(int(r["vram_mb"]) for r in self.preset_plan(mode))
+
+    def apply_next_preset(self, cfg: Any, mode: str, ready: Callable[[Model], bool] | None = None) -> dict[str, Any]:
+        before: dict[str, Any] = {}
+        for row in self.preset_plan(mode, ready):
+            slot = str(row["slot"])
+            if row["model"] is None:
+                if slot in TOGGLES:
+                    for k, v in self.set_enabled(cfg, slot, False).items():
+                        before.setdefault(k, v)
+                continue
+            if not row["ready"]:
+                continue
+            for k, v in self.switch(cfg, slot, str(row["model"])).items():
+                before.setdefault(k, v)
+        for k, v in dict((self.presets_next.get("settings") or {}).get(mode) or {}).items():
+            if str(k).startswith("models_next.") and _has(cfg, str(k)):
+                before.setdefault(str(k), copy.deepcopy(_get(cfg, str(k))))
+                _set(cfg, str(k), v)
         return before
 
     @staticmethod
@@ -278,6 +413,36 @@ class Registry:
                 }
             )
         return out
+
+
+def use_next(cfg: Any) -> bool:
+    """Light / Balanced / Best pick the 2026-10 models (``models_next.presets: next``)."""
+    mn = getattr(cfg, "models_next", None)
+    return bool(mn is not None and getattr(mn, "presets", "classic") == "next")
+
+
+def _has(cfg: Any, path: str) -> bool:
+    try:
+        _get(cfg, path)
+    except AttributeError:
+        return False
+    return True
+
+
+def shipped_catalog() -> dict[str, Any] | None:
+    """The catalog that came with this app (``away/data/catalog_next.json``), used before the online one has the
+    v0.1.24 entries."""
+    v = _read_json(Path(__file__).resolve().parent.parent / "data" / "catalog_next.json")
+    return v if isinstance(v, dict) else None
+
+
+def _merge_next(cat: Any, shipped: dict[str, Any] | None) -> Any:
+    if shipped is None:
+        return cat
+    out = dict(cat) if isinstance(cat, dict) else {"models": [], "modes": {}}
+    out["models_next"] = shipped.get("models_next") or []
+    out["presets_next"] = shipped.get("presets_next") or {}
+    return out
 
 
 def _get(cfg: Any, path: str) -> Any:
@@ -355,7 +520,8 @@ def new_model_hint(reg: Registry, data_dir: Path | None = None) -> str:
     """ "A faster speech model is available - try it (Settings > Models)" for the first unseen permissive model."""
     seen = seen_ids(data_dir)
     for m in reg.models.values():
-        if m.source == "catalog" and m.is_permissive and m.id not in seen:
+        # v0.1.24: the 2026-10 models are offered by Settings > Newer models / Test my PC, never by this hint
+        if m.source == "catalog" and m.is_permissive and m.id not in seen and not m.from_next:
             what = SLOT_TITLES[m.slot].lower()
             return f"A new {what} model is available: {m.title} - try it in Settings > Models"
     return ""

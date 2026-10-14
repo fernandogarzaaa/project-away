@@ -9,6 +9,7 @@ speaker detection). :class:`SileroVAD` wraps the Silero model when the
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -131,7 +132,11 @@ class SileroVAD:  # pragma: no cover - needs faster-whisper (bundled Silero ONNX
         return bool(self.segments(audio))
 
 
-def make_vad(kind: str, sample_rate: int = 16000) -> EnergyVAD | SileroVAD:
+def make_vad(kind: str, sample_rate: int = 16000) -> EnergyVAD | SileroVAD | Any:
+    if kind == "silero6":  # v0.1.24: Silero VAD v6.2 (models_next.vad), the v0.1.23 detector until downloaded
+        from away.voice.vad_next import make_silero6
+
+        return make_silero6(sample_rate, fallback=lambda: make_vad("silero", sample_rate))
     if kind == "silero":
         try:
             return SileroVAD(sample_rate)

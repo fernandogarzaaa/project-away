@@ -2850,6 +2850,12 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.accel import settings_ui as accel_ui  # v0.1.24: where tracking runs + "Run self-test"
 
         accel_ui.build(self, f)
+        try:  # v0.1.25: newer models (Test my PC, Light / Balanced / Best, Advanced folded away)
+            from away.app import models_next_panel
+
+            models_next_panel.build(self, f)
+        except Exception as exc:
+            ttk.Label(f, text=f"Newer models are unavailable here ({exc})").pack(anchor="w")
 
     def _perf_refresh(self) -> None:
         try:
