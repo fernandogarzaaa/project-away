@@ -1,4 +1,4 @@
-"""Check my PC on the real PC (v0.1.25): the measurements behind :mod:`away.selftest.pccheck`.
+"""Check my PC on the real PC (v0.1.24): the measurements behind :mod:`away.selftest.pccheck`.
 
 :class:`RealPcEnv` extends the self-test's :class:`~away.selftest.env.RealEnv` (cameras, tracking, glide, big
 pointer, one-copy lock, microphone, link: unchanged) with the guided and desktop parts. When Project Away is running,
@@ -257,11 +257,28 @@ def pinch_closed(lm: Any) -> bool:
     return size > 0 and d < 0.35 * size
 
 
+def engine_input() -> Any:  # pragma: no cover - real input devices
+    """The echo probe's input: a client of the one action engine (``user`` source: the person asked for the check),
+    so the 1 px move and the Shift tap are audited, obey Stop everything and never bypass the engine."""
+    from away.actions_engine import USER, get_engine
+
+    eng = get_engine()
+    return eng.client(USER, eng.backend if eng.backend is not None else eng.os_backend())
+
+
 def measure_echo(
-    mouse: Any, keyboard: Any, mouse_window: float, key_window: float, samples: int = ECHO_SAMPLES, wait: float = 1.0
+    mouse: Any,
+    keyboard: Any,
+    mouse_window: float,
+    key_window: float,
+    samples: int = ECHO_SAMPLES,
+    wait: float = 1.0,
+    inject: Any = None,
 ) -> dict[str, Any]:
     """Move the pointer by one pixel and back, and tap Shift, ``samples`` times each; time how long each takes to
-    reach a pynput listener (the same path the takeover detection uses)."""
+    reach a pynput listener (the same path the takeover detection uses). ``mouse`` / ``keyboard`` (pynput) are
+    only listened to; the input itself goes through ``inject`` (default: the action engine, :func:`engine_input`),
+    which needs ``position``, ``move(x, y)`` and ``key(name)``."""
     got: dict[str, threading.Event] = {"mouse": threading.Event(), "key": threading.Event()}
     at: dict[str, float] = {}
 
@@ -277,16 +294,16 @@ def measure_echo(
     out: dict[str, Any] = {"mouse_ms": [], "key_ms": [], "mouse_missed": 0, "key_missed": 0}
     try:
         time.sleep(0.3)
-        mc, kc = mouse.Controller(), keyboard.Controller()
+        src = inject if inject is not None else engine_input()
         for i in range(samples):
             for kind in ("mouse", "key"):
                 got[kind].clear()
                 t0 = time.perf_counter()
                 if kind == "mouse":
-                    mc.move(1 if i % 2 == 0 else -1, 0)
+                    x, y = src.position
+                    src.move(int(x) + (1 if i % 2 == 0 else -1), int(y))
                 else:
-                    kc.press(keyboard.Key.shift)
-                    kc.release(keyboard.Key.shift)
+                    src.key("shift")
                 if got[kind].wait(wait):
                     out[f"{kind}_ms"].append(round((at[kind] - t0) * 1000.0, 1))
                 else:

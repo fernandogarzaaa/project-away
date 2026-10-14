@@ -43,7 +43,7 @@ def first_run_command() -> list[str]:
 
 
 def check_pc_command() -> list[str]:
-    """v0.1.25 "Check my PC": the guided real-hardware check in its own window."""
+    """v0.1.24 "Check my PC": the guided real-hardware check in its own window."""
     from away.app.frozen import away_command
 
     return away_command(["check", "--window", "--trigger", "Settings"])

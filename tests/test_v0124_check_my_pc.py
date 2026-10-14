@@ -1,4 +1,4 @@
-"""v0.1.25 Check my PC: each part's Pass / Fail / Skipped rule with fake devices (JoyCam plus a broken internal
+"""v0.1.24 Check my PC: each part's Pass / Fail / Skipped rule with fake devices (JoyCam plus a broken internal
 camera, voices, tray, toast, secure desktop, pynput echo, link reconnect), the guided prompts, redaction (both
 redactors), the saved JSON / HTML / text / verified.json, sharing only with agents allowed to receive it, the
 in-app probe list, RemotePcEnv and the ``away check`` CLI."""
@@ -377,32 +377,37 @@ def test_measure_echo_times_the_listener_with_fake_pynput() -> None:
     def deliver_later(i: int) -> None:
         threading.Timer(0.01, lambda: _FakeListener.instances[i].cb()).start()
 
-    mouse = SimpleNamespace(
-        Listener=lambda on_move: _FakeListener(on_move=on_move),
-        Controller=lambda: SimpleNamespace(move=lambda dx, dy: deliver_later(0)),
-    )
-    keyboard = SimpleNamespace(
-        Listener=lambda on_press: _FakeListener(on_press=on_press),
-        Controller=lambda: SimpleNamespace(press=lambda k: deliver_later(1), release=lambda k: None),
-        Key=SimpleNamespace(shift="shift"),
-    )
-    out = pcenv.measure_echo(mouse, keyboard, 0.25, 0.3, samples=2, wait=1.0)
+    from away.actions_engine import USER, ActionEngine
+    from away.control.mouse import RecordingBackend
+
+    class Backend(RecordingBackend):
+        position = (10, 10)
+
+        def move(self, x: int, y: int) -> None:
+            super().move(x, y)
+            deliver_later(0)
+
+        def key(self, name: str) -> None:
+            super().key(name)
+            deliver_later(1)
+
+    mouse = SimpleNamespace(Listener=lambda on_move: _FakeListener(on_move=on_move))
+    keyboard = SimpleNamespace(Listener=lambda on_press: _FakeListener(on_press=on_press))
+    engine = ActionEngine(Backend())
+    out = pcenv.measure_echo(mouse, keyboard, 0.25, 0.3, samples=2, wait=1.0, inject=engine.client(USER))
     assert len(out["mouse_ms"]) == 2 and len(out["key_ms"]) == 2
     assert all(5.0 <= x < 900.0 for x in out["mouse_ms"] + out["key_ms"])
     assert out["mouse_window_s"] == 0.25 and out["key_window_s"] == 0.3
+    # the probe's input goes through the action engine: 1 px moves from where the pointer is, audited Shift taps
+    assert [c for c in engine.backend.calls if c[0] == "move"] == [("move", (11, 10)), ("move", (9, 10))]
+    assert [e["action"] for e in engine.recent(source=USER)] == ["key", "key"]
 
 
 def test_measure_echo_counts_missed_echoes() -> None:
-    mouse = SimpleNamespace(
-        Listener=lambda on_move: _FakeListener(on_move=on_move),
-        Controller=lambda: SimpleNamespace(move=lambda dx, dy: None),
-    )
-    keyboard = SimpleNamespace(
-        Listener=lambda on_press: _FakeListener(on_press=on_press),
-        Controller=lambda: SimpleNamespace(press=lambda k: None, release=lambda k: None),
-        Key=SimpleNamespace(shift="shift"),
-    )
-    out = pcenv.measure_echo(mouse, keyboard, 0.25, 0.3, samples=1, wait=0.05)
+    mouse = SimpleNamespace(Listener=lambda on_move: _FakeListener(on_move=on_move))
+    keyboard = SimpleNamespace(Listener=lambda on_press: _FakeListener(on_press=on_press))
+    quiet = SimpleNamespace(position=(0, 0), move=lambda x, y: None, key=lambda name: None)
+    out = pcenv.measure_echo(mouse, keyboard, 0.25, 0.3, samples=1, wait=0.05, inject=quiet)
     assert out["mouse_ms"] == [] and out["mouse_missed"] == 1 and out["key_missed"] == 1
 
 
@@ -545,7 +550,7 @@ def _agent(name: str, scopes: list[str], url: str = "") -> Any:
     return SimpleNamespace(name=name, scopes=scopes, wake_url=url)
 
 
-def test_share_only_reaches_agents_with_share_logs_or_diagnose() -> None:
+def test_share_only_reaches_agents_with_share_logs() -> None:
     pub = _report()
     inbox = _Inbox()
     posts: list[tuple[str, dict[str, Any]]] = []
@@ -555,9 +560,9 @@ def test_share_only_reaches_agents_with_share_logs_or_diagnose() -> None:
         _agent("Spy", ["read", "screen"], "https://hook/spy"),
     ]
     out = pccheck.share(pub, agents, inbox=inbox, post=lambda u, p: posts.append((u, p)), background=False)
-    assert [a["agent"] for a in out["agents"]] == ["Claude", "Codex"]
-    assert out["skipped_agents"] == ["Spy"]
-    assert inbox.added[0][1] == ["Claude", "Codex"] and "Check my PC" in inbox.added[0][0]
+    assert [a["agent"] for a in out["agents"]] == ["Claude"]
+    assert out["skipped_agents"] == ["Codex", "Spy"]  # diagnose alone does not get the report
+    assert inbox.added[0][1] == ["Claude"] and "Check my PC" in inbox.added[0][0]
     assert [u for u, _p in posts] == ["https://hook/a"] and posts[0][1]["event"] == "pccheck.completed"
     assert "event_seq" not in out  # never on the shared event stream
 
@@ -572,7 +577,7 @@ def test_may_receive_uses_the_permission_names() -> None:
     from away.agentlink import perms
 
     assert pccheck.may_receive(_agent("a", [perms.SHARE_LOGS]))
-    assert pccheck.may_receive(_agent("b", [perms.DIAGNOSE]))
+    assert not pccheck.may_receive(_agent("b", [perms.DIAGNOSE]))
     assert not pccheck.may_receive(_agent("c", [perms.READ, perms.TUNE, perms.CONTROL]))
     assert not pccheck.may_receive(SimpleNamespace(name="d"))
 

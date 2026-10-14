@@ -1273,11 +1273,11 @@ class AgentLinkHost:
             from away.selftest import fixes
 
             return fixes.apply(str(req.get("fix") or ""), app=self.app, host=self)
-        if a == "pccheck_probe":  # v0.1.25 Check my PC: one measurement inside the app (fixed list of steps)
+        if a == "pccheck_probe":  # v0.1.24 Check my PC: one measurement inside the app (fixed list of steps)
             from away.selftest import pcenv
 
             return pcenv.probe(self.app, self, str(req.get("probe") or ""), list(req.get("args") or []))
-        if a == "pccheck_share":  # v0.1.25: only to agents with share_logs or diagnose, never the event stream
+        if a == "pccheck_share":  # v0.1.24: only to agents with share_logs, never the event stream
             from away.agentlink.inbox import post_json
             from away.selftest import pccheck
 

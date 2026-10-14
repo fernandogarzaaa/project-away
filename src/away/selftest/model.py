@@ -65,7 +65,7 @@ class Report:
     results: list[Result] = field(default_factory=list)
     trigger: str = "you"  # you | tray | settings | cli | <agent name>
     id: str = ""
-    kind: str = "away.selftest"  # v0.1.25: "away.pccheck" for Check my PC
+    kind: str = "away.selftest"  # v0.1.24: "away.pccheck" for Check my PC
 
     @property
     def status(self) -> str:

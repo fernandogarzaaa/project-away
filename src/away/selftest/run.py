@@ -72,7 +72,7 @@ def run(
         raise Busy("a self-test is already running")
     try:
         lim = {**LIMITS_S, **(limits or {})}
-        table = ck.CHECKS if checks is None else checks  # v0.1.25: "Check my PC" runs its own list through here
+        table = ck.CHECKS if checks is None else checks  # v0.1.24: "Check my PC" runs its own list through here
         want = set(only or [c[0] for c in table])
         todo = [c for c in table if c[0] in want]
         rep = Report(__version__, _platform(), clock(), trigger=trigger, id=uuid.uuid4().hex[:10], kind=kind)

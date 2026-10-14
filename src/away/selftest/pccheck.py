@@ -1,4 +1,4 @@
-"""Check my PC (v0.1.25): one click turns the README's "untested" list into facts about *this* PC.
+"""Check my PC (v0.1.24): one click turns the README's "untested" list into facts about *this* PC.
 
 It is the self-test (:mod:`away.selftest.checks`, :mod:`away.selftest.run`) plus a short guided part where the
 person helps: "raise your hand", "pinch", "say: testing one two three", "did you hear the voice?". Every item ends
@@ -633,11 +633,12 @@ def finish(
 
 # ---------------------------------------------------------------------------------------------- sharing
 def may_receive(agent: Any) -> bool:
-    """Only agents allowed to "Share my logs and recordings" or "Run camera and speed checks" get the report."""
+    """Only agents allowed to "Share my logs and recordings" get the report (like the self-test report since the
+    v0.1.24 hardening: "Run camera and speed checks" alone is not enough to read it)."""
     from away.agentlink import perms
 
     scopes = set(getattr(agent, "scopes", None) or [])
-    return perms.SHARE_LOGS in scopes or perms.DIAGNOSE in scopes
+    return perms.SHARE_LOGS in scopes
 
 
 def note_text(report: dict[str, Any]) -> str:

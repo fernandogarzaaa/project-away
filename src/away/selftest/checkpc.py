@@ -1,4 +1,4 @@
-"""``away check`` (v0.1.25): Check my PC from a terminal, the tray or Settings > Getting started.
+"""``away check`` (v0.1.24): Check my PC from a terminal, the tray or Settings > Getting started.
 
 * ``away check`` - the guided check in this terminal (press Enter when asked, answer y / n);
 * ``away check --window`` - the same in a window with fix buttons, "Copy report" and "Send to my agents" (what the

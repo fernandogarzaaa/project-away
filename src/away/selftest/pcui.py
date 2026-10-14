@@ -1,4 +1,4 @@
-"""The Check my PC window (v0.1.25): instructions while it runs, then Pass / Fail / Skipped per item with fix
+"""The Check my PC window (v0.1.24): instructions while it runs, then Pass / Fail / Skipped per item with fix
 buttons, "Copy report", "Open full report", "Send to my agents" and "Run again". Reuses the self-test window's
 colours, ordering and fix buttons (:mod:`away.selftest.ui`)."""
 

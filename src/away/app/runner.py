@@ -593,7 +593,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.dry_run = dry_run
         self.config_path = config_path
         self.stop_event = threading.Event()
-        self.tray_icon: Any = None  # v0.1.25: the pystray icon (set by the tray; Check my PC reads it)
+        self.tray_icon: Any = None  # v0.1.24: the pystray icon (set by the tray; Check my PC reads it)
         self.bus = EventBus()
         self.models_dir = Path(cfg.models_dir) if cfg.models_dir else paths.models_dir()
         try:

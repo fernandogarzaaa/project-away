@@ -325,7 +325,7 @@ def match(phrase: str, heard: str) -> float:
 
 
 def check_stt(env: Env, phrase: str = PHRASE, s: dict[str, Any] | None = None) -> list[Result]:
-    """``s``: an already-made recording result (v0.1.25 Check my PC records after its own prompt)."""
+    """``s``: an already-made recording result (v0.1.24 Check my PC records after its own prompt)."""
     s = env.stt(phrase) if s is None else s
     if s.get("skipped"):
         return [_r("stt", "Speech to text", SKIP, str(s["skipped"]))]

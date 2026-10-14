@@ -181,7 +181,7 @@ class TrayController:
 
     @staticmethod
     def check_pc_command() -> list[str]:
-        """v0.1.25 "Check my PC": the guided real-hardware check window (measurements run inside this app)."""
+        """v0.1.24 "Check my PC": the guided real-hardware check window (measurements run inside this app)."""
         from away.app.frozen import away_command
 
         return away_command(["check", "--window", "--trigger", "tray"])
@@ -615,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
         ),
-        pystray.MenuItem("Check my PC", lambda _icon, _item: ctl.run_check_pc()),  # v0.1.25
+        pystray.MenuItem("Check my PC", lambda _icon, _item: ctl.run_check_pc()),  # v0.1.24
         pystray.MenuItem("Run self-test", lambda _icon, _item: ctl.run_selftest()),  # v0.1.24
         pystray.MenuItem("Settings...", on_settings),
         pystray.MenuItem("Edit config file", on_edit_yaml),
@@ -623,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
-    app.tray_icon = icon  # v0.1.25: Check my PC reads whether it shows and its tooltip
+    app.tray_icon = icon  # v0.1.24: Check my PC reads whether it shows and its tooltip
     topics = (
         "voice.state",
         "app.paused",

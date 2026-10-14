@@ -1567,7 +1567,7 @@ removed. With no agent connected it stays on this PC.
 When the model benchmark (`away.app.model_bench`) is part of the build, its last result appears as one more
 line ("Newer models"); the self-test only reads that result and never starts a benchmark by itself.
 
-## Check my PC (v0.1.25)
+## Check my PC (v0.1.24)
 
 One click to find out what really works on **your** PC. It takes about 2 minutes and you help a little.
 
@@ -1603,8 +1603,8 @@ Passwords, keys, e-mail addresses, your user name and private file paths are tak
 copies the text version; **Open full report** opens the web page.
 
 **Nothing is sent anywhere by itself.** **Send to my agents** (or `away check --send`) sends the report only to
-connected agents you allowed to *Share my logs and recordings* or *Run camera and speed checks*; other agents do
-not get it, and it is not put on the shared event stream.
+connected agents you allowed to *Share my logs and recordings*; other agents (including ones that may only *Run
+camera and speed checks*) do not get it, and it is not put on the shared event stream.
 
 ## GPU tracking (v0.1.24)
 
@@ -1861,7 +1861,7 @@ Config (`macros:` in config.yaml, all optional):
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
 | Computer control (mouse/keyboard), takeover pause, password/secure-desktop blocks, risky-click confirmation | Logic unit-tested with a recording backend and fake UI Automation; **untested on a real desktop**: real pynput listeners for takeover, Windows UI Automation (`uiautomation`), the border/banner windows, Ctrl+Alt+Esc, open_app through the Start menu |
 | Safety hardening (v0.1.24, external audit): undo needs a live grant; separate mouse/keyboard echo windows and a 0.75 s approval grace; stop/takeover interrupts a running drag, typing or open_app and releases the mouse button and modifier keys; unidentified click/drag/Enter/shortcut targets ask; drag destinations checked; no capture without its notice; 64 KB / 256 KB body caps (chunked too); "Share my logs and recordings" permission and log redaction; per-agent action log; permission changes end live sessions and views; secure-desktop check fails closed on Windows | 58 tests in `tests/test_safety_hardening.py`; 45 of them fail on the code before the fixes (the rest guard what must keep working). Interruption is tested with threads and a backend that blocks mid-action; the body cap through Starlette's test client and at the ASGI level. **Untested on a real desktop**: real pynput echo timing against the 0.25 s / 0.3 s windows, `release_modifiers` with real keys, the Windows secure-desktop detector failing for real, Windows UI Automation names for drag targets (Recycle Bin), and the notice/badge windows failing to start on a real PC |
-| Check my PC (v0.1.25) | Every part's Pass / Fail / Skipped rule, the guided prompts, both redactions, the saved files, `verified.json` and sending only to agents with *Share my logs* or *Run camera and speed checks* tested with fake devices in `tests/test_v0125_check_my_pc.py`; **not yet run on the user's laptop**: its first real run is what turns the untested rows here into facts (see `verified.json`) |
+| Check my PC (v0.1.24) | Every part's Pass / Fail / Skipped rule, the guided prompts, both redactions, the saved files, `verified.json` and sending only to agents with *Share my logs* tested with fake devices in `tests/test_v0124_check_my_pc.py`; **not yet run on the user's laptop**: its first real run is what turns the untested rows here into facts (see `verified.json`) |
 | Tray tooltip limit, "hey heart" for Hark (v0.1.24) | Tooltip cut to 127 UTF-16 units (emoji never split) and the sound-alike matcher tested with fixed phrases; **untested** in the real Windows tray and with real speech |
 | Prompts answered by thumbs up/down / fingers / voice | Hand-sign geometry tested on synthetic hands; **untested with real MediaPipe landmarks**; the prompt/toast/border windows are Tk, smoke-tested only |
 | Screenshots, live screen view, camera stills | JPEG scaling and gating tested; Pillow `ImageGrab` **untested on Windows/macOS here**; the live view and its badge need a real desktop |

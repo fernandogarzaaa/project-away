@@ -47,7 +47,7 @@ def build_tab(win: Any, nb: Any) -> Any:  # pragma: no cover - widgets
         cursor="hand2",
         command=lambda: win._report(actions.launch_first_run(), "opening the guided first run..."),
     ).pack(anchor="w", pady=(6, 16))
-    tk.Label(  # v0.1.25: one click, about 2 minutes, a report of what really works on this PC
+    tk.Label(  # v0.1.24: one click, about 2 minutes, a report of what really works on this PC
         f,
         text="Something not working? Check my PC tests your cameras, voice and pointer in about 2 minutes.",
         anchor="w",

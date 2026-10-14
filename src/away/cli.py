@@ -156,7 +156,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """v0.1.25: Check my PC, the guided real-hardware report."""
+    """v0.1.24: Check my PC, the guided real-hardware report."""
     from away.selftest import checkpc
 
     return checkpc.main(args)
