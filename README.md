@@ -272,6 +272,8 @@ your screen and out loud.
 * **"Hey agent"** or the **summon gesture** (then say your message) goes to your **default agent**, chosen under
   *Talk to your agent* in Settings → Agent Link. With no default it goes to every connected agent.
 * Say only "Hey Claude" and pause: you have about 8 seconds to say the message.
+* If the computer mishears the name ("hey heart" for **Hark**, "hey cloud" for **Claude**), the message still goes
+  to that agent, as long as you started with "Hey" (or "Hi", "OK") and only one agent's name sounds like it.
 * It needs always-on listening (the default). The same rules as dictation apply, so a video playing in the
   background does not send messages.
 * **Wake-up address (optional, off by default).** Some agents can be woken up by a web address (a "webhook"). If
@@ -291,7 +293,8 @@ in memory only (the newest 200), never written to disk.
 | ▣ See my screen when I allow | one small screenshot at a time, or a slow (1 per second) live view with a badge on screen the whole time | off |
 | ⚙ Change my settings | sliders, gestures, voice commands, per-app profiles, presets; it asks you first (before/after) and everything can be undone | off |
 | ⌨ Let it use my computer | mouse and keyboard, after you allow it on the PC each time, for 30 minutes at most | off |
-| (Advanced) Run camera and speed checks | camera checks, speed tests, short gesture recordings (no video), diagnostics bundles | on |
+| ✉ Share my logs and recordings | its logs, short gesture recordings (no video) and problem reports, with passwords, keys, e-mail addresses and your user folder hidden | off |
+| (Advanced) Run camera and speed checks | camera checks and speed tests | on |
 
 **While an agent uses your computer** a bright border and the banner *"Claude is using your computer — move your hand
 or mouse to take over"* are on screen. Touching the mouse or keyboard, or making a gesture, pauses it instantly; it
@@ -365,12 +368,12 @@ or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123
 | `events` | `poll` (`since`, `landmarks`), `wait` (`since`, `timeout_s`, `topics`) | see my gestures |
 | `settings` | `list` (`domain`), `change` (`changes`, `why`), `undo` (`what`), `history` (`limit`), `config` | change my settings (`list`/`history`/`config`: see my gestures) |
 | `preferences` | `list`, `add` (`text`), `remove` (`number`) | change my settings to add/remove |
-| `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`logs`: see my gestures) |
+| `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`record`, `bundle`, `files`, `download`, `logs`: share my logs and recordings) |
 | `look` | `camera` | see my camera when I allow |
 | `get_screen` | `scale`, `monitor`, `region`, `elements` (see below) | see my screen when I allow |
 | `ask_user` | `question` (or `message`), `options`, `timeout_s`, `urgency`, `speak` | always |
 | `notify_user` | `text` (or `message`), `level`, `speak` | always |
-| `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always) |
+| `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always; `log` shows only your own actions) |
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
 | `open` | `app` (`name`), `url` (`url`) | use my computer |
@@ -450,6 +453,31 @@ stats, the last 30 s of landmarks) to `<data>/diagnostics/` and tells connected 
 `agent_link.github_issues: true` files a GitHub issue (stats only, never the bundle) with a token you store in the OS
 keyring with `away agent github-token`.
 
+### Safety guarantees
+
+These are enforced by Project Away itself, whatever the agent asks for, and each one has an automatic test:
+
+* **Nothing without your OK.** Using your computer needs your Allow every session. A click, drag, Enter, Delete or
+  shortcut on something Project Away can't identify asks you first, like Send, Pay, Delete or Install do. Dropping
+  something on the Recycle Bin or Trash asks too. You can say "Allow for this session" to stop the questions until
+  the session ends.
+* **You can always take over.** Moving your mouse pauses the agent at once, even while it is typing. Your stop keys
+  (Ctrl+Alt+Esc), saying "stop" and holding up an open palm always work, straight away. An action that is already
+  running stops before its next step (a drag, the next few letters), and Project Away lets go of the mouse button
+  and Shift, Ctrl, Alt and Win.
+* **Undo is yours or the agent's own.** An agent can only undo its own actions, and only while you are letting it use
+  your computer.
+* **No picture without a notice.** Every camera picture and screenshot shows a notice on screen. If the notice can't
+  be shown, the picture is not taken. The live screen view only runs while its "watching" badge is on screen.
+* **Turning a permission off works at once.** Turn off "Let it use my computer" and its session ends and the border
+  goes away. Turn off "See my screen" and its live view stops. Disconnect does both.
+* **Your logs are yours.** Sending logs, recordings and problem reports to an agent needs its own permission, "Share
+  my logs and recordings", off unless you turn it on (agents connected earlier don't get it either). Passwords,
+  keys, tokens, e-mail addresses and your user folder are hidden in what is sent. An agent sees only its own actions
+  in the action list.
+* **Fails safe.** If Windows can't tell whether a security prompt (UAC, Ctrl+Alt+Del) is on screen, the agent is
+  stopped. Oversized requests are refused before they are read (64 KB, 256 KB for MCP).
+
 ### Security notes (honest)
 
 * The local server listens on **127.0.0.1 only**. Remote access exists only while a pairing link or a remote agent is
@@ -465,7 +493,8 @@ keyring with `away agent github-token`.
 * Requests with a browser `Origin` header are refused (a web page cannot drive it); every request is in
   `<data>/logs/agent-access.log` (codes and tokens never written).
 * Never possible through Agent Link: running shell commands, reading or writing your files (downloads are limited to
-  bundles, recordings and logs inside Project Away's data folder, with path-traversal and symlink checks), changing
+  bundles, recordings and logs inside Project Away's data folder, with path-traversal and symlink checks, and need
+  "Share my logs and recordings"), changing
   `allow_shell`, hotkeys, updates or the agents' own permissions.
 * "Let it use my computer" is the riskiest permission. Its protections (approval every session, expiry, takeover
   pause, password-field and secure-desktop blocks, risky-click confirmation, blocked Win+R / Ctrl+Alt+Del, no
@@ -1643,6 +1672,8 @@ Config (`macros:` in config.yaml, all optional):
 | Agent Link through a real Cloudflare quick tunnel | **Verified from the Linux build sandbox**: pinned cloudflared 2026.10.0 downloaded and SHA-256 checked, quick tunnel started, a remote MCP client and the REST example client paired and called tools through `https://*.trycloudflare.com` |
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
 | Computer control (mouse/keyboard), takeover pause, password/secure-desktop blocks, risky-click confirmation | Logic unit-tested with a recording backend and fake UI Automation; **untested on a real desktop**: real pynput listeners for takeover, Windows UI Automation (`uiautomation`), the border/banner windows, Ctrl+Alt+Esc, open_app through the Start menu |
+| Safety hardening (v0.1.24, external audit): undo needs a live grant; separate mouse/keyboard echo windows and a 0.75 s approval grace; stop/takeover interrupts a running drag, typing or open_app and releases the mouse button and modifier keys; unidentified click/drag/Enter/shortcut targets ask; drag destinations checked; no capture without its notice; 64 KB / 256 KB body caps (chunked too); "Share my logs and recordings" permission and log redaction; per-agent action log; permission changes end live sessions and views; secure-desktop check fails closed on Windows | 58 tests in `tests/test_safety_hardening.py`; 45 of them fail on the code before the fixes (the rest guard what must keep working). Interruption is tested with threads and a backend that blocks mid-action; the body cap through Starlette's test client and at the ASGI level. **Untested on a real desktop**: real pynput echo timing against the 0.25 s / 0.3 s windows, `release_modifiers` with real keys, the Windows secure-desktop detector failing for real, Windows UI Automation names for drag targets (Recycle Bin), and the notice/badge windows failing to start on a real PC |
+| Tray tooltip limit, "hey heart" for Hark (v0.1.24) | Tooltip cut to 127 UTF-16 units (emoji never split) and the sound-alike matcher tested with fixed phrases; **untested** in the real Windows tray and with real speech |
 | Prompts answered by thumbs up/down / fingers / voice | Hand-sign geometry tested on synthetic hands; **untested with real MediaPipe landmarks**; the prompt/toast/border windows are Tk, smoke-tested only |
 | Screenshots, live screen view, camera stills | JPEG scaling and gating tested; Pillow `ImageGrab` **untested on Windows/macOS here**; the live view and its badge need a real desktop |
 | Session record + replay, diagnostics bundle, auto-detectors | Tested (replay is deterministic and byte-identical files); fps/latency/CPU numbers in the frozen app **untested on real hardware**; GPU numbers need `nvidia-smi` |
