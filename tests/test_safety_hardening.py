@@ -742,6 +742,9 @@ def _host(tmp_path: Path) -> Any:
     ui = UI()
     h = AgentLinkHost(None, data_dir=tmp_path, ui=ui, headless=True)
     h.core.control.ask = lambda *a, **k: {"answer": "Allow"}
+    # the CI runners' real desktop (no interactive session on Windows) is not what these tests are about
+    h.core.control.hooks.secure_desktop = lambda: False
+    h.core.control.hooks.foreground = lambda: None
     offs: list[int] = []
     orig_off = h.core.control.hooks.overlay_off
 
