@@ -883,3 +883,60 @@ def test_tray_tooltip_never_exceeds_the_windows_limit() -> None:
     t = tooltip_text(emoji)
     assert _utf16_len(t) <= TOOLTIP_MAX
     t.encode("utf-16-le")  # no lone surrogate
+
+
+# ------------------------------------------------------------- extra (b): "hey heart" reaches Hark
+HARK = [{"id": "h1", "name": "Hark", "wake_word": ""}]
+
+
+@pytest.mark.parametrize(
+    ("said", "body"),
+    [
+        ("hey heart, what's on my calendar today", "what's on my calendar today"),
+        ("Hey heart.", ""),
+        ("hey hark remind me at five", "remind me at five"),
+        ("ok heart send it", "send it"),
+    ],
+)
+def test_near_homophones_of_the_agents_name_wake_it(said: str, body: str) -> None:
+    from away.voice import talk
+
+    r = talk.match(said, HARK)
+    assert r is not None and r.target == "h1" and r.body == body
+
+
+def test_a_misheard_longer_name_and_claude_as_cloud() -> None:
+    from away.voice import talk
+
+    agents = [{"id": "c1", "name": "Claude", "wake_word": ""}, {"id": "g1", "name": "Gemini", "wake_word": ""}]
+    r = talk.match("hey cloud open my notes", agents)
+    assert r is not None and r.target == "c1" and r.body == "open my notes"
+    r = talk.match("hey jemini what time is it", agents)
+    assert r is not None and r.target == "g1"
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "heart rate is high today",  # no "hey": ordinary dictation
+        "hey there how are you",
+        "hey harry are you coming",
+        "hey how about lunch",
+        "hey hello",
+        "my heart is full",
+        "hey hawk",
+    ],
+)
+def test_unrelated_phrases_do_not_wake_hark(said: str) -> None:
+    from away.voice import talk
+
+    assert talk.match(said, HARK) is None
+
+
+def test_a_sound_alike_that_fits_two_agents_goes_to_neither() -> None:
+    from away.voice import talk
+
+    agents = [{"id": "h1", "name": "Hark", "wake_word": ""}, {"id": "h2", "name": "Hurt", "wake_word": ""}]
+    assert talk.match("hey heart are you there", agents) is None
+    r = talk.match("hey hurt are you there", agents)  # an exact name always wins
+    assert r is not None and r.target == "h2"

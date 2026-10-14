@@ -95,7 +95,74 @@ def match(text: str, agents: Iterable[Mapping[str, Any]]) -> Route | None:
         if best is None or score > best[0]:
             label = (toks[i] + " " if lead and s == start else "") + phrase
             best = (score, Route(target, body, label))
+    if best is None and lead and start < len(toks):
+        return _sounds_like(toks, raw, i, start, cands)
     return best[1] if best else None
+
+
+# v0.1.24: speech recognition often hears a short name as a common word ("Hey Hark" -> "hey heart", "Hey Claude"
+# -> "hey cloud"). After "hey"/"ok"/... a word that sounds like exactly one agent's one-word name still reaches it.
+_SOUND_CLASS = {
+    **dict.fromkeys("bdgkpqtc", "P"),  # stops: t/k/d/g sound alike in a quick "hey ..."
+    **dict.fromkeys("fv", "f"),
+    **dict.fromkeys("szx", "s"),
+    **dict.fromkeys("mn", "n"),
+    "l": "l",
+    "r": "r",
+    "j": "j",
+}
+
+
+def sound_key(word: str) -> str:
+    """A rough sound of ``word``: its first letter, then its consonants by sound class, vowels and h/w/y dropped,
+    repeats merged ("hark" and "heart" -> "hrP", "claude" and "cloud" -> "PlP")."""
+    w = "".join(ch for ch in str(word).lower() if "a" <= ch <= "z")
+    if not w:
+        return ""
+    out = [_SOUND_CLASS.get(w[0], w[0])]
+    for ch in w[1:]:
+        c = _SOUND_CLASS.get(ch)
+        if c and c != out[-1]:
+            out.append(c)
+    return "".join(out)
+
+
+def _edits(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def sounds_like(heard: str, name: str) -> bool:
+    """``heard`` is a near-homophone of the one-word name ``name``: the same rough sound (and about as long), or,
+    for names of 5+ letters, one letter off ("jemini" for "gemini")."""
+    if heard == name:
+        return True
+    if len(name) >= 5 and _edits(heard, name) <= 1:
+        return True
+    key = sound_key(name)
+    return len(name) >= 3 and len(key) >= 3 and abs(len(heard) - len(name)) <= 2 and sound_key(heard) == key
+
+
+def _sounds_like(
+    toks: list[str], raw: list[str], i: int, start: int, cands: list[tuple[str, bool, str]]
+) -> Route | None:
+    """The one agent whose one-word name the word after the lead sounds like (None when none, or more than one)."""
+    heard = toks[start]
+    hits = {
+        target: phrase
+        for phrase, _need_lead, target in cands
+        if target != DEFAULT and " " not in phrase and phrase not in LEADS and sounds_like(heard, phrase)
+    }
+    if len(hits) != 1:
+        return None
+    target, phrase = next(iter(hits.items()))
+    body = " ".join(raw[start + 1 :]).lstrip(" ,.:;!?-").strip()
+    return Route(target, body, f"{toks[i]} {phrase}")
 
 
 def _match_at(toks: list[str], s: int, words: list[str]) -> int | None:
