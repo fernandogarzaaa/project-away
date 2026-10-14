@@ -1567,6 +1567,45 @@ removed. With no agent connected it stays on this PC.
 When the model benchmark (`away.app.model_bench`) is part of the build, its last result appears as one more
 line ("Newer models"); the self-test only reads that result and never starts a benchmark by itself.
 
+## Check my PC (v0.1.25)
+
+One click to find out what really works on **your** PC. It takes about 2 minutes and you help a little.
+
+**Start it** from the tray (**Check my PC**), from *Settings > Getting started* (**Check my PC**), or by typing
+`away check` in a terminal (`away check --window` opens the same window as the button).
+
+**What it asks you to do**, one popup at a time: raise your hand, pinch, say "testing one two three", say your
+wake word, and answer "Did you hear the voice?" with Yes or No. When Project Away is running you can answer those
+questions with a click or a thumbs up / down; otherwise a small Yes / No window asks.
+
+**What it checks**, each one ending as **Pass**, **Fail** or **Skipped** with one plain sentence and a fix button
+where the app can fix it:
+
+| Part | What it finds out |
+|---|---|
+| Each camera | Does it open, how many pictures a second, which other app has it open. A camera that fails while no other app has it (a broken built-in camera) gets the likely reasons: its privacy switch or camera key, Windows camera privacy, its driver in Device Manager, with a button that opens camera privacy settings |
+| Hand tracking | Updates a second and milliseconds per picture, and whether it runs on the processor or the graphics card (DirectML / CUDA) |
+| Raise your hand, Pinch | Whether the camera and hand model really see your hand and your pinch, and how long it took |
+| Microphone, Test dictation | The sound level, then whether "testing one two three" comes out right |
+| Wake word | Whether saying your wake word is recognised |
+| Voices | Kokoro, Piper, WinRT (Windows natural) and SAPI each speak once and you say whether you heard it; a voice that is not installed is Skipped |
+| Tray icon | That it is showing and its tooltip fits the Windows limit (127 characters) |
+| Big pointer, one copy | That the big pointer shrinks back to your size, and that only one Project Away can run |
+| Smooth pointer | That the pointer output really runs at about 120 times a second |
+| Message windows | That the small toast and agent message windows appear on screen |
+| Lock-screen detector | That the secure-desktop check recognises your normal desktop (if it fails, agents can never use the mouse; that is safe but annoying) |
+| Takeover timing | How long Windows takes to hand Project Away's own mouse / key input back to the takeover listener, compared with the 0.25 s / 0.3 s windows, and the window it recommends for your PC |
+| Agent Link | The local link, the internet link, and three brand-new connections in a row (what an agent does when it reconnects). It does not restart your link or change its address |
+
+**The report** is saved on your PC in `<data folder>/check/` as JSON, a web page (HTML) and plain text, plus
+`verified.json`, which lists each item from *Verified vs untested* below as pass, fail or untested on this PC.
+Passwords, keys, e-mail addresses, your user name and private file paths are taken out first. **Copy report**
+copies the text version; **Open full report** opens the web page.
+
+**Nothing is sent anywhere by itself.** **Send to my agents** (or `away check --send`) sends the report only to
+connected agents you allowed to *Share my logs and recordings* or *Run camera and speed checks*; other agents do
+not get it, and it is not put on the shared event stream.
+
 ## GPU tracking (v0.1.24)
 
 `hands.compute: auto | gpu | cpu` (*Settings > Models*, "Tracking runs on") chooses where hand and face
@@ -1822,6 +1861,7 @@ Config (`macros:` in config.yaml, all optional):
 | Claude Desktop, Cursor, ChatGPT and Claude.ai connectors | **Untested with the real apps**: the stdio server is tested with the official MCP Python client, the HTTP one with the official Streamable HTTP client; the config file format is from their docs |
 | Computer control (mouse/keyboard), takeover pause, password/secure-desktop blocks, risky-click confirmation | Logic unit-tested with a recording backend and fake UI Automation; **untested on a real desktop**: real pynput listeners for takeover, Windows UI Automation (`uiautomation`), the border/banner windows, Ctrl+Alt+Esc, open_app through the Start menu |
 | Safety hardening (v0.1.24, external audit): undo needs a live grant; separate mouse/keyboard echo windows and a 0.75 s approval grace; stop/takeover interrupts a running drag, typing or open_app and releases the mouse button and modifier keys; unidentified click/drag/Enter/shortcut targets ask; drag destinations checked; no capture without its notice; 64 KB / 256 KB body caps (chunked too); "Share my logs and recordings" permission and log redaction; per-agent action log; permission changes end live sessions and views; secure-desktop check fails closed on Windows | 58 tests in `tests/test_safety_hardening.py`; 45 of them fail on the code before the fixes (the rest guard what must keep working). Interruption is tested with threads and a backend that blocks mid-action; the body cap through Starlette's test client and at the ASGI level. **Untested on a real desktop**: real pynput echo timing against the 0.25 s / 0.3 s windows, `release_modifiers` with real keys, the Windows secure-desktop detector failing for real, Windows UI Automation names for drag targets (Recycle Bin), and the notice/badge windows failing to start on a real PC |
+| Check my PC (v0.1.25) | Every part's Pass / Fail / Skipped rule, the guided prompts, both redactions, the saved files, `verified.json` and sending only to agents with *Share my logs* or *Run camera and speed checks* tested with fake devices in `tests/test_v0125_check_my_pc.py`; **not yet run on the user's laptop**: its first real run is what turns the untested rows here into facts (see `verified.json`) |
 | Tray tooltip limit, "hey heart" for Hark (v0.1.24) | Tooltip cut to 127 UTF-16 units (emoji never split) and the sound-alike matcher tested with fixed phrases; **untested** in the real Windows tray and with real speech |
 | Prompts answered by thumbs up/down / fingers / voice | Hand-sign geometry tested on synthetic hands; **untested with real MediaPipe landmarks**; the prompt/toast/border windows are Tk, smoke-tested only |
 | Screenshots, live screen view, camera stills | JPEG scaling and gating tested; Pillow `ImageGrab` **untested on Windows/macOS here**; the live view and its badge need a real desktop |
