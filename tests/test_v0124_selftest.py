@@ -350,7 +350,7 @@ def test_rest_and_mcp_resource(tmp_path: Path) -> None:
     )
     gate = api.Gate(core.service, core.registry, local_key="k" * 43, rate=(100.0, 100))
     mcp = mcp_tools.build(api.LocalBackend(core.service))
-    client = TestClient(api.create_app(core.service, gate, mcp))
+    client = TestClient(api.create_app(core.service, gate, mcp), base_url="http://127.0.0.1:8765")
     h = {"Authorization": f"Bearer {tok}"}
     assert client.get("/v1/selftest/latest", headers=h).status_code == 503  # none yet
     r = client.post("/v1/selftest", headers=h, json={"wait": True})

@@ -313,7 +313,10 @@ def test_pairing_hands_out_a_refresh_token_and_refresh_works_over_rest(tmp_path:
         return core.registry.approve(p, 3600)
 
     gate.pair = approve  # type: ignore[method-assign]
-    client = TestClient(api.create_app(core.service, gate, mcp_tools.build(api.LocalBackend(core.service))))
+    client = TestClient(
+        api.create_app(core.service, gate, mcp_tools.build(api.LocalBackend(core.service))),
+        base_url="http://127.0.0.1:8765",
+    )
     assert client.get("/v1/ping").status_code == 200
     p = core.registry.new_pairing(["read", "diagnose"])
     data = client.post("/v1/pair", json={"pin": p.pin, "name": "Hark"}).json()
