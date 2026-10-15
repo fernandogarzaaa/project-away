@@ -257,13 +257,23 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
-    async def control(ctx: Context, action: str, why: str | None = None, minutes: float | None = None) -> Any:
+    async def control(
+        ctx: Context,
+        action: str,
+        why: str | None = None,
+        minutes: float | None = None,
+        steps: list[dict] | None = None,
+    ) -> Any:
         """Using the person's computer (needs "Let it use my computer").
         - action="request": ask to use it (`why`; expires after `minutes`, default 30). Wait for their approval.
         - action="resume": continue after they took over (any move of their hand, mouse or keyboard pauses you).
         - action="stop": you are done (removes the border and banner). action="undo": undo your last undoable
-          action. action="log": your recent actions."""
-        return await group(ctx, "control", action=action, why=why, minutes=minutes)
+          action. action="log": your recent actions. action="sequence": run several actions in one call
+          (`steps`: a list like [{"action": "move", "x": 10, "y": 10}, {"action": "click"}]; each step is one
+          pointer/keyboard/open action with its usual arguments). One approval covers the whole sequence, but
+          risky steps still ask the person one by one, and the sequence stops at the first refusal or takeover.
+          Keep sequences short and related."""
+        return await group(ctx, "control", action=action, why=why, minutes=minutes, steps=steps)
 
     @mcp.tool()
     async def pointer(

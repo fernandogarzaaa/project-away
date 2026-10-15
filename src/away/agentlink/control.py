@@ -99,6 +99,9 @@ ACTIONS = (
     "open_app",
     "open_url",
 )
+# An action sequence is one MCP call, not one grant: it is bounded so a single call cannot queue an unbounded
+# batch of input.
+SEQUENCE_MAX_STEPS = 25
 
 
 class ControlRefused(ActionRefused):
@@ -529,9 +532,16 @@ class ComputerControl:
         kw: dict[str, Any],
         b: Any,
         a: Action,
+        *,
+        record: bool = True,
     ) -> dict[str, Any]:
         """One action inside the engine's :meth:`~away.actions_engine.ActionEngine.begin`: ``a.step()`` before
-        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish."""
+        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish.
+
+        ``record=False`` is for :meth:`act_sequence`: the sub-step still gets its engine audit entry and all the
+        safety checks, but it does not append its own :class:`LogEntry` - the sequence records one entry with all
+        the sub-step detail.
+        """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
         before = None
@@ -663,9 +673,49 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
+        if not record:
+            self._audit(g, action, detail, "done")
+            return {"ok": True, "action": action, "detail": detail, "log_id": ""}
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
         return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+
+    def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
+        """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
+        still runs through :meth:`_act`, so the risky/unknown "Are you sure?" prompts, the password and terminal
+        refusals and the per-step engine audit apply exactly as they do for single actions - a batch is not a
+        rubber stamp. Stops at the first refusal, cancel or takeover and reports how far it got."""
+        if not isinstance(steps, list) or not steps:
+            raise ControlRefused("sequence needs at least one step, e.g. [{'action': 'move', 'x': 10, 'y': 10}]")
+        if len(steps) > SEQUENCE_MAX_STEPS:
+            raise ControlRefused(f"a sequence is limited to {SEQUENCE_MAX_STEPS} steps at a time")
+        plan: list[tuple[str, dict[str, Any]]] = []
+        for i, s in enumerate(steps, 1):
+            if not isinstance(s, dict):
+                raise ControlRefused(f"step {i} must be an object like {{'action': 'move', ...}}")
+            action = s.get("action")
+            if action not in ACTIONS:
+                raise ControlRefused(f"step {i}: unknown action {action!r}; use {', '.join(ACTIONS)}")
+            plan.append((str(action), {k: v for k, v in s.items() if k != "action"}))
+        g = self._require(agent_id)
+        b = self.hooks.backend
+        done: list[dict[str, Any]] = []
+        try:
+            with self.engine.begin(
+                AGENT, "sequence", actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
+            ) as a:
+                for action, kw in plan:
+                    a.step()  # a pause, takeover or stop ends the batch before its next sub-step
+                    done.append(self._act(g, agent_id, action, kw, b, a, record=False))
+        except ActionCancelled:
+            reason = g.paused or g.ended or "it was stopped"
+            self._log(g, "sequence", f"stopped part-way after {len(done)} of {len(plan)} steps", "stopped", None)
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": reason})
+            raise ControlRefused(f"stopped part-way because {reason}") from None
+        detail = "; ".join(f"{n}. {r['action']}: {r['detail']}" for n, r in enumerate(done, 1))
+        entry = self._log(g, "sequence", detail, "done", None)
+        self._emit("control.action", {"agent": g.agent_name, "action": "sequence", "detail": detail, "id": entry.id})
+        return {"ok": True, "action": "sequence", "detail": detail, "log_id": entry.id, "steps": done}
 
     def _window_title(self) -> str:
         try:
@@ -692,9 +742,13 @@ class ComputerControl:
         self.note_own_keys()
         step().key("enter")
 
+    def _audit(self, g: Grant, action: str, detail: str, result: str) -> None:
+        """The engine's audit trail: one entry per action (or per sub-step of a sequence), never batched."""
+        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
-        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+        self._audit(g, action, detail, result)
         if self.log_folder is not None:
             try:
                 img = self.hooks.grab()
