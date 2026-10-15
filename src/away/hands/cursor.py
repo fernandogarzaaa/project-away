@@ -40,6 +40,8 @@ from away.hands.autocenter import AutoCenter, shift_region
 from away.hands.steady import HoldStill, deadband, hold_from_config
 from away.pointer.smoothing import make_cursor_filter
 
+RESUME_S = 0.3  # v0.1.26: a hand back within this long ...
+RESUME_DIST = 0.04  # ... and this close (frame units) to where it was lost resumes without re-anchoring
 ACCEL_REF = 0.01  # hand-units per frame at which acceleration is neutral
 
 Screen = tuple[int, int] | Layout | Sequence[Monitor]
@@ -124,6 +126,8 @@ class CursorMapper:
         self.pos: tuple[float, float] = (0.0, 0.0)
         self.set_monitors(screen, keep_position=False)
         self._prev: tuple[float, float] | None = None
+        self._raw: tuple[float, float] | None = None  # the last hand point (for a short-dropout resume)
+        self._suspended: tuple[float, tuple[float, float]] | None = None
         self._anchor: str | None = None
         ac_cfg = getattr(self.cfg, "autocenter", None)
         self.autocenter: AutoCenter | None = AutoCenter(ac_cfg) if ac_cfg is not None else None
@@ -202,7 +206,18 @@ class CursorMapper:
             self._hold_key, self.hold = key, hold_from_config(c)
         return self.hold
 
+    def suspend(self, t: float) -> None:
+        """The hand was lost (v0.1.26). A short detection dropout (back within ``RESUME_S`` near where it was)
+        resumes with the filter, hold-still lock and dead-zone state intact, so it cannot kick the cursor; anything
+        longer re-anchors as :meth:`reset` does."""
+        if self._raw is None:
+            self.reset()
+            return
+        self._suspended = (t, self._raw)
+
     def reset(self) -> None:
+        self._suspended = None
+        self._raw = None
         self.filter.reset()
         if self.hold is not None:
             self.hold.reset()
@@ -243,6 +258,13 @@ class CursorMapper:
 
     def update(self, t: float, x: float, y: float, anchor: str = "index") -> tuple[int, int]:
         hold = self._sync_hold()
+        sus = self._suspended
+        if sus is not None:
+            t_lost, raw = sus
+            if not (0.0 <= t - t_lost <= RESUME_S and math.hypot(x - raw[0], y - raw[1]) <= RESUME_DIST):
+                self.reset()
+            self._suspended = None
+        self._raw = (x, y)
         if anchor != self._anchor:
             self.filter.reset()
             if hold is not None:

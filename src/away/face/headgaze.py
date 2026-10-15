@@ -12,8 +12,10 @@ look-to-jump trigger) and acts on the cursor through the :class:`~away.control.m
 * :meth:`HeadGaze.facing` - head pose for the speech gate (an off-axis camera does not mean "not at the
   screen").
 
-Nothing moves the cursor while output is paused or a pinch/drag is in progress. Everything is pure logic on
-top of the injected mouse controller, so it is unit-tested with the recording backend.
+Nothing moves the cursor while output is paused or a pinch/drag is in progress, and (v0.1.26) nothing here moves
+it while the hand drives: the :class:`~away.pointer.arbiter.CursorArbiter` gives the cursor to one source at a
+time, and every write goes through the mouse controller's output (the glide), never straight to the backend.
+Everything is pure logic on top of the injected mouse controller, so it is unit-tested with the recording backend.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ class HeadGaze:
         busy: Callable[[], bool] = lambda: False,
         publish: Callable[[str, dict[str, Any]], Any] | None = None,
         reload_s: float = 2.0,
+        arbiter: Any = None,
     ) -> None:
         self.cfg = cfg
         self.mouse = mouse
@@ -65,6 +68,11 @@ class HeadGaze:
         self.paused, self.hand_active, self.busy = paused, hand_active, busy
         self.publish = publish or (lambda _k, _d: None)
         self.reload_s = reload_s
+        if arbiter is None:
+            from away.pointer.arbiter import CursorArbiter
+
+            arbiter = CursorArbiter()
+        self.arbiter = arbiter
         hd = cfg.hands.cursor.head
         self.filter = HeadPoseFilter(hd.min_cutoff, hd.beta)
         self.aligner = SignAligner()
@@ -192,26 +200,31 @@ class HeadGaze:
             return out
         mode = self.cfg.hands.cursor.head_assist
         busy = self.busy()
-        if mode == "pointer" and not self.hand_active() and not busy:
+        # v0.1.26: one cursor source at a time. While the hand drives (and for a moment after its last frame, so a
+        # detection dropout does not hand the cursor over) the head only observes.
+        hand = bool(self.hand_active()) or self.arbiter.hand_owns(t)
+        free = not busy and not hand
+        if mode == "pointer" and free:
             dx, dy = self.pointer.update(self.aligned, mapper.ref.width)
-            if dx or dy:
+            if (dx or dy) and self.arbiter.claim(t, "head"):
                 mapper.set_position(mapper.pos[0] + dx, mapper.pos[1] + dy)
-                self.mouse.backend.move(round(mapper.pos[0]), round(mapper.pos[1]))
-                out["pointer"] = (round(mapper.pos[0]), round(mapper.pos[1]))
+                x, y = round(mapper.pos[0]), round(mapper.pos[1])
+                self.mouse.follow(x, y)
+                out["pointer"] = (x, y)
         else:
             self.pointer.reset()
-        if mode == "coarse" and self.baseline.ready and self.baseline.yaw is not None and not busy:
+        if mode == "coarse" and free and self.baseline.ready and self.baseline.yaw is not None:
             a = self.aligner
             off = (
                 (self.pose.yaw - self.baseline.yaw) * a.yaw_sign,
                 (self.pose.pitch - self.baseline.pitch) * a.pitch_sign,
             )
             target = self.coarse.update(t, off, mapper.monitors)
-            if target is not None:
+            if target is not None and self.arbiter.claim(t, "head"):
                 out["coarse"] = self._warp(target)
-        if self.cfg.hands.cursor.head.monitor_switch and self.switch is not None and not busy:
+        if self.cfg.hands.cursor.head.monitor_switch and self.switch is not None and free:
             j = self.switch.update(t, self.pose, mapper.current_monitor())
-            if j is not None:
+            if j is not None and self.arbiter.claim(t, "head"):
                 m = mapper.monitors[j]
                 g = self.estimator.fresh(t) if self.estimator is not None else None
                 dest = g if g is not None and m.contains(*g) else m.center
@@ -224,7 +237,7 @@ class HeadGaze:
         x, y = self.mouse.mapper.warp(point[0], point[1])
         if self.mouse.stabilizer is not None:
             self.mouse.stabilizer.reset()
-        self.mouse.backend.move(x, y)
+        self.mouse.jump_to(x, y)  # through the output glide, so it does not pull the cursor back
         return x, y
 
     # ---------------------------------------------------------------- hand / clicks
@@ -249,6 +262,7 @@ class HeadGaze:
         )
         if target is None:
             return None
+        self.arbiter.claim(t, "gaze")  # the hand's movement onset: gaze picks the start, the hand drives on
         pos = self._warp(target)
         self.publish("gaze.jump", {"x": pos[0], "y": pos[1]})
         return pos

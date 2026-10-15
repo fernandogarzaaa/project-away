@@ -585,6 +585,38 @@ model's price is unknown, it is counted at a cautious $1 / $5 per million tokens
 * **Recent turns** in the tab shows what was asked, which model answered, how fast, and what happened.
 * From a terminal: `python -m away.liveagent status | free | models | ask "..." | jev | update-engine`.
 
+### Talking back and forth (conversational mode)
+
+In **Settings → Voice & input → Talking to your agent**:
+
+* **Keep listening after "Hey <name>"** (3–30 seconds, default 8): after you say "Hey Cookie" (or any agent's wake
+  word, or the live agent's name) and pause, it waits this long for your message. Same for every agent.
+* **Conversational mode** (off by default): after the agent answers, just keep talking; no wake word needed. It
+  keeps listening for the time above, counted from when it stops speaking. Say **"stop"** or **"that's all"**, or
+  stay quiet, to end the conversation. Talk over it and it stops and listens to you.
+* **Play a short sound when it starts listening** (on by default): a soft two-note sound after "Hey <name>", and a
+  single note when it has your message.
+
+From a terminal: `away voice listen-seconds 12`, `away voice conversational on`, `away voice listen-sound off`, and
+`away voice agent-pause-ms 450` (how long a pause ends what you say to an agent; dictation keeps its own,
+longer `end_silence_ms`). In `config.yaml` these are `voice.listen_seconds`, `voice.conversational`,
+`voice.listen_sound` and `voice.agent_end_silence_ms`.
+
+**Faster answers (v0.1.26).** Every spoken request now writes a timing line to the log
+(`latency: endpoint=450ms stt=250ms route=0ms first_token=600ms first_sentence=300ms first_audio=250ms total=1856ms`).
+Measured with the same fake speech recognizer, model and voice on both versions
+(`python scripts/bench_voice_latency.py`; real numbers depend on your PC and model):
+
+| Stage | Before | Now | What changed |
+|---|---|---|---|
+| End of speech | 690 ms | 450 ms | A shorter pause ends what you say to an agent (dictation keeps 700 ms) |
+| Speech to text | 250 ms | 250 ms | (fake) |
+| Routing | 900 ms | 0 ms | A plain question goes straight to the answer model; only requests that may be an action ask Jev / a model first |
+| First word from the model | 680 ms | 600 ms | Providers are reused instead of rebuilt (and keys re-read) on every call |
+| First whole sentence | 300 ms | 300 ms | Already streamed sentence by sentence |
+| First sound | 1450 ms | 250 ms | The voice loads while you speak and stays loaded for 10 minutes (it used to load again after 30 idle seconds) |
+| **Total** | **4272 ms** | **1856 ms** | |
+
 ### What is tested and what is not
 
 | Part | Status |
@@ -598,6 +630,7 @@ model's price is unknown, it is counted at a cautious $1 / $5 per million tokens
 | Stopping opencode and its child processes on Windows (`taskkill /T`) | **Untested** |
 | Windows Credential Manager (and the macOS Keychain) | **Untested** with the real stores (a fake store in tests) |
 | The real voice loop (microphone, "Hey Away", speaking, barge-in on real audio) | **Untested** |
+| Conversational mode, listening window, listening sound, timing log (v0.1.26) | Unit-tested with fake clocks, a fake recognizer, fake models and a fake voice (`tests/test_v0126_conversational_voice.py`, 22 of its 27 tests fail on v0.1.25): follow-ups without the wake word, the window honoured and held while the agent speaks, "stop" / "that's all", barge-in keeping your first words, the shorter end-of-speech pause, streaming speech starting before the reply is complete, warm voice. **Untested with a real microphone and speakers**: real barge-in levels, room echo, the earcon through real speakers, and the real latency numbers on a laptop |
 | Your own API keys against the real providers (OpenAI-compatible, Anthropic) | **Untested** live (fake HTTP in tests) |
 
 ## Architecture
@@ -1999,7 +2032,7 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 
 | Area | Status |
 |---|---|
-| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2844 tests at v0.1.25 (283 more than v0.1.24, mostly from `tests/test_v0125_live_calibration.py`, `tests/test_v0125_agent_keepalive.py`, `tests/test_msix_packaging.py`, `tests/test_updater_store.py`, `tests/test_ui_helper.py` and the live agent and newer-model tests); in the Linux build sandbox (Python 3.12, Xvfb) 2824 pass, 14 skip and 6 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
+| Core logic (filters, state machine, cleanup, CSI features, fusion, bindings, dispatch, always-on voice policy, auto-centering, head and gaze logic) | 2885 tests at v0.1.26 (41 more than v0.1.25, from `tests/test_v0126_cursor_source.py`, `tests/test_v0126_conversational_voice.py` and new head and gaze tests); in the Linux build sandbox (Python 3.12, Xvfb) 2865 pass, 14 skip and 6 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2844 tests at v0.1.25 (283 more than v0.1.24, mostly from `tests/test_v0125_live_calibration.py`, `tests/test_v0125_agent_keepalive.py`, `tests/test_msix_packaging.py`, `tests/test_updater_store.py`, `tests/test_ui_helper.py` and the live agent and newer-model tests); in the Linux build sandbox (Python 3.12, Xvfb) 2824 pass, 14 skip and 6 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2561 tests at v0.1.24 (234 more than v0.1.23, mostly from `tests/test_safety_hardening.py`, `tests/test_v0124_selftest.py`, `tests/test_v0124_gpu.py`, `tests/test_v0124_link.py`, `tests/test_v0124_agent_tokens.py`, `tests/test_v0124_check_my_pc.py` and `tests/test_actions_engine.py`); in the Linux build sandbox (Python 3.12, Xvfb) 2542 pass, 14 skip and 5 fail only because that sandbox has no `libtk` (the Settings window tests), with CI on Ubuntu, Windows and macOS green on the release pull request. 2327 tests at v0.1.23 (107 more than v0.1.22, from the new `tests/test_v0123_features.py`, `tests/test_v0123_security.py` and `tests/test_v0123_voices_models.py`). CI on the v0.1.23 pull request (commit cad5122): Ubuntu Python 3.10 2311 pass / 16 skip, 3.11 and 3.12 2312 / 15, Windows 2315 / 12, macOS 2312 / 15. At v0.1.22: 2220 tests (54 new in `tests/test_v0122_realpc.py`). CI on the v0.1.22 pull request: Ubuntu Python 3.10 2205 pass / 15 skip, 3.11 and 3.12 2206 / 14, Windows 2209 / 11, macOS 2205 / 15. At v0.1.21: 2166 tests (Ubuntu 3.10 2151 / 15, 3.11 and 3.12 2152 / 14, Windows 2155 / 11, macOS 2151 / 15). At v0.1.20: 2106 collected, 2094 pass and 12 skip in the Linux aarch64 build sandbox (Python 3.12, Xvfb). The skips are optional extras that sandbox does not have (torch, faster-whisper, onnxruntime, llama-cpp-python), the real DirectShow / Media Foundation / pywinrt / UI Automation checks that only run on Windows, and the real engine download unless `AWAY_NET_TESTS=1`; CI runs the suite on Ubuntu (Python 3.10, 3.11, 3.12), Windows and macOS; ruff + mypy clean |
 | Live agent (optional, off by default) | See [Live agent (optional) → What is tested and what is not](#what-is-tested-and-what-is-not): free models through opencode and Jev verified for real on Linux; the Windows-only parts (opencode isolation, `opencode.cmd`, `taskkill`, Credential Manager), the real voice loop and live API-key providers are **untested** |
 | Agent messages: truthful `shown`, tray fallback, window start-up options (v0.1.21) | The acknowledgement protocol, timeouts, exit codes, the tray fallback and the Popen options (no CREATE_NO_WINDOW, show-normal, frozen environment reset) unit-tested; a real child process writing the acknowledgement is tested on every CI OS; **untested on the user's Windows desktop**: whether the Tk message window now appears from the installed tray app, and the tray balloon on Windows |
 | Speaking (v0.1.21) | Engine order per OS, the speaker thread and queue, settings, fallbacks between engines, the PowerShell and command-line engines (text never on a command line that a shell reads) and SAPI through a fake COM object unit-tested; the Windows release self-test creates the real `SAPI.SpVoice`, sets rate and volume and synthesizes into memory; **not heard on real speakers**, and macOS `say` / Linux `spd-say` are untested on real desktops |
@@ -2106,6 +2139,7 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
 | Newer models (optional, v0.1.25) | Tested with fakes on every CI OS; **nothing tested on Windows or on a GPU**. See [Newer models: verified vs untested](#verified-vs-untested-newer-models) |
 | Parakeet, Wayland | **Untested** |
+| Conversational voice (v0.1.26): "Keep listening" window, conversational mode, barge-in in a conversation, quicker end of speech, timing log | Tested with fakes in `tests/test_v0126_conversational_voice.py` (22 of 27 fail on v0.1.25); before/after latency measured with fakes (`scripts/bench_voice_latency.py`). **Untested with real speech on a real microphone and speakers** (real-mic testing has not been done) |
 | Agent window with a missing or broken session file (v0.1.25, Cookie's fix) | A missing, unreadable or non-object session file and an unknown window kind each give a plain message and exit code 2, tested in `tests/test_ui_helper.py`; the tests no longer start a Tk main loop |
 | Agents staying connected (v0.1.25) | Live streams marking the agent as seen every 20 s, 55 s long-polls, the 90 s Allow wait, `Last-Event-ID` resume and the example client's reconnect tested on a fake clock and a real local server (`tests/test_v0125_agent_keepalive.py`); **untested through a real Cloudflare link over a long session** (for example Cookie idle for 10+ minutes) |
 | Live calibration, steadier cursor (v0.1.25) | The three jitter sources, the adaptive filter, hold-still, the calibration steps and saving per camera tested with fake landmark streams (`tests/test_v0125_live_calibration.py`); **the calibration window has not been used on a real laptop and camera** |
@@ -2115,6 +2149,20 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 | GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
+
+## What's new in 0.1.26
+
+* **A steadier cursor with eye or head tracking on.** With head or eye tracking switched on, the cursor could shake
+  because more than one part of the app was moving it at the same time. Now only one source moves the cursor at a
+  time (your hand, or your head and eyes), so it stays still when you do.
+* **More time to talk after "Hey <name>".** Settings → Voice & input → *Keep listening after "Hey <name>"* sets how
+  long it waits for your message (3–30 seconds, 8 by default), with an optional short sound when it starts listening.
+* **Conversational mode.** Turn it on and, after the agent answers, just keep talking: no wake word needed. Say
+  "stop" or "that's all", or stay quiet, to end the conversation. Talk over the agent and it stops and listens.
+  It is off by default. See *Talking back and forth (conversational mode)*.
+* **Faster replies.** The agent notices sooner that you have finished speaking, plain questions skip an extra step,
+  and the voice stays ready, so the first spoken word comes much sooner (about 1.9 s instead of 4.3 s in our test
+  with stand-in models; real times depend on your PC and model).
 
 ## What's new in 0.1.25
 

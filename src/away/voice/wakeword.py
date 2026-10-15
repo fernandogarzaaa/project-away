@@ -136,7 +136,14 @@ class WakeGate:
 
     @property
     def awake(self) -> bool:
-        return self.clock() <= self._awake_until or bool(getattr(getattr(self.session, "ep", None), "in_speech", False))
+        if self.clock() <= self._awake_until or bool(getattr(getattr(self.session, "ep", None), "in_speech", False)):
+            return True
+        # v0.1.26: an agent is listening for you ("Hey <name>" on its own, or a conversational follow-up)
+        talk = getattr(self.session, "talk", None)
+        try:
+            return talk is not None and talk.state.armed() is not None
+        except Exception:
+            return False
 
     def _remember(self, a: NDArray[np.float32]) -> None:
         self._pre.append(a)

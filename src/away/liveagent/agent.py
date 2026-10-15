@@ -30,6 +30,18 @@ from typing import Any
 from away.liveagent import privacy, untrusted
 from away.liveagent.router import CallRecord, Funnel, NoModel
 from away.liveagent.textstream import SentenceSplitter, ThinkFilter, for_speech, strip_reasoning
+from away.voice import latency
+
+# v0.1.26 quick routing: words that may mean "do something on the PC" or "a job for another agent" anywhere in the
+# request. Without any of them the request is answered by the chat model at once (no routing call first).
+MAYBE_ACTION = re.compile(
+    r"\b(open|close|click|tap|type|write|press|scroll|go to|switch|start|launch|run|show|hide|minimi[sz]e|"
+    r"maximi[sz]e|turn|mute|unmute|volume|louder|quieter|brightness|play|pause|resume|skip|select|copy|paste|save|"
+    r"delete|remove|find|search|move|drag|zoom|screen|window|tab|app|file|folder|setting|settings|send|email|"
+    r"e-mail|message|reply|post|buy|pay|order|book|install|download|upload|research|refactor|build|code|bug|repo|"
+    r"deploy|remind|schedule|every|hand|agent|hark|claude|codex|look at|read (this|that|my))\b",
+    re.IGNORECASE,
+)
 
 STOP_WORDS = ("stop", "cancel", "never mind", "nevermind", "be quiet", "quiet", "shut up", "that's enough")
 
@@ -145,6 +157,7 @@ class LiveAgent:
         self._worker: threading.Thread | None = None
         self._cancel = threading.Event()
         self.busy = False
+        self._trace: Any = None
 
     # ------------------------------------------------------------ entry points
     def submit(self, text: str, source: str = "voice") -> bool:
@@ -160,6 +173,7 @@ class LiveAgent:
             if self._worker is not None:
                 self._worker.join(timeout=2.0)
         self._cancel.clear()
+        self._trace = latency.take() if source == "voice" else None  # v0.1.26 timing log for this turn
         self._worker = threading.Thread(target=self._run_quiet, args=(text, source), daemon=True, name="live-agent")
         self._worker.start()
         return True
@@ -190,6 +204,7 @@ class LiveAgent:
             self.speech.begin()
         try:
             route, by = self._route(text, s)
+            self._mark("route")
             turn.route, turn.route_by = route, by
             if route == "handoff" and self.tools is not None and getattr(self.tools, "available", False):
                 label = self.tools.handoff(text)
@@ -224,6 +239,8 @@ class LiveAgent:
         )
 
     def _route(self, text: str, s: Any) -> tuple[str, str]:
+        if getattr(s, "quick_route", True) and not MAYBE_ACTION.search(text):
+            return "chat", "quick"  # v0.1.26: a plain question - no routing round trip before the answer
         d = self.decider()
         if d is None:
             from away.liveagent.jev import Decider
@@ -244,6 +261,8 @@ class LiveAgent:
             for piece in self.funnel().stream("chat", self._messages(chat_system(s.name), text), rec, max_tokens=300):
                 if self._cancel.is_set():
                     break
+                if piece:
+                    self._mark("first_token")
                 for sentence in splitter.feed(f.feed(piece)):
                     self._speak(sentence, turn, t0)
                     spoken.append(sentence)
@@ -356,8 +375,16 @@ class LiveAgent:
             return
         if turn.first_spoken_s is None:
             turn.first_spoken_s = self.clock() - t0
+            self._mark("first_token")  # replies that were not streamed (computer use, hand-off, errors)
+            self._mark("first_sentence")
         if self.speech is not None and self.settings().speak:
             self.speech.say(sentence)
+
+    def _mark(self, stage: str) -> None:
+        tr = self._trace
+        if tr is not None:
+            with contextlib.suppress(Exception):
+                tr.mark(stage)
 
     def _say_all(self, text: str, turn: Turn, t0: float) -> None:
         sp = SentenceSplitter()

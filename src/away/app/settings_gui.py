@@ -66,6 +66,8 @@ TUNABLE_LABELS = {
     "voice.min_utterance_ms": "Shortest utterance (ms)",
     "voice.max_utterance_s": "Longest utterance (s)",
     "voice.wake_window": "Wake-word follow-up window (s)",
+    "voice.listen_seconds": "Keep listening after the wake word (s)",
+    "voice.agent_end_silence_ms": "Pause that ends what you say to your agent (ms)",
     "face.mouth_threshold": "Mouth-open threshold",
     "face.mouth_hold": "Mouth-open hold (s)",
     "hands.cursor.sigmoid_low": "Sigmoid curve: slow-move gain",
@@ -112,6 +114,7 @@ INT_TUNABLES = {
     "hands.cursor.big_cursor_size",
     "voice.end_silence_ms",
     "voice.min_utterance_ms",
+    "voice.agent_end_silence_ms",
     "hands.cursor.click_rewind_ms",
     "app.auto_pause_idle_ms",
     "voice.numbers_min_value",
@@ -400,6 +403,8 @@ class SettingsModel:
             "hands.gestures.autoscroll_enabled",
             "hands.gestures.autoscroll_horizontal",
             "voice.clap_enabled",
+            "voice.conversational",
+            "voice.listen_sound",
             "voice.clap_require_hands",
             "hands.camera_backend",
         }
@@ -2402,6 +2407,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         ).grid(row=r, column=1, columnspan=2, sticky="w")
         self.scales["voice.vad_sensitivity#voice"] = (svar, None)
         r += 1
+        r = self._build_agent_talk(f, r)
         ttk.Label(f, text="More timing sliders are on the Tuning tab.", foreground="#555").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=6
         )
@@ -2410,6 +2416,51 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
         r = build_section(self, f, r + 1)  # v0.1.20 smart pointer: three plain switches + status / fix button
         self.voice_panel = voice_panel.build(self, f, r)
+
+    def _build_agent_talk(self, f: Any, r: int) -> int:
+        """v0.1.26 "Talking to your agent": how long it keeps listening, conversational mode, the listening sound."""
+        tk, ttk = self.tk, self.ttk
+        ttk.Label(f, text="Talking to your agent", font=("TkDefaultFont", 10, "bold")).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(10, 2)
+        )
+        r += 1
+        ls = {t.path: t for t in self.m.tunables()}["voice.listen_seconds"]
+        ttk.Label(f, text="Keep listening after \u201cHey <name>\u201d (seconds)").grid(
+            row=r, column=0, sticky="w", pady=3
+        )
+        lvar = tk.DoubleVar(value=ls.value)
+        tk.Scale(
+            f,
+            from_=ls.lo,
+            to=ls.hi,
+            resolution=1,
+            orient="horizontal",
+            length=240,
+            variable=lvar,
+            command=lambda v: self._on_scale("voice.listen_seconds", float(v)),
+        ).grid(row=r, column=1, columnspan=2, sticky="w")
+        self.scales["voice.listen_seconds#voice"] = (lvar, None)
+        r += 1
+        for path, label in (
+            (
+                "voice.conversational",
+                "Conversational mode: after it answers, just keep talking (no wake word). "
+                "Say \u201cstop\u201d or \u201cthat's all\u201d, or stay quiet, to end.",
+            ),
+            ("voice.listen_sound", "Play a short sound when it starts listening"),
+        ):
+            var = tk.BooleanVar()
+            ttk.Checkbutton(
+                f, text=label, variable=var, command=lambda p=path, v=var: self._report(self.m.set_voice(p, v.get()))
+            ).grid(row=r, column=0, columnspan=3, sticky="w")
+            self.vvars[path] = var
+            r += 1
+        ttk.Label(
+            f,
+            text="Talking over the agent stops it (Settings > Live agent: Stop talking when I start talking).",
+            foreground="#555",
+        ).grid(row=r, column=0, columnspan=3, sticky="w")
+        return r + 1
 
     def _build_cameras(self, nb: Any) -> None:
         tk, ttk = self.tk, self.ttk

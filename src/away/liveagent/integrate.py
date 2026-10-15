@@ -24,6 +24,8 @@ from away.liveagent import settings as st
 from away.liveagent.tools import AGENT_ID
 
 POLL_S = 2.0
+WARM_IDLE_S = 600.0  # v0.1.26: keep the voice engine loaded this long after the last answer
+FUNNEL_TTL_S = 300.0  # v0.1.26: providers / model list reused this long (keys are read from the vault again after)
 
 
 class LiveAgentHost:
@@ -50,9 +52,15 @@ class LiveAgentHost:
         self._decider: Any = None
         self._decider_key: Any = None
         self.tools = ToolBox(self.service, lambda: self.watcher.current, None)
+        with contextlib.suppress(Exception):  # v0.1.26: the voice stays loaded between turns (no reload lag)
+            if speaker is not None and float(getattr(speaker, "idle_s", 0.0)) < WARM_IDLE_S:
+                speaker.idle_s = WARM_IDLE_S
+        self._funnel: Any = None
+        self._funnel_key: Any = None
+        self._funnel_at = -1e9
         self.agent = LiveAgent(
             lambda: self.watcher.current,
-            lambda: self.runtime.funnel(self.watcher.current),
+            self.funnel,
             self.decider,
             self.tools,
             self.speech,
@@ -76,6 +84,52 @@ class LiveAgentHost:
             self.tools.decider = self._decider
         return self._decider
 
+    def funnel(self) -> Any:
+        """v0.1.26: the providers and model list are built once and reused (they used to be rebuilt, keys read from
+        the OS vault and all, for every model call of every turn). Rebuilt when the settings change or after
+        :data:`FUNNEL_TTL_S`. Keys stay in the OS vault; only the providers in memory hold them while in use."""
+        s = self.watcher.current
+        key = repr(s.public())
+        now = time.monotonic()
+        if self._funnel is None or key != self._funnel_key or now - self._funnel_at > FUNNEL_TTL_S:
+            self._funnel = self.runtime.funnel(s)
+            self._funnel_key, self._funnel_at = key, now
+        return self._funnel
+
+    def warm(self) -> None:
+        """v0.1.26: you started talking to the live agent ("Hey <name>"): get the voice, the model list and the
+        free-model engine ready in the background while you speak, so the answer is not held up by loading."""
+        if not self.enabled():
+            return
+
+        def run() -> None:
+            sp = getattr(self.speech, "speaker", None)
+            with contextlib.suppress(Exception):
+                if sp is not None and hasattr(sp, "warm") and self.watcher.current.speak:
+                    sp.warm()
+            with contextlib.suppress(Exception):
+                self.funnel()
+            with contextlib.suppress(Exception):
+                if any(p.enabled and p.kind == "opencode_free" for p in self.watcher.current.providers):
+                    self.runtime.opencode_server()
+
+        threading.Thread(target=run, daemon=True, name="live-agent-warm").start()
+
+    def busy(self) -> bool:
+        """Answering or still speaking (holds the conversational follow-up window open)."""
+        return bool(self.agent.busy) or bool(self.speech.speaking())
+
+    def _barge(self) -> None:
+        """You talked over the agent: it stops. In a conversation the microphone listens again at once and keeps
+        your first words, so what you said is the next question."""
+        self.agent.cancel()
+        talk = getattr(self.app, "talk", None)
+        if talk is not None and getattr(talk, "conversation", None) is not None:
+            echo = getattr(getattr(self.speech, "speaker", None), "echo", None)
+            if echo is not None and hasattr(echo, "cut"):
+                with contextlib.suppress(Exception):
+                    echo.cut()
+
     def _show(self, text: str) -> None:
         if not text:
             return
@@ -97,6 +151,7 @@ class LiveAgentHost:
         if talk is None:
             return
         orig_agents, orig_deliver, orig_enabled = talk.agents, talk.deliver, talk.enabled
+        orig_armed, orig_busy, orig_stop = talk.on_armed, getattr(talk, "busy", None), getattr(talk, "on_stop", None)
 
         def agents() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
@@ -109,6 +164,10 @@ class LiveAgentHost:
         def deliver(target: str, text: str, source: str) -> str:
             s = self.watcher.current
             if s.enabled and (target == AGENT_ID or (target == "" and self._generic_is_mine())):
+                sp = getattr(self.speech, "speaker", None)
+                with contextlib.suppress(Exception):  # v0.1.26: the voice loads while the model thinks
+                    if sp is not None and hasattr(sp, "warm") and s.speak:
+                        sp.warm()
                 self.agent.submit(text, source)
                 return f"{s.name} is answering"
             if orig_deliver is None:
@@ -123,9 +182,35 @@ class LiveAgentHost:
                 pass
             return self.enabled()
 
+        def mine(target: str) -> bool:
+            return self.enabled() and (target == AGENT_ID or (target == "" and self._generic_is_mine()))
+
+        def on_armed(target: str) -> None:
+            if mine(target):
+                self.warm()  # v0.1.26: load the voice and models while you say your message
+            if orig_armed is not None:
+                orig_armed(target)
+
+        def busy() -> bool:
+            try:
+                if orig_busy is not None and orig_busy():
+                    return True
+            except Exception:
+                pass
+            return self.busy()
+
+        def on_stop(target: str) -> None:
+            if mine(target):
+                self.agent.cancel()  # "that's all": stop talking now
+            if orig_stop is not None:
+                orig_stop(target)
+
         talk.agents = agents
         talk.deliver = deliver
         talk.enabled = enabled
+        talk.on_armed = on_armed
+        talk.busy = busy
+        talk.on_stop = on_stop
 
     def _generic_is_mine(self) -> bool:
         """ "Hey agent" goes to the live agent when nobody else would get it."""
@@ -150,11 +235,13 @@ class LiveAgentHost:
             sr = 16000
             with contextlib.suppress(Exception):
                 sr = int(self.app.cfg.voice.sample_rate)
+            # v0.1.26: not only while the answer is being written: the voice reads its last sentences after the
+            # model finished (agent.busy is already False then), and talking over them must stop it too
             self.barge = BargeIn(
                 self.speech.speaking,
-                self.agent.cancel,
+                self._barge,
                 sample_rate=sr,
-                enabled=lambda: self.enabled() and self.watcher.current.barge_in and self.agent.busy,
+                enabled=lambda: self.enabled() and self.watcher.current.barge_in,
             )
         return wrap_feed(voice, self.barge)
 

@@ -404,4 +404,4 @@ def test_cli_setup(monkeypatch):
 def test_cli_version(capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
-    assert "project-away 0.1.25" in capsys.readouterr().out
+    assert "project-away 0.1.26" in capsys.readouterr().out
