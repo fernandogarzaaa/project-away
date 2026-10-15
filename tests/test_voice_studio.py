@@ -118,7 +118,7 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
     PocketCloneEngine(profile.id, tmp_path / "data", model=second_model, play=lambda *_: None)
     assert second_model.prompts == [str(cache)]
     assert voice_profiles.delete_profile(profile.id, tmp_path / "data")
-    with pytest.raises(ValueError, match="profile could not be read|invalid"):
+    with pytest.raises(ValueError, match=r"profile could not be read|invalid"):
         engine.speak("This profile was deleted.", SimpleNamespace(volume="normal"))
 
 
