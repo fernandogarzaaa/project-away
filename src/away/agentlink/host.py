@@ -471,16 +471,18 @@ class AgentLinkHost:
         self._start_input_watch()  # the grant is only paused: input after this still reports in
         threading.Thread(
             target=self._watch_paused_banner,
-            args=(answer_file,),
+            args=(answer_file, stop),
             kwargs={"deadline": time.monotonic() + 4 * 3600},
             daemon=True,
             name="away-paused-banner",
         ).start()
 
-    def _watch_paused_banner(self, answer_file: Path, deadline: float) -> None:
+    def _watch_paused_banner(self, answer_file: Path, stop: Path, deadline: float) -> None:
         """Feed the paused banner's clicked button to the grant (runs in a thread; see _overlay_paused). The
-        banner writes ``<id>.answer.json`` next to its spec; it is consumed once and the banner then closes."""
-        while time.monotonic() < deadline and self._overlay_stop is not None:
+        banner writes ``<id>.answer.json`` next to its spec; it is consumed once and the banner then closes.
+        The watcher is bound to its own banner's stop path: a replaced ``_overlay_stop`` (a newer overlay)
+        ends it instead of leaving it polling."""
+        while time.monotonic() < deadline and self._overlay_stop == stop:
             try:
                 raw = answer_file.read_text(encoding="utf-8")
             except OSError:
