@@ -149,6 +149,14 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
           `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
+          A finished "cameras" check also carries `result.cameras`, one structured dict per camera: `name`,
+          `enumerated_by` (v4l2|dshow|wmi|system_profiler|probe), `backends` (per backend id: `opened` bool,
+          `fps` measured best or null, `error` text or null), `driver` (`status` ok|error|unknown and
+          `config_error`; minimal until proposal #9's driver-state helper lands), `holder` (who else holds it,
+          or null), and `verdict` (ok = frames flowed; driver = driver/config problem, e.g. "Element not
+          found"; held = another app holds it; privacy = OS privacy blocked it; unknown = could not tell).
+          `result.stopped` is true when the time budget cut the check short. Prefer this over parsing the
+          prose `output`.
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
@@ -257,24 +265,13 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
-    async def control(
-        ctx: Context,
-        action: str,
-        why: str | None = None,
-        minutes: float | None = None,
-        steps: list[dict] | None = None,
-    ) -> Any:
+    async def control(ctx: Context, action: str, why: str | None = None, minutes: float | None = None) -> Any:
         """Using the person's computer (needs "Let it use my computer").
         - action="request": ask to use it (`why`; expires after `minutes`, default 30). Wait for their approval.
         - action="resume": continue after they took over (any move of their hand, mouse or keyboard pauses you).
         - action="stop": you are done (removes the border and banner). action="undo": undo your last undoable
-          action. action="log": your recent actions. action="sequence": run several actions in one call
-          (`steps`: a list like [{"action": "move", "x": 10, "y": 10}, {"action": "click"}]; each step is one
-          pointer/keyboard/open action with its usual arguments). One approval covers the whole sequence, but
-          risky steps still ask the person one by one, and the sequence stops at the first refusal or takeover.
-          Each step counts against the action rate limit like a single action, and the whole sequence is undone
-          with action="undo". Keep sequences short and related."""
-        return await group(ctx, "control", action=action, why=why, minutes=minutes, steps=steps)
+          action. action="log": your recent actions."""
+        return await group(ctx, "control", action=action, why=why, minutes=minutes)
 
     @mcp.tool()
     async def pointer(

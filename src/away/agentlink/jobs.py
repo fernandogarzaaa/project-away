@@ -8,6 +8,7 @@ through a shell). Output is kept in ``<data>/diagnostics/cameras-<kind>-<time>.t
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -197,7 +198,12 @@ class JobRunner:
                 proc = self.runner(self.command(args), **kw)
                 deadline = time.time() + 600
                 assert proc.stdout is not None
+                structured: dict[str, Any] | None = None
                 for line in proc.stdout:
+                    parsed = _diagnose_marker(line.rstrip())
+                    if parsed is not None:  # (proposal #10): machine-readable result, not agent prose
+                        structured = parsed
+                        continue
                     shown = noise.feed(line.rstrip())
                     if shown is not None:
                         job.output.append(shown)
@@ -209,6 +215,9 @@ class JobRunner:
                 if noise.summary():
                     job.output.append(noise.summary())
                 job.result = {"exit_code": rc}
+                if structured is not None:  # (proposal #10): per-camera verdicts for agents/MCP
+                    job.result["cameras"] = structured.get("cameras", [])
+                    job.result["stopped"] = bool(structured.get("stopped"))
                 if noise.hidden():
                     job.result["driver_messages_hidden"] = noise.hidden()
             self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +271,20 @@ class JobRunner:
         with self._lock:
             reason = "expired" if key in self._expired else "unknown"
         raise JobLookupError(key, reason)
+
+
+def _diagnose_marker(line: str) -> dict[str, Any] | None:
+    """The ``AWAY-DIAGNOSE-JSON: {...}`` line ``away cameras diagnose`` prints (proposal #10): the structured
+    per-camera result. Returns None for any other line; a malformed marker is ignored (the prose stays)."""
+    from away.multicam.diagnose import RESULT_MARKER
+
+    if not line.startswith(RESULT_MARKER):
+        return None
+    try:
+        data = json.loads(line[len(RESULT_MARKER) :].strip())
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def normalize_id(job_id: Any) -> str:
