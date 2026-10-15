@@ -269,10 +269,14 @@ def build(win: Any, parent: Any, row: int) -> int:  # pragma: no cover - Tk widg
         lic.set(license_text(cfg))
         dl.configure(state="normal" if needs_download(cfg) else "disabled")
 
+    def profile_changed() -> None:
+        save()
+        refresh_choices()
+
     def picked(_e: Any = None) -> None:
         label = var.get()
         if label == CREATE_LABEL:
-            manage_custom_voices(win, parent, cfg, save)
+            manage_custom_voices(win, parent, cfg, profile_changed)
             refresh_choices()
             return
         if label == DISABLE_CUSTOM_LABEL:
