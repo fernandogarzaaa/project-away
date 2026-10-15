@@ -228,7 +228,8 @@ def test_host_paused_banner_watcher_feeds_continue_to_the_grant(tmp_path: Path) 
     assert ctl.grant is not None and ctl.grant.paused
     _proc, answer_file = h.ui.paused_banner("Sunday", tmp_path / "s.stop")  # the banner the host showed
     answer_file.write_text(json.dumps({"answer": "continue"}), encoding="utf-8")
-    h._watch_paused_banner(answer_file, time.monotonic() + 5)
+    assert h._overlay_stop is not None
+    h._watch_paused_banner(answer_file, h._overlay_stop, time.monotonic() + 5)
     assert not ctl.grant.paused  # resumed, no new approval prompt
     assert not answer_file.exists()  # consumed exactly once
 
@@ -241,7 +242,8 @@ def test_host_paused_banner_watcher_feeds_stop_to_the_grant(tmp_path: Path) -> N
     assert ctl.user_input("mouse")
     _proc, answer_file = h.ui.paused_banner("Sunday", tmp_path / "s.stop")
     answer_file.write_text(json.dumps({"answer": "stop"}), encoding="utf-8")
-    h._watch_paused_banner(answer_file, time.monotonic() + 5)
+    assert h._overlay_stop is not None
+    h._watch_paused_banner(answer_file, h._overlay_stop, time.monotonic() + 5)
     assert ctl.grant is None  # ended
 
 
@@ -249,4 +251,16 @@ def test_host_paused_banner_watcher_exits_when_the_banner_is_gone(tmp_path: Path
     h = _host(tmp_path)
     h._overlay_stop = None  # the banner was cleared another way (end, resume, expiry)
     answer_file = tmp_path / "paused-test.answer.json"
-    h._watch_paused_banner(answer_file, time.monotonic() + 5)  # must return, not spin
+    h._watch_paused_banner(answer_file, tmp_path / "gone.stop", time.monotonic() + 5)  # must return, not spin
+
+
+def test_host_paused_banner_watcher_exits_when_a_newer_overlay_replaced_it(tmp_path: Path) -> None:
+    """A stale watcher must not keep polling after its banner was replaced: it is bound to its own stop path,
+    not to _overlay_stop being non-None."""
+    h = _host(tmp_path)
+    old_stop, new_stop = tmp_path / "old.stop", tmp_path / "new.stop"
+    h._overlay_stop = new_stop  # a newer overlay took over (e.g. the agent resumed through a prompt)
+    answer_file = tmp_path / "paused-test.answer.json"
+    answer_file.write_text(json.dumps({"answer": "continue"}), encoding="utf-8")
+    h._watch_paused_banner(answer_file, old_stop, time.monotonic() + 5)  # must return, not spin
+    assert answer_file.exists()  # the stale watcher consumed nothing
