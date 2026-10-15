@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import ctypes
 import logging
 import re
 import sys
@@ -146,6 +147,48 @@ _WIN_TAP_HOLD_S = 0.10  # 100 ms: inside the 80-120 ms band the shell answers to
 _WIN_TAP_VKS = {"cmd": 0x5B, "cmd_l": 0x5B, "cmd_r": 0x5C}  # VK_LWIN / VK_RWIN
 
 
+# The Windows INPUT layout in fixed-width types. DWORD is 32 bits on Windows, but ctypes maps
+# wintypes.DWORD to c_ulong (64 bits on Linux), so the wintypes aliases would give the wrong
+# sizeof(INPUT) off Windows. Fixed widths keep the layout identical on every host, which also makes
+# the 40-byte cbSize assertion testable anywhere (CodeRabbit: SendInput rejects a cbSize that is not
+# sizeof(INPUT) with ERROR_INVALID_PARAMETER).
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_void_p),  # ULONG_PTR: pointer-sized, like the real field
+    ]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_uint16),
+        ("wScan", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_uint32),
+        ("wParamL", ctypes.c_uint16),
+        ("wParamH", ctypes.c_uint16),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_uint32), ("u", _INPUT_UNION)]
+
+
 def _sendinput_key(vk: int, down: bool) -> None:
     """One keyboard event through the native Windows input queue.
 
@@ -155,33 +198,17 @@ def _sendinput_key(vk: int, down: bool) -> None:
     if sys.platform != "win32":
         raise RuntimeError("_sendinput_key is Windows only")
     import ctypes
-    from ctypes import wintypes
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_void_p),  # ULONG_PTR: pointer-sized, like the real field
-        ]
-
-    class _Ki(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
-
-    class INPUT(ctypes.Structure):
-        _fields_ = [("type", wintypes.DWORD), ("u", _Ki)]
 
     INPUT_KEYBOARD, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC = 1, 0x0002, 0
     user32 = ctypes.windll.user32
-    ki = KEYBDINPUT(
+    ki = _KEYBDINPUT(
         wVk=vk,
         wScan=user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC),
         dwFlags=0 if down else KEYEVENTF_KEYUP,
         time=0,
         dwExtraInfo=0,
     )
-    sent = user32.SendInput(1, ctypes.byref(INPUT(INPUT_KEYBOARD, _Ki(ki=ki))), ctypes.sizeof(INPUT))
+    sent = user32.SendInput(1, ctypes.byref(_INPUT(INPUT_KEYBOARD, _INPUT_UNION(ki=ki))), ctypes.sizeof(_INPUT))
     if sent != 1:
         raise OSError(f"SendInput injected {sent}/1 keyboard events (vk=0x{vk:02X})")
 
