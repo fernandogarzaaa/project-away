@@ -272,7 +272,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
           (`steps`: a list like [{"action": "move", "x": 10, "y": 10}, {"action": "click"}]; each step is one
           pointer/keyboard/open action with its usual arguments). One approval covers the whole sequence, but
           risky steps still ask the person one by one, and the sequence stops at the first refusal or takeover.
-          Keep sequences short and related."""
+          Each step counts against the action rate limit like a single action, and the whole sequence is undone
+          with action="undo". Keep sequences short and related."""
         return await group(ctx, "control", action=action, why=why, minutes=minutes, steps=steps)
 
     @mcp.tool()
