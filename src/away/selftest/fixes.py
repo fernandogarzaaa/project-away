@@ -4,6 +4,10 @@ Each :class:`~away.selftest.model.Fix` names an action; :func:`apply` does it an
 (``{"ok": True, "message": "Closed NVIDIA Broadcast. Press Try again."}``). Only the person presses these buttons:
 agents get the same report, but no fix runs without the person. Actions that close another program say so on the
 button itself ("Close NVIDIA Broadcast").
+
+v0.1.28 (proposal #11): ``open:device_manager`` opens Windows Device Manager (an MMC console, ``devmgmt.msc``,
+not a Settings page), and ``guide:uninstall_driver`` walks the person through the driver repair (uninstall the
+camera, restart the PC) after a Yes / No confirm, in plain words.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import contextlib
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
 
 OPEN_TARGETS = {  # Windows Settings pages (ms-settings: URIs); other systems are told where to look
@@ -31,8 +36,15 @@ def _no(message: str) -> dict[str, Any]:
 
 
 def apply(
-    action: str, app: Any = None, host: Any = None, psutil_mod: Any = None, launcher: Any = None
+    action: str,
+    app: Any = None,
+    host: Any = None,
+    psutil_mod: Any = None,
+    launcher: Any = None,
+    confirm: Callable[[str], bool | None] | None = None,
 ) -> dict[str, Any]:
+    """``confirm`` (v0.1.28): an injected Yes / No answer for the guided flows (the app's own prompt window is
+    used when ``host`` carries one)."""
     kind, _, arg = str(action or "").partition(":")
     try:
         if kind == "retry_cameras":
@@ -77,6 +89,8 @@ def apply(
             return _ok("Downloading the missing models in the background; this can take a few minutes.")
         if kind == "open":
             return _open(arg, launcher)
+        if kind == "guide" and arg == "uninstall_driver":
+            return _guide_uninstall_driver(launcher, host, confirm)
         if kind == "camera_on":
             return _camera_on(arg, host)
         if kind == "use_broadcast":
@@ -181,8 +195,63 @@ def _open(target: str, launcher: Any = None) -> dict[str, Any]:
 
         (launcher or subprocess.Popen)(away_command(["settings", "--tab", target.split("/", 1)[1]]))
         return _ok("Opening Settings.")
+    if target == "device_manager":
+        return _open_device_manager(launcher)
     uri, words = OPEN_TARGETS.get(target, ("", target))
     if sys.platform.startswith("win") and uri:
         os.startfile(uri)  # type: ignore[attr-defined]
         return _ok(f"Opened {words}.")
     return _ok(f"Open {words} on this computer.")
+
+
+def _open_device_manager(launcher: Any = None) -> dict[str, Any]:
+    """v0.1.28 (proposal #11): Device Manager is an MMC console (``devmgmt.msc``), not a Settings page, so it is
+    launched directly, through the same injectable ``launcher`` pattern as the other opens. Safe: only the person
+    presses the button, on this PC; agents never reach this."""
+    if sys.platform.startswith("win"):
+        (launcher or subprocess.Popen)(["mmc.exe", "devmgmt.msc"])
+        return _ok("Opening Device Manager (Windows may ask for permission).")
+    return _ok("Open Device Manager on this computer to look at the camera's driver.")
+
+
+# --------------------------------------------------------------------------------- driver repair guide
+UNINSTALL_DRIVER_QUESTION = (
+    "Your camera's driver looks broken. The repair is to uninstall the camera in Device Manager and restart the PC "
+    "(Windows installs the driver again by itself). Do that now?"
+)
+UNINSTALL_DRIVER_STEPS = (
+    "In Device Manager, open Cameras, right-click the camera, choose Uninstall device (leave 'Delete the driver "
+    "software' unticked), then restart the PC. Windows installs the camera again when it starts up; afterwards, "
+    "press Try again in the self-test."
+)
+
+
+def _confirm_person(question: str, host: Any, confirm: Callable[[str], bool | None] | None) -> bool | None:
+    """Yes / No from the person, reusing the Check-my-PC confirm pattern (v0.1.24): the app's own prompt window
+    when the app runs (``host.core.prompts``), an injected answer in tests, None when there is no way to ask."""
+    if confirm is not None:
+        try:
+            return confirm(question)
+        except Exception:
+            return None
+    pr = getattr(getattr(host, "core", None), "prompts", None)
+    if pr is None:
+        return None
+    try:
+        res = pr.ask(question, ["Yes", "No"], title="Project Away self-test", agent="Project Away", timeout_s=60.0)
+    except Exception:
+        return None
+    ans = str(res.get("answer") or "").lower()
+    return True if ans == "yes" else (False if ans == "no" else None)
+
+
+def _guide_uninstall_driver(launcher: Any, host: Any, confirm: Callable[[str], bool | None] | None) -> dict[str, Any]:
+    """v0.1.28 (proposal #11): the guided repair for a driver-broken camera. Confirms with the person first, then
+    opens Device Manager and hands over the steps in plain words. A "no" changes nothing; with no way to ask, the
+    person just gets the steps."""
+    ans = _confirm_person(UNINSTALL_DRIVER_QUESTION, host, confirm)
+    if ans is False:
+        return _ok("OK, nothing changed.")
+    opened = _open_device_manager(launcher)
+    tail = " (no answer came back, so here are the steps)" if ans is None else ""
+    return _ok(f"{opened.get('message')}{tail} {UNINSTALL_DRIVER_STEPS}")
