@@ -13,8 +13,7 @@ it, tune Project Away to how you like it, and even use your computer while you w
 Nothing leaves your machine unless you connect an agent and press **Allow** on your own screen (or point the
 optional LLM cleanup at an endpoint yourself).
 
-[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy) · Microsoft Store and signing setup:
-[docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md)
+[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy)
 
 ## User guide (no technical knowledge needed)
 
@@ -2175,7 +2174,7 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 * **An optional live agent.** Project Away can run its own small agent that answers you by voice, using free models
   or your own API key, with a daily budget you set. It is off until you turn it on. See *Live agent (optional)*.
 * **A Microsoft Store build.** The release also builds a Store package (MSIX), and a Store copy is updated by the
-  Store instead of by Project Away. See [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
+  Store instead of by Project Away.
 * **Agents stay connected.** An agent holding its connection open no longer shows as "not connected" after a
   couple of minutes, long waits stay under Cloudflare's time limit, and the example client reconnects and catches up
   by itself.
@@ -2410,7 +2409,7 @@ tagged source, and every signing request is approved by hand.
   systems unless specifically requested by the user or the person installing or operating it, apart from the
   anonymous update check and model downloads described there (both can be turned off or skipped).
 
-The Microsoft Store package (MSIX) is signed by Microsoft. Setup steps: [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
+The Microsoft Store package (MSIX) is intended for distribution through the Microsoft Store.
 
 ## Development
 
