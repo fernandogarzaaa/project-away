@@ -77,9 +77,15 @@ def status_text(cfg: Any, data_dir: Path | None = None) -> str:
             profile = voice_profiles.get_profile(selected, data_dir)
             if profile.engine == "pocket-clone":
                 from away.voice.voice_cloning import pocket_available
-                return "Custom voice is local. " + ("Ready; Pocket TTS." if pocket_available() else "Install the optional Pocket TTS extra to use it; preset fallback remains available.")
+                status = "Ready; Pocket TTS." if pocket_available() else (
+                    "Install the optional Pocket TTS extra; preset fallback remains available."
+                )
+                return "Custom voice is local. " + status
             from away.voice.voice_cloning import qwen_available
-            return "Custom voice is local. " + ("Ready; Qwen3-TTS." if qwen_available() else "Install the optional Qwen3-TTS extra to use it; preset fallback remains available.")
+            status = "Ready; Qwen3-TTS." if qwen_available() else (
+                "Install the optional Qwen3-TTS extra; preset fallback remains available."
+            )
+            return "Custom voice is local. " + status
         except Exception:
             return "Custom voice profile is unavailable; the existing voice fallback chain will be used."
     n = needs_download(cfg, data_dir)
@@ -95,8 +101,14 @@ def license_text(cfg: Any) -> str:
         try:
             profile = voice_profiles.get_profile(selected)
             if profile.engine == "pocket-clone":
-                return "Pocket TTS weights are CC-BY-4.0 (credit Kyutai). The reference WAV and reusable voice state stay in your local Project Away data folder."
-            return "Qwen3-TTS uses its own model licence. The reference WAV stays local; the clone prompt is held in memory, not serialized."
+                return (
+                    "Pocket TTS weights are CC-BY-4.0 (credit Kyutai). The reference WAV and reusable voice state "
+                    "stay in your local Project Away data folder."
+                )
+            return (
+                "Qwen3-TTS uses its own model licence. The reference WAV stays local; the clone prompt is held "
+                "in memory, not serialized."
+            )
         except Exception:
             return "Custom voice profile is unavailable."
     eng = cfg.speech.engine if cfg.speech.engine in ("kokoro", "piper") else ""
@@ -124,7 +136,9 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     dialog.grab_set()
     frame = ttk.Frame(dialog, padding=10)
     frame.pack(fill="both", expand=True)
-    ttk.Label(frame, text="Create a custom voice", font=("", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(frame, text="Create a custom voice", font=("", 11, "bold")).grid(
+        row=0, column=0, columnspan=3, sticky="w"
+    )
     ttk.Label(frame, text="Import 3–30 seconds of clear PCM WAV. The sample and profile stay on this PC.",
               wraplength=480).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
     name = tk.StringVar(value="My voice")
@@ -138,7 +152,9 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     ttk.Label(frame, text="Whose voice?").grid(row=3, column=0, sticky="w")
     ttk.Entry(frame, textvariable=speaker, width=38).grid(row=3, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="Engine").grid(row=4, column=0, sticky="w")
-    ttk.Combobox(frame, textvariable=engine, values=["pocket-clone", "qwen-clone"], state="readonly", width=35).grid(row=4, column=1, columnspan=2, sticky="we")
+    ttk.Combobox(
+        frame, textvariable=engine, values=["pocket-clone", "qwen-clone"], state="readonly", width=35
+    ).grid(row=4, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="Reference transcript (Qwen required)").grid(row=5, column=0, sticky="w")
     ttk.Entry(frame, textvariable=transcript, width=38).grid(row=5, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="WAV sample").grid(row=6, column=0, sticky="w")
@@ -150,8 +166,11 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     ttk.Button(frame, text="Browse…", command=browse).grid(row=6, column=2, padx=(4, 0))
     ttk.Checkbutton(frame, text="I have permission from this speaker to create and use this voice clone.",
                     variable=consent).grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
-    ttk.Label(frame, text="Do not clone another person's voice without their informed permission. Voice samples are sensitive data.",
-              wraplength=480).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    ttk.Label(
+        frame,
+        text="Do not clone another person's voice without their informed permission. Voice samples are sensitive data.",
+        wraplength=480,
+    ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
     def refresh() -> None:
         listing.delete(0, "end")
         profile_ids.clear()
@@ -205,7 +224,13 @@ def build(win: Any, parent: Any, row: int) -> int:  # pragma: no cover - Tk widg
     top.pack(fill="x", padx=4, pady=4)
     var = tk.StringVar(value=label_for(cfg))
     custom_labels = custom_choices(cfg)
-    cb = ttk.Combobox(top, textvariable=var, values=[c[0] for c in CHOICES] + list(custom_labels) + [CREATE_LABEL, DISABLE_CUSTOM_LABEL], state="readonly", width=38)
+    cb = ttk.Combobox(
+        top,
+        textvariable=var,
+        values=[c[0] for c in CHOICES] + list(custom_labels) + [CREATE_LABEL, DISABLE_CUSTOM_LABEL],
+        state="readonly",
+        width=38,
+    )
     cb.pack(side="left")
     speed = tk.StringVar(value=cfg.speech.rate)
     ttk.Label(top, text="  Speed").pack(side="left")
