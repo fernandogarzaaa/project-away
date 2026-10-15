@@ -525,6 +525,8 @@ class SpeechConfig:
     engine: str = "auto"
     kokoro_voice: str = "af_heart"  # af_heart | af_bella | am_michael | bf_emma | bm_george
     piper_voice: str = "lessac"  # lessac | amy
+    # Voice Studio: optional local custom voice profile ID. Empty preserves the existing picker/fallback chain.
+    custom_voice_profile: str = ""
 
 
 NEXT_STT = ("whisper", "moonshine", "nemotron")

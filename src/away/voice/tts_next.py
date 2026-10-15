@@ -8,6 +8,9 @@
   cores, first audio in well under a second, used for short replies. It needs PyTorch, so it is the
   ``project-away[pocket]`` pip extra, never a bundled download. Weights CC-BY-4.0 (credit: Kyutai); voice cloning
   only with the speaker's consent.
+* **Voice Studio clones**: a consent-gated local WAV profile can select Pocket TTS (reusable safetensors
+  voice state) or Qwen3-TTS 0.6B Base (reusable in-memory clone prompt). Both are optional extras, and the selected
+  clone is prepended to the existing chain; missing dependencies or engine errors fall back to existing voices.
 
 Licence notes: Kokoro's phonemes come from espeak-ng (GPL-3.0) and Piper's engine is GPL-3.0; both stay optional
 runtime downloads that are never bundled (as in v0.1.23).
@@ -97,6 +100,13 @@ def pocket_available() -> bool:
         return False
 
 
+def _qwen_available() -> bool:
+    try:
+        return importlib.util.find_spec("qwen_tts") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 class PocketEngine:
     """Kyutai pocket-tts for short replies; longer text goes to the next engine (raises so the chain moves on)."""
 
@@ -142,9 +152,17 @@ def next_factories(
     """Engines to try before the v0.1.23 chain: pocket-tts for short replies when chosen, then Kokoro fp16 on the
     graphics card when that precision is chosen and downloaded. Empty by default."""
     o = opts if opts is not None else _get_opts()
-    if o is None:
-        return []
     out: list[tuple[str, Callable[[], Any]]] = []
+    # Voice Studio is independent of models_next: the selected custom profile takes precedence only when its
+    # optional engine is installed. Speaker retains the existing voices as fallback on any failure.
+    try:
+        from away.voice.voice_cloning import profile_factory
+
+        out += profile_factory(settings, data_dir, have_pocket=have_pocket, have_qwen=_qwen_available)
+    except Exception:
+        pass
+    if o is None:
+        return out
     if bool(getattr(o, "instant_voice", False)) and have_pocket():
         out.append((PocketEngine.name, lambda: PocketEngine()))
     s = settings()

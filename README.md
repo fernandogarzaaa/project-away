@@ -2001,8 +2001,10 @@ RTMPose hands on the graphics card (A/B against MediaPipe on your own camera; sw
 steady and as fast) and Kyutai pocket-tts, an instant voice for short replies.
 
 Optional pip extras (not part of the installers or `[all]`): `pip install "project-away[moonshine]"`,
-`"project-away[wakeword]"` (Python 3.11 or newer) and `"project-away[pocket]"` (pulls in PyTorch). Settings can also
-download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
+`"project-away[wakeword]"` (Python 3.11 or newer), `"project-away[pocket]"` (Pocket TTS, pulls in PyTorch), and
+`"project-away[qwen]"` (Qwen3-TTS and its model runtime). Qwen model weights may be downloaded on first use. These
+larger cloning engines are opt-in; install only the engine you intend to use. Settings can also download the Moonshine
+and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
 
 ### Licences
 
@@ -2012,6 +2014,8 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
   is downloaded with the model, and credit NVIDIA if you pass the model on.
 * **Kyutai pocket-tts weights are CC-BY-4.0.** Credit Kyutai. The code is MIT. Only clone a voice with the speaker's
   consent.
+* **Qwen3-TTS** is an optional upstream model package. Review its current model card and licence before
+  redistribution or commercial use; the runtime is not bundled with Project Away.
 * Moonshine v2 and moonshine-voice: MIT. Qwen3.5, livekit-wakeword, NeMo-Speech.cpp, RTMPose/RTMDet and Kokoro:
   Apache-2.0. Silero VAD: MIT. openWakeWord's own pre-trained models (CC BY-NC-SA) are never shipped or downloaded.
 
@@ -2232,6 +2236,13 @@ three app copies at once, a mouse pointer that stayed big, choppy tracking) and 
   natural, or the classic system voice, with Preview and a one-time Download. A voice that cannot play falls back
   to the next one silently. The download includes espeak-ng and phonemizer, which are GPL-3.0: they are fetched
   only when you press Download, the picker says so first, and they are never in the installers.
+* **Voice Studio custom voices** (Settings → Voice & input → Voice → Manage custom voices): import a 3–30 second
+  PCM WAV, name the profile, identify whose voice it is, and confirm you have permission to synthesize it. Pocket TTS
+  caches a reusable local `safetensors` voice state; Qwen3-TTS requires the reference transcript and keeps its
+  derived prompt in memory. Both are optional local runtimes, never bundled in installers. If a clone cannot load
+  or fails during speech, the existing Kokoro → Piper → Windows → classic fallback chain remains available.
+  Delete a profile to remove its WAV, metadata and cached state. Never clone another person's voice without their
+  informed permission.
 * **Settings → Models** and the online model catalog (see *Models*).
 
 ## Changes in v0.1.22

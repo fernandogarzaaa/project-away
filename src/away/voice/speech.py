@@ -350,6 +350,9 @@ class Speaker:
         self._lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
+        # Distinguish actual engine playback from queued/loading speech. Barge-in must not calibrate echo
+        # against the user's voice while a model is still loading.
+        self._speaking = threading.Event()
         # v0.1.26: how long the voice engine stays loaded after the last message (the live agent raises it so a
         # follow-up never waits for the natural voice to load again)
         self.idle_s = IDLE_S
@@ -503,6 +506,18 @@ class Speaker:
                     break  # idle: let the thread (and its COM object) go; the next message starts a new one
                 if text is None:
                     break
+                # Switching/deleting a custom profile must take effect on the next queued message rather than
+                # leaving a stale cloned voice loaded for the entire idle timeout.
+                if eng is not None:
+                    profile = getattr(eng, "profile", None)
+                    if profile is not None:
+                        selected = str(getattr(self._cfg(), "custom_voice_profile", "") or "")
+                        if selected != str(getattr(profile, "id", "")):
+                            with contextlib.suppress(Exception):
+                                eng.close()
+                            eng = None
+                            self.engine_name = ""
+                            self._eng_ready = False
                 if eng is None:
                     eng = self._make()
                     self._eng_ready = eng is not None
@@ -516,8 +531,12 @@ class Speaker:
                     for _attempt in range(4):  # v0.1.23: a failing engine falls back silently to the next one
                         try:
                             latency.mark("tts_start")
-                            with self.echo.speaking():
-                                eng.speak(text, self.voice())
+                            self._speaking.set()
+                            try:
+                                with self.echo.speaking():
+                                    eng.speak(text, self.voice())
+                            finally:
+                                self._speaking.clear()
                             latency.spoken()  # engines that cannot tell when their sound started
                             self.spoken = [*self.spoken[-19:], text]
                             break
