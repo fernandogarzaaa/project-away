@@ -362,6 +362,27 @@ class AmbientSession:
         except Exception:
             return False
 
+    def _same_clock(self) -> bool:
+        talk = self.talk
+        return talk is not None and getattr(getattr(talk, "state", None), "clock", None) is self.clock
+
+    def _onset(self) -> float | None:
+        """v0.1.27: when the utterance being processed STARTED (session clock), for the listening window. From the
+        moment the endpointer closed it minus its silence and length (the stream clock can lag while muted)."""
+        u = getattr(self, "_utt", None)
+        if u is None or not self._same_clock():
+            return None
+        if u.closed_at is not None:
+            return float(u.closed_at) - float(u.end_wait_s) - max(0.0, float(u.t1) - float(u.t0))
+        return float(u.t0)
+
+    def _speech_end(self) -> float | None:
+        """v0.1.27: when the wake phrase ended: the window starts there, not after speech-to-text finished."""
+        u = getattr(self, "_utt", None)
+        if u is None or not self._same_clock() or u.closed_at is None:
+            return None
+        return float(u.closed_at) - float(u.end_wait_s)
+
     def _publish(self, topic: str, data: dict[str, Any]) -> None:
         if self.bus is not None:
             self.bus.publish(topic, data)
@@ -494,12 +515,17 @@ class AmbientSession:
         talk = self.talk
         if not raw.strip():
             return None
+        onset = self._onset()
         try:
             route = talk.route(raw)
-            waiting = talk.state.armed() if talk.ready() else None
+            waiting = talk.state.armed(at=onset) if talk.ready() else None
         except Exception:
             return None
         if route is None and waiting is None:
+            with contextlib.suppress(Exception):
+                late = talk.state.expired(at=onset) if onset is not None else talk.state.expired()
+                if late is not None:  # v0.1.27 feedback: said just after the window closed
+                    talk.report("expired", str(late), "the listening window had closed, so it was treated as dictation")
             return None
         if route is None and waiting == getattr(talk, "conversation", None) and is_stop(raw):
             # v0.1.26 conversational mode: "stop" / "that's all" ends the conversation (and stops the agent)
@@ -518,15 +544,24 @@ class AmbientSession:
             data["confidence"] = conf
         if gi is not None:
             data["gate"] = gi
+        # v0.1.27: the face gate is for stray dictation typing. A message addressed to an agent by name (or said
+        # inside its listening window / conversation) is never blocked by it: with the camera not seeing a face
+        # (face_fraction 0) "Hey <name>" used to be dropped and the agent never heard anything.
         if gate is False:
-            d = Decision("ignore", "face gate: not sent to your agent (the camera did not see you talking)")
-        elif route is not None and not body:
-            talk.arm(target, "voice")
+            data["face_gate_bypassed"] = True
+        if route is not None and not body:
+            end = self._speech_end()
+            if end is not None:
+                talk.arm_at(target, "voice", at=end)
+            else:
+                talk.arm(target, "voice")
             d = Decision("listen", f"waiting for your message ({route.phrase})", phrase=route.phrase)
         else:
+            # mouth-motion evidence comes from the face gate, which does not apply to agent messages; only fillers
+            # are dropped. Exception (v0.1.22 rule kept): another app playing sound needs the mouth seen moving.
             why = should_drop(
                 body,
-                gi,
+                gi if other else None,
                 conf,
                 other_audio=other,
                 strict_ratio=self.strict_ratio,
@@ -534,6 +569,7 @@ class AmbientSession:
             )
             if why:
                 d = Decision("ignore", f"dropped: {why}")
+                talk.report("dropped", target, why)
             else:
                 talk.state.disarm()
                 u = getattr(self, "_utt", None)

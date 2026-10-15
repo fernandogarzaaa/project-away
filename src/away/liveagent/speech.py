@@ -29,54 +29,70 @@ class LiveSpeech:
         self.enabled = enabled
         self.stop_audio = stop_audio or _stop_sounddevice
         self._cancel = threading.Event()
+        # Serialize enqueue and interrupt: otherwise barge-in can drain the queue immediately before say()
+        # enqueues, leaving a sentence that starts after the user interrupted.
+        self._state_lock = threading.RLock()
         self.interrupted = 0
         self.spoken: list[str] = []
         self.on_interrupt: Callable[[], None] | None = None
 
     def begin(self) -> None:
-        self._cancel.clear()
+        with self._state_lock:
+            self._cancel.clear()
 
     @property
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
     def say(self, sentence: str) -> bool:
-        if self._cancel.is_set() or not sentence.strip() or self.speaker is None:
-            return False
-        try:
-            if not self.enabled():
+        with self._state_lock:
+            if self._cancel.is_set() or not sentence.strip() or self.speaker is None:
                 return False
-        except Exception:
-            return False
-        try:
-            res = self.speaker.say(sentence, force=True)
-        except TypeError:
-            res = self.speaker.say(sentence)
-        except Exception:
-            return False
-        self.spoken = [*self.spoken[-19:], sentence]
-        return bool(res.get("spoken", True)) if isinstance(res, dict) else True
+            try:
+                if not self.enabled():
+                    return False
+            except Exception:
+                return False
+            try:
+                res = self.speaker.say(sentence, force=True)
+            except TypeError:
+                try:
+                    res = self.speaker.say(sentence)
+                except Exception:
+                    return False
+            except Exception:
+                return False
+            accepted = bool(res.get("spoken", True)) if isinstance(res, dict) else True
+            if accepted:
+                self.spoken = [*self.spoken[-19:], sentence]
+            return accepted
 
     def speaking(self) -> bool:
+        # Speaker._idle also covers model loading and queued text; only arm acoustic barge-in while audio
+        # is actually being rendered. Keep the old fake/third-party speaker contract as a fallback.
+        active = getattr(self.speaker, "_speaking", None)
+        if active is not None:
+            return bool(active.is_set())
         idle = getattr(self.speaker, "_idle", None)
         return idle is not None and not idle.is_set()
 
     def interrupt(self) -> None:
-        """Barge-in: drop every waiting sentence and stop the sound that is playing."""
-        self._cancel.set()
-        self.interrupted += 1
-        q: Any = getattr(self.speaker, "_q", None)
-        lock = getattr(self.speaker, "_lock", None)
-        if q is not None:
-            with lock if lock is not None else contextlib.nullcontext():
-                while True:
-                    try:
-                        item = q.get_nowait()
-                    except queue.Empty:
-                        break
-                    if item is None:  # keep a stop request
-                        q.put(None)
-                        break
+        """Atomically stop accepting speech, drain queued sentences, and stop current playback."""
+        with self._state_lock:
+            self._cancel.set()
+            self.interrupted += 1
+            q: Any = getattr(self.speaker, "_q", None)
+            lock = getattr(self.speaker, "_lock", None)
+            if q is not None:
+                with lock if lock is not None else contextlib.nullcontext():
+                    while True:
+                        try:
+                            item = q.get_nowait()
+                        except queue.Empty:
+                            break
+                        if item is None:  # preserve a shutdown request
+                            q.put(None)
+                            break
         with contextlib.suppress(Exception):
             self.stop_audio()
         if self.on_interrupt is not None:
@@ -113,8 +129,12 @@ class BargeIn:
     ) -> None:
         self.speaking = speaking
         self.on_barge = on_barge
-        self.sr = sample_rate
-        self.ratio, self.floor, self.hold_s, self.calib_s = ratio, floor, hold_s, calib_s
+        if int(sample_rate) <= 0:
+            raise ValueError("sample_rate must be positive")
+        if hold_s <= 0 or calib_s < 0 or ratio <= 0 or floor < 0:
+            raise ValueError("invalid barge-in thresholds")
+        self.sr = int(sample_rate)
+        self.ratio, self.floor, self.hold_s, self.calib_s = float(ratio), float(floor), float(hold_s), float(calib_s)
         self.clock = clock
         self.enabled = enabled
         self._since: float | None = None  # agent started speaking
@@ -129,8 +149,11 @@ class BargeIn:
                 return False
         except Exception:
             return False
-        arr = np.asarray(chunk, dtype=np.float32).reshape(-1)
-        if arr.size == 0:
+        try:
+            arr = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return False
+        if arr.size == 0 or not np.isfinite(arr).all():
             return False
         rms = float(np.sqrt(np.mean(arr * arr)))
         dur = arr.size / float(self.sr)
@@ -138,7 +161,9 @@ class BargeIn:
         if self._since is None:
             self._since = now
         if now - self._since < self.calib_s:
-            self._echo.append(rms)
+            # A clock that stalls or a broken audio callback must not grow calibration memory without bound.
+            if len(self._echo) < 64:
+                self._echo.append(rms)
             return False
         echo = float(np.median(self._echo)) if self._echo else 0.0
         if rms > max(self.floor, echo * self.ratio):

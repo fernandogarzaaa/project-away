@@ -248,10 +248,13 @@ class TalkState:
     def window_s(self, value: float | Callable[[], float]) -> None:
         self._window = value
 
-    def arm(self, target: str = DEFAULT, source: str = "voice", held: bool = False) -> None:
-        """``held``: the window waits for :attr:`hold` to go False before it starts counting (conversational)."""
+    def arm(self, target: str = DEFAULT, source: str = "voice", held: bool = False, at: float | None = None) -> None:
+        """``held``: the window waits for :attr:`hold` to go False before it starts counting (conversational).
+        ``at`` (v0.1.27): when the wake phrase ended (defaults to now), so speech-to-text time is not taken out of
+        the window."""
         with self._lock:
-            self._until = self.clock() + self.window_s
+            start = self.clock() if at is None else min(float(at), self.clock())
+            self._until = start + self.window_s
             self._target = target
             self.source = source
             self._held = held
@@ -264,8 +267,12 @@ class TalkState:
         except Exception:
             return False
 
-    def armed(self) -> str | None:
-        """The waiting target (DEFAULT or an agent id), or None when nothing is waiting."""
+    def armed(self, at: float | None = None) -> str | None:
+        """The waiting target (DEFAULT or an agent id), or None when nothing is waiting.
+
+        ``at`` (v0.1.27): when the utterance being routed STARTED (same clock). Speech that began inside the window
+        still counts even though speech-to-text finished after it closed (the window used to be checked only once
+        the transcript was ready, so a reply begun at 7.5 s of an 8 s window was typed as dictation)."""
         holding = self._holding()
         with self._lock:
             if self._until <= -1e8:
@@ -273,12 +280,54 @@ class TalkState:
             if holding:
                 self._until = self.clock() + self.window_s  # counts from when the agent goes quiet
                 return self._target
-            return self._target if self.clock() <= self._until else None
+            when = self.clock() if at is None else min(float(at), self.clock())
+            return self._target if when <= self._until else None
+
+    def expired(self, at: float | None = None, grace_s: float = 6.0) -> str | None:
+        """v0.1.27 feedback: the target whose window closed shortly before ``at`` (None otherwise)."""
+        with self._lock:
+            if self._until <= -1e8:
+                return None
+            when = self.clock() if at is None else float(at)
+            return self._target if self._until < when <= self._until + grace_s else None
 
     def disarm(self) -> None:
         with self._lock:
             self._until = -1e9
             self._held = False
+
+
+class TalkProvider:
+    """v0.1.27: an agent that answers voice messages itself (the live agent) instead of an Agent Link inbox.
+
+    Registered with :meth:`TalkHook.add_provider`, never by replacing ``TalkHook.agents``/``deliver``: Agent Link
+    assigns those when it (re)starts, which used to silently unhook a monkeypatched provider. Subclass and
+    override what you need; every call is guarded by the hook."""
+
+    def active(self) -> bool:
+        return False
+
+    def agents(self) -> list[dict[str, Any]]:
+        return []
+
+    def owns(self, target: str) -> bool:
+        return False
+
+    def deliver(self, target: str, text: str, source: str) -> str:
+        return ""
+
+    def on_armed(self, target: str) -> None:
+        return None
+
+    def on_stop(self, target: str) -> None:
+        return None
+
+    def busy(self) -> bool:
+        return False
+
+    def on_attempt(self, kind: str, target: str, detail: str) -> None:
+        """What happened to a wake attempt: ``blocked`` | ``expired`` | ``sent`` | ``listening`` | ``dropped``."""
+        return None
 
 
 class TalkHook:
@@ -306,14 +355,77 @@ class TalkHook:
         self.on_stop: Callable[[str], None] | None = None  # v0.1.26: "stop" / "that's all" ended the conversation
         self.conversational = conversational or (lambda: False)
         self.busy: Callable[[], bool] = lambda: False
-        self.state = TalkState(window_s, hold=lambda: self.busy())
+        self.state = TalkState(window_s, hold=self.any_busy)
         self.conversation: str | None = None  # the agent a conversation is going on with (conversational mode)
+        self.providers: list[TalkProvider] = []  # v0.1.27: the live agent (survives Agent Link restarts)
 
-    def ready(self) -> bool:
+    # ------------------------------------------------------------ providers (v0.1.27)
+    def add_provider(self, provider: TalkProvider) -> None:
+        if not any(p is provider for p in self.providers):
+            self.providers.append(provider)
+
+    def remove_provider(self, provider: TalkProvider) -> None:
+        self.providers = [p for p in self.providers if p is not provider]
+
+    def _active(self) -> list[TalkProvider]:
+        out = []
+        for p in list(self.providers):
+            try:
+                if p.active():
+                    out.append(p)
+            except Exception:
+                pass
+        return out
+
+    def owner(self, target: str) -> TalkProvider | None:
+        """The provider that answers ``target`` itself (None: Agent Link's inbox)."""
+        for p in self._active():
+            try:
+                if p.owns(target):
+                    return p
+            except Exception:
+                pass
+        return None
+
+    def any_busy(self) -> bool:
+        try:
+            if self.busy():
+                return True
+        except Exception:
+            pass
+        for p in self._active():
+            try:
+                if p.busy():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def report(self, kind: str, target: str, detail: str = "") -> None:
+        """Tell the providers what happened to a wake attempt (the live agent shows it)."""
+        for p in list(self.providers):
+            with contextlib.suppress(Exception):
+                p.on_attempt(kind, target, detail)
+
+    def _base_ready(self) -> bool:
         try:
             return self.deliver is not None and bool(self.enabled())
         except Exception:
             return False
+
+    def ready(self) -> bool:
+        return self._base_ready() or bool(self._active())
+
+    def all_agents(self) -> list[dict[str, Any]]:
+        """Provider agents first (so the live agent's own name wins a tie), then Agent Link's."""
+        out: list[dict[str, Any]] = []
+        for p in self._active():
+            with contextlib.suppress(Exception):
+                out.extend(p.agents())
+        if self._base_ready():
+            with contextlib.suppress(Exception):
+                out.extend(list(self.agents()))
+        return out
 
     def is_conversational(self) -> bool:
         try:
@@ -324,11 +436,7 @@ class TalkHook:
     def route(self, text: str) -> Route | None:
         if not self.ready():
             return None
-        try:
-            agents = list(self.agents())
-        except Exception:
-            agents = []
-        return match(text, agents)
+        return match(text, self.all_agents())
 
     def _sound(self, kind: str) -> None:
         if self.sound is not None:
@@ -336,20 +444,35 @@ class TalkHook:
                 self.sound(kind)
 
     def arm(self, target: str = DEFAULT, source: str = "gesture") -> None:
-        self.state.arm(target, source)
+        self.arm_at(target, source)
+
+    def arm_at(self, target: str = DEFAULT, source: str = "gesture", at: float | None = None) -> None:
+        self.state.arm(target, source, at=at)
         self._sound("listen")
+        prov = self.owner(target)
+        if prov is not None:  # v0.1.27: the live agent says "Listening..." itself (Agent Link knew no such agent)
+            with contextlib.suppress(Exception):
+                prov.on_armed(target)
+            self.report("listening", target)
+            return
         if self.on_armed is not None:
             with contextlib.suppress(Exception):
                 self.on_armed(target)
+        self.report("listening", target)
 
     def send(self, target: str, text: str, source: str) -> str:
-        if self.deliver is None:
+        prov = self.owner(target)
+        if prov is None and self.deliver is None:
             return ""
         self._sound("heard")
         try:
-            label = str(self.deliver(target, text, source) or "")
+            if prov is not None:
+                label = str(prov.deliver(target, text, source) or "")
+            else:
+                label = str(self.deliver(target, text, source) or "")  # type: ignore[misc]
         except Exception:
             label = ""
+        self.report("sent" if label else "failed", target, label)
         if label and self.is_conversational():
             # v0.1.26: the agent answers, then listens for your follow-up (no wake word) for ``window_s``
             self.conversation = target
@@ -361,6 +484,10 @@ class TalkHook:
         t = target if target is not None else (self.conversation or DEFAULT)
         self.state.disarm()
         self.conversation = None
+        prov = self.owner(t)
+        if prov is not None:
+            with contextlib.suppress(Exception):
+                prov.on_stop(t)
         if self.on_stop is not None:
             with contextlib.suppress(Exception):
                 self.on_stop(t)

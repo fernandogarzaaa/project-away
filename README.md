@@ -13,8 +13,7 @@ it, tune Project Away to how you like it, and even use your computer while you w
 Nothing leaves your machine unless you connect an agent and press **Allow** on your own screen (or point the
 optional LLM cleanup at an endpoint yourself).
 
-[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy) · Microsoft Store and signing setup:
-[docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md)
+[Privacy policy](PRIVACY.md) · [Code signing policy](#code-signing-policy)
 
 ## User guide (no technical knowledge needed)
 
@@ -2001,8 +2000,10 @@ RTMPose hands on the graphics card (A/B against MediaPipe on your own camera; sw
 steady and as fast) and Kyutai pocket-tts, an instant voice for short replies.
 
 Optional pip extras (not part of the installers or `[all]`): `pip install "project-away[moonshine]"`,
-`"project-away[wakeword]"` (Python 3.11 or newer) and `"project-away[pocket]"` (pulls in PyTorch). Settings can also
-download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
+`"project-away[wakeword]"` (Python 3.11 or newer), `"project-away[pocket]"` (Pocket TTS, pulls in PyTorch), and
+`"project-away[qwen]"` (Qwen3-TTS and its model runtime). Qwen model weights may be downloaded on first use. These
+larger cloning engines are opt-in; install only the engine you intend to use. Settings can also download the Moonshine
+and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against its sha256.
 
 ### Licences
 
@@ -2012,6 +2013,8 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
   is downloaded with the model, and credit NVIDIA if you pass the model on.
 * **Kyutai pocket-tts weights are CC-BY-4.0.** Credit Kyutai. The code is MIT. Only clone a voice with the speaker's
   consent.
+* **Qwen3-TTS** is an optional upstream model package. Review its current model card and licence before
+  redistribution or commercial use; the runtime is not bundled with Project Away.
 * Moonshine v2 and moonshine-voice: MIT. Qwen3.5, livekit-wakeword, NeMo-Speech.cpp, RTMPose/RTMDet and Kokoro:
   Apache-2.0. Silero VAD: MIT. openWakeWord's own pre-trained models (CC BY-NC-SA) are never shipped or downloaded.
 
@@ -2150,6 +2153,16 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.27
+
+* **Talking to your live agent works again with the camera on.** "Hey <name>" is no longer ignored when the face
+  gate cannot see your face, a reply you start inside the listening window is no longer typed out after the window
+  closes, the live agent stays connected after Agent Link changes, and the spoken language is kept (#40).
+* **Voice Studio (optional).** Make a custom voice from a short recording of your own (3 to 30 seconds, with the
+  speaker's permission), stored only on your PC, with an easy way back to the preset voices. Conversational mode
+  also handles talking over the agent more reliably (#39).
+* **Docs.** The detailed public signing and Store setup guide was removed; the short code-signing policy stays (#38).
+
 ## What's new in 0.1.26
 
 * **A steadier cursor with eye or head tracking on.** With head or eye tracking switched on, the cursor could shake
@@ -2175,7 +2188,7 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 * **An optional live agent.** Project Away can run its own small agent that answers you by voice, using free models
   or your own API key, with a daily budget you set. It is off until you turn it on. See *Live agent (optional)*.
 * **A Microsoft Store build.** The release also builds a Store package (MSIX), and a Store copy is updated by the
-  Store instead of by Project Away. See [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
+  Store instead of by Project Away.
 * **Agents stay connected.** An agent holding its connection open no longer shows as "not connected" after a
   couple of minutes, long waits stay under Cloudflare's time limit, and the example client reconnects and catches up
   by itself.
@@ -2232,6 +2245,13 @@ three app copies at once, a mouse pointer that stayed big, choppy tracking) and 
   natural, or the classic system voice, with Preview and a one-time Download. A voice that cannot play falls back
   to the next one silently. The download includes espeak-ng and phonemizer, which are GPL-3.0: they are fetched
   only when you press Download, the picker says so first, and they are never in the installers.
+* **Voice Studio custom voices** (Settings → Voice & input → Voice → Manage custom voices): import a 3–30 second
+  PCM WAV, name the profile, identify whose voice it is, and confirm you have permission to synthesize it. Pocket TTS
+  caches a reusable local `safetensors` voice state; Qwen3-TTS requires the reference transcript and keeps its
+  derived prompt in memory. Both are optional local runtimes, never bundled in installers. If a clone cannot load
+  or fails during speech, the existing Kokoro → Piper → Windows → classic fallback chain remains available.
+  Delete a profile to remove its WAV, metadata and cached state. Never clone another person's voice without their
+  informed permission.
 * **Settings → Models** and the online model catalog (see *Models*).
 
 ## Changes in v0.1.22
@@ -2410,7 +2430,7 @@ tagged source, and every signing request is approved by hand.
   systems unless specifically requested by the user or the person installing or operating it, apart from the
   anonymous update check and model downloads described there (both can be turned off or skipped).
 
-The Microsoft Store package (MSIX) is signed by Microsoft. Setup steps: [docs/SIGNING-AND-STORE.md](docs/SIGNING-AND-STORE.md).
+The Microsoft Store package (MSIX) is intended for distribution through the Microsoft Store.
 
 ## Development
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-away"
-version = "0.1.26"
+version = "0.1.27"
 description = "The bridge between you and your AI agents, controlled by your hands, face and voice: hands-free PC control, dictation, Agent Link (MCP) and more. Local-first."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -74,6 +74,8 @@ moonshine = ["moonshine-voice>=0.1.5,<0.2"]
 wakeword = ["livekit-wakeword>=0.3.0,<0.4; python_version >= '3.11'"]
 # Kyutai pocket-tts instant voice (experimental; code MIT, weights CC-BY-4.0: credit Kyutai). Pulls in PyTorch.
 pocket = ["pocket-tts>=3.2,<4"]
+# Qwen3-TTS Base 0.6B custom voice cloning; optional and not bundled in installers.
+qwen = ["qwen-tts>=0.1.1"]
 all = [
   "mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17",
   "faster-whisper>=1.1", "sounddevice>=0.4.6", "pycaw>=20240210; sys_platform == 'win32'",

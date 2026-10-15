@@ -2,8 +2,8 @@ name: Release
 
 # Builds the one-click native installers when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0).
 # Everything here is free: GitHub-hosted runners, PyInstaller, Inno Setup, appimagetool, hdiutil, makeappx.
-# Windows code signing is free through SignPath Foundation and switches itself on once the SIGNPATH_* secrets and
-# variables exist (docs/SIGNING-AND-STORE.md); until then the Windows files ship unsigned, exactly as before.
+# Windows code signing is configured through SignPath Foundation and switches itself on once the SIGNPATH_* secrets and
+# variables exist; until then the Windows files ship unsigned, exactly as before.
 # The Windows job also builds the Microsoft Store upload (.msixupload) and, when signing is set up, a signed .msix.
 #
 # Every installer bundles every runtime feature: [all] + [train] (CPU-only torch, onnx), tkinter,

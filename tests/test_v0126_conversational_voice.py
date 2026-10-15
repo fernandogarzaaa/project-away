@@ -83,6 +83,7 @@ def test_listen_window_is_the_setting_and_is_honoured() -> None:
     assert talk.state.armed() == "cookie"
     clock.t += 0.2  # 3.1 s: the window closed
     assert talk.state.armed() is None
+    clock.t += 1.1  # v0.1.27: routing goes by when speech STARTED; this 1 s utterance starts after the window
     amb.process(_utt(clock))
     assert sent == [] and sink.items  # typed as dictation, not sent
     secs[0] = 20.0
