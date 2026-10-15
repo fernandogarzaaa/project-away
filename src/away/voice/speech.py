@@ -508,15 +508,16 @@ class Speaker:
                     break
                 # Switching/deleting a custom profile must take effect on the next queued message rather than
                 # leaving a stale cloned voice loaded for the entire idle timeout.
-                profile = getattr(eng, "profile", None) if eng is not None else None
-                if profile is not None:
-                    selected = str(getattr(self._cfg(), "custom_voice_profile", "") or "")
-                    if selected != str(getattr(profile, "id", "")):
-                        with contextlib.suppress(Exception):
-                            eng.close()
-                        eng = None
-                        self.engine_name = ""
-                        self._eng_ready = False
+                if eng is not None:
+                    profile = getattr(eng, "profile", None)
+                    if profile is not None:
+                        selected = str(getattr(self._cfg(), "custom_voice_profile", "") or "")
+                        if selected != str(getattr(profile, "id", "")):
+                            with contextlib.suppress(Exception):
+                                eng.close()
+                            eng = None
+                            self.engine_name = ""
+                            self._eng_ready = False
                 if eng is None:
                     eng = self._make()
                     self._eng_ready = eng is not None
