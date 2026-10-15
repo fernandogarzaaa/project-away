@@ -502,3 +502,25 @@ def test_win_chords_still_press_and_release_through_pynput(monkeypatch: pytest.M
     b._keys = FakeKeys()  # type: ignore[attr-defined]
     b.hotkey(["cmd", "r"])
     assert pressed == ["Key.cmd", "r"] and released == ["r", "Key.cmd"]
+
+
+def test_sendinput_input_struct_matches_the_windows_abi() -> None:
+    """CodeRabbit: SendInput's cbSize must be sizeof(INPUT) (40 on x64); an undersized struct makes it fail
+    with ERROR_INVALID_PARAMETER, turning every Win tap into an OSError instead of opening Start."""
+    import ctypes
+
+    import away.actions_engine as engmod
+
+    ptr = ctypes.sizeof(ctypes.c_void_p)
+
+    def aligned(n: int, a: int) -> int:
+        return (n + a - 1) // a * a
+
+    mouse = aligned(4 * 5 + ptr, 8)
+    kbd = aligned(2 + 2 + 4 + 4 + ptr, 8)
+    hw = aligned(4 + 2 + 2, 4)
+    union = aligned(max(mouse, kbd, hw), 8)
+    assert ctypes.sizeof(engmod._INPUT_UNION) == union
+    assert ctypes.sizeof(engmod._INPUT) == 4 + 4 + union  # DWORD type + alignment padding + union
+    if ptr == 8:  # the 64-bit Windows cbSize SendInput checks
+        assert ctypes.sizeof(engmod._INPUT) == 40
