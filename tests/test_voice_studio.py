@@ -236,3 +236,19 @@ def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playba
     assert speaker.wait(2)
     assert not speaker._speaking.is_set()
     speaker.stop()
+
+
+def test_custom_voice_factory_does_not_depend_on_models_next_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from away.voice import tts_next
+
+    profile = _profile(tmp_path)
+    cfg = SimpleNamespace(custom_voice_profile=profile.id, engine="auto")
+    monkeypatch.setattr(tts_next, "_opts", None)
+    factories = tts_next.next_factories(
+        lambda: cfg,
+        tmp_path / "data",
+        opts=None,
+        have_pocket=lambda: True,
+        cuda=lambda: False,
+    )
+    assert factories and factories[0][0].startswith("Custom voice (Pocket TTS)")
