@@ -171,6 +171,7 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
         chosen = filedialog.askopenfilename(parent=dialog, filetypes=[("WAV audio", "*.wav")])
         if chosen:
             sample.set(chosen)
+
     ttk.Button(frame, text="Browse…", command=browse).grid(row=6, column=2, padx=(4, 0))
     ttk.Checkbutton(
         frame, text="I have permission from this speaker to create and use this voice clone.", variable=consent
@@ -187,6 +188,7 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
         for profile in voice_profiles.list_profiles():
             profile_ids.append(profile.id)
             listing.insert("end", f"{profile.name} · {profile.engine} · {profile.duration_s:.1f}s")
+
     def create() -> None:
         try:
             profile = voice_profiles.create_profile(
