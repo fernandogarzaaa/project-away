@@ -81,6 +81,17 @@ def effective_ambient_fallback(cfg: AppConfig) -> str:
 CLICK_ACTIONS = ("click", "double_click", "right_click", "middle_click")
 
 
+def set_asr_language(asr: Any, language: str | None) -> None:
+    """v0.1.27: change the speech language of a running speech-to-text backend (and the ones it wraps)."""
+    seen = 0
+    while asr is not None and seen < 4:
+        if hasattr(asr, "language"):
+            with contextlib.suppress(Exception):
+                asr.language = language
+        asr = getattr(asr, "asr", None) or getattr(asr, "_asr", None) or getattr(asr, "inner", None)
+        seen += 1
+
+
 class Pipeline:
     def __init__(
         self,
@@ -1022,6 +1033,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
     def _apply_voice(self, new: AppConfig) -> None:
         v = new.voice
         amb = self.voice.ambient
+        if amb is not None:  # v0.1.27: Settings > Voice & input > Speech language applies without a restart
+            set_asr_language(getattr(amb, "asr", None), v.language)
         if amb is not None:
             amb.wake_word = v.wake_word if v.wake_word_enabled else None
             amb.wake_window = v.wake_window

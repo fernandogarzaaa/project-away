@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from away import config as cfgmod
+from away.voice.language import AGENT_CHOICES as LANG_CHOICES
 
 MERGE_TODO: tuple[str, ...] = (
     "blocked zones from an agent ('ignore my hand in this part of the camera'): Gesture Studio has zone maps; "
@@ -58,7 +59,10 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "zones.anchor": ("palm", "index_tip", "wrist"),  # Gesture Studio zones: which point of the hand is tested
     "speech.rate": cfgmod.SPEECH_RATES,  # v0.1.21: how fast agents speak to you
     "speech.volume": cfgmod.SPEECH_VOLUMES,
+    "voice.language": LANG_CHOICES,  # v0.1.27: Speech language ("auto" = detect); you confirm on the PC
 }
+# v0.1.27: voice settings an agent may change only with your OK on the PC (never applied silently)
+CONFIRM_KEYS = ("voice.language", "voice.listen_seconds")
 SWITCHES = (
     "hands.virtual_fallback",  # v0.1.23: use NVIDIA Broadcast's camera when a camera is busy
     "hands.dwell.enabled",
@@ -174,6 +178,7 @@ TITLES = {
     "speech.rate": "How fast agents speak (slow, normal, fast)",
     "speech.volume": "How loud agents speak (quiet, normal, loud)",
     "speech.read_messages_aloud": "Read every agent message aloud",
+    "voice.language": "Speech language (auto, en, es, ...)",
 }
 
 
@@ -215,7 +220,13 @@ def settings_list(cfg: Any) -> list[dict[str, Any]]:
         out.append({"key": key, "title": title_for(key), "value": v, "min": lo, "max": hi, "kind": "number"})
     for key, ch in CHOICES.items():
         out.append(
-            {"key": key, "title": title_for(key), "value": _get(cfg, key), "choices": list(ch), "kind": "choice"}
+            {
+                "key": key,
+                "title": title_for(key),
+                "value": (_get(cfg, key) or "auto") if key == "voice.language" else _get(cfg, key),
+                "choices": list(ch),
+                "kind": "choice",
+            }
         )
     for key in SWITCHES:
         out.append({"key": key, "title": title_for(key), "value": _get(cfg, key), "kind": "switch"})
@@ -235,9 +246,24 @@ def settings_apply(cfg: Any, op: Op) -> Applied:
         new: Any = _coerce_number(key, op.value, lo, hi, cur)
         low = True
     elif key in CHOICES:
-        new = str(op.value)
+        new = (
+            str(op.value if op.value is not None else "auto").strip().lower()
+            if key == "voice.language"
+            else str(op.value)
+        )
         if new not in CHOICES[key]:
             raise ChangeError(f"{title_for(key)} must be one of {', '.join(CHOICES[key])}")
+        if key == "voice.language":
+            before = before or "auto"  # undo puts "auto" back (stored as no language)
+            _set(cfg, key, None if new == "auto" else new)
+            return Applied(
+                op,
+                before,
+                new,
+                [Op("settings", "set", key, before)],
+                f"{title_for(key)}: {_fmt(before)} -> {new}",
+                False,
+            )
     elif key in SWITCHES:
         if not isinstance(op.value, bool):
             raise ChangeError(f"{title_for(key)} is on/off (true/false)")
@@ -245,6 +271,8 @@ def settings_apply(cfg: Any, op: Op) -> Applied:
     else:
         raise ChangeError(f"{key} is not a setting agents can change (see list_settings)")
     _set(cfg, key, new)
+    if key in CONFIRM_KEYS:
+        low = False
     return Applied(
         op, before, new, [Op("settings", "set", key, before)], f"{title_for(key)}: {_fmt(before)} -> {_fmt(new)}", low
     )
