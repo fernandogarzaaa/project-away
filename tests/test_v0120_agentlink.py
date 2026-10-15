@@ -669,6 +669,80 @@ def test_from_image_coordinates_use_the_last_screenshot_scale() -> None:
     assert backend.calls[-1] == ("move", (200, 100))
 
 
+def test_click_result_carries_the_resolved_pre_click_label() -> None:
+    """Proposal #6: `_point` resolves the UIA element at the click point, and the label now reaches the
+    agent in the result (it used to die inside the `detail` string), so the agent can see what it
+    actually clicked instead of taking another screenshot."""
+    clock = Clock()
+    uia = FakeUIA(at=Element("Desktop", "PaneControl", rect=(0, 0, 99, 99)))
+    ctl, _, _ = _control(clock, uia=uia, fg={"title": "Program Manager", "process": "explorer.exe"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert res["ok"] is True and res["action"] == "click"
+    assert res["target_label"] == "Desktop"
+    assert res["detail"] == "(10, 20) 'Desktop'"
+
+
+def test_click_by_element_name_reports_the_resolved_label() -> None:
+    """The element-name path also reports what `_point` resolved, not just what the agent asked for."""
+    clock = Clock()
+    uia = FakeUIA(elements=[Element("Start", "ButtonControl", rect=(0, 0, 50, 20))])
+    ctl, backend, _ = _control(clock, uia=uia)
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", element="Start")
+    assert res["target_label"] == "Start"
+    assert backend.calls == [("move", (25, 10)), ("click", (1,))]
+
+
+def test_click_result_names_post_click_foreground_and_focus() -> None:
+    """Proposal #6 pairs with the richer action results: the click result also carries the post-click
+    foreground window and focused element, so the agent sees "clicked 'Desktop', not 'Start'"."""
+    clock = Clock()
+    uia = FakeUIA(
+        at=Element("Desktop", "PaneControl", rect=(0, 0, 99, 99)),
+        focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)),
+    )
+    ctl, _, _ = _control(clock, uia=uia, fg={"title": "Untitled - Notepad", "process": "notepad.exe"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert res["target_label"] == "Desktop"  # what was under the cursor before the click
+    assert res["foreground"] == {"title": "Untitled - Notepad", "process": "notepad.exe"}
+    assert res["focused"] == "OK"  # where the desktop is after the click landed
+    assert "log_id" in res and "detail" in res
+
+
+def test_target_label_empty_when_nothing_resolves() -> None:
+    """No UIA element at the point (coordinates only): the result still carries the field, empty."""
+    clock = Clock()
+    ctl, _, asked = _control(clock, ["Allow", "Allow"], uia=FakeUIA(at=None))
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert asked[-1]["kind"] == "confirm"  # the unknown target still asks the person first
+    assert res["target_label"] == ""
+    assert res["detail"] == "(10, 20)"
+
+
+def test_click_result_survives_a_broken_foreground_hook() -> None:
+    """Post-click state is best effort: a failing foreground hook must not fail a click that landed."""
+    clock = Clock()
+    uia = FakeUIA(
+        at=Element("Canvas", "PaneControl", rect=(0, 0, 99, 99)),
+        focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)),
+    )
+    ctl, backend, _ = _control(clock, uia=uia)
+    ctl.request("a1", "Claude")
+
+    def boom() -> None:
+        raise RuntimeError("no window info")
+
+    ctl.hooks.foreground = boom  # type: ignore[method-assign]
+    res = ctl.act("a1", "click", x=10, y=10)
+    assert res["ok"] is True
+    assert backend.calls == [("move", (10, 10)), ("click", (1,))]
+    assert res["foreground"] == {"title": "", "process": ""}
+    assert res["focused"] == "OK"
+
+
 # ---------------------------------------------------------------------------------------- detectors
 def test_detectors() -> None:
     from away.agentlink.detectors import Detectors

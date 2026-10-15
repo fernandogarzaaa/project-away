@@ -534,6 +534,7 @@ class ComputerControl:
         every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish."""
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
+        extra: dict[str, Any] = {}  # per-action result fields beyond ok/action/detail/log_id
         before = None
         try:
             before = self.hooks.cursor_pos()
@@ -558,6 +559,9 @@ class ComputerControl:
             elif action == "right_click":
                 step().click_button("right", 1)
             detail = f"({x}, {y})" + (f" '{label}'" if label else "")
+            # proposal #6: the resolved pre-click label reaches the agent in the result, so it can see
+            # e.g. "clicked 'Desktop', not 'Start'" and self-correct instead of taking another screenshot
+            extra["target_label"] = label
             if action == "move" and before is not None:
                 undo = {"move": list(before)}
         elif action == "drag":
@@ -663,9 +667,24 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
+        # the observed effect: what the desktop looks like right after the input landed. Best effort and
+        # never failing: the action already succeeded. `foreground`/`focused` use the same shape as the
+        # richer action results (proposal #3), so the agent can see e.g. "clicked 'Desktop', not 'Start'"
+        extra["foreground"] = self._foreground_state()
+        extra["focused"] = self._focused_label()
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id, **extra}
+
+    def _foreground_state(self) -> dict[str, str]:
+        """Best-effort post-action foreground window (title + process name). Never raises: if the hook
+        fails, the action already succeeded and the agent still gets its result, just without the
+        observed window state."""
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
     def _window_title(self) -> str:
         try:

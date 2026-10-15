@@ -282,7 +282,12 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
         right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
         screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
-        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
+        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first.
+        The result reports the observed effect: `target_label` (the UI element label resolved at the click point
+        before acting, so you can see e.g. "clicked 'Desktop', not 'Start'"), `foreground` (the foreground
+        window's title and process name right after the action) and `focused` (the focused UI element's label,
+        when UI Automation has one). Check these: they tell you whether the click actually landed where you
+        intended, so you can self-correct instead of taking another screenshot."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -304,13 +309,17 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
         (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab"."""
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". The result reports the observed
+        effect: `foreground` (the foreground window's title and process name right after the action) and
+        `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "keyboard", action=action, text=text, keys=keys)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser."""
+        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser.
+        The result reports the observed effect: `foreground` (the foreground window's title and process name
+        right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
 
     @mcp.tool()
