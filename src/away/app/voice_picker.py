@@ -77,6 +77,7 @@ def status_text(cfg: Any, data_dir: Path | None = None) -> str:
             profile = voice_profiles.get_profile(selected, data_dir)
             if profile.engine == "pocket-clone":
                 from away.voice.voice_cloning import pocket_available
+
                 status = (
                     "Ready; Pocket TTS."
                     if pocket_available()
@@ -84,6 +85,7 @@ def status_text(cfg: Any, data_dir: Path | None = None) -> str:
                 )
                 return "Custom voice is local. " + status
             from away.voice.voice_cloning import qwen_available
+
             status = (
                 "Ready; Qwen3-TTS."
                 if qwen_available()
@@ -164,6 +166,7 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     ttk.Entry(frame, textvariable=transcript, width=38).grid(row=5, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="WAV sample").grid(row=6, column=0, sticky="w")
     ttk.Entry(frame, textvariable=sample, width=30).grid(row=6, column=1, sticky="we")
+
     def browse() -> None:
         chosen = filedialog.askopenfilename(parent=dialog, filetypes=[("WAV audio", "*.wav")])
         if chosen:
@@ -177,6 +180,7 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
         text="Do not clone another person's voice without their informed permission. Voice samples are sensitive data.",
         wraplength=480,
     ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
     def refresh() -> None:
         listing.delete(0, "end")
         profile_ids.clear()
@@ -200,12 +204,14 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
         on_change()
         refresh()
         messagebox.showinfo("Voice created", f"{profile.name} was saved locally and selected.", parent=dialog)
+
     ttk.Button(frame, text="Create and select", command=create).grid(row=9, column=1, sticky="e", pady=(2, 8))
     ttk.Separator(frame).grid(row=10, column=0, columnspan=3, sticky="we", pady=5)
     ttk.Label(frame, text="Saved profiles").grid(row=11, column=0, columnspan=3, sticky="w")
     listing = tk.Listbox(frame, height=5, width=58)
     listing.grid(row=12, column=0, columnspan=2, sticky="we")
     profile_ids: list[str] = []
+
     def delete_selected() -> None:
         sel = listing.curselection()
         if not sel:
@@ -218,6 +224,7 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
             cfg.speech.custom_voice_profile = ""
         on_change()
         refresh()
+
     ttk.Button(frame, text="Delete selected", command=delete_selected).grid(row=12, column=2, sticky="n", padx=(4, 0))
     ttk.Button(frame, text="Done", command=dialog.destroy).grid(row=13, column=2, sticky="e", pady=(8, 0))
     refresh()
