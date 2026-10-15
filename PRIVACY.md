@@ -22,13 +22,22 @@ until you delete them.
 ## Microphone
 
 Project Away uses your microphone for dictation (talk to type) and voice commands. Speech is turned into text by a
-speech model that runs **on your computer**. Audio is not saved and not uploaded. The words you add under "My
-words" are saved in your settings file.
+speech model that runs **on your computer**. Ordinary dictation audio is held in memory and discarded; it is not
+saved or uploaded. The words you add under "My words" are saved in your settings file.
 
-The one exception is a feature you set up yourself: if you point "Smart cleanup" at an online AI service (by
+**Voice Studio is an explicit exception for audio you choose to import.** When you create a custom voice, Project
+Away copies a 3–30 second PCM WAV sample into your local `voice_profiles` data folder, alongside minimal profile
+metadata. Pocket TTS may create a reusable local `safetensors` voice-state cache. Qwen3-TTS rebuilds its derived
+clone prompt in memory rather than serializing Python objects. These files are not included in logs or diagnostic
+bundles and are not uploaded by Project Away. Qwen model weights may be downloaded from the upstream model host
+when you first enable that optional engine; the reference WAV is passed to the local model runtime. Delete a voice
+in Settings → Voice & input → Voice → Manage custom voices to remove its source WAV, metadata and cached state.
+Only create a profile for a voice you have permission to synthesize, and get the speaker's informed permission.
+
+The other exception is a feature you set up yourself: if you point "Smart cleanup" at an online AI service (by
 entering its web address, or the `AWAY_LLM_BASE_URL` setting), the text of your dictation (not the audio) is sent
-to that service to tidy it up, under that service's own privacy policy. By default, cleanup uses simple rules on your
-computer, and the optional Smart cleanup model also runs on your computer.
+to that service to tidy it up, under that service's own privacy policy. By default, cleanup uses simple rules on
+your computer, and the optional Smart cleanup model also runs on your computer.
 
 ## Agent Link (connecting your AI agent)
 
@@ -67,10 +76,10 @@ These downloads come from the services named above, which may log your IP addres
 
 ## Where your data is stored
 
-On Windows: settings in `%APPDATA%\ProjectAway`, models, logs and diagnostics in `%LOCALAPPDATA%\ProjectAway` (the
-Microsoft Store version keeps these inside its own app storage, which Windows deletes when you uninstall it). On
-macOS and Linux: the matching folders in your home folder. To delete everything, run **Project Away: uninstall**
-(`away uninstall`), or delete those folders.
+On Windows: settings in `%APPDATA%\ProjectAway`, models, logs, diagnostics and voice profiles in
+`%LOCALAPPDATA%\ProjectAway` (the Microsoft Store version keeps these inside its own app storage, which Windows
+deletes when you uninstall it). On macOS and Linux: the matching folders in your home folder. To delete everything,
+run **Project Away: uninstall** (`away uninstall`), or delete those folders.
 
 ## Children
 
