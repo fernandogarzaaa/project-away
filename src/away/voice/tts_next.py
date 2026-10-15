@@ -152,16 +152,16 @@ def next_factories(
     """Engines to try before the v0.1.23 chain: pocket-tts for short replies when chosen, then Kokoro fp16 on the
     graphics card when that precision is chosen and downloaded. Empty by default."""
     o = opts if opts is not None else _get_opts()
-    if o is None:
-        return []
     out: list[tuple[str, Callable[[], Any]]] = []
-    # Voice Studio custom profile takes precedence only when its optional engine is installed. Speaker retains
-    # the rest of the engine chain as fallback if profile loading or synthesis fails.
+    # Voice Studio is independent of models_next: the selected custom profile takes precedence only when its
+    # optional engine is installed. Speaker retains the existing voices as fallback on any failure.
     try:
         from away.voice.voice_cloning import profile_factory
         out += profile_factory(settings, data_dir, have_pocket=have_pocket, have_qwen=_qwen_available)
     except Exception:
         pass
+    if o is None:
+        return out
     if bool(getattr(o, "instant_voice", False)) and have_pocket():
         out.append((PocketEngine.name, lambda: PocketEngine()))
     s = settings()
