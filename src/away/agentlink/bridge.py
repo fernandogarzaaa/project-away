@@ -35,9 +35,21 @@ LONG_TOOLS = {
     "change_settings": 120,
     "wait_for_event": 130,
     "act": 90,
-    "act_sequence": 180,  # several actions; each risky sub-step can ask the person
+    # several actions; scaled per call in _timeout_for because each risky sub-step can wait out a 60 s prompt
+    "act_sequence": 180,
     "get_bundle": 120,
 }
+
+
+def _timeout_for(method: str, kw: dict) -> float:
+    """How long the MCP bridge waits for one REST call. A sequence may legitimately outlast the 180 s base:
+    every risky sub-step can wait up to 60 s for the person's "Are you sure?" answer, and the app keeps
+    executing after the bridge gives up - losing the result while later steps still run. So the sequence
+    timeout covers the permitted batch: a 60 s prompt plus margin for every step."""
+    base = float(LONG_TOOLS.get(method, 60))
+    if method == "act_sequence":
+        return max(base, 120.0 + 70.0 * len(kw.get("steps") or []))
+    return base
 
 
 def _slug(name: str) -> str:
@@ -152,9 +164,7 @@ class RestBackend:
     def call(self, ctx: Any, method: str, **kw: Any) -> Any:
         for attempt in (1, 2):
             token = self._ensure_token(ctx)
-            status, data = self._http(
-                "POST", f"/v1/rpc/{method}", kw, token=token, timeout=float(LONG_TOOLS.get(method, 60))
-            )
+            status, data = self._http("POST", f"/v1/rpc/{method}", kw, token=token, timeout=_timeout_for(method, kw))
             if status == 401 and attempt == 1:  # revoked or expired: pair again once
                 self.token = None
                 self._token_file().unlink(missing_ok=True)
