@@ -74,6 +74,7 @@ class PocketCloneEngine:
                 temp.unlink(missing_ok=True)
 
     def speak(self, text: str, v: Any) -> None:
+        voice_profiles.get_profile(self.profile.id, self.data_dir)
         volume = natural.VOLUMES.get(str(getattr(v, "volume", "normal")), 0.9)
 
         def synth(piece: str) -> tuple[Any, int]:
@@ -83,8 +84,9 @@ class PocketCloneEngine:
         natural.play_chunks(synth, natural.chunks(text), lambda samples, sr: self.play(samples, sr, volume))
 
     def close(self) -> None:
-        # Pocket's small model is shared only for this engine lifetime; no profile data is deleted here.
-        pass
+        # Drop references to profile-derived state when the Speaker switches voices or goes idle.
+        self.state = None
+        self.model = None
 
 
 class QwenCloneEngine:
@@ -128,7 +130,8 @@ class QwenCloneEngine:
         natural.play_chunks(synth, natural.chunks(text), lambda samples, sr: self.play(samples, sr, volume))
 
     def close(self) -> None:
-        pass
+        self.prompt = None
+        self.model = None
 
 
 def profile_factory(
