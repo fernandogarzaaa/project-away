@@ -414,3 +414,91 @@ def test_a_private_engine_per_control_keeps_old_callers_working() -> None:
     assert isinstance(ctl.engine, ActionEngine)
     ctl.request("a1", "A")
     assert ctl.engine.stop_all("tray") == 0 and ctl.status() == {"active": False}
+
+
+# ------------------------------------------------- proposal #4: the swallowed Win key
+def test_win_key_is_a_held_native_tap_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proposal #4: `press_keys keys="win"` returned ok while Start never opened. pynput's instant
+    press()/release() is two SendInput events in one batch (zero dwell), which the shell discards; the
+    fix holds the key natively for 80-120 ms on Windows."""
+    import away.actions_engine as engmod
+
+    monkeypatch.setattr("sys.platform", "win32")
+    sent: list[tuple[int, bool]] = []
+    monkeypatch.setattr(engmod, "_sendinput_key", lambda vk, down: sent.append((vk, down)))
+    held: list[float] = []
+    monkeypatch.setattr(engmod.time, "sleep", lambda s: held.append(s))
+
+    b = object.__new__(engmod.OSInputBackend)
+    b.key("cmd")  # what step().key("cmd") reaches for a lone Win press
+
+    assert sent == [(0x5B, True), (0x5B, False)]  # VK_LWIN down, then up
+    assert len(held) == 1 and 0.08 <= held[0] <= 0.12
+
+
+def test_win_key_is_released_even_when_the_hold_is_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hold must never leave the Win key logically down (a stuck Win key hijacks the PC)."""
+    import away.actions_engine as engmod
+
+    monkeypatch.setattr("sys.platform", "win32")
+    sent: list[tuple[int, bool]] = []
+    monkeypatch.setattr(engmod, "_sendinput_key", lambda vk, down: sent.append((vk, down)))
+
+    def boom(_s: float) -> None:
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(engmod.time, "sleep", boom)
+    b = object.__new__(engmod.OSInputBackend)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        b.key("cmd")
+    assert sent == [(0x5B, True), (0x5B, False)]
+
+
+def test_win_key_keeps_the_pynput_path_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Everywhere but Windows the tap still goes through pynput's press/release (no behavior change)."""
+    import away.actions_engine as engmod
+
+    monkeypatch.setattr("sys.platform", "linux")
+    pressed: list[Any] = []
+    released: list[Any] = []
+
+    class FakeKeys:
+        cmd = "Key.cmd"
+
+    class FakeK:
+        def press(self, k: Any) -> None:
+            pressed.append(k)
+
+        def release(self, k: Any) -> None:
+            released.append(k)
+
+    b = object.__new__(engmod.OSInputBackend)
+    b._k = FakeK()  # type: ignore[attr-defined]
+    b._keys = FakeKeys()  # type: ignore[attr-defined]
+    b.key("cmd")
+    assert pressed == ["Key.cmd"] and released == ["Key.cmd"]
+
+
+def test_win_chords_still_press_and_release_through_pynput(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a LONE Win key takes the native path: chords (Win+R) hold Win while the other key is down."""
+    import away.actions_engine as engmod
+
+    monkeypatch.setattr("sys.platform", "win32")
+    pressed: list[Any] = []
+    released: list[Any] = []
+
+    class FakeKeys:
+        cmd = "Key.cmd"
+
+    class FakeK:
+        def press(self, k: Any) -> None:
+            pressed.append(k)
+
+        def release(self, k: Any) -> None:
+            released.append(k)
+
+    b = object.__new__(engmod.OSInputBackend)
+    b._k = FakeK()  # type: ignore[attr-defined]
+    b._keys = FakeKeys()  # type: ignore[attr-defined]
+    b.hotkey(["cmd", "r"])
+    assert pressed == ["Key.cmd", "r"] and released == ["r", "Key.cmd"]

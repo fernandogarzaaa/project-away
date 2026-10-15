@@ -1680,7 +1680,8 @@ When the app is running, the self-test runs inside it, so the cameras are not ta
 cameras (opens each one, measures its real frame rate, names the app holding a busy camera and offers to close
 it), hand tracking speed, the graphics card (see *GPU tracking* below), the smooth pointer's update rate, the
 big pointer, that only one copy is running, the microphone level, speech to text on a short phrase, the speaking
-voices, pop-up messages, Agent Link, PC load and the models. A check that crashes or runs past its time limit
+voices, pop-up messages, the Windows Start key (presses Win and checks Start really opens), Agent Link, PC load
+and the models. A check that crashes or runs past its time limit
 becomes a "could not run" line; it never breaks the report.
 
 Where the report goes: to **every** connected agent (its inbox, its wake-up address when one is set, and the
