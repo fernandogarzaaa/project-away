@@ -106,6 +106,7 @@ class QwenCloneEngine:
         if not self.profile.reference_text.strip():
             raise ValueError("Qwen3-TTS needs a transcript for the reference audio")
         self.name = f"Custom voice (Qwen3-TTS): {self.profile.name}"
+        self.data_dir = data_dir
         self.play = play or natural.sd_play
         if model is None:
             from qwen_tts import Qwen3TTSModel
