@@ -4,6 +4,7 @@ Pocket TTS caches its reusable voice state in safetensors. Qwen3-TTS keeps its d
 and rebuilds it from the local WAV on next launch rather than serializing Python objects or tensors unsafely.
 Both engines are opt-in, local-only, and rely on a consent-gated profile created by voice_profiles.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -45,6 +46,7 @@ class PocketCloneEngine:
         self.data_dir = data_dir
         if model is None:
             from pocket_tts import TTSModel
+
             model = TTSModel.load_model()
         self.model = model
         self.play = play or natural.sd_play
@@ -56,6 +58,7 @@ class PocketCloneEngine:
             self.state = model.get_state_for_audio_prompt(str(reference))
             try:
                 from pocket_tts import export_model_state
+
                 export_model_state(self.state, str(cache))
                 if cache.is_file() and __import__("os").name != "nt":
                     cache.chmod(0o600)
@@ -65,6 +68,7 @@ class PocketCloneEngine:
 
     def speak(self, text: str, v: Any) -> None:
         volume = natural.VOLUMES.get(str(getattr(v, "volume", "normal")), 0.9)
+
         def synth(piece: str) -> tuple[Any, int]:
             audio = self.model.generate_audio(self.state, piece)
             samples = audio.detach().cpu().numpy() if hasattr(audio, "detach") else audio
@@ -95,6 +99,7 @@ class QwenCloneEngine:
         self.play = play or natural.sd_play
         if model is None:
             from qwen_tts import Qwen3TTSModel
+
             model = Qwen3TTSModel.from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base", device_map="cpu")
         self.model = model
         reference = voice_profiles.reference_path(profile_id, data_dir)
