@@ -28,11 +28,13 @@ from numpy.typing import NDArray
 
 from away.bindings import Action, normalize_phrase
 from away.events import EventBus
+from away.voice import latency
 from away.voice.asr import ASRBackend
 from away.voice.context import whisper_prompt
 from away.voice.dictation import Cleaner, DictationSession
 from away.voice.hallucination import clean_transcript
 from away.voice.output import TextSink
+from away.voice.talk import is_stop
 from away.voice.weak_speech import STRICT_CONFIDENCE, STRICT_MOTION_RATIO, should_drop
 
 WAKE_LEADS = ("hey", "ok", "okay", "hi")
@@ -44,6 +46,8 @@ class Utterance:
     audio: NDArray[np.float32]
     t0: float  # stream seconds (plus the session's clock origin)
     t1: float
+    closed_at: float | None = None  # v0.1.26 latency log: when the end of speech was decided (session clock)
+    end_wait_s: float = 0.0  # the silence waited for before deciding it
 
 
 def sensitivity_params(sensitivity: float) -> tuple[float, float]:
@@ -64,12 +68,18 @@ class StreamingEndpointer:
         preroll_ms: int = 300,
         start_frames: int = 2,
         noise_alpha: float = 0.05,
+        quick_end_silence_ms: int | None = None,
     ) -> None:
         self.sr = sample_rate
         self.frame = int(sample_rate * frame_ms / 1000)
         self.frame_ms = frame_ms
         self.set_sensitivity(sensitivity)
         self.end_frames = max(1, round(end_silence_ms / frame_ms))
+        # v0.1.26: while you talk to an agent (``quick()`` True) a shorter pause ends the utterance: the agent
+        # starts answering sooner. Dictation keeps the longer pause (you may stop to think mid-sentence).
+        self.quick: Callable[[], bool] | None = None
+        self.set_quick_end_silence(quick_end_silence_ms)
+        self.last_end_wait_s = 0.0  # the silence waited before the last utterance was closed (latency log)
         self.min_frames = max(1, round(min_utterance_ms / frame_ms))
         self.max_frames = max(self.min_frames + 1, int(max_utterance_s * 1000 / frame_ms))
         self.preroll = max(0, round(preroll_ms / frame_ms))
@@ -77,6 +87,19 @@ class StreamingEndpointer:
         self.noise_alpha = noise_alpha
         self.origin = 0.0
         self.reset()
+
+    def set_quick_end_silence(self, ms: int | None) -> None:
+        self.quick_end_frames = self.end_frames if ms is None else max(1, round(int(ms) / self.frame_ms))
+
+    def _end_frames_now(self) -> int:
+        q = self.quick
+        if q is not None:
+            try:
+                if q():
+                    return min(self.end_frames, self.quick_end_frames)
+            except Exception:
+                pass
+        return self.end_frames
 
     def set_sensitivity(self, sensitivity: float) -> None:
         self.ratio, self.min_rms = sensitivity_params(sensitivity)
@@ -143,7 +166,9 @@ class StreamingEndpointer:
             self._silence = 0
         else:
             self._silence += 1
-        if self._silence >= self.end_frames or len(self._utt) >= self.max_frames:
+        end_frames = self._end_frames_now()
+        if self._silence >= end_frames or len(self._utt) >= self.max_frames:
+            self.last_end_wait_s = self._silence * self.frame / self.sr
             return self._close(idx + 1)
         return None
 
@@ -300,6 +325,8 @@ class AmbientSession:
         self.strict_confidence = STRICT_CONFIDENCE
         # v0.1.22: "Hey <agent>, ..." goes to that agent's inbox (away.voice.talk.TalkHook)
         self.talk = talk
+        if talk is not None and getattr(endpointer, "quick", None) is None:
+            endpointer.quick = self.talking  # v0.1.26: a shorter end-of-speech pause while you talk to an agent
         self.gate_info = gate_info  # the face gate's evidence for its last decision (logged with the utterance)
         self.commands = commands
         self.run_command = run_command
@@ -320,6 +347,21 @@ class AmbientSession:
         self.results: deque[AmbientResult] = deque(maxlen=50)
         self._lock = threading.Lock()
 
+    def talking(self) -> bool:
+        """v0.1.26: you are talking to an agent right now: its listening window is open (after "Hey <name>", or a
+        reply in conversational mode), or the wake-word model just fired with agents to talk to."""
+        talk = self.talk
+        if talk is None:
+            return False
+        try:
+            if not talk.ready():
+                return False
+            if talk.state.armed() is not None:
+                return True
+            return self.clock() <= self._wake_until
+        except Exception:
+            return False
+
     def _publish(self, topic: str, data: dict[str, Any]) -> None:
         if self.bus is not None:
             self.bus.publish(topic, data)
@@ -336,6 +378,10 @@ class AmbientSession:
                 self.ep.origin = self.clock() - len(arr) / self.ep.sr
                 self._origin_set = True
             utts = self.ep.feed(arr)
+            if utts:
+                now = self.clock()
+                for u in utts:
+                    u.closed_at, u.end_wait_s = now, float(self.ep.last_end_wait_s)
         out: list[AmbientResult] = []
         for u in utts:
             if self.submit is None:
@@ -360,6 +406,8 @@ class AmbientSession:
         app = self.context() if self.context else None
         prompt = whisper_prompt(app, self.vocabulary)
         heard = self.asr.transcribe(u.audio, prompt)
+        self._stt_at = self.clock()
+        self._utt = u
         u.audio = np.zeros(0, dtype=np.float32)  # privacy: the audio is gone once transcribed
         commands = self.commands()
         if normalize_phrase(heard) in commands:  # a bound phrase is never a hallucination ("thank you")
@@ -453,6 +501,15 @@ class AmbientSession:
             return None
         if route is None and waiting is None:
             return None
+        if route is None and waiting == getattr(talk, "conversation", None) and is_stop(raw):
+            # v0.1.26 conversational mode: "stop" / "that's all" ends the conversation (and stops the agent)
+            target0 = str(waiting)
+            talk.stop_conversation(target0)
+            d0 = Decision("message", "conversation ended")
+            res0 = AmbientResult(d0, raw=raw, seconds=seconds, meta={"app": app, "gate": gate, "confidence": conf})
+            self.results.append(res0)
+            self._publish("voice.utterance", {"text": "", "decision": d0.kind, "reason": d0.reason})
+            return res0
         target = route.target if route is not None else str(waiting)
         body = route.body if route is not None else raw.strip()
         source = "voice" if route is not None else str(getattr(talk.state, "source", "voice"))
@@ -479,6 +536,9 @@ class AmbientSession:
                 d = Decision("ignore", f"dropped: {why}")
             else:
                 talk.state.disarm()
+                u = getattr(self, "_utt", None)
+                if u is not None and u.closed_at is not None:  # v0.1.26 latency log
+                    latency.start(u.closed_at, u.end_wait_s, self.clock).mark("stt", getattr(self, "_stt_at", None))
                 label = talk.send(target, body, source)
                 d = Decision("message", label or "could not send it to your agent")
                 data["sent_to"] = label
@@ -504,6 +564,8 @@ def _confidence(asr: Any) -> float | None:
         return None
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
+
+HELD_SAMPLES = 16000  # ~1 s of microphone audio (16 kHz) kept while the computer speaks, for a barge-in
 
 VOICE_STATES = ("muted", "stopped", "listening", "recording", "idle", "off")
 
@@ -538,6 +600,8 @@ class VoiceController:
         self.muted = False
         self.echo: Any = None  # v0.1.22: away.voice.speech.EchoGuard (the app sets it)
         self._echo_dropping = False
+        # v0.1.26: the last ~1 s heard while the voice spoke (replayed only after a barge-in, else dropped)
+        self._held: deque[NDArray[np.float32]] = deque()
         self._last_state: str | None = None
         self._emit()
 
@@ -576,8 +640,19 @@ class VoiceController:
             if not self._echo_dropping and self.ambient is not None:
                 self.ambient.reset()  # an utterance cut by the voice is thrown away, not half-transcribed
             self._echo_dropping = True
+            self._held.append(np.asarray(chunk, dtype=np.float32).reshape(-1))  # v0.1.26: for a barge-in
+            while len(self._held) > 1 and sum(len(c) for c in self._held) - len(self._held[0]) >= HELD_SAMPLES:
+                self._held.popleft()
             return None
-        self._echo_dropping = False
+        replay = None
+        if self._echo_dropping:
+            self._echo_dropping = False
+            if self._held and _safe(getattr(self.echo, "take_barge", lambda: False)):
+                # v0.1.26 barge-in: you talked over the voice; your first words were heard while it spoke
+                replay = np.concatenate([*self._held, np.asarray(chunk, dtype=np.float32).reshape(-1)])
+            self._held.clear()
+        if replay is not None:
+            chunk = replay
         if self.mode == "always_on":
             return self.ambient.feed(chunk) if self.ambient is not None else None
         if self.dictation is not None:

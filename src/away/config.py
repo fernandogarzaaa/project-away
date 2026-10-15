@@ -290,6 +290,11 @@ class VoiceConfig:
     ambient_fallback: str = "commands_only"  # always_on, no wake word and no face gate: commands_only | type
     vad_sensitivity: float = 0.5  # 0 = only loud, close speech .. 1 = picks up quiet speech
     end_silence_ms: int = 700  # silence that ends an utterance
+    # v0.1.26 talking to an agent (the live agent and Agent Link "Hey <name>" routing):
+    listen_seconds: float = 8.0  # after "Hey <name>" (or a reply in conversational mode) keep listening this long
+    conversational: bool = False  # after the agent replies, keep listening for a follow-up without the wake word
+    agent_end_silence_ms: int = 450  # while talking to an agent, this much silence ends what you said (quicker)
+    listen_sound: bool = True  # a short soft sound when the agent starts listening / heard you
     min_utterance_ms: int = 250
     max_utterance_s: float = 15.0
     commands_enabled: bool = True  # an utterance that exactly matches a bound phrase runs it instead of typing
@@ -1119,6 +1124,8 @@ def tunable_ranges(cfg: AppConfig) -> list[tuple[str, Any, float, float]]:
         ("voice.min_utterance_ms", v.min_utterance_ms, 50, 2000),
         ("voice.max_utterance_s", v.max_utterance_s, 2.0, 60.0),
         ("voice.wake_window", v.wake_window, 0.0, 30.0),
+        ("voice.listen_seconds", v.listen_seconds, 3.0, 30.0),
+        ("voice.agent_end_silence_ms", v.agent_end_silence_ms, 150, 1500),
         ("face.mouth_threshold", cfg.face.mouth_threshold, 0.05, 1.0),
         ("face.mouth_hold", cfg.face.mouth_hold, 0.1, 5.0),
         ("hands.cursor.sigmoid_low", c.sigmoid_low, 0.05, 5.0),

@@ -585,6 +585,38 @@ model's price is unknown, it is counted at a cautious $1 / $5 per million tokens
 * **Recent turns** in the tab shows what was asked, which model answered, how fast, and what happened.
 * From a terminal: `python -m away.liveagent status | free | models | ask "..." | jev | update-engine`.
 
+### Talking back and forth (conversational mode)
+
+In **Settings → Voice & input → Talking to your agent**:
+
+* **Keep listening after "Hey <name>"** (3–30 seconds, default 8): after you say "Hey Cookie" (or any agent's wake
+  word, or the live agent's name) and pause, it waits this long for your message. Same for every agent.
+* **Conversational mode** (off by default): after the agent answers, just keep talking; no wake word needed. It
+  keeps listening for the time above, counted from when it stops speaking. Say **"stop"** or **"that's all"**, or
+  stay quiet, to end the conversation. Talk over it and it stops and listens to you.
+* **Play a short sound when it starts listening** (on by default): a soft two-note sound after "Hey <name>", and a
+  single note when it has your message.
+
+From a terminal: `away voice listen-seconds 12`, `away voice conversational on`, `away voice listen-sound off`, and
+`away voice agent-pause-ms 450` (how long a pause ends what you say to an agent; dictation keeps its own,
+longer `end_silence_ms`). In `config.yaml` these are `voice.listen_seconds`, `voice.conversational`,
+`voice.listen_sound` and `voice.agent_end_silence_ms`.
+
+**Faster answers (v0.1.26).** Every spoken request now writes a timing line to the log
+(`latency: endpoint=450ms stt=250ms route=0ms first_token=600ms first_sentence=300ms first_audio=250ms total=1856ms`).
+Measured with the same fake speech recognizer, model and voice on both versions
+(`python scripts/bench_voice_latency.py`; real numbers depend on your PC and model):
+
+| Stage | Before | Now | What changed |
+|---|---|---|---|
+| End of speech | 690 ms | 450 ms | A shorter pause ends what you say to an agent (dictation keeps 700 ms) |
+| Speech to text | 250 ms | 250 ms | (fake) |
+| Routing | 900 ms | 0 ms | A plain question goes straight to the answer model; only requests that may be an action ask Jev / a model first |
+| First word from the model | 680 ms | 600 ms | Providers are reused instead of rebuilt (and keys re-read) on every call |
+| First whole sentence | 300 ms | 300 ms | Already streamed sentence by sentence |
+| First sound | 1450 ms | 250 ms | The voice loads while you speak and stays loaded for 10 minutes (it used to load again after 30 idle seconds) |
+| **Total** | **4272 ms** | **1856 ms** | |
+
 ### What is tested and what is not
 
 | Part | Status |
@@ -598,6 +630,7 @@ model's price is unknown, it is counted at a cautious $1 / $5 per million tokens
 | Stopping opencode and its child processes on Windows (`taskkill /T`) | **Untested** |
 | Windows Credential Manager (and the macOS Keychain) | **Untested** with the real stores (a fake store in tests) |
 | The real voice loop (microphone, "Hey Away", speaking, barge-in on real audio) | **Untested** |
+| Conversational mode, listening window, listening sound, timing log (v0.1.26) | Unit-tested with fake clocks, a fake recognizer, fake models and a fake voice (`tests/test_v0126_conversational_voice.py`, 22 of its 27 tests fail on v0.1.25): follow-ups without the wake word, the window honoured and held while the agent speaks, "stop" / "that's all", barge-in keeping your first words, the shorter end-of-speech pause, streaming speech starting before the reply is complete, warm voice. **Untested with a real microphone and speakers**: real barge-in levels, room echo, the earcon through real speakers, and the real latency numbers on a laptop |
 | Your own API keys against the real providers (OpenAI-compatible, Anthropic) | **Untested** live (fake HTTP in tests) |
 
 ## Architecture
@@ -2106,6 +2139,7 @@ download the Moonshine and wake-word engines and NeMo-Speech.cpp as pinned files
 | WinRT format fallback, no Broadcast fallback for the built-in camera (v0.1.23) | Ranked formats, refused formats tried in order through the fake WinRT camera, internal camera names and the fallback rule tested; **untested with the real HD User Facing camera and NVIDIA Broadcast** |
 | Newer models (optional, v0.1.25) | Tested with fakes on every CI OS; **nothing tested on Windows or on a GPU**. See [Newer models: verified vs untested](#verified-vs-untested-newer-models) |
 | Parakeet, Wayland | **Untested** |
+| Conversational voice (v0.1.26): "Keep listening" window, conversational mode, barge-in in a conversation, quicker end of speech, timing log | Tested with fakes in `tests/test_v0126_conversational_voice.py` (22 of 27 fail on v0.1.25); before/after latency measured with fakes (`scripts/bench_voice_latency.py`). **Untested with real speech on a real microphone and speakers** (real-mic testing has not been done) |
 | Agent window with a missing or broken session file (v0.1.25, Cookie's fix) | A missing, unreadable or non-object session file and an unknown window kind each give a plain message and exit code 2, tested in `tests/test_ui_helper.py`; the tests no longer start a Tk main loop |
 | Agents staying connected (v0.1.25) | Live streams marking the agent as seen every 20 s, 55 s long-polls, the 90 s Allow wait, `Last-Event-ID` resume and the example client's reconnect tested on a fake clock and a real local server (`tests/test_v0125_agent_keepalive.py`); **untested through a real Cloudflare link over a long session** (for example Cookie idle for 10+ minutes) |
 | Live calibration, steadier cursor (v0.1.25) | The three jitter sources, the adaptive filter, hold-still, the calibration steps and saving per camera tested with fake landmark streams (`tests/test_v0125_live_calibration.py`); **the calibration window has not been used on a real laptop and camera** |

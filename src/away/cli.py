@@ -528,6 +528,10 @@ VOICE_SHOW_KEYS = (
     "vad_sensitivity",
     "end_silence_ms",
     "commands_enabled",
+    "listen_seconds",
+    "conversational",
+    "agent_end_silence_ms",
+    "listen_sound",
 )
 
 
@@ -544,7 +548,15 @@ def cmd_voice(args: argparse.Namespace) -> int:
         print(f"app.always_on: {cfg.app.always_on}")
         return 0
     val = args.value
-    attr = {"mode": "mode", "intent": "intent", "sensitivity": "vad_sensitivity"}.get(args.action)
+    attr = {
+        "mode": "mode",
+        "intent": "intent",
+        "sensitivity": "vad_sensitivity",
+        "listen-seconds": "listen_seconds",
+        "conversational": "conversational",
+        "agent-pause-ms": "agent_end_silence_ms",
+        "listen-sound": "listen_sound",
+    }.get(args.action)
     if val is None:
         if attr:
             print(getattr(v, attr))
@@ -561,6 +573,14 @@ def cmd_voice(args: argparse.Namespace) -> int:
                     v.wake_word = val
         elif attr == "vad_sensitivity":
             v.vad_sensitivity = float(val)
+        elif attr == "listen_seconds":
+            v.listen_seconds = float(val)
+        elif attr == "agent_end_silence_ms":
+            v.agent_end_silence_ms = int(float(val))
+        elif attr in ("conversational", "listen_sound"):
+            if val.lower() not in ("on", "off", "true", "false", "1", "0", "yes", "no"):
+                raise ValueError(f"voice {args.action} must be on or off")
+            setattr(v, attr, val.lower() in ("on", "true", "1", "yes"))
         elif attr:
             setattr(v, attr, val)
         cfgmod.save(cfg, path)  # validates
@@ -1484,8 +1504,25 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--config")
     pf.set_defaults(fn=cmd_profile)
 
-    vc = sub.add_parser("voice", help="show | mode [always_on|push_to_talk|toggle] | wake-word [WORD|off] | ...")
-    vc.add_argument("action", choices=["show", "mode", "wake-word", "intent", "sensitivity"])
+    vc = sub.add_parser(
+        "voice",
+        help="show | mode [always_on|push_to_talk|toggle] | wake-word [WORD|off] | listen-seconds [3-30] | "
+        "conversational [on|off] | ...",
+    )
+    vc.add_argument(
+        "action",
+        choices=[
+            "show",
+            "mode",
+            "wake-word",
+            "intent",
+            "sensitivity",
+            "listen-seconds",
+            "conversational",
+            "agent-pause-ms",
+            "listen-sound",
+        ],
+    )
     vc.add_argument("value", nargs="?")
     vc.add_argument("--config")
     vc.set_defaults(fn=cmd_voice)

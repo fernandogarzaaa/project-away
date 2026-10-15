@@ -54,6 +54,9 @@ class LiveSettings:
     jev: str = "auto"  # auto (free Jev when it answers) | on | off
     speak: bool = True
     barge_in: bool = True
+    # v0.1.26: a plain question (no "open / click / type / setting..." words, nothing for another agent) goes
+    # straight to the quick-answer model instead of first asking Jev or a model what kind of request it is
+    quick_route: bool = True
     log_turns: bool = True
     handoff_agent: str = ""  # "" = the default agent of Settings > Agent Link
     first_token_timeout_s: float = 8.0
