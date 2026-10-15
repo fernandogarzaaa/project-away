@@ -350,6 +350,9 @@ class Speaker:
         self._lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
+        # Distinguish actual engine playback from queued/loading speech. Barge-in must not calibrate echo
+        # against the user's voice while a model is still loading.
+        self._speaking = threading.Event()
         # v0.1.26: how long the voice engine stays loaded after the last message (the live agent raises it so a
         # follow-up never waits for the natural voice to load again)
         self.idle_s = IDLE_S
@@ -516,8 +519,12 @@ class Speaker:
                     for _attempt in range(4):  # v0.1.23: a failing engine falls back silently to the next one
                         try:
                             latency.mark("tts_start")
-                            with self.echo.speaking():
-                                eng.speak(text, self.voice())
+                            self._speaking.set()
+                            try:
+                                with self.echo.speaking():
+                                    eng.speak(text, self.voice())
+                            finally:
+                                self._speaking.clear()
                             latency.spoken()  # engines that cannot tell when their sound started
                             self.spoken = [*self.spoken[-19:], text]
                             break
