@@ -26,34 +26,43 @@ def _wav(path: Path, seconds: float = 5.0, sample_rate: int = 16000) -> Path:
 def _profile(tmp_path: Path, engine: str = "pocket-clone", transcript: str = ""):
     src = _wav(tmp_path / "source.wav")
     return voice_profiles.create_profile(
-        "My voice", engine, src, consent_confirmed=True, speaker_name="Me",
-        reference_text=transcript, data_dir=tmp_path / "data",
+        "My voice",
+        engine,
+        src,
+        consent_confirmed=True,
+        speaker_name="Me",
+        reference_text=transcript,
+        data_dir=tmp_path / "data",
     )
 
 
 def test_voice_profile_requires_explicit_permission_and_speaker_identity(tmp_path: Path):
     src = _wav(tmp_path / "source.wav")
     with pytest.raises(PermissionError, match="permission"):
-        voice_profiles.create_profile("Test", "pocket-clone", src, consent_confirmed=False,
-                                      speaker_name="Me", data_dir=tmp_path / "data")
+        voice_profiles.create_profile(
+            "Test", "pocket-clone", src, consent_confirmed=False, speaker_name="Me", data_dir=tmp_path / "data"
+        )
     with pytest.raises(ValueError, match=r"whose voice|permission"):
-        voice_profiles.create_profile("Test", "pocket-clone", src, consent_confirmed=True,
-                                      speaker_name="", data_dir=tmp_path / "data")
+        voice_profiles.create_profile(
+            "Test", "pocket-clone", src, consent_confirmed=True, speaker_name="", data_dir=tmp_path / "data"
+        )
 
 
 def test_qwen_profile_requires_reference_transcript(tmp_path: Path):
     src = _wav(tmp_path / "source.wav")
     with pytest.raises(ValueError, match="transcript"):
-        voice_profiles.create_profile("Qwen test", "qwen-clone", src, consent_confirmed=True,
-                                      speaker_name="Me", data_dir=tmp_path / "data")
+        voice_profiles.create_profile(
+            "Qwen test", "qwen-clone", src, consent_confirmed=True, speaker_name="Me", data_dir=tmp_path / "data"
+        )
 
 
 @pytest.mark.parametrize("seconds", [1.0, 31.0])
 def test_voice_profile_rejects_wav_outside_duration_bounds(tmp_path: Path, seconds: float):
     src = _wav(tmp_path / "source.wav", seconds=seconds)
     with pytest.raises(ValueError, match="3–30 seconds"):
-        voice_profiles.create_profile("Test", "pocket-clone", src, consent_confirmed=True,
-                                      speaker_name="Me", data_dir=tmp_path / "data")
+        voice_profiles.create_profile(
+            "Test", "pocket-clone", src, consent_confirmed=True, speaker_name="Me", data_dir=tmp_path / "data"
+        )
 
 
 def test_profile_storage_is_local_and_delete_removes_reference_and_cache(tmp_path: Path):
@@ -78,23 +87,27 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
     module = ModuleType("pocket_tts")
     def export(state, path):
         Path(path).write_bytes(b"safe-state")
+
     module.export_model_state = export  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "pocket_tts", module)
 
     class FakeModel:
         sample_rate = 24000
+
         def __init__(self):
             self.prompts = []
         def get_state_for_audio_prompt(self, prompt):
             self.prompts.append(str(prompt))
             return {"prompt": str(prompt)}
+
         def generate_audio(self, state, text):
             return np.zeros(240, dtype=np.float32)
 
     model = FakeModel()
     played = []
-    engine = PocketCloneEngine(profile.id, tmp_path / "data", model=model,
-                               play=lambda samples, sr, volume: played.append((len(samples), sr)))
+    engine = PocketCloneEngine(
+        profile.id, tmp_path / "data", model=model, play=lambda samples, sr, volume: played.append((len(samples), sr))
+    )
     cache = voice_profiles.cache_path(profile.id, "pocket-clone", tmp_path / "data")
     assert cache.is_file() and cache.read_bytes() == b"safe-state"
     assert model.prompts[0].endswith("reference.wav")
@@ -102,8 +115,7 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
     assert played and all(sr == 24000 for _, sr in played)
 
     second_model = FakeModel()
-    PocketCloneEngine(profile.id, tmp_path / "data", model=second_model,
-                      play=lambda *_: None)
+    PocketCloneEngine(profile.id, tmp_path / "data", model=second_model, play=lambda *_: None)
     assert second_model.prompts == [str(cache)]
 
 
@@ -113,17 +125,20 @@ def test_qwen_clone_builds_one_reusable_in_memory_prompt_and_speaks(tmp_path: Pa
         def __init__(self):
             self.prompt_calls = []
             self.generation_calls = []
+
         def create_voice_clone_prompt(self, **kwargs):
             self.prompt_calls.append(kwargs)
             return ["reusable-prompt"]
+
         def generate_voice_clone(self, **kwargs):
             self.generation_calls.append(kwargs)
             return [np.zeros(240, dtype=np.float32)], 24000
 
     model = FakeModel()
     played = []
-    engine = QwenCloneEngine(profile.id, tmp_path / "data", model=model,
-                             play=lambda samples, sr, volume: played.append(sr))
+    engine = QwenCloneEngine(
+        profile.id, tmp_path / "data", model=model, play=lambda samples, sr, volume: played.append(sr)
+    )
     engine.speak("Hello there. How are you?", SimpleNamespace(volume="normal"))
     assert len(model.prompt_calls) == 1
     assert model.prompt_calls[0]["ref_text"] == "Hello, my name is Alex."
@@ -149,6 +164,7 @@ def test_live_speech_interrupt_cannot_race_with_queue_insertion():
             self._lock = threading.Lock()
             self.entered = threading.Event()
             self.release = threading.Event()
+
         def say(self, text, force=False):
             self.entered.set()
             assert self.release.wait(2)
@@ -179,6 +195,7 @@ def test_barge_in_only_arms_when_audio_is_actually_playing_and_rejects_bad_sampl
             self._idle = threading.Event()
             self._idle.clear()  # queued/loading, but not actually playing
             self._speaking = threading.Event()
+
     speaker = Speaker()
     live = LiveSpeech(speaker, stop_audio=lambda: None)
     assert live.speaking() is False
@@ -203,11 +220,14 @@ def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playba
         def speak(self, text, voice):
             entered.set()
             assert release.wait(2)
+
         def close(self):
             pass
 
-    speaker = Speaker(lambda: SimpleNamespace(enabled=True, rate="normal", volume="normal", voice=""),
-                      factories=[("blocking", BlockingEngine)])
+    speaker = Speaker(
+        lambda: SimpleNamespace(enabled=True, rate="normal", volume="normal", voice=""),
+        factories=[("blocking", BlockingEngine)],
+    )
     assert not speaker._speaking.is_set()
     assert speaker.say("hello")["spoken"]
     assert entered.wait(1)
