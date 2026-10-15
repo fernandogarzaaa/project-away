@@ -2153,6 +2153,16 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.27
+
+* **Talking to your live agent works again with the camera on.** "Hey <name>" is no longer ignored when the face
+  gate cannot see your face, a reply you start inside the listening window is no longer typed out after the window
+  closes, the live agent stays connected after Agent Link changes, and the spoken language is kept (#40).
+* **Voice Studio (optional).** Make a custom voice from a short recording of your own (3 to 30 seconds, with the
+  speaker's permission), stored only on your PC, with an easy way back to the preset voices. Conversational mode
+  also handles talking over the agent more reliably (#39).
+* **Docs.** The detailed public signing and Store setup guide was removed; the short code-signing policy stays (#38).
+
 ## What's new in 0.1.26
 
 * **A steadier cursor with eye or head tracking on.** With head or eye tracking switched on, the cursor could shake
