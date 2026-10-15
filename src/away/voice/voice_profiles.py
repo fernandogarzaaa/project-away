@@ -3,6 +3,7 @@
 Profiles are deliberately stored outside logs and settings. Only a WAV reference, minimal metadata,
 and engine-specific local caches are written. Nothing in this module uploads audio or contacts a service.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,6 +47,7 @@ class VoiceProfile:
 def profile_dir(data_dir: Path | None = None) -> Path:
     if data_dir is None:
         from away import paths
+
         data_dir = paths.data_dir()
     return Path(data_dir) / "voice_profiles"
 
