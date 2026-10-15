@@ -233,6 +233,55 @@ def test_structured_result_unknown_verdict() -> None:
     assert cam["backends"]["winrt"]["error"] == "unavailable: not installed"
 
 
+def _cam(
+    fps: float | None = None,
+    error: str | None = "did not open",
+    holder: str | None = None,
+    backend: str = "dshow",
+) -> dict[str, Any]:
+    return {
+        "name": "Cam",
+        "enumerated_by": "dshow",
+        "backends": {backend: {"opened": False, "fps": fps, "error": error}},
+        "driver": {"status": "unknown", "config_error": None},
+        "holder": holder,
+        "verdict": "unknown",
+    }
+
+
+def test_verdict_needs_measured_frames_not_just_no_error() -> None:
+    from away.multicam.diagnose import _verdict
+
+    assert _verdict(_cam(fps=None)) == "unknown"  # None fps is not a frame
+    assert _verdict(_cam(fps=0.0)) == "unknown"  # nor is a measured zero
+    assert _verdict(_cam(fps=29.8)) == "ok"
+    assert _verdict(_cam(fps=29.8, error="did not open", backend="msmf")) == "ok"  # one backend suffices
+    assert _verdict(_cam(holder="Project Away")) == "held"
+    assert _verdict(_cam(error="Access is denied")) == "privacy"
+    assert _verdict(_cam(error="not listed by Media Foundation")) == "driver"
+
+
+def test_finish_camera_driver_config_error_prefers_the_os_error() -> None:
+    from away.multicam.diagnose import _finish_camera
+
+    cam = _cam(error="WinRT could not initialise the camera (Element not found)")
+    cam["backends"]["msmf"] = {"opened": False, "fps": None, "error": "not listed by Media Foundation"}
+    done = _finish_camera(cam)
+    assert done["verdict"] == "driver"
+    assert done["driver"] == {
+        "status": "error",
+        "config_error": "WinRT could not initialise the camera (Element not found)",
+    }
+
+
+def test_finish_camera_driver_config_error_falls_back_to_first_shaped_error() -> None:
+    from away.multicam.diagnose import _finish_camera
+
+    done = _finish_camera(_cam(error="not listed by Media Foundation"))
+    assert done["verdict"] == "driver"
+    assert done["driver"]["config_error"] == "not listed by Media Foundation"
+
+
 def test_no_cameras_structured() -> None:
     clock = Clock()
     report = diagnose.run_diagnose([], cv2=FakeCV2({}, clock), windows=False, clock=clock, sleep=clock.sleep)
