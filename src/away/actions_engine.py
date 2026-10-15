@@ -136,6 +136,66 @@ def current_attribution() -> str | None:
     return getattr(_attr, "source", None)
 
 
+# ------------------------------------------------ Windows system-key taps (proposal #4)
+# A lone Win keypress must be HELD, not tapped. pynput's Controller.press()/release() sends two back-to-back
+# SendInput events with no dwell in between; the Windows shell discards the zero-dwell tap (down and up land in
+# the same input batch with identical timestamps), so `press_keys keys="win"` returned "ok" while Start never
+# opened. A human-like hold (80-120 ms) through native SendInput makes it through. Windows only: every other
+# platform keeps the existing pynput path.
+_WIN_TAP_HOLD_S = 0.10  # 100 ms: inside the 80-120 ms band the shell answers to
+_WIN_TAP_VKS = {"cmd": 0x5B, "cmd_l": 0x5B, "cmd_r": 0x5C}  # VK_LWIN / VK_RWIN
+
+
+def _sendinput_key(vk: int, down: bool) -> None:
+    """One keyboard event through the native Windows input queue.
+
+    Raises :class:`OSError` when nothing was injected: a silent no-op here is exactly the class of bug this
+    fixes (the old path always answered "ok").
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("_sendinput_key is Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.c_void_p),  # ULONG_PTR: pointer-sized, like the real field
+        ]
+
+    class _Ki(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _Ki)]
+
+    INPUT_KEYBOARD, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC = 1, 0x0002, 0
+    user32 = ctypes.windll.user32
+    ki = KEYBDINPUT(
+        wVk=vk,
+        wScan=user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC),
+        dwFlags=0 if down else KEYEVENTF_KEYUP,
+        time=0,
+        dwExtraInfo=0,
+    )
+    sent = user32.SendInput(1, ctypes.byref(INPUT(INPUT_KEYBOARD, _Ki(ki=ki))), ctypes.sizeof(INPUT))
+    if sent != 1:
+        raise OSError(f"SendInput injected {sent}/1 keyboard events (vk=0x{vk:02X})")
+
+
+def _win_tap(key: str, hold_s: float = _WIN_TAP_HOLD_S) -> None:
+    """Press and release one Windows system key with a real hold; the key is always released."""
+    vk = _WIN_TAP_VKS[key]
+    _sendinput_key(vk, True)
+    try:
+        time.sleep(hold_s)
+    finally:
+        _sendinput_key(vk, False)
+
+
 # --------------------------------------------------------------------------------------------- the backend
 class OSInputBackend:  # pragma: no cover - needs a desktop session
     """The real mouse and keyboard (pynput). Built only by :meth:`ActionEngine.os_backend`."""
@@ -208,7 +268,12 @@ class OSInputBackend:  # pragma: no cover - needs a desktop session
 
     def hotkey(self, keys: list[str]) -> None:
         """Press a chord and always attempt to release every key touched (a failure part-way must never leave a
-        modifier logically held). An original press error wins over a cleanup error."""
+        modifier logically held). An original press error wins over a cleanup error. A lone Windows system key
+        (the Win key) goes through the native held tap instead: pynput's instant down/up is swallowed by the
+        shell, so Start would never open."""
+        if len(keys) == 1 and sys.platform == "win32" and str(keys[0]).lower() in _WIN_TAP_VKS:
+            _win_tap(str(keys[0]).lower())
+            return
         objs = [self._key(k) for k in keys]
         attempted: list[Any] = []
         try:
