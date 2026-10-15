@@ -227,6 +227,7 @@ def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playba
 
     class BlockingEngine:
         name = "blocking"
+
         def speak(self, text, voice):
             entered.set()
             assert release.wait(2)
