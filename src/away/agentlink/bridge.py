@@ -35,6 +35,7 @@ LONG_TOOLS = {
     "change_settings": 120,
     "wait_for_event": 130,
     "act": 90,
+    "act_sequence": 180,  # several actions; each risky sub-step can ask the person
     "get_bundle": 120,
 }
 

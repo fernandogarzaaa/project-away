@@ -805,6 +805,12 @@ class Service:
         # element names resolve through hooks.uia: the smart pointer's cache + fuzzy matcher when the app runs
         return self.control.act(agent.id, action, **kw)
 
+    def act_sequence(self, agent: Agent, steps: Any = None) -> dict[str, Any]:
+        """v0.1.27+: several computer actions in one call (``control(action="sequence", steps=[...])``): one grant
+        check, one log entry, stops at the first refusal, cancel or takeover."""
+        self.require(agent, perms.CONTROL)
+        return self.control.act_sequence(agent.id, steps)
+
     def stop_control(self, agent: Agent) -> dict[str, Any]:
         if self.control.grant is not None and self.control.grant.agent_id == agent.id:
             self.control.stop("the agent finished")

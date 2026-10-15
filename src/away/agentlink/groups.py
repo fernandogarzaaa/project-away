@@ -57,6 +57,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "stop": GroupAction("stop_control"),
         "undo": GroupAction("undo_last_action"),
         "log": GroupAction("action_log", ("limit",)),
+        "sequence": GroupAction("act_sequence", ("steps",)),
     },
     "pointer": {
         "move": GroupAction("act", POINT, fixed={"action": "move"}),
