@@ -81,6 +81,7 @@ class PocketCloneEngine:
             audio = self.model.generate_audio(self.state, piece)
             samples = audio.detach().cpu().numpy() if hasattr(audio, "detach") else audio
             return samples, int(self.model.sample_rate)
+
         natural.play_chunks(synth, natural.chunks(text), lambda samples, sr: self.play(samples, sr, volume))
 
     def close(self) -> None:
@@ -119,7 +120,9 @@ class QwenCloneEngine:
         )
 
     def speak(self, text: str, v: Any) -> None:
+        voice_profiles.get_profile(self.profile.id, self.data_dir)
         volume = natural.VOLUMES.get(str(getattr(v, "volume", "normal")), 0.9)
+
         def synth(piece: str) -> tuple[Any, int]:
             wavs, sr = self.model.generate_voice_clone(
                 text=piece,
@@ -127,6 +130,7 @@ class QwenCloneEngine:
                 voice_clone_prompt=self.prompt,
             )
             return wavs[0], int(sr)
+
         natural.play_chunks(synth, natural.chunks(text), lambda samples, sr: self.play(samples, sr, volume))
 
     def close(self) -> None:
