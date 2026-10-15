@@ -223,15 +223,22 @@ class HeadPointer:
         self._prev = None
 
     def update(self, pose: HeadPose, ref_width: float) -> tuple[float, float]:
-        prev, self._prev = self._prev, pose
+        prev = self._prev
         if prev is None:
+            self._prev = pose
             return 0.0, 0.0
+        # v0.1.26: the dead zone is slack (like the hand's since v0.1.25): the reference pose stays put while the
+        # head wobbles within ``dead_zone`` degrees, then follows at that distance. It used to keep the old anchor
+        # until one frame crossed the threshold, so tremor piled up and went through as a hop.
         dyaw, dpitch = pose.yaw - prev.yaw, pose.pitch - prev.pitch
         mag = math.hypot(dyaw, dpitch)
-        if mag < self.dead_zone or mag == 0.0:
-            self._prev = prev  # tremor: keep the anchor so slow, steady turns still add up
+        if mag <= self.dead_zone or mag == 0.0:
             return 0.0, 0.0
-        k = max(1.0, mag) ** (self.acceleration - 1.0)
+        k_slack = (mag - self.dead_zone) / mag
+        dyaw, dpitch = dyaw * k_slack, dpitch * k_slack
+        self._prev = HeadPose(prev.yaw + dyaw, prev.pitch + dpitch, pose.roll)
+        step = math.hypot(dyaw, dpitch)
+        k = max(1.0, step) ** (self.acceleration - 1.0)
         scale = self.gain * ref_width * k
         return dyaw * scale, dpitch * scale
 

@@ -123,10 +123,10 @@ def test_head_pointer_moves_with_turns_eats_tremor_and_accumulates_slow_turns():
     assert hp.update(HeadPose(0, 0, 0), 1000) == (0.0, 0.0)  # first frame anchors
     assert hp.update(HeadPose(0.1, 0, 0), 1000) == (0.0, 0.0)  # tremor
     assert hp.update(HeadPose(0.2, 0, 0), 1000) == (0.0, 0.0)
-    dx, dy = hp.update(HeadPose(0.4, 0, 0), 1000)  # slow turn adds up past the dead zone
-    assert dx == pytest.approx(4.0) and dy == 0.0
+    dx, dy = hp.update(HeadPose(0.4, 0, 0), 1000)  # slow turn: everything past the dead zone goes through
+    assert dx == pytest.approx(1.0) and dy == 0.0  # v0.1.26: slack (0.4 - 0.3), not a 4 px hop
     dx, dy = hp.update(HeadPose(0.4, 2.4, 0), 1000)  # look down -> cursor down
-    assert dx == 0.0 and dy == pytest.approx(24.0)
+    assert dy == pytest.approx(21.0, abs=0.1) and 0.0 < dx < 0.15 * dy
     hp.reset()
     assert hp.update(HeadPose(50, 0, 0), 1000) == (0.0, 0.0)
 

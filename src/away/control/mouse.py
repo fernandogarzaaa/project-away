@@ -128,7 +128,7 @@ class MouseController:
         if ev.kind == "hand_lost":
             if self.glide is not None:
                 self.glide.stop()
-            self.mapper.reset()
+            self.mapper.suspend(ev.t)  # v0.1.26: a short detection dropout resumes without a kick
             if self.stabilizer is not None:
                 self.stabilizer.reset()
             self._release_if_down()
@@ -222,6 +222,20 @@ class MouseController:
         if self.glide is not None:
             self.glide.jump(float(x), float(y), time.monotonic())
         self.backend.move(x, y)
+
+    def jump_to(self, x: int, y: int) -> None:
+        """A warp from another cursor source (head zones, monitor switch, look-to-jump), v0.1.26."""
+        self._jump_to(x, y)
+        if self.refiner is not None:
+            self.refiner.resync((float(x), float(y)))
+
+    def follow(self, x: int, y: int) -> None:
+        """A continuous move from another cursor source (the head pointer), v0.1.26: through the output glide when
+        it runs, so the glide never pulls the cursor back to an old hand target."""
+        if self.glide is not None:
+            self.glide.on_target(time.monotonic(), float(x), float(y))
+        else:
+            self.backend.move(x, y)
 
     def _release_if_down(self) -> None:
         if self.button_down:

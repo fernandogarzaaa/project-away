@@ -294,7 +294,9 @@ def test_look_to_jump_fires_once_when_moving_after_rest():
     move = [(0.83 + i * 0.033, (0.5 + 0.01 * (i + 1), 0.5)) for i in range(5)]
     out = run_jump(lj, rest + move)
     fired = [o for o in out if o is not None]
-    assert fired == [(2500.0, 500.0)] and out.index(fired[0]) == 25  # the first moving frame, once
+    # once, on the frame the move is unmistakable (v0.1.26: 0.025 of the frame from the rest point, not one
+    # 0.006 step, so landmark noise on a resting hand never fires it)
+    assert fired == [(2500.0, 500.0)] and out.index(fired[0]) == 27
 
 
 def test_look_to_jump_needs_the_rest_the_distance_and_a_gaze_point():

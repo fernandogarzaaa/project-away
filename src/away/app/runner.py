@@ -155,6 +155,10 @@ class Pipeline:
         self.custom = CustomGestureDetector(cfg.bindings.custom_gestures, cfg.hands.gestures.model_min_conf)
         # head tracking + gaze (v0.1.19): acts only when hands.cursor.head_assist / monitor_switch are on or a
         # gaze calibration exists for this camera
+        # v0.1.26: one cursor source at a time (hand / head / gaze) + per-source rates in away.log
+        from away.pointer.arbiter import CursorArbiter
+
+        self.cursor_arbiter = CursorArbiter(publish=lambda topic, data: self.bus.publish(topic, data))
         self.headgaze = HeadGaze(
             cfg,
             self.mouse,
@@ -163,6 +167,7 @@ class Pipeline:
             hand_active=lambda: bool(self.gestures.hand_present),
             busy=lambda: bool(self.gestures.pinched or self.gestures.dragging),
             publish=lambda topic, data: self.bus.publish(topic, data),
+            arbiter=self.cursor_arbiter,
         )
         self.mouse.gaze_point = lambda: self.headgaze.estimator.point if self.headgaze.estimator else None
         # v0.1.20 smart pointer: magnetic targets + "click <name>" (Windows UI Automation; a no-op elsewhere).
@@ -412,6 +417,7 @@ class Pipeline:
                 self.bus.publish(f"gesture.{ev.kind}", dict(ev.data), t)
                 self.dispatcher.on_gesture(ev)
                 accepted.append(ev.kind)
+        self.cursor_arbiter.note_hand(t, landmarks is not None)
         if pointer_id is not None or landmarks is None:
             self._pointer_id = pointer_id
         if promoted:
@@ -463,6 +469,8 @@ class Pipeline:
                 self.dispatcher.on_gesture(ev)
             if ev.kind == "move" and ev.data.get("anchor") != "pinch":
                 pointed = True
+            if ev.kind == "move":
+                self.cursor_arbiter.claim(t, "hand")
             accepted.append(ev.kind)
         active = not self.output_paused()
         if self.cfg.hands.dwell.enabled:
@@ -557,6 +565,7 @@ class Pipeline:
             k = ids.index(user) if user is not None else 0
             ex = extras[k] if k < len(extras) else None
             raw_pose = getattr(ex, "pose", None)
+            self.cursor_arbiter.note_face(t, raw_pose is not None, getattr(ex, "gaze", None) is not None)
             self.headgaze.on_face(t, raw_pose, getattr(ex, "proxy", None), getattr(ex, "gaze", None), net)
             self.comfort.on_face(t, raw_pose is not None)
             if self.headgaze.facing(raw_pose) and user_frontal is not True:
@@ -1373,8 +1382,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         def process(n: int, t: float, rgb: Any) -> None:
             self.pipeline.gate.note_camera_frame(t)  # v0.1.22: the camera is delivering (for the face gate)
             self._frame_times.append(time.monotonic())  # v0.1.23: hand-tracking rate for the "choppy" hint
+            arb = self.pipeline.cursor_arbiter
             if hands is not None and n % max(1, prof.hands_every) == 0:
+                c0 = time.perf_counter()
                 fr = hands.process(rgb, t)
+                arb.note_cost("hand", (time.perf_counter() - c0) * 1000.0)
                 self.pipeline.note_hands(t, fr.n_hands, fr.hands_gap)
                 if fr.n_hands:
                     self._last_hand_t = time.monotonic()  # v0.1.23: probes wait while a hand is tracked
@@ -1388,9 +1400,16 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                     promoted=bool(getattr(fr, "promoted", False)),
                 )
                 self._agent_frame(self.cfg.hands.camera_index, t, rgb, fr)
-            if faces is not None and n % max(1, prof.face_every) == 0 and self.face_source.use_webcam(t):
+            if (
+                faces is not None
+                and n % max(1, prof.face_every) == 0
+                and self.face_source.use_webcam(t)
+                and arb.face_due(t)  # v0.1.26: lighter face rate while the hand drives (steady hand frame time)
+            ):
+                c0 = time.perf_counter()
                 obs = faces.process(rgb, t)
                 net = self._gaze_net(t, rgb, obs)
+                arb.note_cost("face", (time.perf_counter() - c0) * 1000.0)
                 with self._face_lock:
                     self.pipeline.on_faces(
                         t,
@@ -2157,10 +2176,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                                 faces is not None
                                 and prim_frame is not None
                                 and self.face_source.use_webcam(prim_frame[0])
+                                and self.pipeline.cursor_arbiter.face_due(prim_frame[0])
                             ):
                                 t_p, rgb_p = prim_frame
+                                c0 = time.perf_counter()
                                 obs = faces.process(rgb_p, t_p)
                                 net = self._gaze_net(t_p, rgb_p, obs)
+                                self.pipeline.cursor_arbiter.note_cost("face", (time.perf_counter() - c0) * 1000.0)
                                 with self._face_lock:
                                     self.pipeline.on_faces(
                                         t_p,

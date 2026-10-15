@@ -574,17 +574,32 @@ class GazeEstimator:
 class LookToJump:
     """MAGIC pointing trigger: when the hand starts moving after resting ``idle_s`` seconds, warp the cursor to
     the gaze point if it is at least ``min_px`` away (or only when it is on another monitor). One jump per
-    movement onset; the hand then refines from there."""
+    movement onset; the hand then refines from there.
 
-    def __init__(self, idle_s: float = 0.6, min_px: float = 250.0, motion: float = 0.006) -> None:
-        self.idle_s, self.min_px, self.motion = idle_s, min_px, motion
-        self._last: tuple[float, float] | None = None
-        self._still_since: float | None = None
+    v0.1.26: a movement onset is a deliberate move, not landmark noise. The hand rests while it stays within
+    ``still_r`` of where its rest began; it starts moving when it then gets ``onset`` away from that rest point
+    within ``onset_s``. (It used to be any single frame-to-frame step of ``motion``, 0.006 of the frame, which a
+    still hand's landmark noise at 640x480 crosses every few frames: the cursor warped to the noisy gaze point
+    while the hand was held still.) A slow drift that never gets ``onset`` away quickly re-starts the rest."""
+
+    def __init__(
+        self,
+        idle_s: float = 0.6,
+        min_px: float = 250.0,
+        motion: float = 0.006,
+        still_r: float = 0.012,
+        onset: float = 0.025,
+        onset_s: float = 0.25,
+    ) -> None:
+        self.idle_s, self.min_px, self.motion = idle_s, min_px, motion  # ``motion``: kept for old callers
+        self.still_r, self.onset, self.onset_s = still_r, onset, onset_s
+        self.reset()
 
     def reset(self) -> None:
         """Hand lost: the next appearance counts as resting from then on."""
-        self._last = None
-        self._still_since = None
+        self._rest: tuple[float, float] | None = None
+        self._still_since: float | None = None
+        self._left: tuple[float, bool] | None = None  # (time the hand left the rest circle, had it rested)
 
     def update(
         self,
@@ -596,18 +611,21 @@ class LookToJump:
         across_only: bool = False,
     ) -> tuple[float, float] | None:
         """One pointing frame (normalised hand position). Returns the warp target or None."""
-        last, self._last = self._last, hand
-        if last is None:
-            self._still_since = t
+        if self._rest is None or self._still_since is None:
+            self._rest, self._still_since, self._left = hand, t, None
             return None
-        moved = math.hypot(hand[0] - last[0], hand[1] - last[1]) >= self.motion
-        if not moved:
-            if self._still_since is None:
-                self._still_since = t
+        d = math.hypot(hand[0] - self._rest[0], hand[1] - self._rest[1])
+        if self._left is None:
+            if d <= self.still_r:
+                return None  # resting (noise stays in here)
+            self._left = (t, t - self._still_since >= self.idle_s)
+        t_left, rested = self._left
+        if d < self.onset:
+            if t - t_left > self.onset_s:  # a slow drift, not an onset: rest again from here
+                self._rest, self._still_since, self._left = hand, t, None
             return None
-        rested = self._still_since is not None and t - self._still_since >= self.idle_s
-        self._still_since = None
-        if not rested or gaze is None:
+        self._rest, self._still_since, self._left = hand, t, None  # one jump per onset
+        if not rested or t - t_left > self.onset_s or gaze is None:
             return None
         if math.hypot(gaze[0] - cursor[0], gaze[1] - cursor[1]) < self.min_px:
             return None
