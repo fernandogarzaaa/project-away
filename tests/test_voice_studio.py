@@ -148,7 +148,7 @@ def test_qwen_clone_builds_one_reusable_in_memory_prompt_and_speaks(tmp_path: Pa
     assert model.generation_calls and model.generation_calls[0]["voice_clone_prompt"] == ["reusable-prompt"]
     assert played and all(sr == 24000 for sr in played)
     assert voice_profiles.delete_profile(profile.id, tmp_path / "data")
-    with pytest.raises(ValueError, match="profile could not be read|invalid"):
+    with pytest.raises(ValueError, match=r"profile could not be read|invalid"):
         engine.speak("This profile was deleted.", SimpleNamespace(volume="normal"))
 
 
