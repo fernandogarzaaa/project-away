@@ -36,7 +36,7 @@ def test_voice_profile_requires_explicit_permission_and_speaker_identity(tmp_pat
     with pytest.raises(PermissionError, match="permission"):
         voice_profiles.create_profile("Test", "pocket-clone", src, consent_confirmed=False,
                                       speaker_name="Me", data_dir=tmp_path / "data")
-    with pytest.raises(ValueError, match="whose voice|permission"):
+    with pytest.raises(ValueError, match=r"whose voice|permission"):
         voice_profiles.create_profile("Test", "pocket-clone", src, consent_confirmed=True,
                                       speaker_name="", data_dir=tmp_path / "data")
 
