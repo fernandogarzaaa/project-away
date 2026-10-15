@@ -11,8 +11,11 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
 3. **Takeover.** Any real input (physical mouse/keyboard - told apart from the agent's own input by
    :class:`~away.app.autopause.ManualInputGuard` and short echo windows: typing never hides a real mouse movement,
    and each typed chunk hides key presses for a moment only - or a hand gesture) pauses the agent instantly and
-   interrupts the action in progress; resuming needs a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or
-   holding an open palm ~1 s (never delayed by the short grace right after approval).
+   interrupts the action in progress. While paused a slim banner stays on screen ("Paused - you took over from
+   <agent>") with "Let <agent> continue" and "Stop" buttons whose click IS the answer: no second approval
+   round-trip through the agent. Resuming through the agent still needs a new approval. Global stop:
+   Ctrl+Alt+Esc, saying "stop", or holding an open palm ~1 s (never delayed by the short grace right after
+   approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
    secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
@@ -153,6 +156,8 @@ class ControlHooks:
     platform: str = ""
     overlay_on: Callable[[str], None] = lambda _name: None
     overlay_off: Callable[[], None] = lambda: None
+    # the takeover banner (proposal #16): shown instead of overlay_off() while the grant is paused
+    overlay_paused: Callable[[str], None] = lambda _name: None
     sleep: Callable[[float], None] = time.sleep
     engine: Any = None  # the shared ActionEngine in the app; None = a private one (tests, headless)
 
@@ -352,9 +357,39 @@ class ComputerControl:
                 return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
             g.cancel.set()  # stop the action in progress (typing, a drag) before its next step
+        # the banner stays up while paused ("Paused - you took over from <agent>", with buttons to continue or
+        # stop), instead of the border vanishing with no explanation
         with contextlib.suppress(Exception):
-            self.hooks.overlay_off()
+            self.hooks.overlay_paused(g.agent_name)
         self._emit("control.paused", {"agent": g.agent_name, "reason": g.paused})
+        return True
+
+    def paused_banner_answer(self, answer: str) -> bool:
+        """The user answered the paused banner directly: the click IS the answer (no prompt round-trip).
+
+        "continue" resumes the grant without asking again (the banner click itself is covered by the same short
+        grace as an approval click, so it is not a takeover); anything else stops the grant. True when it acted
+        on a live grant; False when the grant had already ended another way (the banner closes with its stop
+        file, and a click on a stale banner does nothing).
+        """
+        with self._lock:
+            g = self.grant
+            if g is None:
+                return False
+            name = g.agent_name
+            stop = answer != "continue"
+            resumed = answer == "continue" and bool(g.paused)
+            if resumed:
+                g.paused = ""
+                g.cancel = threading.Event()  # the old takeover does not cancel new actions
+                self._grace_until = self.clock() + GRACE_S  # the banner click itself is not a takeover
+        if stop:
+            self._end("the user chose to stop")
+            return True
+        with contextlib.suppress(Exception):
+            self.hooks.overlay_on(name)  # back to the control border/banner (this clears the paused one)
+        if resumed:
+            self._emit("control.resumed", {"agent": name, "via": "paused banner"})
         return True
 
     # ---------------------------------------------------------------- acting
