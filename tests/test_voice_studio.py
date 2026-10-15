@@ -117,6 +117,9 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
     second_model = FakeModel()
     PocketCloneEngine(profile.id, tmp_path / "data", model=second_model, play=lambda *_: None)
     assert second_model.prompts == [str(cache)]
+    assert voice_profiles.delete_profile(profile.id, tmp_path / "data")
+    with pytest.raises(ValueError, match="profile could not be read|invalid"):
+        engine.speak("This profile was deleted.", SimpleNamespace(volume="normal"))
 
 
 def test_qwen_clone_builds_one_reusable_in_memory_prompt_and_speaks(tmp_path: Path):
@@ -144,6 +147,9 @@ def test_qwen_clone_builds_one_reusable_in_memory_prompt_and_speaks(tmp_path: Pa
     assert model.prompt_calls[0]["ref_text"] == "Hello, my name is Alex."
     assert model.generation_calls and model.generation_calls[0]["voice_clone_prompt"] == ["reusable-prompt"]
     assert played and all(sr == 24000 for sr in played)
+    assert voice_profiles.delete_profile(profile.id, tmp_path / "data")
+    with pytest.raises(ValueError, match="profile could not be read|invalid"):
+        engine.speak("This profile was deleted.", SimpleNamespace(volume="normal"))
 
 
 def test_selected_custom_profile_precedes_existing_voice_chain_but_is_optional(tmp_path: Path):
