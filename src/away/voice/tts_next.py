@@ -157,6 +157,7 @@ def next_factories(
     # optional engine is installed. Speaker retains the existing voices as fallback on any failure.
     try:
         from away.voice.voice_cloning import profile_factory
+
         out += profile_factory(settings, data_dir, have_pocket=have_pocket, have_qwen=_qwen_available)
     except Exception:
         pass
