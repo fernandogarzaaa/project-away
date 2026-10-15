@@ -87,6 +87,12 @@ MOUSE_ECHO_S = 0.25
 KEY_ECHO_S = 0.3
 KEY_ECHO_PER_CHAR_S = 0.02
 TYPE_CHUNK = 8  # characters typed at a time (each chunk can be interrupted)
+# open_app verification: after the launcher keystrokes (fixed 0.6/0.8 s sleeps stay as the base timing), the
+# foreground window is polled for up to this long for a title/process match against the requested app name.
+# A poll miss does not mean the app failed to launch; it only means it could not be confirmed, so the result
+# carries a warning instead of a silent ok.
+OPEN_APP_VERIFY_S = 3.0
+OPEN_APP_POLL_S = 0.25
 ACTIONS = (
     "move",
     "click",
@@ -540,6 +546,7 @@ class ComputerControl:
         except Exception:
             before = None
         detail = ""
+        warning: str | None = None  # set by actions that verify after the fact (open_app)
         if action in ("move", "click", "double_click", "right_click"):
             x, y, label = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
             if action == "right_click":  # it only opens a menu: asks for a risky target only
@@ -660,12 +667,20 @@ class ComputerControl:
                 "registry editor",
             ):
                 raise ControlRefused("agents cannot open terminals or system tools")
-            self._open_app(name, step, wait)
+            if not self._open_app(name, step, wait):
+                warning = (
+                    f"could not confirm '{name}' opened within {OPEN_APP_VERIFY_S:g} s (the foreground "
+                    "window did not match its name); the launcher keystrokes may have done nothing. "
+                    "Ask the person whether it opened before typing into it."
+                )
             detail = name
         a.ok = True
-        entry = self._log(g, action, detail, "done", undo)
+        entry = self._log(g, action, detail, "warned" if warning else "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        out: dict[str, Any] = {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        if warning:
+            out["warning"] = warning
+        return out
 
     def _window_title(self) -> str:
         try:
@@ -674,9 +689,11 @@ class ComputerControl:
             fg = {}
         return str(fg.get("title", ""))
 
-    def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
+    def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> bool:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
-        that the person has not stopped or taken over."""
+        that the person has not stopped or taken over. After Enter, the foreground window is polled for up to
+        ``OPEN_APP_VERIFY_S`` for a title/process match against ``name``; returns True when the app visibly
+        opened. The fixed 0.6/0.8 s sleeps stay as the base timing; the poll is the verification."""
         b = self.hooks.backend
         if not (self.platform == "win32" or (self.platform == "darwin" and hasattr(b, "hotkey"))):
             raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
@@ -691,6 +708,37 @@ class ComputerControl:
         wait(0.8)
         self.note_own_keys()
         step().key("enter")
+        return self._app_visible(name, wait)
+
+    @staticmethod
+    def _name_matches(want: str, title: str, process: str) -> bool:
+        """The requested app name against a foreground window's title and process name (case-insensitive,
+        punctuation-insensitive: "Notepad" matches "Untitled - Notepad" and "notepad.exe")."""
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", s.lower())
+
+        want = norm(want)
+        if not want:
+            return False
+        proc = norm(process[:-4]) if process.lower().endswith(".exe") else norm(process)
+        return want in norm(title) or (bool(proc) and want in proc)
+
+    def _app_visible(self, name: str, wait: Callable[[float], None]) -> bool:
+        """Poll the foreground window until its title or process matches ``name`` (or the ~3 s budget runs out).
+        ``wait`` still checks for a stop/takeover between polls, so the person can interrupt the verification."""
+        deadline = self.clock() + OPEN_APP_VERIFY_S
+        for _ in range(int(OPEN_APP_VERIFY_S / OPEN_APP_POLL_S) + 1):
+            try:
+                fg = self.hooks.foreground() or {}
+            except Exception:
+                fg = {}
+            if self._name_matches(name, str(fg.get("title", "")), str(fg.get("process", ""))):
+                return True
+            if self.clock() >= deadline:
+                return False
+            wait(OPEN_APP_POLL_S)
+        return False
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)

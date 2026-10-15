@@ -289,6 +289,45 @@ def test_open_app_checks_for_a_stop_before_each_step() -> None:
     assert backend.calls == [("key", ("cmd",)), ("release_modifiers", ())]  # never typed the name or pressed Enter
 
 
+def test_open_app_warns_when_the_app_never_appears() -> None:
+    """Regression: _open_app pressed Win, typed and hit Enter on fixed sleeps, then reported ok blind. Now the
+    foreground window is polled for ~3 s for a title/process match, and a miss returns a warning."""
+    clock = Clock()
+    ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
+    ctl.hooks.sleep = lambda s: clock.advance(s)
+    ctl.hooks.foreground = lambda: {"title": "Search", "process": "SearchHost.exe"}  # never the app
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "open_app", name="Notepad")
+    assert res["ok"] is True
+    assert "warning" in res and "Notepad" in res["warning"] and "3 s" in res["warning"]
+    assert ctl.log and ctl.log[-1].result == "warned"
+    assert backend.calls == [
+        ("key", ("cmd",)),
+        ("type_text", ("Notepad",)),
+        ("key", ("enter",)),
+    ]  # the launcher keystrokes still run; only the blind ok is gone
+
+
+def test_open_app_is_quiet_when_the_app_appears() -> None:
+    """No warning when the foreground window matches the app's title or process within the poll budget."""
+    clock = Clock()
+    ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
+    ctl.hooks.sleep = lambda s: clock.advance(s)
+    n = {"i": 0}
+
+    def fg() -> dict[str, Any]:
+        n["i"] += 1
+        if n["i"] < 3:
+            return {"title": "Search", "process": "SearchHost.exe"}
+        return {"title": "Untitled - Notepad", "process": "notepad.exe"}
+
+    ctl.hooks.foreground = fg
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "open_app", name="Notepad")
+    assert res["ok"] is True and "warning" not in res
+    assert ctl.log and ctl.log[-1].result == "done"
+
+
 # ------------------------------------------------------------- 4. clicks, drags and keys it cannot classify
 class NoUIA:
     available = False
