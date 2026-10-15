@@ -191,3 +191,28 @@ def test_barge_in_only_arms_when_audio_is_actually_playing_and_rejects_bad_sampl
     assert fired == []
     with pytest.raises(ValueError, match="sample_rate"):
         BargeIn(lambda: True, lambda: None, sample_rate=0)
+
+
+def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playback():
+    from away.voice.speech import Speaker
+
+    entered = threading.Event()
+    release = threading.Event()
+    class BlockingEngine:
+        name = "blocking"
+        def speak(self, text, voice):
+            entered.set()
+            assert release.wait(2)
+        def close(self):
+            pass
+
+    speaker = Speaker(lambda: SimpleNamespace(enabled=True, rate="normal", volume="normal", voice=""),
+                      factories=[("blocking", BlockingEngine)])
+    assert not speaker._speaking.is_set()
+    assert speaker.say("hello")["spoken"]
+    assert entered.wait(1)
+    assert speaker._speaking.is_set()
+    release.set()
+    assert speaker.wait(2)
+    assert not speaker._speaking.is_set()
+    speaker.stop()
