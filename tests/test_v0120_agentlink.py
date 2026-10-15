@@ -549,14 +549,95 @@ def test_takeover_pauses_and_resume_needs_approval() -> None:
         ctl.act("a1", "click", x=5, y=5)
     assert ctl.user_input("hand") is False  # already paused
     ctl.resume("a1")
-    assert asked[-1]["question"].startswith("Let Claude continue")
+    assert asked[-1]["question"] == "Claude stopped because you moved the mouse. Let it keep going?"
+    assert asked[-1]["options"] == ["Continue", "Yes, until I take over again", "Stop"]
     ctl.act("a1", "click", x=5, y=5)
     clock.advance(2.5)
     assert ctl.user_input("hand")  # a hand gesture also takes over
     assert ctl.stop("you said stop") and ctl.status()["active"] is False
 
 
-def test_password_fields_terminals_and_secure_desktop_are_blocked() -> None:
+# ------------------------------------------------------- proposal #21: friendly resume wording
+
+
+def _takeover_and_prompt(clock: Clock, source: str) -> tuple:
+    """Request a grant, let the person take over with `source`, return (ctl, asked)."""
+    ctl, backend, asked = _control(clock, ["Allow"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input(source)  # the takeover pauses at once
+    return ctl, asked
+
+
+def test_resume_prompt_names_each_takeover_source_in_plain_words() -> None:
+    expected = {
+        "mouse": "Claude stopped because you moved the mouse. Let it keep going?",
+        "keyboard": "Claude stopped because you used the keyboard. Let it keep going?",
+        "hand": "Claude stopped because you moved your hand. Let it keep going?",
+        "voice": "Claude stopped because you spoke. Let it keep going?",
+        "shortcut": "Claude stopped because you used a shortcut. Let it keep going?",
+    }
+    for source, question in expected.items():
+        clock = Clock()
+        ctl, asked = _takeover_and_prompt(clock, source)
+        with pytest.raises(ControlRefused, match="did not let it continue"):
+            ctl.resume("a1")  # the queued answers ran out: no answer ends the grant
+        assert asked[-1]["question"] == question
+        assert asked[-1]["options"] == ["Continue", "Yes, until I take over again", "Stop"]
+
+
+def test_resume_until_takeover_suppresses_reprompts_but_takeover_still_pauses() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Yes, until I take over again"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    prompts = len(asked)
+    ctl.resume("a1")  # the person picks "Yes, until I take over again"
+    assert len(asked) == prompts + 1
+    assert ctl.grant is not None and ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")  # a takeover still pauses at once
+    with pytest.raises(ControlRefused, match="paused"):
+        ctl.act("a1", "move", x=5, y=5)  # nothing runs while it is paused
+    n_before = len(asked)
+    ctl.resume("a1")  # no re-prompt this session: the agent just resumes
+    assert len(asked) == n_before
+    ctl.act("a1", "move", x=5, y=5)
+    assert ("move", (5, 5)) in backend.calls
+
+
+def test_resume_continue_still_prompts_next_time() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Continue", "Continue"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")
+    assert ctl.grant is not None and not ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")  # "Continue" is one-time: it prompts again
+    assert asked[-1]["question"] == "Claude stopped because you moved the mouse. Let it keep going?"
+
+
+def test_resume_until_takeover_is_per_session() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Yes, until I take over again", "Allow", "Continue"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")
+    clock.advance(1.0)
+    ctl.stop("the person ended it")
+    ctl.request("a1", "Claude")  # a new grant: the opt-in does not carry over
+    assert ctl.grant is not None and not ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    prompts = len(asked)
+    ctl.resume("a1")
+    assert len(asked) == prompts + 1  # it prompts again on the new grant
+
     clock = Clock()
     pwd = FakeUIA(focused=Element("Password", "EditControl", is_password=True, rect=(0, 0, 10, 10)))
     ctl, backend, _ = _control(clock, uia=pwd)

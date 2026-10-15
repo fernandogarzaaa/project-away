@@ -117,12 +117,32 @@ class Grant:
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
+    # proposal #21: the person picked "Yes, until I take over again". resume() then skips the prompt for the rest
+    # of the session. A takeover still pauses at once; nothing auto-resumes.
+    no_reprompt: bool = False
 
 
 # The grant was paused or ended while an action was running (the engine's cancellation).
 _Interrupted = ActionCancelled
 # how a user source names itself in "paused because you used the ..."
 _TAKEOVER_NAMES = {"gesture": "hand", "voice": "voice", "dictation": "keyboard", "macro": "shortcut", "user": "mouse"}
+
+# proposal #21: the same takeover sources in plain words for the resume prompt.
+_RESUME_REASON_WORDS = {
+    "mouse": "you moved the mouse",
+    "keyboard": "you used the keyboard",
+    "hand": "you moved your hand",
+    "voice": "you spoke",
+    "shortcut": "you used a shortcut",
+}
+
+
+def _pause_in_plain_words(paused: str) -> str:
+    """Turn the grant's "you used the {source}" pause reason into plain words (proposal #21)."""
+    if paused.startswith("you used the "):
+        src = paused[len("you used the ") :]
+        return _RESUME_REASON_WORDS.get(src, paused)
+    return paused
 
 
 @dataclass
@@ -282,17 +302,27 @@ class ComputerControl:
             raise ControlRefused("this agent is not allowed to use the computer right now; ask with request_control")
         if not g.paused:
             return self.status()
-        res = self.ask(
-            f"Let {g.agent_name} continue using your computer?",
-            ["Continue", "Stop"],
-            title="Resume?",
-            agent=g.agent_name,
-            details=[f"It was paused because {g.paused}."],
-            timeout_s=60.0,
-            urgency="high",
-            kind="approve",
-        )
-        if res.get("answer") != "Continue":
+        answer = "Continue"
+        if not g.no_reprompt:  # the person picked "Yes, until I take over again" earlier this session
+            reason = _pause_in_plain_words(g.paused)
+            res = self.ask(
+                f"{g.agent_name} stopped because {reason}. Let it keep going?",
+                ["Continue", "Yes, until I take over again", "Stop"],
+                title="Resume?",
+                agent=g.agent_name,
+                details=[
+                    "It still stops the moment you take over again.",
+                    "'Yes, until I take over again' skips this question for the rest of the session.",
+                ],
+                timeout_s=60.0,
+                urgency="high",
+                kind="approve",
+            )
+            answer = res.get("answer") or ""
+            if answer == "Yes, until I take over again":
+                with self._lock:
+                    g.no_reprompt = True
+        if answer != "Continue" and answer != "Yes, until I take over again":
             self._end("the user chose to stop")
             raise ControlRefused("the user did not let it continue")
         with self._lock:
@@ -302,7 +332,7 @@ class ComputerControl:
                 self._grace_until = self.clock() + GRACE_S
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(g.agent_name)
-        self._emit("control.resumed", {"agent": g.agent_name})
+        self._emit("control.resumed", {"agent": g.agent_name, "no_reprompt": g.no_reprompt})
         return self.status()
 
     def _end(self, reason: str) -> None:
