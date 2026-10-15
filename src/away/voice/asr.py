@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -65,13 +65,18 @@ class FasterWhisperASR:  # pragma: no cover - downloads a model
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        from away.voice.language import LanguageMemory
+
+        self.languages = LanguageMemory()  # v0.1.27: a safer Auto (falls back to the language you use most)
         self.hotwords = hotwords
         self.beam_size = max(1, int(beam_size))
         self.last_confidence: float | None = None
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
         stats: dict[str, object] = {}
-        text = whisper_transcribe(self.model, audio, self.language, prompt, self.hotwords, self.beam_size, stats)
+        text = whisper_transcribe(
+            self.model, audio, self.language, prompt, self.hotwords, self.beam_size, stats, self.languages
+        )
         conf = stats.get("confidence")
         self.last_confidence = float(conf) if isinstance(conf, (int, float)) else None
         return text
@@ -103,10 +108,17 @@ def whisper_transcribe(
     hotwords: str | None,
     beam_size: int = 5,
     stats: dict[str, object] | None = None,
+    memory: Any = None,
 ) -> str:
     """Call ``WhisperModel.transcribe`` with the vocabulary as ``initial_prompt`` and, when the installed
     faster-whisper has it (1.1+; verified on 1.2.1), also as ``hotwords``. Silent-segment hallucinations are
-    removed (:func:`away.voice.hallucination.segment_ok`)."""
+    removed (:func:`away.voice.hallucination.segment_ok`).
+
+    v0.1.27: with no language set (Auto) and a ``memory`` (:class:`away.voice.language.LanguageMemory`), an unsure
+    guess or a language you have not been speaking is transcribed again in your most-used language."""
+    from away.voice.language import normalize
+
+    language = normalize(language)
     fn = model.transcribe  # type: ignore[attr-defined]
     kw: dict[str, object] = {
         "language": language,
@@ -117,8 +129,19 @@ def whisper_transcribe(
     }
     if hotwords and supports_kwarg(fn, "hotwords"):
         kw["hotwords"] = hotwords
-    segments, _info = fn(np.asarray(audio, dtype=np.float32), **kw)
+    segments, info = fn(np.asarray(audio, dtype=np.float32), **kw)
     segs = list(segments)  # a generator: the text and the confidence both need it
+    used = language or str(getattr(info, "language", "") or "")
+    if language is None and memory is not None and hasattr(memory, "fallback"):
+        fb = memory.fallback(getattr(info, "language", None), getattr(info, "language_probability", None))
+        if fb:
+            kw["language"] = fb
+            segments, info = fn(np.asarray(audio, dtype=np.float32), **kw)
+            segs = list(segments)
+            used = fb
+            memory.note(fb)
+    if stats is not None:
+        stats["language"] = used
     if stats is not None:
         from away.voice.hallucination import segment_ok
         from away.voice.weak_speech import confidence_of

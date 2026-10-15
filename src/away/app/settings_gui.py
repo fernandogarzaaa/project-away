@@ -428,6 +428,28 @@ class SettingsModel:
             self.cfg.voice.ambient_fallback = "type"
         return None
 
+    # ------------------------------------------------------------ speech language (v0.1.27)
+    @staticmethod
+    def language_choices() -> list[str]:
+        """Settings > Voice & input > Speech language: Auto, English, ..."""
+        from away.voice.language import LANGUAGES
+
+        return [label for _code, label in LANGUAGES]
+
+    def language_label(self) -> str:
+        from away.voice.language import label_for
+
+        return label_for(self.cfg.voice.language)
+
+    def set_language_label(self, label: str) -> str | None:
+        from away.voice.language import code_for_label
+
+        try:
+            self.cfg.voice.language = code_for_label(label)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
     # ------------------------------------------------------------ hand roles
     @staticmethod
     def role_choices() -> list[str]:
@@ -2420,6 +2442,13 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
     def _build_agent_talk(self, f: Any, r: int) -> int:
         """v0.1.26 "Talking to your agent": how long it keeps listening, conversational mode, the listening sound."""
         tk, ttk = self.tk, self.ttk
+        # v0.1.27: Auto could hear English as Malay; pick the language you speak (Auto now falls back to it)
+        ttk.Label(f, text="Speech language").grid(row=r, column=0, sticky="w", pady=(10, 2))
+        self.lang_var = tk.StringVar(value=self.m.language_label())
+        lang = ttk.Combobox(f, textvariable=self.lang_var, values=self.m.language_choices(), state="readonly", width=44)
+        lang.grid(row=r, column=1, columnspan=2, sticky="w", pady=(10, 2))
+        lang.bind("<<ComboboxSelected>>", lambda _e: self._report(self.m.set_language_label(self.lang_var.get())))
+        r += 1
         ttk.Label(f, text="Talking to your agent", font=("TkDefaultFont", 10, "bold")).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 2)
         )
@@ -3011,6 +3040,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             var.set(bool(m.voice_value(path)))
         if hasattr(self, "roles_var"):
             self.roles_var.set(m.role_label())
+        if hasattr(self, "lang_var"):
+            self.lang_var.set(m.language_label())
         self.shell_var.set(m.bindings.allow_shell)
         self._cam_refresh()
         self._report(None)

@@ -70,6 +70,8 @@ class LiveAgentHost:
         self.stop_event = threading.Event()
         self.barge: Any = None
         self._thread: threading.Thread | None = None
+        self._provider: Any = None
+        self.attempts: list[dict[str, Any]] = []  # v0.1.27: what happened to the last wake attempts
 
     # ------------------------------------------------------------ pieces
     def settings(self) -> st.LiveSettings:
@@ -147,70 +149,38 @@ class LiveAgentHost:
 
     # ------------------------------------------------------------ voice
     def hook_talk(self) -> None:
+        """v0.1.27: register as a :class:`~away.voice.talk.TalkProvider` instead of wrapping ``talk.agents`` /
+        ``deliver`` / ``enabled``. Agent Link assigns those when it (re)starts (a new private link, a remote agent
+        pairing), which silently unhooked the wrapper: "Hey <name>" then went to Agent Link's inbox ("AI agent
+        isn't connected right now; I'll keep your message") and the live agent never answered. Idempotent."""
         talk = getattr(self.app, "talk", None)
         if talk is None:
             return
-        orig_agents, orig_deliver, orig_enabled = talk.agents, talk.deliver, talk.enabled
-        orig_armed, orig_busy, orig_stop = talk.on_armed, getattr(talk, "busy", None), getattr(talk, "on_stop", None)
+        if self._provider is None:
+            self._provider = _LiveTalk(self)
+        if hasattr(talk, "add_provider"):
+            talk.add_provider(self._provider)
 
-        def agents() -> list[dict[str, Any]]:
-            out: list[dict[str, Any]] = []
-            with contextlib.suppress(Exception):
-                out = list(orig_agents())
-            if self.enabled():
-                out.append({"id": AGENT_ID, "name": self.watcher.current.name, "wake_word": ""})
-            return out
+    def mine(self, target: str) -> bool:
+        return self.enabled() and (target == AGENT_ID or (target == "" and self._generic_is_mine()))
 
-        def deliver(target: str, text: str, source: str) -> str:
-            s = self.watcher.current
-            if s.enabled and (target == AGENT_ID or (target == "" and self._generic_is_mine())):
-                sp = getattr(self.speech, "speaker", None)
-                with contextlib.suppress(Exception):  # v0.1.26: the voice loads while the model thinks
-                    if sp is not None and hasattr(sp, "warm") and s.speak:
-                        sp.warm()
-                self.agent.submit(text, source)
-                return f"{s.name} is answering"
-            if orig_deliver is None:
-                return ""
-            return str(orig_deliver(target, text, source) or "")
-
-        def enabled() -> bool:
-            try:
-                if orig_enabled():
-                    return True
-            except Exception:
-                pass
-            return self.enabled()
-
-        def mine(target: str) -> bool:
-            return self.enabled() and (target == AGENT_ID or (target == "" and self._generic_is_mine()))
-
-        def on_armed(target: str) -> None:
-            if mine(target):
-                self.warm()  # v0.1.26: load the voice and models while you say your message
-            if orig_armed is not None:
-                orig_armed(target)
-
-        def busy() -> bool:
-            try:
-                if orig_busy is not None and orig_busy():
-                    return True
-            except Exception:
-                pass
-            return self.busy()
-
-        def on_stop(target: str) -> None:
-            if mine(target):
-                self.agent.cancel()  # "that's all": stop talking now
-            if orig_stop is not None:
-                orig_stop(target)
-
-        talk.agents = agents
-        talk.deliver = deliver
-        talk.enabled = enabled
-        talk.on_armed = on_armed
-        talk.busy = busy
-        talk.on_stop = on_stop
+    def note_attempt(self, kind: str, target: str, detail: str = "") -> None:
+        """v0.1.27: what happened to each wake attempt ("blocked", "expired", "sent to X", "answered"), kept for
+        Settings > Live agent / get_context and shown as a short notice when it went wrong."""
+        if not self.enabled():
+            return
+        who = self.watcher.current.name if target in (AGENT_ID, "") and self.mine(target) else (target or "your agent")
+        text = {
+            "listening": f"Listening... say your message for {who}",
+            "sent": detail or f"Sent to {who}",
+            "failed": f"Could not send it to {who}",
+            "expired": f"Too late for {who}: {detail}" if detail else f"Too late for {who}",
+            "dropped": f"Not sent to {who}: {detail}" if detail else f"Not sent to {who}",
+            "answered": f"{who} answered",
+        }.get(kind, f"{kind}: {detail}")
+        self.attempts = [*self.attempts[-19:], {"at": time.time(), "kind": kind, "target": target, "text": text}]
+        if kind in ("expired", "dropped", "failed") or (kind == "listening" and self.mine(target)):
+            self._show(text)
 
     def _generic_is_mine(self) -> bool:
         """ "Hey agent" goes to the live agent when nobody else would get it."""
@@ -256,6 +226,8 @@ class LiveAgentHost:
     def public_status(self) -> dict[str, Any]:
         s = self.watcher.current
         out: dict[str, Any] = {"enabled": s.enabled, "wake_phrase": f"Hey {s.name}", "busy": self.agent.busy}
+        if self.attempts:
+            out["last_wake_attempts"] = [a["text"] for a in self.attempts[-5:]]
         if s.enabled:
             with contextlib.suppress(Exception):
                 out["model"] = self.runtime.current_model(s)
@@ -296,6 +268,7 @@ class LiveAgentHost:
         was = self.enabled()
         while not self.stop_event.wait(POLL_S):
             with contextlib.suppress(Exception):
+                self.hook_talk()  # v0.1.27: idempotent; survives the app replacing its TalkHook
                 if self.watcher.poll():
                     now = self.enabled()
                     if was and not now:
@@ -327,6 +300,45 @@ def attach(app: Any, data_dir: Path | None = None) -> LiveAgentHost | None:
         with contextlib.suppress(Exception):
             app.bus.publish("liveagent.error", {"error": str(exc)})
         return None
+
+
+class _LiveTalk:
+    """The live agent as a voice-message provider (see :meth:`LiveAgentHost.hook_talk`). Its own name ALWAYS routes
+    here, whatever Agent Link is doing; "Hey agent" only when nobody else would get it."""
+
+    def __init__(self, host: LiveAgentHost) -> None:
+        self.host = host
+
+    def active(self) -> bool:
+        return self.host.enabled()
+
+    def agents(self) -> list[dict[str, Any]]:
+        return [{"id": AGENT_ID, "name": self.host.watcher.current.name, "wake_word": ""}]
+
+    def owns(self, target: str) -> bool:
+        return self.host.mine(target)
+
+    def deliver(self, target: str, text: str, source: str) -> str:
+        h = self.host
+        s = h.watcher.current
+        sp = getattr(h.speech, "speaker", None)
+        with contextlib.suppress(Exception):  # v0.1.26: the voice loads while the model thinks
+            if sp is not None and hasattr(sp, "warm") and s.speak:
+                sp.warm()
+        h.agent.submit(text, source)
+        return f"{s.name} is answering"
+
+    def on_armed(self, target: str) -> None:
+        self.host.warm()  # v0.1.26: load the voice and models while you say your message
+
+    def on_stop(self, target: str) -> None:
+        self.host.agent.cancel()  # "that's all": stop talking now
+
+    def busy(self) -> bool:
+        return self.host.busy()
+
+    def on_attempt(self, kind: str, target: str, detail: str) -> None:
+        self.host.note_attempt(kind, target, detail)
 
 
 # ------------------------------------------------------------------------------------------------ Agent Link domain
