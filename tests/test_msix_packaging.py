@@ -1,4 +1,4 @@
-"""MSIX packaging, SignPath signing and Store docs (scripts/build_msix.py, packaging/msix, release.yml)."""
+"""MSIX packaging, SignPath signing workflow and public policy (scripts/build_msix.py, packaging/msix, release.yml)."""
 
 import importlib.util
 import re
@@ -400,20 +400,17 @@ def test_ci_builds_and_installs_a_test_msix():
 
 
 # ---------------------------------------------------------------------------------------------- docs
-def test_docs_privacy_and_code_signing_policy_are_linked():
+def test_privacy_and_signing_policy_are_public_without_publishing_the_playbook():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "[Privacy policy](PRIVACY.md)" in readme
     assert "Code signing policy" in readme
     assert "Free code signing provided by [SignPath.io](https://about.signpath.io)" in readme
     assert "certificate by [SignPath Foundation](https://signpath.org)" in readme
-    guide = (ROOT / "docs" / "SIGNING-AND-STORE.md").read_text(encoding="utf-8")
-    for must in ("SIGNPATH_API_TOKEN", "SIGNPATH_ORGANIZATION_ID", "SIGNPATH_PROJECT_SLUG", "SIGNPATH_POLICY_SLUG",
-                 "MSIX_IDENTITY_NAME", "MSIX_PUBLISHER", "MSIX_PUBLISHER_DISPLAY_NAME", "MSIX_SIDELOAD_PUBLISHER",
-                 "storedeveloper.microsoft.com", "signpath.org", ".msixupload", "winget"):  # fmt: skip
-        assert must in guide, must
+    assert "docs/SIGNING-AND-STORE.md" not in readme
+    assert not (ROOT / "docs" / "SIGNING-AND-STORE.md").exists()
     privacy = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
     for must in ("camera", "microphone", "Agent Link", "telemetry", "updates.check"):
-        assert must in privacy, must
+        assert must in privacy
 
 
 def test_winget_manifests_are_valid_yaml_with_the_installer_name():
