@@ -129,8 +129,12 @@ class BargeIn:
     ) -> None:
         self.speaking = speaking
         self.on_barge = on_barge
-        self.sr = sample_rate
-        self.ratio, self.floor, self.hold_s, self.calib_s = ratio, floor, hold_s, calib_s
+        if int(sample_rate) <= 0:
+            raise ValueError("sample_rate must be positive")
+        if hold_s <= 0 or calib_s < 0 or ratio <= 0 or floor < 0:
+            raise ValueError("invalid barge-in thresholds")
+        self.sr = int(sample_rate)
+        self.ratio, self.floor, self.hold_s, self.calib_s = float(ratio), float(floor), float(hold_s), float(calib_s)
         self.clock = clock
         self.enabled = enabled
         self._since: float | None = None  # agent started speaking
@@ -145,8 +149,11 @@ class BargeIn:
                 return False
         except Exception:
             return False
-        arr = np.asarray(chunk, dtype=np.float32).reshape(-1)
-        if arr.size == 0:
+        try:
+            arr = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return False
+        if arr.size == 0 or not np.isfinite(arr).all():
             return False
         rms = float(np.sqrt(np.mean(arr * arr)))
         dur = arr.size / float(self.sr)
@@ -154,7 +161,9 @@ class BargeIn:
         if self._since is None:
             self._since = now
         if now - self._since < self.calib_s:
-            self._echo.append(rms)
+            # A clock that stalls or a broken audio callback must not grow calibration memory without bound.
+            if len(self._echo) < 64:
+                self._echo.append(rms)
             return False
         echo = float(np.median(self._echo)) if self._echo else 0.0
         if rms > max(self.floor, echo * self.ratio):
