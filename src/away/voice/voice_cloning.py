@@ -8,6 +8,8 @@ Both engines are opt-in, local-only, and rely on a consent-gated profile created
 from __future__ import annotations
 
 import importlib.util
+import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -56,15 +58,20 @@ class PocketCloneEngine:
             self.state = model.get_state_for_audio_prompt(str(cache))
         else:
             self.state = model.get_state_for_audio_prompt(str(reference))
+            temp = cache.with_name(f".pocket-state-{uuid.uuid4().hex}.safetensors")
             try:
                 from pocket_tts import export_model_state
 
-                export_model_state(self.state, str(cache))
-                if cache.is_file() and __import__("os").name != "nt":
-                    cache.chmod(0o600)
+                export_model_state(self.state, str(temp))
+                if temp.is_file():
+                    if os.name != "nt":
+                        temp.chmod(0o600)
+                    os.replace(temp, cache)
             except Exception:
                 # Cache is an optimization only. Voice synthesis still works without it.
                 pass
+            finally:
+                temp.unlink(missing_ok=True)
 
     def speak(self, text: str, v: Any) -> None:
         volume = natural.VOLUMES.get(str(getattr(v, "volume", "normal")), 0.9)
