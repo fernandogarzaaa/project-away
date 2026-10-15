@@ -77,13 +77,17 @@ def status_text(cfg: Any, data_dir: Path | None = None) -> str:
             profile = voice_profiles.get_profile(selected, data_dir)
             if profile.engine == "pocket-clone":
                 from away.voice.voice_cloning import pocket_available
-                status = "Ready; Pocket TTS." if pocket_available() else (
-                    "Install the optional Pocket TTS extra; preset fallback remains available."
+                status = (
+                    "Ready; Pocket TTS."
+                    if pocket_available()
+                    else ("Install the optional Pocket TTS extra; preset fallback remains available.")
                 )
                 return "Custom voice is local. " + status
             from away.voice.voice_cloning import qwen_available
-            status = "Ready; Qwen3-TTS." if qwen_available() else (
-                "Install the optional Qwen3-TTS extra; preset fallback remains available."
+            status = (
+                "Ready; Qwen3-TTS."
+                if qwen_available()
+                else ("Install the optional Qwen3-TTS extra; preset fallback remains available.")
             )
             return "Custom voice is local. " + status
         except Exception:
@@ -139,8 +143,9 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     ttk.Label(frame, text="Create a custom voice", font=("", 11, "bold")).grid(
         row=0, column=0, columnspan=3, sticky="w"
     )
-    ttk.Label(frame, text="Import 3–30 seconds of clear PCM WAV. The sample and profile stay on this PC.",
-              wraplength=480).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
+    ttk.Label(
+        frame, text="Import 3–30 seconds of clear PCM WAV. The sample and profile stay on this PC.", wraplength=480
+    ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
     name = tk.StringVar(value="My voice")
     speaker = tk.StringVar(value="Me")
     engine = tk.StringVar(value="pocket-clone")
@@ -152,9 +157,9 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     ttk.Label(frame, text="Whose voice?").grid(row=3, column=0, sticky="w")
     ttk.Entry(frame, textvariable=speaker, width=38).grid(row=3, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="Engine").grid(row=4, column=0, sticky="w")
-    ttk.Combobox(
-        frame, textvariable=engine, values=["pocket-clone", "qwen-clone"], state="readonly", width=35
-    ).grid(row=4, column=1, columnspan=2, sticky="we")
+    ttk.Combobox(frame, textvariable=engine, values=["pocket-clone", "qwen-clone"], state="readonly", width=35).grid(
+        row=4, column=1, columnspan=2, sticky="we"
+    )
     ttk.Label(frame, text="Reference transcript (Qwen required)").grid(row=5, column=0, sticky="w")
     ttk.Entry(frame, textvariable=transcript, width=38).grid(row=5, column=1, columnspan=2, sticky="we")
     ttk.Label(frame, text="WAV sample").grid(row=6, column=0, sticky="w")
@@ -164,8 +169,9 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
         if chosen:
             sample.set(chosen)
     ttk.Button(frame, text="Browse…", command=browse).grid(row=6, column=2, padx=(4, 0))
-    ttk.Checkbutton(frame, text="I have permission from this speaker to create and use this voice clone.",
-                    variable=consent).grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
+    ttk.Checkbutton(
+        frame, text="I have permission from this speaker to create and use this voice clone.", variable=consent
+    ).grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
     ttk.Label(
         frame,
         text="Do not clone another person's voice without their informed permission. Voice samples are sensitive data.",
@@ -180,8 +186,11 @@ def manage_custom_voices(win: Any, parent: Any, cfg: Any, on_change: Callable[[]
     def create() -> None:
         try:
             profile = voice_profiles.create_profile(
-                name.get(), engine.get(), Path(sample.get()),
-                consent_confirmed=bool(consent.get()), speaker_name=speaker.get(),
+                name.get(),
+                engine.get(),
+                Path(sample.get()),
+                consent_confirmed=bool(consent.get()),
+                speaker_name=speaker.get(),
                 reference_text=transcript.get(),
             )
         except Exception as exc:
