@@ -85,6 +85,7 @@ def test_profile_id_rejects_path_traversal(tmp_path: Path):
 def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     profile = _profile(tmp_path)
     module = ModuleType("pocket_tts")
+
     def export(state, path):
         Path(path).write_bytes(b"safe-state")
 
@@ -96,6 +97,7 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
 
         def __init__(self):
             self.prompts = []
+
         def get_state_for_audio_prompt(self, prompt):
             self.prompts.append(str(prompt))
             return {"prompt": str(prompt)}
@@ -124,6 +126,7 @@ def test_pocket_clone_caches_reusable_voice_state_as_safetensors(tmp_path: Path,
 
 def test_qwen_clone_builds_one_reusable_in_memory_prompt_and_speaks(tmp_path: Path):
     profile = _profile(tmp_path, "qwen-clone", "Hello, my name is Alex.")
+
     class FakeModel:
         def __init__(self):
             self.prompt_calls = []
@@ -221,6 +224,7 @@ def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playba
 
     entered = threading.Event()
     release = threading.Event()
+
     class BlockingEngine:
         name = "blocking"
         def speak(self, text, voice):
@@ -244,7 +248,9 @@ def test_speaker_playback_flag_is_false_while_idle_and_true_during_engine_playba
     speaker.stop()
 
 
-def test_custom_voice_factory_does_not_depend_on_models_next_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_custom_voice_factory_does_not_depend_on_models_next_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from away.voice import tts_next
 
     profile = _profile(tmp_path)
