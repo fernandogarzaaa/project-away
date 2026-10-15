@@ -219,6 +219,7 @@ def build_core(
         on_event=emit,
         always_allowed=always,
         allow_always=registry.allow_always,
+        notify=prompts.notify,  # v0.1.28: toast when a computer-control grant ends
     )
     jobs = shared_runner(Path(data_dir) / "diagnostics", command=job_command)
     from away.agentlink.inbox import Inbox
