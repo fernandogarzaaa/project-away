@@ -68,6 +68,11 @@ class LiveSpeech:
             return accepted
 
     def speaking(self) -> bool:
+        # Speaker._idle also covers model loading and queued text; only arm acoustic barge-in while audio
+        # is actually being rendered. Keep the old fake/third-party speaker contract as a fallback.
+        active = getattr(self.speaker, "_speaking", None)
+        if active is not None:
+            return bool(active.is_set())
         idle = getattr(self.speaker, "_idle", None)
         return idle is not None and not idle.is_set()
 
