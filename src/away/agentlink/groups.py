@@ -78,6 +78,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
     "open": {
         "app": GroupAction("act", ("name",), fixed={"action": "open_app"}),
         "url": GroupAction("act", ("url",), fixed={"action": "open_url"}),
+        "system": GroupAction("act", ("name",), fixed={"action": "open_app", "system": True}),
     },
 }
 

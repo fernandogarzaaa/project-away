@@ -17,7 +17,7 @@ take an `action`:
   inbox(action=list|read|reply), events(action=poll|wait), settings(action=list|change|undo|history|config),
   preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
   control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
-  keyboard(action=type|press), open(action=app|url).
+  keyboard(action=type|press), open(action=app|url|system).
 For example settings action="change", pointer action="click", diagnostics action="job" job_id="82557239" (check ids
 are strings; a result is kept about 10 minutes after the check finished). The older one-purpose names
 (change_settings, get_job, act...) still work over REST and /v1/rpc.
