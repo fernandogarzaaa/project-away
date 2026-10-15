@@ -178,48 +178,146 @@ def _match_at(toks: list[str], s: int, words: list[str]) -> int | None:
     return None
 
 
-class TalkState:
-    """The "waiting for your message" window after a bare wake phrase or the summon gesture."""
+# v0.1.26 conversational mode: these end the conversation (the agent stops talking and stops listening)
+STOP_PHRASES = (
+    "stop",
+    "stop it",
+    "stop talking",
+    "that's all",
+    "thats all",
+    "that is all",
+    "that's it",
+    "thats it",
+    "thanks that's all",
+    "thank you that's all",
+    "no thanks",
+    "never mind",
+    "nevermind",
+    "goodbye",
+    "bye",
+    "cancel",
+    "be quiet",
+    "quiet",
+)
 
-    def __init__(self, window_s: float = WINDOW_S, clock: Callable[[], float] = time.monotonic) -> None:
-        self.window_s = float(window_s)
+
+def is_stop(text: str) -> bool:
+    """ "stop", "that's all", "okay, that's all. thanks" ... (the whole utterance, not a sentence that has "stop")."""
+    t = " ".join(str(text).lower().replace("\u2019", "'").replace(",", " ").replace(".", " ").replace("!", " ").split())
+    for lead in ("okay ", "ok ", "alright ", "no "):
+        if t.startswith(lead) and t[len(lead) :] in STOP_PHRASES:
+            return True
+    for tail in (" thanks", " thank you"):
+        if t.endswith(tail) and t[: -len(tail)] in STOP_PHRASES:
+            return True
+    return t in STOP_PHRASES
+
+
+class TalkState:
+    """The "waiting for your message" window after a bare wake phrase or the summon gesture.
+
+    v0.1.26: ``window_s`` may be a getter (Settings > Voice & input "Keep listening", read at every arm), and
+    ``hold`` (True while the agent is still answering or speaking) keeps the window open and restarts it from the
+    moment the agent goes quiet, so a long reply never eats the time you have to answer."""
+
+    def __init__(
+        self,
+        window_s: float | Callable[[], float] = WINDOW_S,
+        clock: Callable[[], float] = time.monotonic,
+        hold: Callable[[], bool] | None = None,
+    ) -> None:
+        self._window = window_s
         self.clock = clock
+        self.hold = hold
         self._lock = threading.Lock()
         self._until = -1e9
         self._target = DEFAULT
+        self._held = False
         self.source = "voice"
 
-    def arm(self, target: str = DEFAULT, source: str = "voice") -> None:
+    @property
+    def window_s(self) -> float:
+        w = self._window
+        try:
+            v = float(w() if callable(w) else w)
+        except Exception:
+            v = WINDOW_S
+        return max(0.5, min(60.0, v))
+
+    @window_s.setter
+    def window_s(self, value: float | Callable[[], float]) -> None:
+        self._window = value
+
+    def arm(self, target: str = DEFAULT, source: str = "voice", held: bool = False) -> None:
+        """``held``: the window waits for :attr:`hold` to go False before it starts counting (conversational)."""
         with self._lock:
             self._until = self.clock() + self.window_s
             self._target = target
             self.source = source
+            self._held = held
+
+    def _holding(self) -> bool:
+        if not self._held or self.hold is None:
+            return False
+        try:
+            return bool(self.hold())
+        except Exception:
+            return False
 
     def armed(self) -> str | None:
         """The waiting target (DEFAULT or an agent id), or None when nothing is waiting."""
+        holding = self._holding()
         with self._lock:
+            if self._until <= -1e8:
+                return None
+            if holding:
+                self._until = self.clock() + self.window_s  # counts from when the agent goes quiet
+                return self._target
             return self._target if self.clock() <= self._until else None
 
     def disarm(self) -> None:
         with self._lock:
             self._until = -1e9
+            self._held = False
 
 
 class TalkHook:
     """What the voice input needs from Agent Link: the agents to listen for, where to deliver a message, and the
-    waiting window. The app creates one; Agent Link fills in ``agents`` and ``deliver`` when it starts."""
+    waiting window. The app creates one; Agent Link fills in ``agents`` and ``deliver`` when it starts.
 
-    def __init__(self, enabled: Callable[[], bool] | None = None, window_s: float = WINDOW_S) -> None:
+    v0.1.26: ``window_s`` (a getter: Settings "Keep listening after the wake word"), ``conversational`` (a getter:
+    after a message, keep listening for a follow-up to the same agent without the wake word), ``busy`` (True while
+    an agent answers or the computer speaks: holds the follow-up window open) and ``sound`` (the short listening
+    sound)."""
+
+    def __init__(
+        self,
+        enabled: Callable[[], bool] | None = None,
+        window_s: float | Callable[[], float] = WINDOW_S,
+        conversational: Callable[[], bool] | None = None,
+    ) -> None:
         self.enabled = enabled or (lambda: True)
         self.agents: Callable[[], list[dict[str, Any]]] = list
         # deliver(target, text, source) -> what to show ("Sent to Claude"), "" when it could not be delivered
         self.deliver: Callable[[str, str, str], str] | None = None
         self.on_armed: Callable[[str], None] | None = None  # "Listening for your message to Claude..."
-        self.state = TalkState(window_s)
+        # v0.1.26: the short listening sound ("listen": waiting for your words; "heard": your message was taken)
+        self.sound: Callable[[str], Any] | None = None
+        self.on_stop: Callable[[str], None] | None = None  # v0.1.26: "stop" / "that's all" ended the conversation
+        self.conversational = conversational or (lambda: False)
+        self.busy: Callable[[], bool] = lambda: False
+        self.state = TalkState(window_s, hold=lambda: self.busy())
+        self.conversation: str | None = None  # the agent a conversation is going on with (conversational mode)
 
     def ready(self) -> bool:
         try:
             return self.deliver is not None and bool(self.enabled())
+        except Exception:
+            return False
+
+    def is_conversational(self) -> bool:
+        try:
+            return bool(self.conversational())
         except Exception:
             return False
 
@@ -232,8 +330,14 @@ class TalkHook:
             agents = []
         return match(text, agents)
 
+    def _sound(self, kind: str) -> None:
+        if self.sound is not None:
+            with contextlib.suppress(Exception):
+                self.sound(kind)
+
     def arm(self, target: str = DEFAULT, source: str = "gesture") -> None:
         self.state.arm(target, source)
+        self._sound("listen")
         if self.on_armed is not None:
             with contextlib.suppress(Exception):
                 self.on_armed(target)
@@ -241,7 +345,22 @@ class TalkHook:
     def send(self, target: str, text: str, source: str) -> str:
         if self.deliver is None:
             return ""
+        self._sound("heard")
         try:
-            return str(self.deliver(target, text, source) or "")
+            label = str(self.deliver(target, text, source) or "")
         except Exception:
-            return ""
+            label = ""
+        if label and self.is_conversational():
+            # v0.1.26: the agent answers, then listens for your follow-up (no wake word) for ``window_s``
+            self.conversation = target
+            self.state.arm(target, "conversation", held=True)
+        return label
+
+    def stop_conversation(self, target: str | None = None) -> None:
+        """ "stop" / "that's all": no more follow-ups until the next wake word."""
+        t = target if target is not None else (self.conversation or DEFAULT)
+        self.state.disarm()
+        self.conversation = None
+        if self.on_stop is not None:
+            with contextlib.suppress(Exception):
+                self.on_stop(t)

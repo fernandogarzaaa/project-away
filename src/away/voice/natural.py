@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from away.voice import latency
+
 ENGINES = ("auto", "kokoro", "piper", "windows", "classic")
 ENGINE_TITLES = {
     "auto": "Best available",
@@ -401,6 +403,8 @@ def play_chunks(synth: Callable[[str], tuple[Any, int]], pieces: list[str], play
         if item is None:
             break
         samples, sr = item
+        if n == 0:
+            latency.mark("first_audio")  # v0.1.26 latency log: the first piece is synthesized and starts playing
         play(samples, sr)
         n += 1
     if err and n == 0:

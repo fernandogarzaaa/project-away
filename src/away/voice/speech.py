@@ -29,6 +29,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from away.voice import latency
+
 log = logging.getLogger("away.speech")
 
 ECHO_TAIL_S = 0.7  # v0.1.22: the microphone keeps ignoring sound this long after the voice stops (room echo)
@@ -72,6 +74,25 @@ class EchoGuard:
         finally:
             self.end()
 
+    def cut(self, keep_s: float = 1.2) -> None:
+        """v0.1.26 barge-in: you started talking over the voice. The microphone listens again at once (no echo
+        tail), and the last ``keep_s`` seconds no longer count as the computer's voice: they hold your first
+        words (the voice input replays them, :attr:`barged`)."""
+        with self._lock:
+            now = self.clock()
+            since = self._since if self._speaking else now
+            self._speaking = 0
+            self.spans = [(a, min(b, now - keep_s)) for a, b in self.spans[-19:]]
+            self.spans.append((since, now - float(keep_s)))
+            self.barged = True
+
+    barged = False
+
+    def take_barge(self) -> bool:
+        with self._lock:
+            b, self.barged = self.barged, False
+            return b
+
     def active(self, now: float | None = None) -> bool:
         """True while the voice speaks or within ``tail_s`` after it stopped."""
         t = self.clock() if now is None else now
@@ -100,6 +121,8 @@ SPD_VOLUME = {"quiet": "-50", "normal": "0", "loud": "60"}  # spd-say -i: -100..
 ESPEAK_AMP = {"quiet": "60", "normal": "110", "loud": "170"}  # espeak -a: 0..200
 MAX_TEXT = 600
 MAX_QUEUE = 4
+IDLE_S = 30.0
+WARM = "\x00warm"  # v0.1.26: queue marker: load the voice engine now, say nothing
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -327,6 +350,9 @@ class Speaker:
         self._lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
+        # v0.1.26: how long the voice engine stays loaded after the last message (the live agent raises it so a
+        # follow-up never waits for the natural voice to load again)
+        self.idle_s = IDLE_S
 
     # ---------------------------------------------------------------- settings
     def _cfg(self) -> Any:
@@ -394,6 +420,24 @@ class Speaker:
 
     __call__ = say
 
+    def warm(self) -> bool:
+        """v0.1.26: load the voice engine now (on its thread) so the first sentence of an answer plays at once.
+        Called when you start talking to an agent. Says nothing; False when no voice is available."""
+        if not self.factories:
+            return False
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive() and self._warm:
+                return True
+            self._q.put(WARM)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, daemon=True, name="away-speech")
+                self._thread.start()
+        return True
+
+    @property
+    def _warm(self) -> bool:
+        return bool(getattr(self, "_eng_ready", False))
+
     def wait(self, timeout: float = 30.0) -> bool:
         """Until everything queued was spoken (tests, the self-test)."""
         return self._idle.wait(timeout)
@@ -454,20 +498,27 @@ class Speaker:
         try:
             while True:
                 try:
-                    text = self._q.get(timeout=30.0)
+                    text = self._q.get(timeout=max(1.0, float(self.idle_s)))
                 except queue.Empty:
                     break  # idle: let the thread (and its COM object) go; the next message starts a new one
                 if text is None:
                     break
                 if eng is None:
                     eng = self._make()
+                    self._eng_ready = eng is not None
+                if text == WARM:
+                    if self._q.empty():
+                        self._idle.set()
+                    continue
                 if eng is None:
                     self._fail("no voice engine could start")
                 else:
                     for _attempt in range(4):  # v0.1.23: a failing engine falls back silently to the next one
                         try:
+                            latency.mark("tts_start")
                             with self.echo.speaking():
                                 eng.speak(text, self.voice())
+                            latency.spoken()  # engines that cannot tell when their sound started
                             self.spoken = [*self.spoken[-19:], text]
                             break
                         except Exception as exc:
@@ -480,11 +531,13 @@ class Speaker:
                             self._failed.add(self.engine_name)
                             self.factories.pop(0)
                             eng = self._make()
+                            self._eng_ready = eng is not None
                             if eng is None:
                                 break
                 if self._q.empty():
                     self._idle.set()
         finally:
+            self._eng_ready = False
             if eng is not None:
                 with contextlib.suppress(Exception):
                     eng.close()

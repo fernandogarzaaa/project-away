@@ -699,7 +699,13 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.voice.talk import TalkHook
 
         # v0.1.22 "Talk to your agent": Agent Link fills in the agents and where messages go
-        self.talk = TalkHook(enabled=lambda: bool(getattr(self.cfg.agent_link, "talk_enabled", True)))
+        self.talk = TalkHook(
+            enabled=lambda: bool(getattr(self.cfg.agent_link, "talk_enabled", True)),
+            # v0.1.26: Settings > Voice & input "Keep listening after the wake word" and "Conversational mode"
+            window_s=lambda: float(getattr(self.cfg.voice, "listen_seconds", 8.0)),
+            conversational=lambda: bool(getattr(self.cfg.voice, "conversational", False)),
+        )
+        self._wire_talk_extras()
         self.other_audio: Any = None  # away.voice.other_audio.OtherAudioMeter (Windows, while voice runs)
         self._face_lock = threading.Lock()
         self.gaze_net: Any = None  # NetRunner (optional learned gaze model), created with the first face
@@ -1016,6 +1022,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             amb.gate = self.pipeline.gate.allow_ambient if face_gate else None
             amb.commands_enabled = v.commands_enabled
             amb.ep.set_sensitivity(v.vad_sensitivity)
+            amb.ep.set_quick_end_silence(v.agent_end_silence_ms)
             amb.strict_ratio, amb.strict_confidence = float(v.strict_motion_ratio), float(v.strict_confidence)
             amb.other_audio_needs_mouth = bool(v.other_audio_needs_mouth)
         self.pipeline.gate.when_camera_busy = new.face.gate_when_camera_busy
@@ -1038,6 +1045,15 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         if not self.pipeline.comfort.voice_allowed():
             return
         self.pipeline.fire("voice", phrase)
+
+    def _wire_talk_extras(self) -> None:
+        """v0.1.26: the listening sound, and the follow-up window held open while the computer speaks."""
+        from away.voice.earcon import Earcon
+        from away.voice.speech import ECHO
+
+        self.talk.busy = ECHO.active
+        if not self.dry_run:
+            self.talk.sound = Earcon(lambda: bool(getattr(self.cfg.voice, "listen_sound", True)), ECHO.active)
 
     def _start_voice(self) -> None:
         from away.app.performance import asr_plan
@@ -1180,6 +1196,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 end_silence_ms=v.end_silence_ms,
                 min_utterance_ms=v.min_utterance_ms,
                 max_utterance_s=v.max_utterance_s,
+                quick_end_silence_ms=v.agent_end_silence_ms,
             ),
             commands=self.pipeline.voice_phrases,
             run_command=self._ambient_command,

@@ -336,6 +336,18 @@ TUNABLE_META: dict[str, TunableMeta] = {
     "voice.wake_window": M(
         "Voice", "Wake word: follow-up time", "Higher: more time to speak after the wake word.", "s"
     ),
+    "voice.listen_seconds": M(
+        "Voice",
+        "Keep listening after the wake word",
+        "Higher: more time to start talking to your agent (and, in conversational mode, to answer it).",
+        "s",
+    ),
+    "voice.agent_end_silence_ms": M(
+        "Voice",
+        "Pause that ends what you say to your agent",
+        "Lower: the agent answers sooner; higher: you may pause longer mid-sentence.",
+        "ms",
+    ),
     "voice.numbers_min_value": M("Voice", "Write numbers as digits from", "Higher: more numbers stay spelled out.", ""),
     "voice.clap_sensitivity": M("Voice", "Clap sensitivity", "Higher: softer claps count.", ""),
     "voice.clap_double_window": M("Voice", "Double-clap time", "Higher: more time allowed between the two claps.", "s"),
