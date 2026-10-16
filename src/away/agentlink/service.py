@@ -360,10 +360,17 @@ class Service:
 
     # ------------------------------------------------------------ diagnose
     def run_diagnose(
-        self, agent: Agent, kind: str = "cameras", device: str | None = None, seconds: float | None = None
+        self,
+        agent: Agent,
+        kind: str = "cameras",
+        device: str | None = None,
+        seconds: float | None = None,
+        quick: bool = False,
     ) -> dict[str, Any]:
+        """v0.1.28: ``quick`` (kind="cameras" only) opens each camera on its remembered backend only, skipping
+        the mode sweep - a fast triage answer. Every check's result carries ``elapsed_s`` and ``budget_hit``."""
         self.require(agent, perms.DIAGNOSE)
-        return self.jobs.start(kind, device, seconds).public()
+        return self.jobs.start(kind, device, seconds, quick).public()
 
     def get_job(self, agent: Agent, job_id: str | int | None = None, id: str | int | None = None) -> dict[str, Any]:
         """A check's state. ``id`` is accepted as an alias of ``job_id`` (v0.1.21); the error says whether the id

@@ -325,7 +325,9 @@ def test_job_output_hides_driver_noise(tmp_path: Path) -> None:
     assert job.state == "done"
     assert job.output[-1].startswith("(hid 299 camera-driver messages")
     assert "camera 0: JoyCam" in job.output and len(job.output) == 4
-    assert job.result == {"exit_code": 0, "driver_messages_hidden": 299}
+    assert job.result["exit_code"] == 0 and job.result["driver_messages_hidden"] == 299
+    # v0.1.28: every check's structured result carries elapsed_s and budget_hit
+    assert job.result["budget_hit"] is False and job.result["elapsed_s"] >= 0.0
 
 
 def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:

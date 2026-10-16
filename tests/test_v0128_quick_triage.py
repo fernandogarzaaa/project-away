@@ -111,7 +111,7 @@ def test_quick_opens_only_the_remembered_backend_and_mode(monkeypatch: pytest.Mo
     clock = Clock()
     cv2 = FakeCV2({(0, DSHOW): (True, 30.0), (0, MSMF): (False, 0.0)}, clock)
     _remembered(monkeypatch, {"JoyCam": ("DirectShow", CaptureMode(640, 480, 30, "MJPG"))})
-    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **_quick_kw(clock))
+    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **_quick_kw(clock)).lines
     text = "\n".join(lines)
     opens = [e for e in cv2.log if e[0] == "open"]
     assert len(opens) == 1 and opens[0][1:] == (0, DSHOW)  # no Media Foundation, no WinRT, no sweep
@@ -130,7 +130,7 @@ def test_quick_with_remembered_media_foundation_uses_its_index(monkeypatch: pyte
         out=lambda m: None,
         msmf_lister=lambda: [("Other", "usb#x"), ("JoyCam", "usb#0")],
         **_quick_kw(clock),
-    )
+    ).lines
     opens = [e for e in cv2.log if e[0] == "open"]
     assert len(opens) == 1 and opens[0][1:] == (1, MSMF)  # Media Foundation's own index, one mode only
     assert "quick: remembered Media Foundation 640x480@30 YUY2" in "\n".join(lines)
@@ -142,7 +142,7 @@ def test_quick_without_a_remembered_backend_names_the_camera_and_opens_nothing(
     clock = Clock()
     cv2 = FakeCV2({}, clock)
     _remembered(monkeypatch, {})
-    lines = diagnose.run_diagnose(_devs(), cv2=cv2, out=lambda m: None, **_quick_kw(clock))
+    lines = diagnose.run_diagnose(_devs(), cv2=cv2, out=lambda m: None, **_quick_kw(clock)).lines
     text = "\n".join(lines)
     assert text.count("quick: no remembered backend for this camera") == 2
     assert not [e for e in cv2.log if e[0] == "open"]
@@ -179,7 +179,7 @@ def test_quick_winrt_opens_only_the_remembered_native_format(monkeypatch: pytest
         winrt_formats=lambda n, o: (fmts, ""),
         winrt_open=winrt_open,
         **{k: v for k, v in _quick_kw(clock).items() if k != "winrt_available"},
-    )
+    ).lines
     assert len(opened) == 1 and opened[0][1] is fmts[1]  # the remembered native format, not the best-first list
     assert "quick: remembered WinRT 1280x720@30 MJPG" in "\n".join(lines)
 
@@ -188,7 +188,7 @@ def test_quick_reports_a_remembered_camera_that_no_longer_opens(monkeypatch: pyt
     clock = Clock()
     cv2 = FakeCV2({(0, DSHOW): (False, 0.0)}, clock)
     _remembered(monkeypatch, {"JoyCam": ("DirectShow", CaptureMode(640, 480, 30, "MJPG"))})
-    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **_quick_kw(clock))
+    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **_quick_kw(clock)).lines
     text = "\n".join(lines)
     assert "640x480@30 MJPG: did not open" in text
     assert len([e for e in cv2.log if e[0] == "open"]) == 1  # tried once, no sweep after the failure
@@ -361,7 +361,7 @@ def test_quick_winrt_reports_when_the_remembered_mode_is_not_offered(monkeypatch
         winrt_formats=lambda n, o: ([NativeFormat(640, 480, 30, "MJPG", 0)], ""),
         winrt_open=winrt_open,
         **kw,
-    )
+    ).lines
     assert "remembered mode 1280x720@30 MJPG is not offered by this camera now" in "\n".join(lines)
     # same size and FOURCC but 15 fps: not the remembered 30 fps mode
     _remembered(monkeypatch, {"JoyCam": ("WinRT", CaptureMode(640, 480, 30, "MJPG"))})
@@ -373,7 +373,7 @@ def test_quick_winrt_reports_when_the_remembered_mode_is_not_offered(monkeypatch
         winrt_formats=lambda n, o: ([NativeFormat(640, 480, 15, "MJPG", 0)], ""),
         winrt_open=winrt_open,
         **kw,
-    )
+    ).lines
     assert "remembered mode 640x480@30 MJPG is not offered by this camera now" in "\n".join(lines)
     assert not opened
 
@@ -395,5 +395,5 @@ def test_quick_probe_past_the_budget_marks_the_time_limit(monkeypatch: pytest.Mo
     _remembered(monkeypatch, {"JoyCam": ("DirectShow", CaptureMode(640, 480, 30, "MJPG"))})
     kw = dict(_quick_kw(clock))
     kw["budget_s"] = 60.0
-    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **kw)
+    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **kw).lines
     assert lines[-1].startswith("stopped after 60 s (time limit)")
