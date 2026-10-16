@@ -112,7 +112,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "get_preferences": ("json", "GET", "/v1/preferences", "Preference notes"),
     "add_preference": ("json", "POST", "/v1/preferences", "Add a preference {text} (tune)"),
     "remove_preference": ("json", "POST", "/v1/preferences/remove", "Remove preference {number} (tune)"),
-    "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds} (diagnose)"),
+    "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds, quick} (diagnose)"),
     "get_job": ("json", "GET", "/v1/jobs", "A check's state (?job_id=) (diagnose)"),
     "record_session": ("json", "POST", "/v1/record", "Record landmarks {seconds, note} (share_logs)"),
     "run_selftest": (

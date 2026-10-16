@@ -20,6 +20,8 @@ from away.multicam.capture import CameraDevice, CaptureMode
 
 BACKENDS = ("dshow", "msmf", "winrt")
 BACKEND_LABELS = {"dshow": "DirectShow", "msmf": "Media Foundation", "winrt": "WinRT", "default": "default"}
+# v0.1.28: the backend labels the mode file remembers (capture.saved_modes) back to diagnose's short names.
+REMEMBERED_BACKENDS = {v: k for k, v in BACKEND_LABELS.items()}
 MEASURE_S = 1.0  # frames are counted this long per mode
 FIRST_FRAME_S = 3.0
 MAX_WINRT_FORMATS = 6  # native formats opened per camera (all of them are listed)
@@ -89,6 +91,91 @@ def speed_verdict(fps: float | None) -> str:
     return " - too slow for tracking"
 
 
+def _quick_probe(
+    dev: CameraDevice,
+    devices: Sequence[CameraDevice],
+    emit: Callable[[str], None],
+    width: int,
+    height: int,
+    fps: int,
+    measure_s: float,
+    cv2: Any,
+    winrt_available: Callable[[], tuple[bool, str]] | None,
+    winrt_formats: Callable[[str, int], tuple[list[Any], str]] | None,
+    winrt_open: Callable[[str, Any, int], Any] | None,
+    msmf_lister: Callable[[], list[tuple[str, str]] | None] | None,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Any],
+) -> None:
+    """v0.1.28: quick triage for one camera: open it on its remembered backend in its remembered mode only,
+    skipping the mode sweep. A camera with no remembered mode needs a full check once first (that is what
+    records the backend and mode in the mode file)."""
+    remembered = capture.saved_modes().get(dev.name)
+    if remembered is None:
+        emit("  quick: no remembered backend for this camera; run a full check once to record one")
+        return
+    label, mode = remembered
+    b = REMEMBERED_BACKENDS.get(label, label)
+    info = capture.saved_mode_info().get(dev.name, {})
+    remembered_fps = info.get("fps")
+    fps_txt = f" (remembered {remembered_fps:.1f} fps)" if isinstance(remembered_fps, (int, float)) else ""
+    emit(f"  quick: remembered {label} {mode.describe()}{fps_txt}")
+    if b == "winrt":
+        from away.multicam import winrt_capture
+
+        ok, why = (winrt_available or winrt_capture.available)()
+        if not ok:
+            emit(f"  WinRT: unavailable ({why})")
+            return
+        same = [d for d in devices if d.name.lower() == dev.name.lower()]
+        occurrence = next((j for j, d in enumerate(same) if d is dev), 0)
+        formats, err = (winrt_formats or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
+        if err and not formats:
+            emit(f"  WinRT: {err}")
+            return
+        match = next(
+            (f for f in formats if f.width == mode.width and f.height == mode.height and f.fourcc() == mode.fourcc),
+            None,
+        )
+        picked = [match] if match is not None else winrt_candidates(formats, width, height, fps, 1)
+        _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats, winrt_open,
+               1, clock, sleep, formats_override=(picked, ""))  # fmt: skip
+        return
+    if cv2 is None:
+        emit("  quick: skipped (OpenCV not installed)")
+        return
+    where = dev.index if dev.index is not None else dev.path
+    src: int | str | None = where
+    api: Any = None
+    if b == "dshow":
+        api = getattr(cv2, "CAP_DSHOW", None)
+    elif b == "msmf":
+        api = getattr(cv2, "CAP_MSMF", None)
+        if isinstance(where, int):
+            src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
+        if src is None:
+            emit("  Media Foundation: not listed by Media Foundation")
+            return
+    emit(f"  {BACKEND_LABELS.get(b, b)} (index {src}): quick check of the remembered mode")
+    try:
+        cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+    except Exception as exc:
+        emit(f"    {mode.describe()}: error {exc}")
+        return
+    try:
+        if not cap.isOpened():
+            emit(f"    {mode.describe()}: did not open")
+            return
+        capture.apply_mode(cap, mode, cv2, repr(dev.name))
+        _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
+        emit(f"    {mode.describe()}: {text}")
+    except Exception as exc:
+        emit(f"    {mode.describe()}: error {exc}")
+    finally:
+        with contextlib.suppress(Exception):
+            cap.release()
+
+
 def run_diagnose(
     devices: Sequence[CameraDevice],
     *,
@@ -109,12 +196,15 @@ def run_diagnose(
     sleep: Callable[[float], Any] = time.sleep,
     budget_s: float | None = BUDGET_S,
     include_virtual: bool = False,
+    quick: bool = False,
 ) -> list[str]:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
     (Settings shows them while the diagnosis runs) and all of them are returned.
 
     v0.1.22: virtual cameras (NVIDIA Broadcast, OBS...) are skipped unless ``include_virtual`` (or the camera was
-    named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so."""
+    named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so.
+    v0.1.28: ``quick`` opens each camera on its remembered backend in its remembered mode only (no mode sweep),
+    for a fast triage answer; a camera with no remembered mode needs a full check once first."""
     lines: list[str] = []
     say = out or (lambda _m: None)
     started = clock()
@@ -147,57 +237,75 @@ def run_diagnose(
             stopped = True
             break
         emit(f"camera {where}: {dev.name}" + (" (virtual)" if dev.virtual else ""))
-        for b in use:
-            if over():
-                stopped = True
-                break
-            label = BACKEND_LABELS.get(b, b)
-            if b == "winrt":
-                _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
-                       winrt_open, max_winrt_formats, clock, sleep)  # fmt: skip
-                continue
-            if cv2 is None:
-                emit(f"  {label}: skipped (OpenCV not installed)")
-                continue
-            src: int | str | None = where
-            api: Any = None
-            if b == "dshow":
-                api = getattr(cv2, "CAP_DSHOW", None)
-            elif b == "msmf":
-                api = getattr(cv2, "CAP_MSMF", None)
-                if isinstance(where, int):
-                    src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
-                if src is None:
-                    emit(f"  {label}: not listed by Media Foundation")
-                    continue
-            emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
-            best: tuple[float, str] | None = None
-            for mode in diagnose_modes(width, height, fps):
+        if quick:
+            _quick_probe(
+                dev,
+                devices,
+                emit,
+                width,
+                height,
+                fps,
+                measure_s,
+                cv2,
+                winrt_available,
+                winrt_formats,
+                winrt_open,
+                msmf_lister,
+                clock,
+                sleep,
+            )
+        else:
+            for b in use:
                 if over():
                     stopped = True
                     break
-                try:
-                    cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
-                except Exception as exc:
-                    emit(f"    {mode.describe()}: error {exc}")
-                    break
-                try:
-                    if not cap.isOpened():
-                        emit(f"    {mode.describe()}: did not open (skipping this backend's other modes)")
+                label = BACKEND_LABELS.get(b, b)
+                if b == "winrt":
+                    _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
+                           winrt_open, max_winrt_formats, clock, sleep)  # fmt: skip
+                    continue
+                if cv2 is None:
+                    emit(f"  {label}: skipped (OpenCV not installed)")
+                    continue
+                src: int | str | None = where
+                api: Any = None
+                if b == "dshow":
+                    api = getattr(cv2, "CAP_DSHOW", None)
+                elif b == "msmf":
+                    api = getattr(cv2, "CAP_MSMF", None)
+                    if isinstance(where, int):
+                        src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
+                    if src is None:
+                        emit(f"  {label}: not listed by Media Foundation")
+                        continue
+                emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
+                best: tuple[float, str] | None = None
+                for mode in diagnose_modes(width, height, fps):
+                    if over():
+                        stopped = True
                         break
-                    capture.apply_mode(cap, mode, cv2, repr(dev.name))
-                    _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
-                    emit(f"    {mode.describe()}: {text}")
-                    rate = _rate_of(text)
-                    if _ok and rate is not None and (best is None or rate > best[0]):
-                        best = (rate, mode.describe())
-                except Exception as exc:
-                    emit(f"    {mode.describe()}: error {exc}")
-                finally:
-                    with contextlib.suppress(Exception):
-                        cap.release()
-            if best is not None:
-                emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
+                    try:
+                        cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+                    except Exception as exc:
+                        emit(f"    {mode.describe()}: error {exc}")
+                        break
+                    try:
+                        if not cap.isOpened():
+                            emit(f"    {mode.describe()}: did not open (skipping this backend's other modes)")
+                            break
+                        capture.apply_mode(cap, mode, cv2, repr(dev.name))
+                        _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
+                        emit(f"    {mode.describe()}: {text}")
+                        rate = _rate_of(text)
+                        if _ok and rate is not None and (best is None or rate > best[0]):
+                            best = (rate, mode.describe())
+                    except Exception as exc:
+                        emit(f"    {mode.describe()}: error {exc}")
+                    finally:
+                        with contextlib.suppress(Exception):
+                            cap.release()
+                if best is not None:
+                    emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
         saved = capture.saved_mode_info().get(dev.name)
         modes = capture.saved_modes().get(dev.name)
         if modes is not None:
@@ -236,6 +344,7 @@ def _winrt(
     limit: int,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
+    formats_override: tuple[list[Any], str] | None = None,
 ) -> None:
     from away.multicam import winrt_capture
 
@@ -245,7 +354,10 @@ def _winrt(
         return
     same = [d for d in devices if d.name.lower() == dev.name.lower()]
     occurrence = next((j for j, d in enumerate(same) if d is dev), 0)
-    formats, err = (formats_of or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
+    if formats_override is not None:
+        formats, err = formats_override  # v0.1.28: quick triage picks the remembered native format first
+    else:
+        formats, err = (formats_of or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
     if err and not formats:
         emit(f"  WinRT: {err}")
         return

@@ -41,7 +41,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "remove": GroupAction("remove_preference", ("number",)),
     },
     "diagnostics": {
-        "run": GroupAction("run_diagnose", ("kind", "device", "seconds")),
+        "run": GroupAction("run_diagnose", ("kind", "device", "seconds", "quick")),
         "job": GroupAction("get_job", ("job_id",)),
         "record": GroupAction("record_session", ("seconds", "note")),
         "bundle": GroupAction("get_bundle", ("note",)),
