@@ -143,7 +143,7 @@ def _run(
 
 
 def _camera_schema(cam: dict[str, Any]) -> None:
-    assert set(cam) == {"name", "enumerated_by", "backends", "driver", "holder", "verdict"}
+    assert set(cam) == {"id", "name", "enumerated_by", "backends", "driver", "holder", "verdict"}
     assert set(cam["driver"]) == {"status", "config_error"}
     for b in cam["backends"].values():
         assert set(b) == {"opened", "fps", "error"}
@@ -429,3 +429,59 @@ def test_cli_without_structured_runner_prints_no_marker(
     )
     assert rc == 0
     assert not any(ln.startswith(RESULT_MARKER) for ln in capsys.readouterr().out.splitlines())
+
+
+def test_diagnose_marker_rejects_mistyped_fields(tmp_path: Path) -> None:
+    # CodeRabbit: a mistyped marker must stay visible as prose, not publish bad data
+    bad = RESULT_MARKER + ' {"cameras": "bad", "stopped": "false"}'
+    assert _diagnose_marker(bad) is None
+    assert _diagnose_marker(RESULT_MARKER + ' {"cameras": []}') is None  # stopped missing
+    r = JobRunner(
+        tmp_path,
+        command=lambda a: ["away", *a],
+        runner=_proc_with(["camera 0: JoyCam", bad]),
+    )
+    job = _finished(r)
+    assert "cameras" not in job.result and "stopped" not in job.result
+    assert any(RESULT_MARKER in ln for ln in job.output)  # mistyped marker stays visible, not lost
+
+
+def test_same_name_cameras_have_distinct_ids() -> None:
+    # CodeRabbit: two devices can share a name; the id must tell them apart
+    clock = Clock()
+    cv2 = FakeCV2({(0, DSHOW): (True, 30.0), (1, DSHOW): (True, 30.0)}, clock)
+    report = _run(
+        [CameraDevice(0, "camera 0", "USB Camera"), CameraDevice(1, "camera 1", "USB Camera")],
+        cv2,
+        clock,
+    )
+    cams = report.result["cameras"]
+    assert len(cams) == 2
+    assert all(c["name"] == "USB Camera" for c in cams)
+    assert [c["id"] for c in cams] == ["0", "1"]
+
+
+class FlakyAfterFirstCV2(FakeCV2):
+    """First VideoCapture works; every later one raises (a failing mode after a good one)."""
+
+    def __init__(self, *a: Any, **k: Any) -> None:
+        super().__init__(*a, **k)
+        self.calls = 0
+
+    def VideoCapture(self, src: Any, api: Any = None) -> FakeCap:
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError("boom")
+        return super().VideoCapture(src, api)
+
+
+def test_backend_error_cleared_when_fps_measured() -> None:
+    # CodeRabbit: a later mode failure must not leave an error next to a measured fps
+    clock = Clock()
+    cv2 = FlakyAfterFirstCV2({(0, DSHOW): (True, 30.0)}, clock)
+    report = _run([CameraDevice(0, "camera 0", "JoyCam")], cv2, clock)
+    dshow = report.result["cameras"][0]["backends"]["dshow"]
+    assert dshow["fps"] == 30.0
+    assert dshow["error"] is None
+    # the prose still records the failing mode for humans
+    assert any("boom" in ln for ln in report.lines)
