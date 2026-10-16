@@ -4,9 +4,11 @@ verdict carries the ``open:camera_privacy`` fix marker so Settings > Cameras sho
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import numpy as np
+import pytest
 
 from away.multicam import diagnose
 from away.multicam.capture import CameraDevice
@@ -135,8 +137,9 @@ def test_read_consent_missing_key_means_could_not_check() -> None:
     assert diagnose.read_consent(FakeWinreg({})) is None
 
 
-def test_read_consent_graceful_when_winreg_missing_on_windows() -> None:
-    assert diagnose.read_consent(platform="win32") is None  # no winreg module injected, none importable here
+def test_read_consent_graceful_when_winreg_unimportable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "winreg", None)  # `import winreg` raises ImportError everywhere
+    assert diagnose.read_consent(platform="win32") is None
 
 
 # --------------------------------------------------------------------------------- the plain words
