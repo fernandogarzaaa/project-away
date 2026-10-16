@@ -147,7 +147,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Find out what is wrong. run/job need "Run camera and speed checks"; record, bundle, files, download
         and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
-          `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
+          `device`), "sweep" (the configured cameras together), "benchmark" (model speeds), or "holders" (who is
+          holding a camera: what Windows says holds one now, a live scan of known camera apps running now, and who
+          used one last with timestamps; `now`/`last_used` in the result). Returns a job id.
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).

@@ -9,6 +9,10 @@ say *which* camera, so the message names the app(s) and the camera that failed.
 
 NVIDIA Broadcast keeps its source camera open; when that source is the built-in camera, Broadcast's virtual
 camera *is* the built-in camera, filtered. :func:`broadcast_source` reads Broadcast's own settings to find out.
+
+:func:`holders` (proposal #13, v0.1.28) answers "who is holding my camera" for the diagnose tool: the apps
+Windows says hold a camera now, a live scan of known camera apps (a hint, not proof), and the last-used
+timestamps Windows stores per app.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +114,126 @@ def current_users(reader: Callable[[], list[tuple[str, bool, dict[str, Any]]]] =
         return parse(reader())
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------------- holders (v0.1.28)
+# Proposal #13: first-class "who is holding my camera". The registry only says who used a camera *last* (one
+# start/stop pair per app; Windows does not say which camera either), so "holders" answers the question with
+# three honest pieces: what Windows says holds it now (LastUsedTimeStop == 0), a live scan of known camera apps
+# (running now, so they *may* hold it - a hint, never a claim), and who used it before with their last timestamps.
+
+# 100-ns ticks between the Windows epoch (1601-01-01) and the Unix epoch (1970-01-01)
+_FILETIME_UNIX_DIFF = 116444736000000000
+
+
+def filetime_to_iso(ft: Any) -> str:
+    """A Windows FILETIME value (100-ns ticks since 1601-01-01 UTC) as an ISO timestamp, or "" when it is not
+    a plausible timestamp."""
+    try:
+        seconds = (int(ft) - _FILETIME_UNIX_DIFF) / 10_000_000
+        if not 0 <= seconds <= 4102444800:  # 1970-01-01 .. 2100-01-01
+            return ""
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def last_used(entries: list[tuple[str, bool, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Apps the registry says used a camera and stopped (``LastUsedTimeStop`` != 0), most recent first:
+    ``[{"name", "path", "packaged", "at"}]`` where ``at`` is an ISO timestamp ("" when Windows stored junk).
+    Project Away itself is excluded."""
+    out: list[dict[str, Any]] = []
+    for key, packaged, vals in entries:
+        start = int(vals.get("LastUsedTimeStart") or 0)
+        stop = int(vals.get("LastUsedTimeStop") or 0)
+        if start == 0 or stop == 0:
+            continue  # never used it, or still using it now (see parse())
+        name = _pretty(key, packaged)
+        if any(o in (key + " " + name).lower() for o in OWN):
+            continue
+        out.append(
+            {
+                "name": name,
+                "path": key.replace("#", "\\") if not packaged else key,
+                "packaged": packaged,
+                "at": filetime_to_iso(stop),
+            }
+        )
+    out.sort(key=lambda d: (d["at"] == "", d["at"]), reverse=True)
+    return out
+
+
+# process base name (lowercase, no .exe) -> friendly name
+CAMERA_PROCESSES = {
+    "nvbroadcast": "NVIDIA Broadcast",
+    "obs64": "OBS Studio",
+    "obs32": "OBS Studio",
+    "windowscamera": "Windows Camera",
+    "ms-teams": "Microsoft Teams",
+    "teams": "Microsoft Teams",
+    "zoom": "Zoom",
+    "discord": "Discord",
+    "skype": "Skype",
+    "slack": "Slack",
+    "webex": "Cisco Webex",
+    "cct": "Cisco Webex",
+    "gotomeeting": "GoTo Meeting",
+    "whereby": "Whereby",
+    "meetnow": "Meet Now",
+}
+
+
+def running_camera_apps(psutil_mod: Any = None) -> list[dict[str, Any]]:
+    """The known camera apps (see :data:`CAMERA_PROCESSES`) running right now: ``[{"name", "path"}]``, [] when
+    psutil is not installed or the process list cannot be read. A hint only: being open does not mean the app
+    holds the camera."""
+    try:
+        ps = psutil_mod
+        if ps is None:
+            import psutil as ps  # type: ignore[no-redef]
+    except Exception:
+        return []
+    try:
+        procs = list(ps.process_iter(["name", "exe"]))
+    except Exception:
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for p in procs:
+        try:
+            info = p.info or {}
+            name = str(info.get("name") or "")
+            base = os.path.splitext(os.path.basename(name).lower())[0]
+            if base in CAMERA_PROCESSES and base not in seen:
+                seen[base] = {
+                    "name": CAMERA_PROCESSES[base],
+                    "path": str(info.get("exe") or name),
+                }
+        except Exception:
+            continue
+    return sorted(seen.values(), key=lambda d: d["name"])
+
+
+def holders(
+    read: Callable[[], list[tuple[str, bool, dict[str, Any]]]] = read_registry,
+    psutil_mod: Any = None,
+) -> dict[str, Any]:
+    """Who holds a camera now plus who used it last (proposal #13).
+
+    ``{"now": [{"name", "path", "source"}], "last_used": [{"name", "path", "packaged", "at"}]}``. ``source`` is
+    "registry" when Windows reports the app holds a camera now, or "process" when a known camera app is running
+    (a hint, not proof). Windows never names *which* camera an app holds, so this answers "which app", not
+    "which camera".
+    """
+    try:
+        entries = read()
+    except Exception:
+        entries = []
+    now: list[dict[str, Any]] = [{"name": u.name, "path": u.path, "source": "registry"} for u in parse(entries)]
+    have = {n["name"].lower() for n in now}
+    for app in running_camera_apps(psutil_mod):
+        if app["name"].lower() not in have:
+            now.append({**app, "source": "process"})
+    return {"now": now, "last_used": last_used(entries)}
 
 
 def broadcast_settings_paths(environ: dict[str, str] | None = None) -> list[Path]:
