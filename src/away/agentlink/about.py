@@ -51,6 +51,9 @@ How to work with the human through Project Away:
   Everything can be undone.
 - Using the computer (only with the "use my computer" permission): control action="request" and wait for the
   person's approval; act with element names when available (get_screen with elements=true), else coordinates.
+  Each approved session has a step budget (default 40 actions; every action result tells you how many steps
+  are left, `steps_left`): when it is used up, tell the person what is done and what is left, and ask them to
+  let you continue.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
   control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
   the person first, and so does a click, drag, Enter or shortcut on something Project Away cannot identify.

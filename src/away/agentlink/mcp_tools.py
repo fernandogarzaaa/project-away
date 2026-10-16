@@ -260,9 +260,13 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     async def control(ctx: Context, action: str, why: str | None = None, minutes: float | None = None) -> Any:
         """Using the person's computer (needs "Let it use my computer").
         - action="request": ask to use it (`why`; expires after `minutes`, default 30). Wait for their approval.
+          Each approved session has a step budget (default 40 actions; the person can change it in Settings):
+          every action result tells you `steps_left`, and when the budget is used up you must ask them to let
+          you continue (approving again starts a fresh session).
         - action="resume": continue after they took over (any move of their hand, mouse or keyboard pauses you).
         - action="stop": you are done (removes the border and banner). action="undo": undo your last undoable
-          action. action="log": your recent actions."""
+          action (counts as one step). action="log": your recent actions (the person keeps a step-by-step record
+          of every session, with a screenshot per step, and can replay it)."""
         return await group(ctx, "control", action=action, why=why, minutes=minutes)
 
     @mcp.tool()
