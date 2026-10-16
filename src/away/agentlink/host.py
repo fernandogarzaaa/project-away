@@ -1321,6 +1321,7 @@ class AgentLinkHost:
             "control": core.control.status(),
             "actions": core.control.actions(20),
             "changes": core.changes.history(20),
+            "captures": core.service.capture_feed(10),  # v0.1.28 "Recently" feed
             "access": list(self.gate.recent)[-20:] if self.gate else [],
             "results": self._results,
             "errors": self.errors[-5:],
