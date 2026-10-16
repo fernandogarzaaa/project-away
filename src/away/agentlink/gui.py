@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import webbrowser
-from typing import Any
+from typing import Any, Protocol
 
 from away.agentlink import perms
 from away.agentlink.gui_model import AgentLinkModel, Problem
@@ -645,8 +645,23 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         Wizard(self)
 
 
+class WizardHost(Protocol):
+    """What the connect wizard needs from its host window: the tab in Settings, or the first-run window.
+
+    Structural on purpose: the first-run guide hosts the same 3-step wizard without building a whole tab.
+    """
+
+    tk: Any
+    ttk: Any
+    frame: Any  # the widget the wizard's window opens on top of
+    m: AgentLinkModel
+
+    def _bg(self, fn: Any, done: Any = None) -> None: ...
+    def _fix(self, p: Problem) -> None: ...
+
+
 class Wizard:  # pragma: no cover - widgets
-    def __init__(self, tab: AgentLinkTab) -> None:
+    def __init__(self, tab: WizardHost) -> None:
         self.tab, self.m = tab, tab.m
         tk = tab.tk
         self.top = tk.Toplevel(tab.frame)
