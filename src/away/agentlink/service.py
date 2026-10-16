@@ -805,6 +805,12 @@ class Service:
         # element names resolve through hooks.uia: the smart pointer's cache + fuzzy matcher when the app runs
         return self.control.act(agent.id, action, **kw)
 
+    def ui_query(self, agent: Agent) -> dict[str, Any]:
+        """v0.1.28 proposal #24: the foreground window's interactable UI elements with short ids
+        (``[{id, name, role, bounds}]``) an agent can pass back to pointer/keyboard as ``element_id``."""
+        self.require(agent, perms.CONTROL)
+        return self.control.ui_query()
+
     def stop_control(self, agent: Agent) -> dict[str, Any]:
         if self.control.grant is not None and self.control.grant.agent_id == agent.id:
             self.control.stop("the agent finished")

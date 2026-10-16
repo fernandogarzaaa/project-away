@@ -21,7 +21,8 @@ class GroupAction:
     fixed: Mapping[str, Any] = field(default_factory=dict)  # always passed (e.g. act's action)
 
 
-POINT = ("x", "y", "element", "from_image")
+# v0.1.28 proposal #24: pointer and keyboard also accept element_id (a ui_query id) alongside coordinates.
+POINT = ("x", "y", "element", "element_id", "from_image")
 
 GROUPS: dict[str, dict[str, GroupAction]] = {
     "events": {
@@ -63,12 +64,14 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "click": GroupAction("act", POINT, fixed={"action": "click"}),
         "double_click": GroupAction("act", POINT, fixed={"action": "double_click"}),
         "right_click": GroupAction("act", POINT, fixed={"action": "right_click"}),
-        "drag": GroupAction("act", (*POINT, "x2", "y2", "to_element"), fixed={"action": "drag"}),
-        "scroll": GroupAction("act", ("dy", "dx", "x", "y", "element", "from_image"), fixed={"action": "scroll"}),
+        "drag": GroupAction("act", (*POINT, "x2", "y2", "to_element", "to_element_id"), fixed={"action": "drag"}),
+        "scroll": GroupAction(
+            "act", ("dy", "dx", "x", "y", "element", "element_id", "from_image"), fixed={"action": "scroll"}
+        ),
     },
     "keyboard": {
-        "type": GroupAction("act", ("text",), fixed={"action": "type_text"}),
-        "press": GroupAction("act", ("keys",), fixed={"action": "press_keys"}),
+        "type": GroupAction("act", ("text", "element_id"), fixed={"action": "type_text"}),
+        "press": GroupAction("act", ("keys", "element_id"), fixed={"action": "press_keys"}),
     },
     "inbox": {  # v0.1.22 "Talk to your agent"
         "list": GroupAction("inbox_list", ("unread_only",)),
