@@ -29,3 +29,4 @@ squashfs-root/
 .testteeth-reports/
 packaging/linux/appimagetool-*.AppImage
 packaging/linux/runtime-*
+.venv-b17/
