@@ -703,6 +703,8 @@ def cmd_cameras_diagnose(
         seconds = diagnose.MEASURE_S if args.seconds is None else float(args.seconds)
         quick = bool(getattr(args, "quick", False))
         if quick:
+            # v0.1.28 (CodeRabbit): the mode store is what saved_modes reads; configure() does not activate it
+            capture.use_mode_store(capture.default_mode_file())
             print("quick check: opening each camera on its remembered backend only...", flush=True)
         else:
             print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)

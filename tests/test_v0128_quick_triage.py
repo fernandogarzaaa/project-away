@@ -290,3 +290,110 @@ def test_cli_diagnose_accepts_quick() -> None:
     a = cli.build_parser().parse_args(["cameras", "diagnose", "--quick"])
     assert a.quick is True
     assert cli.build_parser().parse_args(["cameras", "diagnose"]).quick is False
+
+
+def test_cli_quick_diagnose_activates_the_mode_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeRabbit: configure() does not activate the mode store, so the CLI quick path must do it itself,
+    or every camera reports 'no remembered backend'."""
+    import contextlib
+
+    from away import cli
+    from away import config as C
+
+    calls: list[Any] = []
+    monkeypatch.setattr(capture, "use_mode_store", lambda p: calls.append(p))
+    cfgp = tmp_path / "config.yaml"
+    C.save(C.AppConfig(), cfgp)
+
+    class Lease:
+        app_running = False
+        handed_over = False
+
+    @contextlib.contextmanager
+    def lease() -> Any:
+        yield Lease()
+
+    seen: dict[str, Any] = {}
+
+    def runner(devs: Any, **kw: Any) -> list[str]:
+        seen.update(kw)
+        return []
+
+    args = cli.build_parser().parse_args(["cameras", "diagnose", "--quick", "--config", str(cfgp)])
+    rc = cli.cmd_cameras_diagnose(args, lease_factory=lease, runner=runner, lister=lambda d: [_devs()[0]])
+    assert rc == 0 and seen.get("quick") is True and len(calls) == 1
+
+
+# ===================================================================================== 4. CodeRabbit follow-ups
+def test_failed_job_result_carries_elapsed_s_and_budget_hit(tmp_path: Path) -> None:
+    """CodeRabbit: the result contract (elapsed_s, budget_hit) holds on the failure path too."""
+
+    def boom() -> dict[str, Any]:
+        raise RuntimeError("nope")
+
+    r = jobs.JobRunner(tmp_path / "diag", command=lambda a: ["away", *a], bench=boom)
+    job = r.start("benchmark")
+    _wait_done(r, job.id)
+    assert job.state == "failed"
+    res = r.lookup(job.id).public()["result"]
+    assert res["budget_hit"] is False and res["elapsed_s"] >= 0.0
+
+
+def test_quick_winrt_reports_when_the_remembered_mode_is_not_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeRabbit: match the whole remembered mode (size, FOURCC, rounded fps); never probe a substitute."""
+    from away.multicam.winrt_capture import NativeFormat
+
+    clock = Clock()
+    opened: list[Any] = []
+
+    def winrt_open(name: str, f: Any, occ: int) -> Any:
+        opened.append((name, f))
+        raise AssertionError("must not open a substitute mode")
+
+    kw = {k: v for k, v in _quick_kw(clock).items() if k != "winrt_available"}
+    # wrong size: 1280x720 remembered, only 640x480 offered
+    _remembered(monkeypatch, {"JoyCam": ("WinRT", CaptureMode(1280, 720, 30, "MJPG"))})
+    lines = diagnose.run_diagnose(
+        [_devs()[0]],
+        cv2=FakeCV2({}, clock),
+        out=lambda m: None,
+        winrt_available=lambda: (True, ""),
+        winrt_formats=lambda n, o: ([NativeFormat(640, 480, 30, "MJPG", 0)], ""),
+        winrt_open=winrt_open,
+        **kw,
+    )
+    assert "remembered mode 1280x720@30 MJPG is not offered by this camera now" in "\n".join(lines)
+    # same size and FOURCC but 15 fps: not the remembered 30 fps mode
+    _remembered(monkeypatch, {"JoyCam": ("WinRT", CaptureMode(640, 480, 30, "MJPG"))})
+    lines = diagnose.run_diagnose(
+        [_devs()[0]],
+        cv2=FakeCV2({}, clock),
+        out=lambda m: None,
+        winrt_available=lambda: (True, ""),
+        winrt_formats=lambda n, o: ([NativeFormat(640, 480, 15, "MJPG", 0)], ""),
+        winrt_open=winrt_open,
+        **kw,
+    )
+    assert "remembered mode 640x480@30 MJPG is not offered by this camera now" in "\n".join(lines)
+    assert not opened
+
+
+def test_quick_probe_past_the_budget_marks_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeRabbit: a single probe can run past budget_s; the run must still say so (budget_hit)."""
+
+    class SlowCap(FakeCap):
+        def read(self) -> tuple[bool, Any]:
+            self.cv2.clock.t += 120.0  # this probe takes forever
+            return super().read()
+
+    class SlowCV2(FakeCV2):
+        def VideoCapture(self, src: Any, api: Any = None) -> SlowCap:
+            return SlowCap(self, src, api)
+
+    clock = Clock()
+    cv2 = SlowCV2({(0, DSHOW): (True, 30.0)}, clock)
+    _remembered(monkeypatch, {"JoyCam": ("DirectShow", CaptureMode(640, 480, 30, "MJPG"))})
+    kw = dict(_quick_kw(clock))
+    kw["budget_s"] = 60.0
+    lines = diagnose.run_diagnose([_devs()[0]], cv2=cv2, out=lambda m: None, **kw)
+    assert lines[-1].startswith("stopped after 60 s (time limit)")

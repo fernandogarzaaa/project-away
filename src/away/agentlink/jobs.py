@@ -229,6 +229,9 @@ class JobRunner:
             job.state = "done"
         except Exception as exc:
             job.output.append(f"failed: {exc}")
+            # v0.1.28: the result contract holds on the failure path too (CodeRabbit)
+            job.result["elapsed_s"] = round(self.clock() - t0, 1)
+            job.result["budget_hit"] = budget_hit
             job.finished = self.clock()
             job.state = "failed"
 
