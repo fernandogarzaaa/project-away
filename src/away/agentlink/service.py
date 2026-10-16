@@ -44,7 +44,7 @@ EVENT_TOPICS = (
     "notify",
     "user.message",  # v0.1.22: the person spoke to you (only the agents it was sent to see it)
     "inbox",
-    "selftest",  # v0.1.24: selftest.completed (the report reached every connected agent)
+    "selftest",  # v0.1.27: selftest.completed (report delivery; the app's share_logs audience skips the stream)
     "link",  # v0.1.24: link.moved (the public address changed)
 )
 MAX_RECORD_S = 120.0
@@ -375,9 +375,9 @@ class Service:
         return self.jobs.lookup(key).public()
 
     def run_selftest(self, agent: Agent, wait: bool = False, only: Any = None) -> dict[str, Any]:
-        """v0.1.24: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
-        The report goes to *every* connected agent (inbox, wake-up address, event selftest.completed) and is
-        readable as away://selftest/latest. ``wait``: block until it is done (at most 3 minutes) and return it."""
+        """v0.1.27: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
+        The report is pushed to the agents the person let "Share my logs and recordings" (inbox, wake-up address)
+        and is readable as away://selftest/latest. ``wait``: block until it is done (3 minutes at most)."""
         self.require(agent, perms.DIAGNOSE)
         st = self.selftest
         if st is None:
@@ -388,7 +388,10 @@ class Service:
         try:
             started = st.start(trigger=agent.name, only=checks)
         except Busy:
-            started = {"state": "running", "note": "a self-test was already running; its report will reach you too"}
+            started = {
+                "state": "running",
+                "note": "a self-test was already running; its report goes to the agents allowed to see it",
+            }
         if not wait:
             return started
         st.wait(180.0)
