@@ -176,6 +176,8 @@ class Service:
         self.events = events or EventHub()
         self.started = time.time()
         self.captures: deque[Capture] = deque(maxlen=4)
+        # v0.1.28 "Recently": plain-language history of who looked through the camera or at the screen
+        self.capture_history: deque[dict[str, Any]] = deque(maxlen=20)
         self._record_lock = threading.Lock()
         self._watchers: set[str] = set()
         self.watching = watching
@@ -479,8 +481,10 @@ class Service:
             raise NotAvailable("no camera picture right now (is the camera running and not paused?)")
         from away.agentlink.desktop import to_jpeg
 
-        self._flash(f"{agent.name} looked through your camera", "camera picture")
+        notice = f"{agent.name} looked through your camera"
+        self._flash(notice, "camera picture")
         jpeg, scale = to_jpeg(frame, int(self._s("snapshot_max_width", 320)), 60)
+        self._log_capture(notice)  # v0.1.28: only after the picture exists
         self.events.publish("look.taken", {"agent": agent.name})
         return jpeg, {"camera": camera or "primary", "scale": scale}
 
@@ -542,10 +546,12 @@ class Service:
             )
         except shot.ScreenRequestError as exc:
             raise ValueError(str(exc)) from None
+        notice = f"{agent.name} looked at your screen"
         if not quiet or agent.id not in self._watchers:
             # v0.1.24 hardening: "quiet" only skips the notice while this agent's live view badge is on screen
-            self._flash(f"{agent.name} looked at your screen", "screenshot")
+            self._flash(notice, "screenshot")
         jpeg = shot.render(img, p)
+        self._log_capture(notice)  # v0.1.28: after the picture exists; the badge is the indicator for quiet views
         self.control.scales[agent.id] = p.scale
         self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
         meta: dict[str, Any] = shot.meta(p, ds, len(jpeg))
@@ -638,13 +644,24 @@ class Service:
                 f"the {what} was not taken because the on-screen notice that tells the person could not be shown"
             )
 
+    def _log_capture(self, text: str) -> None:
+        """v0.1.28 "Recently": the history entry for a capture. Called only after the image is made, so the
+        history can never claim a capture that was refused (no notice, so no capture) or that failed before a
+        picture existed. The live-view badge counts as the visible indicator for badge-backed captures."""
+        self.capture_history.append({"text": text, "t": time.time()})
+
     def user_capture(self, kind: str, jpeg: bytes, meta: dict[str, Any]) -> Capture:
         """The user pushed a capture to their agents ("hey agent, look" / the summon gesture)."""
         import uuid
 
         c = Capture(uuid.uuid4().hex[:8], time.time(), kind, jpeg, meta)
         self.captures.append(c)
+        self._log_capture(f"You sent a {kind} picture to your agents")  # v0.1.28 "Recently"
         return c
+
+    def capture_feed(self, limit: int = 10) -> list[dict[str, Any]]:
+        """v0.1.28 "Recently": who looked through the camera or at the screen, newest first."""
+        return list(reversed(self.capture_history))[: max(0, limit)]
 
     def last_capture(self, agent: Agent) -> tuple[bytes, dict[str, Any]]:
         for c in reversed(self.captures):
