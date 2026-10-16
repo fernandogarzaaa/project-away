@@ -112,7 +112,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "get_preferences": ("json", "GET", "/v1/preferences", "Preference notes"),
     "add_preference": ("json", "POST", "/v1/preferences", "Add a preference {text} (tune)"),
     "remove_preference": ("json", "POST", "/v1/preferences/remove", "Remove preference {number} (tune)"),
-    "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds} (diagnose)"),
+    "run_diagnose": ("json", "POST", "/v1/diagnose", "Start a check {kind, device, seconds, quick} (diagnose)"),
     "get_job": ("json", "GET", "/v1/jobs", "A check's state (?job_id=) (diagnose)"),
     "record_session": ("json", "POST", "/v1/record", "Record landmarks {seconds, note} (share_logs)"),
     "run_selftest": (
@@ -144,12 +144,6 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "resume_control": ("json", "POST", "/v1/control/resume", "Ask to continue after a takeover (control)"),
     "stop_control": ("json", "POST", "/v1/control/stop", "Stop using the computer"),
     "act": ("json", "POST", "/v1/control/act", "{action: move|click|...|open_url, ...} (control)"),
-    "act_sequence": (
-        "json",
-        "POST",
-        "/v1/control/sequence",
-        "Run several actions as one call {steps: [{action: move|click|...|open_url, ...}]} (control)",
-    ),
     "undo_last_action": ("json", "POST", "/v1/control/undo", "Undo the last undoable action (control)"),
     "action_log": ("json", "GET", "/v1/control/log", "Your own computer actions"),
     "disconnect": ("json", "POST", "/v1/disconnect", "Disconnect this agent"),

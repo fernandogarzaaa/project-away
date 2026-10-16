@@ -405,7 +405,7 @@ def test_job_round_trips_by_int_and_string_and_expires(tmp_path: Path) -> None:
     _wait_done(r, job.id)
     r.jobs["82557239"] = r.jobs.pop(job.id)
     r.jobs["82557239"].id = "82557239"
-    assert r.lookup(82557239).public()["result"] == {"x_ms": 1.0}
+    assert r.lookup(82557239).public()["result"] == {"x_ms": 1.0, "elapsed_s": 0.0, "budget_hit": False}
     assert r.lookup("82557239").state == "done" and r.jobs["82557239"].fetched
     with pytest.raises(jobs.JobLookupError) as e:
         r.lookup("deadbeef")

@@ -13,7 +13,6 @@ import contextlib
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
 from away.multicam import capture
@@ -21,79 +20,12 @@ from away.multicam.capture import CameraDevice, CaptureMode
 
 BACKENDS = ("dshow", "msmf", "winrt")
 BACKEND_LABELS = {"dshow": "DirectShow", "msmf": "Media Foundation", "winrt": "WinRT", "default": "default"}
+# v0.1.28: the backend labels the mode file remembers (capture.saved_modes) back to diagnose's short names.
+REMEMBERED_BACKENDS = {v: k for k, v in BACKEND_LABELS.items()}
 MEASURE_S = 1.0  # frames are counted this long per mode
 FIRST_FRAME_S = 3.0
 MAX_WINRT_FORMATS = 6  # native formats opened per camera (all of them are listed)
 BUDGET_S = 60.0  # v0.1.22: the whole diagnosis stops after this long (it ran for minutes on the user's PC)
-
-# (proposal #10): the CLI prints one line starting with this marker followed by the JSON of
-# DiagnoseReport.result, so ``away.agentlink.jobs`` can lift the structured per-camera results out of the
-# subprocess output and into the job's ``result`` for agents/MCP (the prose lines stay for the Settings UI).
-RESULT_MARKER = "AWAY-DIAGNOSE-JSON:"
-
-# (proposal #10): verdict heuristics over the collected backend errors, in plain priority order.
-# "Element not found" (0x80070490) is what WinRT reports for the user's broken internal camera (a driver
-# problem); "not listed by Media Foundation" means the driver does not present the device at all.
-_DRIVER_RE = re.compile(r"element not found|not listed by media foundation|could not initialise", re.IGNORECASE)
-_PRIVACY_RE = re.compile(r"access is denied|privacy", re.IGNORECASE)
-
-
-@dataclass
-class DiagnoseReport:
-    """(proposal #10): what :func:`run_diagnose` found. ``lines`` is the prose for the Settings UI and
-    the CLI; ``result`` is the structured form for agents/MCP::
-
-        {"cameras": [{"name": ..., "enumerated_by": ...,
-                      "backends": {"dshow": {"opened": bool, "fps": float | None, "error": str | None}, ...},
-                      "driver": {"status": str, "config_error": str | None},  # minimal; #9's driver-state
-                      "holder": str | None,                                   # helper will enrich this
-                      "verdict": "ok" | "driver" | "held" | "privacy" | "unknown"},
-                     ...],
-         "stopped": bool}
-
-    ``enumerated_by`` is where the camera list came from (v4l2 | dshow | wmi | system_profiler | probe).
-    Everything in ``result`` is JSON-serializable."""
-
-    lines: list[str] = field(default_factory=list)
-    result: dict[str, Any] = field(default_factory=lambda: {"cameras": [], "stopped": False})
-
-
-def _new_backend() -> dict[str, Any]:
-    return {"opened": False, "fps": None, "error": None}
-
-
-def _verdict(cam: dict[str, Any]) -> str:
-    """One word for agents: a camera that delivered frames is ``ok``; otherwise the best guess at why not."""
-    backends = cam.get("backends") or {}
-    if any((b.get("fps") or 0) > 0 for b in backends.values()):
-        return "ok"
-    if cam.get("holder"):
-        return "held"
-    errors = " ".join(str(b.get("error") or "") for b in backends.values())
-    if _PRIVACY_RE.search(errors):
-        return "privacy"
-    if _DRIVER_RE.search(errors):
-        return "driver"
-    return "unknown"
-
-
-def _finish_camera(cam: dict[str, Any]) -> dict[str, Any]:
-    """Fill in ``verdict`` and the minimal ``driver`` field once every backend was probed (#9 enriches
-    ``driver`` with its driver-state helper; the shape stays ``{"status", "config_error"}``). For a driver
-    verdict ``config_error`` is the error that looks driver-shaped ("Element not found" tells an agent more
-    than "did not open"); otherwise the first error seen."""
-    cam["verdict"] = _verdict(cam)
-    errors = [b.get("error") for b in cam["backends"].values() if b.get("error")]
-    if cam["verdict"] == "ok":
-        cam["driver"] = {"status": "ok", "config_error": None}
-    elif cam["verdict"] == "driver":
-        shaped = [e for e in errors if _DRIVER_RE.search(str(e))]
-        picked = next((e for e in shaped if _SPECIFIC_RE.search(str(e))), None)
-        picked = picked or (shaped[0] if shaped else (errors[0] if errors else None))
-        cam["driver"] = {"status": "error", "config_error": picked}
-    else:
-        cam["driver"] = {"status": "unknown", "config_error": errors[0] if errors else None}
-    return cam
 
 
 def diagnose_modes(width: int = 640, height: int = 480, fps: int = 30) -> list[CaptureMode]:
@@ -159,6 +91,91 @@ def speed_verdict(fps: float | None) -> str:
     return " - too slow for tracking"
 
 
+def _quick_probe(
+    dev: CameraDevice,
+    devices: Sequence[CameraDevice],
+    emit: Callable[[str], None],
+    width: int,
+    height: int,
+    fps: int,
+    measure_s: float,
+    cv2: Any,
+    winrt_available: Callable[[], tuple[bool, str]] | None,
+    winrt_formats: Callable[[str, int], tuple[list[Any], str]] | None,
+    winrt_open: Callable[[str, Any, int], Any] | None,
+    msmf_lister: Callable[[], list[tuple[str, str]] | None] | None,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Any],
+) -> None:
+    """v0.1.28: quick triage for one camera: open it on its remembered backend in its remembered mode only,
+    skipping the mode sweep. A camera with no remembered mode needs a full check once first (that is what
+    records the backend and mode in the mode file)."""
+    remembered = capture.saved_modes().get(dev.name)
+    if remembered is None:
+        emit("  quick: no remembered backend for this camera; run a full check once to record one")
+        return
+    label, mode = remembered
+    b = REMEMBERED_BACKENDS.get(label, label)
+    info = capture.saved_mode_info().get(dev.name, {})
+    remembered_fps = info.get("fps")
+    fps_txt = f" (remembered {remembered_fps:.1f} fps)" if isinstance(remembered_fps, (int, float)) else ""
+    emit(f"  quick: remembered {label} {mode.describe()}{fps_txt}")
+    if b == "winrt":
+        from away.multicam import winrt_capture
+
+        ok, why = (winrt_available or winrt_capture.available)()
+        if not ok:
+            emit(f"  WinRT: unavailable ({why})")
+            return
+        same = [d for d in devices if d.name.lower() == dev.name.lower()]
+        occurrence = next((j for j, d in enumerate(same) if d is dev), 0)
+        formats, err = (winrt_formats or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
+        if err and not formats:
+            emit(f"  WinRT: {err}")
+            return
+        match = next(
+            (f for f in formats if f.width == mode.width and f.height == mode.height and f.fourcc() == mode.fourcc),
+            None,
+        )
+        picked = [match] if match is not None else winrt_candidates(formats, width, height, fps, 1)
+        _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats, winrt_open,
+               1, clock, sleep, formats_override=(picked, ""))  # fmt: skip
+        return
+    if cv2 is None:
+        emit("  quick: skipped (OpenCV not installed)")
+        return
+    where = dev.index if dev.index is not None else dev.path
+    src: int | str | None = where
+    api: Any = None
+    if b == "dshow":
+        api = getattr(cv2, "CAP_DSHOW", None)
+    elif b == "msmf":
+        api = getattr(cv2, "CAP_MSMF", None)
+        if isinstance(where, int):
+            src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
+        if src is None:
+            emit("  Media Foundation: not listed by Media Foundation")
+            return
+    emit(f"  {BACKEND_LABELS.get(b, b)} (index {src}): quick check of the remembered mode")
+    try:
+        cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+    except Exception as exc:
+        emit(f"    {mode.describe()}: error {exc}")
+        return
+    try:
+        if not cap.isOpened():
+            emit(f"    {mode.describe()}: did not open")
+            return
+        capture.apply_mode(cap, mode, cv2, repr(dev.name))
+        _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
+        emit(f"    {mode.describe()}: {text}")
+    except Exception as exc:
+        emit(f"    {mode.describe()}: error {exc}")
+    finally:
+        with contextlib.suppress(Exception):
+            cap.release()
+
+
 def run_diagnose(
     devices: Sequence[CameraDevice],
     *,
@@ -179,15 +196,15 @@ def run_diagnose(
     sleep: Callable[[float], Any] = time.sleep,
     budget_s: float | None = BUDGET_S,
     include_virtual: bool = False,
-    enumerated_by: str | None = None,
-) -> DiagnoseReport:
+    quick: bool = False,
+) -> list[str]:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
-    (Settings shows them while the diagnosis runs) and the :class:`DiagnoseReport` holds both the prose
-    ``lines`` (Settings UI, CLI) and the structured ``result`` dict per camera (agents/MCP, proposal #10).
+    (Settings shows them while the diagnosis runs) and all of them are returned.
 
     v0.1.22: virtual cameras (NVIDIA Broadcast, OBS...) are skipped unless ``include_virtual`` (or the camera was
     named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so.
-    ``enumerated_by`` names where ``devices`` came from; it defaults to ``capture.last_source``."""
+    v0.1.28: ``quick`` opens each camera on its remembered backend in its remembered mode only (no mode sweep),
+    for a fast triage answer; a camera with no remembered mode needs a full check once first."""
     lines: list[str] = []
     say = out or (lambda _m: None)
     started = clock()
@@ -207,12 +224,10 @@ def run_diagnose(
         except ImportError:
             emit("OpenCV is not installed (pip install 'project-away[hands]'); only WinRT can be checked")
     use = list(backends or (BACKENDS if win else ("default",)))
-    source = enumerated_by or getattr(capture, "last_source", "") or "unknown"
     if not devices:
         emit("no cameras found")
-        return DiagnoseReport(lines, {"cameras": [], "stopped": False})
+        return lines
     stopped = False
-    cams: list[dict[str, Any]] = []
     for dev in devices:
         where = dev.index if dev.index is not None else dev.path
         if dev.virtual and not include_virtual and len(devices) > 1:
@@ -222,80 +237,75 @@ def run_diagnose(
             stopped = True
             break
         emit(f"camera {where}: {dev.name}" + (" (virtual)" if dev.virtual else ""))
-        cam: dict[str, Any] = {
-            "name": dev.name,
-            "enumerated_by": source,
-            "backends": {},
-            "driver": {"status": "unknown", "config_error": None},
-            "holder": "Project Away" if dev.in_use else None,
-            "verdict": "unknown",
-        }
-        for b in use:
-            if over():
-                stopped = True
-                break
-            label = BACKEND_LABELS.get(b, b)
-            if b == "winrt":
-                cam["backends"][b] = _winrt(dev, devices, emit, width, height, fps, measure_s, cv2,
-                                           winrt_available, winrt_formats, winrt_open, max_winrt_formats,
-                                           clock, sleep)  # fmt: skip
-                continue
-            rec = _new_backend()
-            cam["backends"][b] = rec
-            if cv2 is None:
-                emit(f"  {label}: skipped (OpenCV not installed)")
-                rec["error"] = "skipped (OpenCV not installed)"
-                continue
-            src: int | str | None = where
-            api: Any = None
-            if b == "dshow":
-                api = getattr(cv2, "CAP_DSHOW", None)
-            elif b == "msmf":
-                api = getattr(cv2, "CAP_MSMF", None)
-                if isinstance(where, int):
-                    src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
-                if src is None:
-                    emit(f"  {label}: not listed by Media Foundation")
-                    rec["error"] = "not listed by Media Foundation"
-                    continue
-            emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
-            best: tuple[float, str] | None = None
-            for mode in diagnose_modes(width, height, fps):
+        if quick:
+            _quick_probe(
+                dev,
+                devices,
+                emit,
+                width,
+                height,
+                fps,
+                measure_s,
+                cv2,
+                winrt_available,
+                winrt_formats,
+                winrt_open,
+                msmf_lister,
+                clock,
+                sleep,
+            )
+        else:
+            for b in use:
                 if over():
                     stopped = True
                     break
-                try:
-                    cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
-                except Exception as exc:
-                    emit(f"    {mode.describe()}: error {exc}")
-                    rec["error"] = rec["error"] or f"error {exc}"
-                    break
-                try:
-                    if not cap.isOpened():
-                        emit(f"    {mode.describe()}: did not open (skipping this backend's other modes)")
-                        rec["error"] = rec["error"] or "did not open"
+                label = BACKEND_LABELS.get(b, b)
+                if b == "winrt":
+                    _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
+                           winrt_open, max_winrt_formats, clock, sleep)  # fmt: skip
+                    continue
+                if cv2 is None:
+                    emit(f"  {label}: skipped (OpenCV not installed)")
+                    continue
+                src: int | str | None = where
+                api: Any = None
+                if b == "dshow":
+                    api = getattr(cv2, "CAP_DSHOW", None)
+                elif b == "msmf":
+                    api = getattr(cv2, "CAP_MSMF", None)
+                    if isinstance(where, int):
+                        src = capture.msmf_index(where, dev, list(devices), repr(dev.name), msmf_lister)
+                    if src is None:
+                        emit(f"  {label}: not listed by Media Foundation")
+                        continue
+                emit(f"  {label} (index {src}): OpenCV cannot list this backend's formats; trying common modes")
+                best: tuple[float, str] | None = None
+                for mode in diagnose_modes(width, height, fps):
+                    if over():
+                        stopped = True
                         break
-                    rec["opened"] = True
-                    capture.apply_mode(cap, mode, cv2, repr(dev.name))
-                    _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
-                    emit(f"    {mode.describe()}: {text}")
-                    rate = _rate_of(text)
-                    if _ok and rate is not None:
-                        rec["error"] = None
-                        if best is None or rate > best[0]:
+                    try:
+                        cap = cv2.VideoCapture(src) if api is None else cv2.VideoCapture(src, api)
+                    except Exception as exc:
+                        emit(f"    {mode.describe()}: error {exc}")
+                        break
+                    try:
+                        if not cap.isOpened():
+                            emit(f"    {mode.describe()}: did not open (skipping this backend's other modes)")
+                            break
+                        capture.apply_mode(cap, mode, cv2, repr(dev.name))
+                        _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
+                        emit(f"    {mode.describe()}: {text}")
+                        rate = _rate_of(text)
+                        if _ok and rate is not None and (best is None or rate > best[0]):
                             best = (rate, mode.describe())
-                    else:
-                        rec["error"] = rec["error"] or "opened, but no frames"
-                except Exception as exc:
-                    emit(f"    {mode.describe()}: error {exc}")
-                    rec["error"] = rec["error"] or f"error {exc}"
-                finally:
-                    with contextlib.suppress(Exception):
-                        cap.release()
-            if best is not None:
-                rec["fps"] = round(best[0], 1)
-                emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
-        cams.append(_finish_camera(cam))
+                    except Exception as exc:
+                        emit(f"    {mode.describe()}: error {exc}")
+                    finally:
+                        with contextlib.suppress(Exception):
+                            cap.release()
+                if best is not None:
+                    emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
         saved = capture.saved_mode_info().get(dev.name)
         modes = capture.saved_modes().get(dev.name)
         if modes is not None:
@@ -309,7 +319,7 @@ def run_diagnose(
             f"stopped after {budget:g} s (time limit) - the cameras checked so far are above; "
             "name one camera to check just that one"
         )
-    return DiagnoseReport(lines, {"cameras": cams, "stopped": stopped})
+    return lines
 
 
 def _rate_of(text: str) -> float | None:
@@ -334,28 +344,26 @@ def _winrt(
     limit: int,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
-) -> dict[str, Any]:
-    """The WinRT backend probe; also emits the prose lines. Returns the per-backend record for
-    :class:`DiagnoseReport` (proposal #10)."""
+    formats_override: tuple[list[Any], str] | None = None,
+) -> None:
     from away.multicam import winrt_capture
 
-    rec = _new_backend()
     ok, why = (available or winrt_capture.available)()
     if not ok:
         emit(f"  WinRT: unavailable ({why})")
-        rec["error"] = f"unavailable: {why}"
-        return rec
+        return
     same = [d for d in devices if d.name.lower() == dev.name.lower()]
     occurrence = next((j for j, d in enumerate(same) if d is dev), 0)
-    formats, err = (formats_of or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
+    if formats_override is not None:
+        formats, err = formats_override  # v0.1.28: quick triage picks the remembered native format first
+    else:
+        formats, err = (formats_of or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
     if err and not formats:
         emit(f"  WinRT: {err}")
-        rec["error"] = err
-        return rec
+        return
     emit(f"  WinRT: {len(formats)} native formats: " + (", ".join(f.describe() for f in formats) or "none"))
     if not formats:
-        rec["error"] = err or "no native formats"
-        return rec
+        return
 
     def default_open(name: str, f: Any, occ: int) -> Any:
         return winrt_capture.WinrtCapture(
@@ -367,36 +375,19 @@ def _winrt(
             cap = (opener or default_open)(dev.name, f, occurrence)
         except Exception as exc:
             emit(f"    {f.describe()}: error {exc}")
-            rec["error"] = rec["error"] or f"error {exc}"
             continue
         try:
             if not cap.isOpened():
-                reason = getattr(cap, "error", "") or "no reason given"
-                emit(f"    {f.describe()}: did not open ({reason})")
-                rec["error"] = rec["error"] or f"did not open ({reason})"
+                emit(f"    {f.describe()}: did not open ({getattr(cap, 'error', '') or 'no reason given'})")
                 continue
-            rec["opened"] = True
             _ok, text = _probe(cap, None, None, measure_s, clock, sleep)
             emit(f"    {f.describe()}: {text}")
-            rate = _rate_of(text)
-            if _ok and rate is not None:
-                rec["error"] = None
-                if rec["fps"] is None or rate > rec["fps"]:
-                    rec["fps"] = round(rate, 1)
-            else:
-                rec["error"] = rec["error"] or "opened, but no frames"
         finally:
             with contextlib.suppress(Exception):
                 cap.release()
-    return rec
 
 
 # ------------------------------------------------------------------------------------------- driver noise
-# (proposal #10): among driver-shaped errors, one that names an OS error ("Element not found", 0x80070490)
-# tells an agent more than "not listed by Media Foundation", so it wins ``config_error``.
-_SPECIFIC_RE = re.compile(r"element not found|0x[0-9a-f]{4,}", re.IGNORECASE)
-
-
 # v0.1.22: NVIDIA Broadcast's virtual camera driver writes "[VCAMDS] ..." lines to stderr every time a camera is
 # opened, flooding the report. These patterns are camera-driver / OpenCV chatter, not results.
 NOISE_PATTERNS = (

@@ -137,6 +137,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         kind: str | None = None,
         device: str | None = None,
         seconds: float | None = None,
+        quick: bool | None = None,
         job_id: str | None = None,
         note: str | None = None,
         path: str | None = None,
@@ -147,16 +148,10 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Find out what is wrong. run/job need "Run camera and speed checks"; record, bundle, files, download
         and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
-          `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
+          `device`; `quick`=true opens each camera on its remembered backend only and skips the mode sweep, a
+          fast triage answer), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns
+          a job id. Every check's result carries `elapsed_s` and `budget_hit` (whether a time limit stopped it).
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
-          A finished "cameras" check also carries `result.cameras`, one structured dict per camera: `name`,
-          `enumerated_by` (v4l2|dshow|wmi|system_profiler|probe), `backends` (per backend id: `opened` bool,
-          `fps` measured best or null, `error` text or null), `driver` (`status` ok|error|unknown and
-          `config_error`; minimal until proposal #9's driver-state helper lands), `holder` (who else holds it,
-          or null), and `verdict` (ok = frames flowed; driver = driver/config problem, e.g. "Element not
-          found"; held = another app holds it; privacy = OS privacy blocked it; unknown = could not tell).
-          `result.stopped` is true when the time budget cut the check short. Prefer this over parsing the
-          prose `output`.
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
@@ -176,6 +171,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             kind=kind,
             device=device,
             seconds=seconds,
+            quick=quick,
             job_id=job_id,
             note=note,
             lines=lines,
