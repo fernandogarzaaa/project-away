@@ -167,6 +167,16 @@ def test_split_fix_marker() -> None:
     assert action is None and text == "a plain line"
 
 
+def test_wired_fix_target_exists_in_open_targets() -> None:
+    from away.selftest import fixes
+
+    assert diagnose.PRIVACY_FIX == "open:camera_privacy"
+    kind, _, target = diagnose.PRIVACY_FIX.partition(":")
+    assert kind == "open" and target in fixes.OPEN_TARGETS  # the marker's button resolves to a real fix
+    res = fixes.apply(diagnose.PRIVACY_FIX)
+    assert res["ok"] and "privacy" in str(res["message"]).lower()
+
+
 # ---------------------------------------------------------------------------- wired into diagnose
 def test_diagnose_reports_privacy_first() -> None:
     lines = run(one_camera(), True, consent=lambda: "Deny")

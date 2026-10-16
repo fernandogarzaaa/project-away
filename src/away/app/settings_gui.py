@@ -2603,6 +2603,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_out.pack(side="left", fill="both", expand=True)
         self._cam_diag_q: queue.Queue[Any] = queue.Queue()
         self._cam_diag_thread: threading.Thread | None = None
+        self._cam_fix_q: queue.Queue[Any] = queue.Queue()
+        self._cam_fix_thread: threading.Thread | None = None
         self._cam_q: queue.Queue[Any] = queue.Queue()
         self._cam_stop = threading.Event()
         self._cam_thread: threading.Thread | None = None
@@ -2710,25 +2712,39 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_fix_btn.pack_forget()
 
     def _cam_fix(self) -> None:
+        # v0.1.28: worker threads never touch Tk here (see test_no_worker_thread_touches_tk_directly):
+        # the fix runs in a thread, its result rides the queue, and the main thread polls it.
         from away.selftest import fixes
 
         action = self.cam_fix_action
         if not action:
             return
         self.cam_fix_btn.configure(state="disabled")
+        while not self._cam_fix_q.empty():  # a stale result from an earlier press is never shown
+            self._cam_fix_q.get_nowait()
+        self._cam_fix_thread = threading.Thread(
+            target=lambda: self._cam_fix_q.put(fixes.apply(action)),
+            daemon=True,
+            name="camera-diagnose-fix",
+        )
+        self._cam_fix_thread.start()
+        self.root.after(200, self._cam_fix_poll)
 
-        def work() -> None:
-            res = fixes.apply(action)
+    def _cam_fix_poll(self) -> None:
+        running = self._cam_fix_thread is not None and self._cam_fix_thread.is_alive()
+        res: dict[str, Any] | None = None
+        while not self._cam_fix_q.empty():
+            res = self._cam_fix_q.get_nowait()
+        if res is not None:
             ok = bool(res.get("ok"))
             message = str(res.get("message") or "Done.")
-
-            def done() -> None:
-                self._report(None if ok else message, message if ok else None)
-                self.cam_fix_btn.configure(state="normal")
-
-            self.root.after(0, done)
-
-        threading.Thread(target=work, daemon=True, name="camera-diagnose-fix").start()
+            self._report(None if ok else message, message if ok else None)
+            self.cam_fix_btn.configure(state="normal")
+            return
+        if running:
+            self.root.after(200, self._cam_fix_poll)
+        else:
+            self.cam_fix_btn.configure(state="normal")
 
     def _cam_selected(self) -> int | None:
         sel = self.cam_tree.selection()
