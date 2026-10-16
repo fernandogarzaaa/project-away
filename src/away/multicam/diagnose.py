@@ -133,13 +133,24 @@ def _quick_probe(
         if err and not formats:
             emit(f"  WinRT: {err}")
             return
+        # v0.1.28 (CodeRabbit): match the whole remembered mode (size, FOURCC, rounded fps); never probe a
+        # substitute mode and report it as the remembered one.
         match = next(
-            (f for f in formats if f.width == mode.width and f.height == mode.height and f.fourcc() == mode.fourcc),
+            (
+                f
+                for f in formats
+                if f.width == mode.width
+                and f.height == mode.height
+                and f.fourcc() == mode.fourcc
+                and round(float(f.fps or 0)) == int(mode.fps or 0)
+            ),
             None,
         )
-        picked = [match] if match is not None else winrt_candidates(formats, width, height, fps, 1)
+        if match is None:
+            emit(f"  WinRT: remembered mode {mode.describe()} is not offered by this camera now")
+            return
         _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats, winrt_open,
-               1, clock, sleep, formats_override=(picked, ""))  # fmt: skip
+               1, clock, sleep, formats_override=([match], ""))  # fmt: skip
         return
     if cv2 is None:
         emit("  quick: skipped (OpenCV not installed)")
@@ -254,6 +265,8 @@ def run_diagnose(
                 clock,
                 sleep,
             )
+            if over():  # v0.1.28 (CodeRabbit): a single probe can run past the budget too
+                stopped = True
         else:
             for b in use:
                 if over():
