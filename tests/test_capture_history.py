@@ -82,6 +82,41 @@ def test_refused_capture_is_not_logged(core) -> None:
     assert core.service.capture_feed() == []
 
 
+def test_failed_image_creation_is_not_logged(core, monkeypatch) -> None:
+    """CodeRabbit: _flash runs before to_jpeg; if the image operation fails the history must not claim the
+    agent looked, even though the transient notice already showed."""
+    import numpy as np
+
+    from away.agentlink import desktop
+
+    a, _ = core.registry.issue("Claude", ["read", "snapshots"], 3600)
+    core.frame["img"] = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def boom(_frame: object, _width: int, _quality: int) -> object:
+        raise RuntimeError("jpeg exploded")
+
+    monkeypatch.setattr(desktop, "to_jpeg", boom)
+    with pytest.raises(RuntimeError):
+        core.service.look(a)
+    assert core.flashes and "camera" in core.flashes[-1]  # the notice still showed first (the precondition)
+    assert core.service.capture_feed() == []
+
+
+def test_badge_backed_screen_capture_is_logged_without_a_second_notice(core) -> None:
+    """CodeRabbit: get_screen(quiet=True) for an agent with the live-view badge skips _flash; the screenshot
+    must still reach Recently (the badge is the visible indicator), without a second notice."""
+    from PIL import Image
+
+    core.service.screen_grab = lambda: Image.new("RGB", (1920, 1080))
+    a, _ = core.registry.issue("Claude", ["read", "screen"], 3600)
+    core.service.screen_watch(a, on=True)
+    n = len(core.flashes)
+    core.service.get_screen(a, quiet=True)
+    assert len(core.flashes) == n
+    feed = core.service.capture_feed()
+    assert len(feed) == 1 and feed[0]["text"] == "Claude looked at your screen"
+
+
 def test_user_capture_is_logged(core) -> None:
     core.service.user_capture("camera", b"jpeg", {})
     feed = core.service.capture_feed()
