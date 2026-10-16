@@ -44,7 +44,7 @@ from away.app import selftest
 from away.voice import speech, weak_speech
 from away.voice.weak_speech import confidence_of, is_filler, should_drop, weak_evidence
 
-GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools)
+GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17 tools)
     "inbox",
     "get_status",
     "get_context",
@@ -60,6 +60,7 @@ GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools)
     "pointer",
     "keyboard",
     "open",
+    "shell",
     "disconnect",
 }
 

@@ -358,6 +358,11 @@ class ComputerControl:
         return True
 
     # ---------------------------------------------------------------- acting
+    def require_grant(self, agent_id: str) -> Grant:
+        """The live, unpaused grant for this agent (raises ControlRefused otherwise): the approved-session
+        gate for tools that ride the computer-control session, like the staged shell."""
+        return self._require(agent_id)
+
     def _require(self, agent_id: str) -> Grant:
         g = self._check_expiry()
         if g is None:

@@ -146,6 +146,12 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "act": ("json", "POST", "/v1/control/act", "{action: move|click|...|open_url, ...} (control)"),
     "undo_last_action": ("json", "POST", "/v1/control/undo", "Undo the last undoable action (control)"),
     "action_log": ("json", "GET", "/v1/control/log", "Your own computer actions"),
+    "run_shell": (
+        "json",
+        "POST",
+        "/v1/shell",
+        "Run a PC command in safety tiers {action, command, argv, why} (control)",
+    ),
     "disconnect": ("json", "POST", "/v1/disconnect", "Disconnect this agent"),
 }
 
@@ -850,7 +856,8 @@ def openapi() -> dict[str, Any]:
             "title": "Project Away Agent Link",
             "version": __version__,
             "description": "The bridge between a person and their AI agents. Same tools as the MCP server; "
-            "same permissions. Never shell, never arbitrary files.",
+            "same permissions. Shell access is staged (a read-only allowlist, then per-call approval); "
+            "never arbitrary files.",
         },
         "components": {"securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}}},
         "security": [{"bearer": []}],

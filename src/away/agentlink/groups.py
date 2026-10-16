@@ -1,5 +1,7 @@
 """Grouped tools (v0.1.21): the MCP tool list went from 37 tools to 15, which an agent can reason over.
 
+v0.1.28: 17 tools (``shell`` added).
+
 Related tools became one tool with an ``action`` argument (``settings(action="change", ...)``,
 ``pointer(action="click", ...)``). Each group action maps to an existing service method, so nothing below the MCP
 layer changed: every REST route (``/v1/settings/change``...) and every ``/v1/rpc/<method>`` name still works, and
@@ -78,6 +80,11 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
     "open": {
         "app": GroupAction("act", ("name",), fixed={"action": "open_app"}),
         "url": GroupAction("act", ("url",), fixed={"action": "open_url"}),
+    },
+    "shell": {  # v0.1.28: staged shell (proposal #26)
+        "list": GroupAction("run_shell", (), fixed={"action": "list"}),
+        "run": GroupAction("run_shell", ("command", "argv", "why")),
+        "log": GroupAction("run_shell", ("limit",), fixed={"action": "log"}),
     },
 }
 
