@@ -68,6 +68,8 @@ __all__ = [
     "Grant",
     "LogEntry",
     "classify",
+    "describe_action",
+    "plain_end_reason",
 ]
 
 UNKNOWN_NOTE = "Project Away can't tell what is there, so it is asking first."
@@ -101,6 +103,55 @@ ACTIONS = (
 )
 
 
+def _target_label(detail: str) -> str:
+    """The quoted element name in an action detail like "(120, 300) 'OK'", or "" when there was none."""
+    m = re.search(r"'([^']{1,60})'", detail or "")
+    return m.group(1) if m else ""
+
+
+def describe_action(action: str, detail: str) -> str:
+    """Plain words for what the agent did (no jargon): the "what did the agent just do" receipt lists one of
+    these per action. ``detail`` is the raw detail string stored on the :class:`LogEntry`."""
+    detail = str(detail or "")
+    label = _target_label(detail)
+    if action == "move":
+        return "Moved the mouse"
+    if action == "click":
+        return f"Clicked on '{label}'" if label else f"Clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "double_click":
+        return f"Double-clicked '{label}'" if label else f"Double-clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "right_click":
+        return f"Right-clicked '{label}'" if label else f"Right-clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "drag":
+        return "Dragged something across the screen"
+    if action == "scroll":
+        return "Scrolled"
+    if action == "type_text":
+        n = detail.split(" ")[0] if detail else "0"
+        return f"Typed {n} characters"
+    if action == "press_keys":
+        return f"Pressed {detail}" if detail else "Pressed some keys"
+    if action == "open_app":
+        return f"Opened {detail}" if detail else "Opened an app"
+    if action == "open_url":
+        return f"Opened {detail}" if detail else "Opened a link"
+    return detail or action
+
+
+PLAIN_END_REASONS = {
+    "expired": "its time ran out",
+    "stopped": "you stopped it",
+    "you pressed Stop": "you pressed Stop",
+    "the user chose to stop": "you chose to stop it",
+    "the agent was disconnected": "the agent disconnected",
+}
+
+
+def plain_end_reason(reason: str) -> str:
+    """Plain words for why a control grant ended (proposal #17 receipts)."""
+    return PLAIN_END_REASONS.get(reason, str(reason or ""))
+
+
 class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
 
@@ -117,6 +168,8 @@ class Grant:
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
+    # proposal #17: id of the newest log entry when the grant started; the receipt lists what came after it
+    last_log_id: str = ""
 
 
 # The grant was paused or ended while an action was running (the engine's cancellation).
@@ -270,6 +323,7 @@ class ComputerControl:
         with self._lock:
             now = self.clock()
             self.grant = Grant(agent_id, agent_name, now, now + ttl)
+            self.grant.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
             self._grace_until = now + GRACE_S
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(agent_name)
@@ -311,10 +365,57 @@ class ComputerControl:
             if g is not None:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
+        receipt = self.receipt(g) if g is not None else None
         if g is not None:
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
+            if receipt is not None:  # proposal #17: "what did the agent just do"
+                self._emit("control.receipt", receipt)
+
+    def receipt(self, g: Grant) -> dict[str, Any]:
+        """Build the "what did the agent just do" receipt for a grant that just ended: one plain-language line
+        per action this grant ran (the existing ``actions()`` log with the existing thumbnails), plus whether
+        anything can still be put back. The app shows it as a toast plus one dialog with an "Undo all" button."""
+        with self._lock:
+            rows = [e for e in self.log if e.agent_id == g.agent_id]
+        if g.last_log_id:  # only what this grant did (the log keeps the agent's older actions too)
+            idx = next((i + 1 for i, e in enumerate(rows) if e.id == g.last_log_id), 0)
+            rows = rows[idx:]
+        items = []
+        for e in rows:
+            text = describe_action(e.action, e.detail)
+            if e.result == "stopped":
+                text += " (stopped part-way)"
+            elif e.result == "undone":
+                text += " (you already put this back)"
+            items.append(
+                {
+                    "id": e.id,
+                    "ts": e.ts,
+                    "text": text,
+                    "thumb": e.thumb,  # file name in the action log folder (PNG)
+                    "undoable": e.undo is not None and e.result == "done",
+                }
+            )
+        n = len(items)
+        headline = (
+            f"{g.agent_name} did {n} thing{'s' if n != 1 else ''}."
+            if n
+            else (f"{g.agent_name} did not do anything this time.")
+        )
+        return {
+            "agent": g.agent_name,
+            "agent_id": g.agent_id,
+            "reason": g.ended,
+            "ended": plain_end_reason(g.ended),  # plain words for "why it ended"
+            "title": f"{g.agent_name} finished using your computer",
+            "headline": headline,
+            "count": n,
+            "items": items,
+            "undoable": any(i["undoable"] for i in items),
+            "log_folder": str(self.log_folder) if self.log_folder else "",
+        }
 
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
@@ -739,6 +840,19 @@ class ComputerControl:
     def undo_last_by_user(self) -> dict[str, Any]:
         """The person pressed Undo in Agent Link (no grant needed: it is their own input)."""
         return self._undo(None)
+
+    def undo_all_by_user(self) -> dict[str, Any]:
+        """The person pressed "Undo all" on a consent receipt (proposal #17): put back every action that can be
+        put back (cursor moves, scrolls, typed text). No grant needed: it is their own input. Clicks and key
+        presses can't be put back."""
+        undone: list[str] = []
+        while True:
+            try:
+                r = self._undo(None)
+            except ControlRefused:
+                break
+            undone.append(describe_action(r["undone"], r["detail"]))
+        return {"undone": undone, "count": len(undone)}
 
     def _undo(self, agent_id: str | None) -> dict[str, Any]:
         with self._lock:

@@ -516,6 +516,40 @@ class SubprocessUI:  # pragma: no cover - starts GUI processes; smoke-tested und
             raise RuntimeError(f"could not open the on-screen border: {self.last_spawn_error}")
         return proc
 
+    def receipt(self, spec: dict[str, Any]) -> Path | None:
+        """The consent receipt window (proposal #17): ``away agent-ui receipt <spec>`` in its own process. The
+        spec's ``id`` names the spec, answer and done files (like a prompt). Returns the spec path, or None when
+        the window could not be started."""
+        rid = str(spec.get("id") or uuid.uuid4().hex[:8])
+        spec = {**spec, "id": rid}
+        p = self.folder / f"{rid}.json"
+        p.write_text(json.dumps(spec), encoding="utf-8")
+        proc = self._spawn(["agent-ui", "receipt", str(p)])
+        if proc is None:
+            with contextlib.suppress(OSError):
+                p.unlink(missing_ok=True)
+            return None
+        self.procs[rid] = proc
+        return p
+
+    def receipt_answer(self, rid: str) -> str | None:
+        """What the receipt window answered ("undo_all" or "close"), once; None while it is still open."""
+        ans = self.folder / f"{rid}.answer.json"
+        if not ans.exists():
+            return None
+        try:
+            data = json.loads(ans.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        ans.unlink(missing_ok=True)
+        return str(data.get("answer")) if data.get("answer") is not None else None
+
+    def receipt_close(self, rid: str) -> None:
+        """Close the receipt window (the app writes ``<id>.done``) and clean up its files."""
+        (self.folder / f"{rid}.done").write_text("", encoding="utf-8")
+        for suffix in (".json", ".answer.json"):
+            (self.folder / f"{rid}{suffix}").unlink(missing_ok=True)
+
 
 def window_process_options(platform: str | None = None, env: Any = None) -> dict[str, Any]:
     """Popen options for the on-screen windows (v0.1.21).
