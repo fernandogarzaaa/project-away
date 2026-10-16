@@ -936,7 +936,21 @@ class Service:
         return self._run_shell_exec(agent, fixed, tier=1, name=command, why=why, approved=False)
 
     def _run_shell_argv(self, agent: Agent, argv: list[str], why: str | None) -> dict[str, Any]:
-        tier, name = sh.classify(argv)  # ShellRefused -> REST 400, before anything runs
+        try:
+            tier, name = sh.classify(argv)  # ShellRefused -> REST 400, before anything runs
+        except sh.ShellRefused as e:
+            self._shell_audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": 2,
+                    "command": argv[0],
+                    "argv": [redact_text(a) for a in argv],
+                    "approved": False,
+                    "refused": str(e),
+                }
+            )
+            raise
         if tier == 2:
             details = [
                 "Tier 2: anything outside the read-only tier-1 list. It runs once, only with your approval.",
@@ -972,6 +986,23 @@ class Service:
                     }
                 )
                 raise ControlRefused(f"the user did not allow the command ({argv[0][:60]})")
+            # the grant can expire, pause or be revoked while the prompt waited: re-check it now, so a
+            # stale "Allow" cannot start the command without a live grant
+            try:
+                self.control.require_grant(agent.id)
+            except ControlRefused as e:
+                self._shell_audit.append(
+                    {
+                        "agent": agent.name,
+                        "agent_id": agent.id,
+                        "tier": 2,
+                        "command": argv[0],
+                        "argv": [redact_text(a) for a in argv],
+                        "approved": True,
+                        "refused": f"the computer session ended while awaiting approval ({e})",
+                    }
+                )
+                raise
             return self._run_shell_exec(agent, argv, tier=2, name=argv[0], why=why, approved=True)
         return self._run_shell_exec(agent, argv, tier=1, name=name or argv[0], why=why, approved=False)
 
@@ -981,6 +1012,17 @@ class Service:
         try:
             res = sh.run(argv)
         except sh.ShellNotAvailable as e:
+            self._shell_audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": tier,
+                    "command": name,
+                    "argv": [redact_text(a) for a in argv],
+                    "approved": approved,
+                    "refused": f"not available on this PC ({e})",
+                }
+            )
             raise NotAvailable(str(e)) from None
         stdout, stderr = redact_text(res["stdout"]), redact_text(res["stderr"])
         self._shell_audit.append(
