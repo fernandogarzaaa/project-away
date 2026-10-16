@@ -159,7 +159,7 @@ def last_used(entries: list[tuple[str, bool, dict[str, Any]]]) -> list[dict[str,
                 "at": filetime_to_iso(stop),
             }
         )
-    out.sort(key=lambda d: (d["at"] == "", d["at"]), reverse=True)
+    out.sort(key=lambda d: (d["at"] != "", d["at"]), reverse=True)  # newest first; broken timestamps last
     return out
 
 

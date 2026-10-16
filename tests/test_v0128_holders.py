@@ -8,6 +8,7 @@ process list are injected.
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,18 @@ def test_filetime_to_iso_rejects_junk() -> None:
     assert CU.filetime_to_iso(None) == ""
 
 
+EPOCH_FT = 116444736000000000  # 1970-01-01T00:00:00+00:00
+UPPER_FT = 4102444800 * 10_000_000 + EPOCH_FT  # 2100-01-01T00:00:00+00:00
+
+
+def test_filetime_to_iso_accepts_the_exact_bounds() -> None:
+    assert CU.filetime_to_iso(EPOCH_FT) == "1970-01-01T00:00:00+00:00"
+    assert CU.filetime_to_iso(UPPER_FT) == "2100-01-01T00:00:00+00:00"
+    assert CU.filetime_to_iso(EPOCH_FT - 1) == ""  # one tick before the epoch
+    assert CU.filetime_to_iso(UPPER_FT + 10_000_000) == ""  # one second past the upper bound
+    assert CU.filetime_to_iso(UPPER_FT + 5_000_000) == ""  # half a second past it
+
+
 # ------------------------------------------------------------------ last_used
 
 
@@ -102,6 +115,23 @@ def test_last_used_most_recent_first_and_skips_away() -> None:
     assert [r["name"] for r in got] == ["New", "Old"]  # Project Away excluded, newest first
 
 
+def test_last_used_needs_both_a_start_and_a_stop() -> None:
+    rows = [
+        ("C:#Apps#NoStart.exe", False, {"LastUsedTimeStop": FT_2026_10_16_NOON}),  # no start: skipped
+        ("C:#Apps#Early.exe", False, {"LastUsedTimeStart": 1, "LastUsedTimeStop": FT_2026_10_16_NOON}),  # kept
+    ]
+    assert [r["name"] for r in CU.last_used(rows)] == ["Early"]
+
+
+def test_last_used_sorts_a_broken_timestamp_last() -> None:
+    rows = [
+        ("C:#Apps#Junk.exe", False, {"LastUsedTimeStart": 2, "LastUsedTimeStop": 1}),  # at == ""
+        ("C:#Apps#New.exe", False, {"LastUsedTimeStart": 2, "LastUsedTimeStop": FT_2026_10_16_NOON}),
+    ]
+    got = CU.last_used(rows)
+    assert [(r["name"], r["at"]) for r in got] == [("New", "2026-10-16T12:00:00+00:00"), ("Junk", "")]
+
+
 # ------------------------------------------------------------------ process scan
 
 
@@ -126,6 +156,42 @@ def test_running_camera_apps_empty_without_psutil() -> None:
             raise ImportError("no psutil here")
 
     assert CU.running_camera_apps(NoPsutil()) == []
+
+
+def test_running_camera_apps_empty_when_psutil_cannot_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert CU.running_camera_apps() == []
+
+
+def test_running_camera_apps_empty_when_the_process_list_fails() -> None:
+    class BrokenPsutil:
+        def process_iter(self, attrs: list[str]) -> Any:
+            raise PermissionError("denied")
+
+    assert CU.running_camera_apps(BrokenPsutil()) == []
+
+
+def test_running_camera_apps_dedupes_by_program_name() -> None:
+    ps = _FakePsutil(
+        [
+            ("nvbroadcast.exe", r"C:\a\nvbroadcast.exe"),
+            ("NVBroadcast.EXE", r"C:\b\nvbroadcast.exe"),  # same program, different path/case
+        ]
+    )
+    assert CU.running_camera_apps(ps) == [{"name": "NVIDIA Broadcast", "path": r"C:\a\nvbroadcast.exe"}]
+
+
+def test_running_camera_apps_skips_processes_that_vanish() -> None:
+    class Vanishing:
+        @property
+        def info(self) -> dict[str, Any]:
+            raise RuntimeError("no such process")
+
+    class FlakyPsutil:
+        def process_iter(self, attrs: list[str]) -> list[Any]:
+            return [Vanishing(), _Proc("zoom.exe", r"C:\Apps\Zoom.exe")]
+
+    assert CU.running_camera_apps(FlakyPsutil()) == [{"name": "Zoom", "path": r"C:\Apps\Zoom.exe"}]
 
 
 # ------------------------------------------------------------------ holders
