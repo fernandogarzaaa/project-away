@@ -275,7 +275,10 @@ class JobRunner:
 
 def _diagnose_marker(line: str) -> dict[str, Any] | None:
     """The ``AWAY-DIAGNOSE-JSON: {...}`` line ``away cameras diagnose`` prints (proposal #10): the structured
-    per-camera result. Returns None for any other line; a malformed marker is ignored (the prose stays)."""
+    per-camera result. Returns None for any other line; a malformed marker is ignored (the prose stays).
+
+    The marker is schema-checked: ``cameras`` must be a list and ``stopped`` a bool. Anything else
+    returns None so the line stays visible as prose instead of publishing a mistyped result."""
     from away.multicam.diagnose import RESULT_MARKER
 
     if not line.startswith(RESULT_MARKER):
@@ -284,7 +287,11 @@ def _diagnose_marker(line: str) -> dict[str, Any] | None:
         data = json.loads(line[len(RESULT_MARKER) :].strip())
     except ValueError:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("cameras"), list) or not isinstance(data.get("stopped"), bool):
+        return None
+    return data
 
 
 def normalize_id(job_id: Any) -> str:

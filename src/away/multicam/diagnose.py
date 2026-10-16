@@ -43,7 +43,7 @@ class DiagnoseReport:
     """(proposal #10): what :func:`run_diagnose` found. ``lines`` is the prose for the Settings UI and
     the CLI; ``result`` is the structured form for agents/MCP::
 
-        {"cameras": [{"name": ..., "enumerated_by": ...,
+        {"cameras": [{"id": ..., "name": ..., "enumerated_by": ...,
                       "backends": {"dshow": {"opened": bool, "fps": float | None, "error": str | None}, ...},
                       "driver": {"status": str, "config_error": str | None},  # minimal; #9's driver-state
                       "holder": str | None,                                   # helper will enrich this
@@ -223,6 +223,7 @@ def run_diagnose(
             break
         emit(f"camera {where}: {dev.name}" + (" (virtual)" if dev.virtual else ""))
         cam: dict[str, Any] = {
+            "id": dev.key,  # per-device identifier: two cameras can share a name, not a key
             "name": dev.name,
             "enumerated_by": source,
             "backends": {},
@@ -294,6 +295,8 @@ def run_diagnose(
                         cap.release()
             if best is not None:
                 rec["fps"] = round(best[0], 1)
+                if best[0] > 0:
+                    rec["error"] = None  # a measured fps wins over earlier mode failures (prose keeps them)
                 emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
         cams.append(_finish_camera(cam))
         saved = capture.saved_mode_info().get(dev.name)
@@ -388,6 +391,8 @@ def _winrt(
         finally:
             with contextlib.suppress(Exception):
                 cap.release()
+    if (rec["fps"] or 0) > 0:
+        rec["error"] = None  # a measured fps wins over earlier format failures (prose keeps them)
     return rec
 
 
