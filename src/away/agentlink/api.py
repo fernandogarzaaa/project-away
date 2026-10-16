@@ -144,6 +144,12 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
     "resume_control": ("json", "POST", "/v1/control/resume", "Ask to continue after a takeover (control)"),
     "stop_control": ("json", "POST", "/v1/control/stop", "Stop using the computer"),
     "act": ("json", "POST", "/v1/control/act", "{action: move|click|...|open_url, ...} (control)"),
+    "ui_query": (
+        "json",
+        "POST",
+        "/v1/control/ui_query",
+        "Interactable UI elements {id, name, role, bounds} (control)",
+    ),
     "undo_last_action": ("json", "POST", "/v1/control/undo", "Undo the last undoable action (control)"),
     "action_log": ("json", "GET", "/v1/control/log", "Your own computer actions"),
     "disconnect": ("json", "POST", "/v1/disconnect", "Disconnect this agent"),
