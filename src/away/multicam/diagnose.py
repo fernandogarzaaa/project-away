@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -89,6 +90,72 @@ def speed_verdict(fps: float | None) -> str:
     return " - too slow for tracking"
 
 
+# ----------------------------------------------------------------------- privacy + shutter (v0.1.28)
+# Three invisible causes of "enumerates but never opens": the Windows camera privacy consent is off, a
+# physical lens cover / privacy shutter is closed, or the camera kill key (often an Fn key) is switched off.
+# The diagnose now reports the consent store's verdict in plain words and points at the two physical causes.
+
+CONSENT_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+FIX_MARKER_RE = re.compile(r"^\[fix:([A-Za-z0-9_:.-]+)\]\s*")
+PRIVACY_FIX = "open:camera_privacy"  # away.selftest.fixes.OPEN_TARGETS: the fix button the Settings panel shows
+SHUTTER_GUIDANCE = (
+    "the camera is listed but never opens: this also happens when a lens cover is closed "
+    "or the camera kill key is off (often an Fn key or a physical switch on the laptop)"
+)
+
+
+def read_consent(winreg_mod: Any = None, platform: str | None = None) -> str | None:
+    """The webcam consent store's global ``Value`` ("Allow"/"Deny" as Windows writes it), or None when it
+    cannot be read. Never raises: off Windows, missing ``winreg``, a missing key or no permission all
+    mean "could not check". ``winreg_mod``/``platform`` are injectable for tests."""
+    plat = sys.platform if platform is None else platform
+    wr = winreg_mod
+    if wr is None:
+        if plat != "win32":
+            return None
+        try:
+            import winreg as wr  # type: ignore[no-redef]
+        except ImportError:
+            return None
+    roots = [getattr(wr, "HKEY_CURRENT_USER", None), getattr(wr, "HKEY_LOCAL_MACHINE", None)]
+    for root in roots:
+        if root is None:
+            continue
+        try:
+            with wr.OpenKey(root, CONSENT_KEY) as key:
+                value = wr.QueryValueEx(key, "Value")[0]
+        except OSError:
+            continue
+        text = str(value or "").strip()
+        return text or None
+    return None
+
+
+def consent_line(reader: Callable[[], str | None] | None = None) -> str | None:
+    """Plain-words camera privacy verdict for the diagnose report, or None when it could not be checked
+    (off Windows, or an unreadable store, the line is skipped entirely). A denied verdict carries the
+    ``[fix:open:camera_privacy]`` marker so the Settings > Cameras panel shows the fix button."""
+    value = (reader or read_consent)()
+    if value is None:
+        return None
+    verdict = value.strip().lower()
+    if verdict == "deny":
+        return (
+            f"[fix:{PRIVACY_FIX}] Camera privacy: Windows is blocking apps from using the camera. "
+            "Allow camera access in Settings > Privacy > Camera."
+        )
+    if verdict == "allow":
+        return "Camera privacy: Windows lets apps use the camera."
+    return None
+
+
+def split_fix_marker(line: str) -> tuple[str | None, str]:
+    """``("[fix:open:camera_privacy] text")`` -> ``("open:camera_privacy", "text")``; any other line ->
+    ``(None, line)``. CLI and Settings strip the marker before showing the text to people."""
+    m = FIX_MARKER_RE.match(line)
+    return (m.group(1), line[m.end() :]) if m else (None, line)
+
+
 def run_diagnose(
     devices: Sequence[CameraDevice],
     *,
@@ -109,12 +176,15 @@ def run_diagnose(
     sleep: Callable[[float], Any] = time.sleep,
     budget_s: float | None = BUDGET_S,
     include_virtual: bool = False,
+    consent: Callable[[], str | None] | None = None,
 ) -> list[str]:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
     (Settings shows them while the diagnosis runs) and all of them are returned.
 
     v0.1.22: virtual cameras (NVIDIA Broadcast, OBS...) are skipped unless ``include_virtual`` (or the camera was
-    named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so."""
+    named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so.
+    v0.1.28: ``consent`` (a :func:`read_consent`-shaped reader; None = skip) reports the Windows camera privacy
+    verdict first, and a camera that is listed but never opens gets the lens-cover / kill-key guidance."""
     lines: list[str] = []
     say = out or (lambda _m: None)
     started = clock()
@@ -134,6 +204,10 @@ def run_diagnose(
         except ImportError:
             emit("OpenCV is not installed (pip install 'project-away[hands]'); only WinRT can be checked")
     use = list(backends or (BACKENDS if win else ("default",)))
+    if consent is not None:
+        privacy = consent_line(consent)
+        if privacy is not None:
+            emit(privacy)
     if not devices:
         emit("no cameras found")
         return lines
@@ -147,14 +221,16 @@ def run_diagnose(
             stopped = True
             break
         emit(f"camera {where}: {dev.name}" + (" (virtual)" if dev.virtual else ""))
+        opened_anywhere = False  # v0.1.28: listed but never opened -> lens-cover / kill-key guidance below
         for b in use:
             if over():
                 stopped = True
                 break
             label = BACKEND_LABELS.get(b, b)
             if b == "winrt":
-                _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
-                       winrt_open, max_winrt_formats, clock, sleep)  # fmt: skip
+                if _winrt(dev, devices, emit, width, height, fps, measure_s, cv2, winrt_available, winrt_formats,
+                          winrt_open, max_winrt_formats, clock, sleep):  # fmt: skip
+                    opened_anywhere = True
                 continue
             if cv2 is None:
                 emit(f"  {label}: skipped (OpenCV not installed)")
@@ -185,6 +261,7 @@ def run_diagnose(
                     if not cap.isOpened():
                         emit(f"    {mode.describe()}: did not open (skipping this backend's other modes)")
                         break
+                    opened_anywhere = True
                     capture.apply_mode(cap, mode, cv2, repr(dev.name))
                     _ok, text = _probe(cap, cv2, mode, measure_s, clock, sleep)
                     emit(f"    {mode.describe()}: {text}")
@@ -198,6 +275,8 @@ def run_diagnose(
                         cap.release()
             if best is not None:
                 emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
+        if not opened_anywhere and not stopped:
+            emit(f"  {SHUTTER_GUIDANCE}")
         saved = capture.saved_mode_info().get(dev.name)
         modes = capture.saved_modes().get(dev.name)
         if modes is not None:
@@ -236,28 +315,29 @@ def _winrt(
     limit: int,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
-) -> None:
+) -> bool:
     from away.multicam import winrt_capture
 
     ok, why = (available or winrt_capture.available)()
     if not ok:
         emit(f"  WinRT: unavailable ({why})")
-        return
+        return False
     same = [d for d in devices if d.name.lower() == dev.name.lower()]
     occurrence = next((j for j, d in enumerate(same) if d is dev), 0)
     formats, err = (formats_of or (lambda n, o: winrt_capture.list_formats(n, o)))(dev.name, occurrence)
     if err and not formats:
         emit(f"  WinRT: {err}")
-        return
+        return False
     emit(f"  WinRT: {len(formats)} native formats: " + (", ".join(f.describe() for f in formats) or "none"))
     if not formats:
-        return
+        return False
 
     def default_open(name: str, f: Any, occ: int) -> Any:
         return winrt_capture.WinrtCapture(
             name, f.width, f.height, f.fps, f.fourcc(), out_size=(f.width, f.height), occurrence=occ
         )
 
+    opened = False
     for f in winrt_candidates(formats, width, height, fps, limit):
         try:
             cap = (opener or default_open)(dev.name, f, occurrence)
@@ -268,11 +348,13 @@ def _winrt(
             if not cap.isOpened():
                 emit(f"    {f.describe()}: did not open ({getattr(cap, 'error', '') or 'no reason given'})")
                 continue
+            opened = True
             _ok, text = _probe(cap, None, None, measure_s, clock, sleep)
             emit(f"    {f.describe()}: {text}")
         finally:
             with contextlib.suppress(Exception):
                 cap.release()
+    return opened
 
 
 # ------------------------------------------------------------------------------------------- driver noise

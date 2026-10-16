@@ -1060,7 +1060,9 @@ def test_diagnose_winrt_errors_are_printed() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert lines[-1] == "  WinRT: WinRT does not list a camera named 'HD User Facing'"
+    assert lines[-2] == "  WinRT: WinRT does not list a camera named 'HD User Facing'"
+    # v0.1.28: a camera that never opens gets the lens-cover / kill-key guidance last
+    assert lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"
 
     class Dead:
         error = "busy"
@@ -1082,7 +1084,8 @@ def test_diagnose_winrt_errors_are_printed() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert lines[-1] == "    640x480@30 MJPG: did not open (busy)"
+    assert lines[-2] == "    640x480@30 MJPG: did not open (busy)"
+    assert lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"  # v0.1.28: never opened -> lens-cover / kill-key
 
 
 def test_diagnose_modes_and_candidates() -> None:
