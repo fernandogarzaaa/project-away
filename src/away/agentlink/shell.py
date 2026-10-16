@@ -23,6 +23,7 @@ removes shell-injection as a class; the credential-store refuse-list removes the
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -190,13 +191,67 @@ def _decode(data: Any) -> str:
     return str(data or "")
 
 
+def _bounded_popen_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+    """A ``subprocess.run``-compatible runner with bounded output retention: two drain threads keep at most
+    :data:`OUTPUT_CAP` bytes per stream while the child runs, so a chatty approved command cannot grow
+    service memory without bound. The child is never killed for being chatty: draining continues until it
+    exits or ``timeout`` fires (which kills it, as ``subprocess.run`` does). The result carries
+    ``discarded_output=True`` when any bytes were dropped."""
+    create = kw.pop("creationflags", 0)
+    proc = subprocess.Popen(args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=create)
+    out, err = bytearray(), bytearray()
+    discarded = {"out": False, "err": False}
+
+    def _drain(stream: Any, buf: bytearray, key: str) -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                room = OUTPUT_CAP - len(buf)
+                if room > 0:
+                    buf += chunk[:room]
+                if len(chunk) > room:
+                    discarded[key] = True
+        except Exception:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                stream.close()
+
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout, out, "out"), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, err, "err"), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    timeout = float(kw.get("timeout") or DEFAULT_TIMEOUT_S)
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc = proc.wait()
+        for t in threads:
+            t.join(timeout=5)
+        raise subprocess.TimeoutExpired(args, timeout, output=bytes(out), stderr=bytes(err)) from None
+    for t in threads:
+        t.join(timeout=5)
+    res = subprocess.CompletedProcess(args, rc, bytes(out), bytes(err))
+    res.discarded_output = discarded["out"] or discarded["err"]  # type: ignore[attr-defined]
+    return res
+
+
 def run(
     argv: Sequence[str],
     timeout_s: float = DEFAULT_TIMEOUT_S,
     runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Run a fixed argv with no shell. Returns rc, stdout, stderr (each redacted later by the caller),
-    timed_out, truncated and out_bytes. Raises ShellNotAvailable when the program cannot start."""
+    timed_out, truncated and out_bytes. Raises ShellNotAvailable when the program cannot start.
+
+    Output retention is bounded even before the 64 KB cap is applied: the default runner drains both
+    streams through bounded buffers, so a chatty child cannot grow service memory without bound.
+    """
     args = [str(a) for a in argv]
     if not args or any(not a for a in args):
         raise ValueError("shell: argv must be a non-empty list of non-empty strings")
@@ -206,7 +261,7 @@ def run(
     if sys.platform == "win32":  # pragma: no cover - same as jobs.py: no console window flash
         kw["creationflags"] = 0x08000000
     try:
-        proc = (runner or subprocess.run)(args, **kw)
+        proc = (runner or _bounded_popen_run)(args, **kw)
     except FileNotFoundError:
         raise ShellNotAvailable(f"{args[0]!r} is not installed on this PC") from None
     except subprocess.TimeoutExpired as e:
@@ -217,12 +272,13 @@ def run(
             "stdout": stdout,
             "stderr": stderr,
             "timed_out": True,
-            "truncated": truncated,
+            "truncated": True,  # a killed child may have emitted more than was drained
             "out_bytes": len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")),
         }
     except OSError as e:
         raise ShellNotAvailable(f"could not start {args[0]!r}: {e.strerror or e}") from None
     stdout, stderr, truncated = _cap(_decode(proc.stdout), _decode(proc.stderr))
+    truncated = truncated or bool(getattr(proc, "discarded_output", False))
     return {
         "rc": proc.returncode,
         "stdout": stdout,

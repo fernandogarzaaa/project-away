@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import types
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from away.agentlink.auth import Agent
 from away.agentlink.control import ControlRefused
 from away.agentlink.host import build_core
 from away.agentlink.prompts import NullUI
-from away.agentlink.service import Forbidden
+from away.agentlink.service import Forbidden, NotAvailable
 
 
 # ============================================================================ pure: classify / run / audit
@@ -126,6 +127,15 @@ def test_audit_appends_jsonl_and_tails_newest_first(tmp_path: Path) -> None:
     assert [e["command"] for e in tail] == ["echo", "processes"]
 
 
+def test_run_bounds_output_retention() -> None:
+    # a chatty child (5 MB) must not grow memory without bound: retention is capped, the child still
+    # completes normally (it is not killed for being chatty)
+    res = sh.run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 5_000_000)"])
+    assert res["rc"] == 0 and not res["timed_out"]
+    assert res["truncated"] is True
+    assert len(res["stdout"].encode()) + len(res["stderr"].encode()) <= sh.OUTPUT_CAP
+
+
 def test_summarize_is_short() -> None:
     assert sh.summarize("line one\nline two", 0) == "rc=0 line one"
     assert len(sh.summarize("y" * 500, 1)) <= 170
@@ -162,11 +172,12 @@ def granted(tmp_path: Path, core: Any) -> Any:
 def _no_subprocess(monkeypatch: pytest.MonkeyPatch, out: bytes = b"fake out") -> list[Any]:
     calls: list[Any] = []
 
-    def fake(argv: Any, **kw: Any) -> Any:
-        calls.append(argv)
-        return _proc(stdout=out)
+    def fake(args: Any, **kw: Any) -> Any:
+        calls.append(args)
+        proc = types.SimpleNamespace(args=args, returncode=0, stdout=out, stderr=b"")
+        return proc
 
-    monkeypatch.setattr(sh.subprocess, "run", fake)
+    monkeypatch.setattr(sh, "_bounded_popen_run", fake)
     return calls
 
 
@@ -269,6 +280,43 @@ def test_tier2_credential_argv_refused_before_any_prompt(granted: Any, monkeypat
     with pytest.raises(sh.ShellRefused):
         granted.core.service.run_shell(granted.agent, action="run", argv=["cat", "~/.ssh/id_rsa"])
     assert asked == [] and calls == [], "credential touching is refused even when the user would allow it"
+
+
+def test_tier2_grant_rechecked_after_approval(granted: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # TOCTOU: the grant ends while the approval prompt waits -> the stale "Allow" must not run anything
+    calls = _no_subprocess(monkeypatch)
+
+    def ask(*a: Any, **k: Any) -> dict[str, Any]:
+        granted.core.control.stop("the person pressed Stop")
+        return {"answer": "Allow", "method": "click"}
+
+    granted.core.service.prompts.ask = ask  # type: ignore[method-assign]
+    with pytest.raises(ControlRefused):
+        granted.core.service.run_shell(granted.agent, action="run", argv=["echo", "hi"])
+    assert calls == []
+    entries = granted.core.service.run_shell(granted.agent, action="log")["entries"]
+    assert entries and entries[0]["approved"] is True and "session ended" in entries[0]["refused"]
+
+
+def test_shellrefused_credential_argv_is_audited(granted: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_subprocess(monkeypatch)
+    granted.core.service.prompts.ask = lambda *a, **k: {"answer": "Allow"}  # type: ignore[method-assign]
+    with pytest.raises(sh.ShellRefused):
+        granted.core.service.run_shell(granted.agent, action="run", argv=["cat", "~/.ssh/id_rsa"])
+    entries = granted.core.service.run_shell(granted.agent, action="log")["entries"]
+    assert entries and entries[0]["command"] == "cat" and entries[0]["approved"] is False
+    assert "credential" in entries[0]["refused"]
+
+
+def test_shell_not_available_is_audited(granted: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(argv: Any, **kw: Any) -> Any:
+        raise FileNotFoundError(2, "no such file")
+
+    monkeypatch.setattr(sh, "_bounded_popen_run", fake)
+    with pytest.raises(NotAvailable, match="not installed"):
+        granted.core.service.run_shell(granted.agent, action="run", command="devices")
+    entries = granted.core.service.run_shell(granted.agent, action="log")["entries"]
+    assert entries and entries[0]["command"] == "devices" and "not available" in entries[0]["refused"]
 
 
 def test_shell_rejects_command_and_argv_together(granted: Any) -> None:
