@@ -364,7 +364,7 @@ async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") 
 or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
 `ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
 
-**Tools (16; 15 in v0.1.21, `inbox` added in v0.1.22).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
+**Tools (17; 15 in v0.1.21, `inbox` added in v0.1.22, `shell` in v0.1.28).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
 
 | Tool | Actions / arguments | Permission |
 |---|---|---|
@@ -382,6 +382,7 @@ or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
 | `open` | `app` (`name`), `url` (`url`) | use my computer |
+| `shell` | `list`, `run` (`command` = tier-1 name \\| `argv` = tier 2, `why`), `log` (`limit`) - staged shell: tier 1 read-only diagnostics run at once in an approved session, tier 2 asks the person every time | use my computer |
 | `disconnect` | (none) | always |
 
 Example: `settings(action="change", changes=[{"key": "hands.cursor.gain", "value": 1.6}], why="you said it is too
@@ -1680,8 +1681,7 @@ When the app is running, the self-test runs inside it, so the cameras are not ta
 cameras (opens each one, measures its real frame rate, names the app holding a busy camera and offers to close
 it), hand tracking speed, the graphics card (see *GPU tracking* below), the smooth pointer's update rate, the
 big pointer, that only one copy is running, the microphone level, speech to text on a short phrase, the speaking
-voices, pop-up messages, the Windows Start key (presses Win and checks Start really opens), Agent Link, PC load
-and the models. A check that crashes or runs past its time limit
+voices, pop-up messages, Agent Link, PC load and the models. A check that crashes or runs past its time limit
 becomes a "could not run" line; it never breaks the report.
 
 Where the report goes: to **every** connected agent (its inbox, its wake-up address when one is set, and the

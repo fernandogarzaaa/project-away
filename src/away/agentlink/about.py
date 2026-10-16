@@ -55,7 +55,10 @@ How to work with the human through Project Away:
   control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
   the person first, and so does a click, drag, Enter or shortcut on something Project Away cannot identify.
 - Logs, recordings and diagnostics bundles need the separate "Share my logs and recordings" permission.
-- Never ask the person for passwords; you cannot type into password fields and cannot use a shell or files.
+- Never ask the person for passwords; you cannot type into password fields. The `shell` tool runs read-only
+  diagnostics (tier 1: device/camera/process lists, the away CLI, the app log) inside an approved computer
+  session, and asks the person first for anything else (tier 2); it never touches password fields or
+  credential stores. You cannot read or write arbitrary files.
 - Subscribe to away://events (or call events action="wait") for: presence (sat down / left), attention, the
   summon gesture or "hey agent" phrases, "that was wrong" feedback, auto-detector trips and control pauses.
 """

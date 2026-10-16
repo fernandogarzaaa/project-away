@@ -62,7 +62,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox). Related tools are one tool with an `action`
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 17 (shell). Related tools are one tool with an `action`
     # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
@@ -149,17 +149,6 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
           `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
-          A finished "cameras" check also carries `result.cameras`, one structured dict per camera: `id`
-          (per-device identifier; names can collide), `name`,
-          `enumerated_by` (v4l2|dshow|wmi|system_profiler|probe), `backends` (per backend id: `opened` bool,
-          `fps` measured best or null, `error` text or null), `driver` (`status` ok|error|unknown and
-          `config_error`; minimal until proposal #9's driver-state helper lands), `holder` (Project Away
-          itself when it holds the camera, or null; other apps are not detected yet, so null does
-          not mean the camera is free), and `verdict` (ok = frames flowed; driver = driver/config
-          problem, e.g. "Element not
-          found"; held = another app holds it; privacy = OS privacy blocked it; unknown = could not tell).
-          `result.stopped` is true when the time budget cut the check short. Prefer this over parsing the
-          prose `output`.
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
@@ -323,6 +312,25 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
         / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser."""
         return await group(ctx, "open", action=action, name=name, url=url)
+
+    @mcp.tool()
+    async def shell(
+        ctx: Context,
+        action: str = "run",
+        command: str | None = None,
+        argv: list[str] | None = None,
+        why: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """Run a command on the person's PC, in two safety tiers (needs "Let it use my computer", inside an
+        approved computer session: control action="request" first).
+        - action="list": the tier-1 read-only commands (device/camera/process lists, the away CLI, the app log).
+        - action="run": tier 1 = `command` set to one of those names runs at once (fixed, read-only, no shell
+          is ever involved); tier 2 = anything else via `argv` asks the person first, every time, showing the
+          exact command. `why` is your reason, shown with the approval question. Output is capped at 64 KB
+          and secrets are hidden; password fields and credential stores are never touched.
+        - action="log": every shell call so far (command, tier, result)."""
+        return await group(ctx, "shell", action=action, command=command, argv=argv, why=why, limit=limit)
 
     @mcp.tool()
     async def disconnect(ctx: Context) -> dict:
