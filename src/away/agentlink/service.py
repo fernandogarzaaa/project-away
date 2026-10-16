@@ -176,6 +176,8 @@ class Service:
         self.events = events or EventHub()
         self.started = time.time()
         self.captures: deque[Capture] = deque(maxlen=4)
+        # v0.1.28 "Recently": plain-language history of who looked through the camera or at the screen
+        self.capture_history: deque[dict[str, Any]] = deque(maxlen=20)
         self._record_lock = threading.Lock()
         self._watchers: set[str] = set()
         self.watching = watching
@@ -360,17 +362,10 @@ class Service:
 
     # ------------------------------------------------------------ diagnose
     def run_diagnose(
-        self,
-        agent: Agent,
-        kind: str = "cameras",
-        device: str | None = None,
-        seconds: float | None = None,
-        quick: bool = False,
+        self, agent: Agent, kind: str = "cameras", device: str | None = None, seconds: float | None = None
     ) -> dict[str, Any]:
-        """v0.1.28: ``quick`` (kind="cameras" only) opens each camera on its remembered backend only, skipping
-        the mode sweep - a fast triage answer. Every check's result carries ``elapsed_s`` and ``budget_hit``."""
         self.require(agent, perms.DIAGNOSE)
-        return self.jobs.start(kind, device, seconds, quick).public()
+        return self.jobs.start(kind, device, seconds).public()
 
     def get_job(self, agent: Agent, job_id: str | int | None = None, id: str | int | None = None) -> dict[str, Any]:
         """A check's state. ``id`` is accepted as an alias of ``job_id`` (v0.1.21); the error says whether the id
@@ -637,6 +632,9 @@ class Service:
             raise NotAvailable(
                 f"the {what} was not taken because the on-screen notice that tells the person could not be shown"
             )
+        # v0.1.28 "Recently": only captures that actually showed the notice are logged, so the history can never
+        # claim a capture that the safety rule above refused
+        self.capture_history.append({"text": text, "t": time.time()})
 
     def user_capture(self, kind: str, jpeg: bytes, meta: dict[str, Any]) -> Capture:
         """The user pushed a capture to their agents ("hey agent, look" / the summon gesture)."""
@@ -644,7 +642,13 @@ class Service:
 
         c = Capture(uuid.uuid4().hex[:8], time.time(), kind, jpeg, meta)
         self.captures.append(c)
+        # v0.1.28 "Recently": the person can see later what they sent
+        self.capture_history.append({"text": f"You sent a {kind} picture to your agents", "t": time.time()})
         return c
+
+    def capture_feed(self, limit: int = 10) -> list[dict[str, Any]]:
+        """v0.1.28 "Recently": who looked through the camera or at the screen, newest first."""
+        return list(reversed(self.capture_history))[: max(0, limit)]
 
     def last_capture(self, agent: Agent) -> tuple[bytes, dict[str, Any]]:
         for c in reversed(self.captures):
