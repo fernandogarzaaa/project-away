@@ -2155,6 +2155,24 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.28
+
+* **Agents that drive your PC got sharper.** Several computer actions now run in one call instead of one round
+  trip at a time (#43), and after each action the agent sees what the desktop actually looks like (which window
+  is in front, what has focus), so it can tell when a click missed and try again instead of guessing (#42).
+  The Windows key now opens Start reliably for agents (#48), and opening an app verifies it really opened (#67
+  follow-up in #48's batch).
+* **A safety-gated shell for agents (opt-in).** Agents can run a small allowlist of read-only system queries
+  (device status, logs, process lists) without full freedom; anything destructive, network-facing, or touching
+  credentials still asks you first, and every invocation is logged (#67).
+* **Camera diagnose is faster and speaks agent.** A quick-triage mode checks each camera on its remembered
+  backend and mode only, skipping the minute-long sweep (#58), and the full diagnose now returns structured
+  per-camera results (which backends opened, at what fps, driver state, verdict) instead of prose the agent
+  had to parse (#47).
+* **Clearer control states.** When you take over from an agent, a slim banner stays on screen with
+  [Let it continue] and [Stop], instead of the overlay vanishing with no explanation (#51). A new
+  "who looked at me" history shows which agent used your camera or screen and when (#62).
+
 ## What's new in 0.1.27
 
 * **Talking to your live agent works again with the camera on.** "Hey <name>" is no longer ignored when the face
