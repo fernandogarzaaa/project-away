@@ -24,6 +24,12 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    session" stops asking until the session ends). Moving, scrolling and typing into a named text box never ask.
 6. **Rate limited and logged.** At most ``action_rate_per_s`` actions per second; every action is logged with a
    thumbnail of the screen; "Undo last" reverses what can be reversed (cursor moves, scrolls, typed text).
+7. **Step budget.** Each approved session gets ``agent_link.control_step_budget`` actions (default 40, fresh
+   every grant): every action result tells the agent how many steps it has left, and a session that used them
+   all refuses new actions in plain words until the person approves again.
+8. **Visual audit trail.** Every control step is kept per session (``agent_link.control_audit_trail``, on by
+   default): timestamp, action, screenshot thumbnail and result, persisted to ``actions/session-<id>.jsonl`` and
+   replayable step by step in the app (Settings > Agent Link).
 
 Since audit Phase 1b every input goes through the one action engine (:mod:`away.actions_engine`): it owns the
 cancel tokens, the secure desktop check, the rate limit, the risk classification, held-input cleanup, "Stop
@@ -99,6 +105,14 @@ ACTIONS = (
     "open_app",
     "open_url",
 )
+# v0.1.28: the step budget and the visual audit trail
+DEFAULT_STEP_BUDGET = 40  # actions per approved control session when nothing is configured
+TRAIL_CAP = 300  # audit-trail steps kept per session (matches the action log's bound)
+MAX_SESSIONS = 12  # session trails kept in memory and on disk; older ones are dropped
+BUDGET_EXHAUSTED = (
+    "you have used all {budget} of this session's steps. Tell the person what is done and what is left, "
+    "then ask them to let you continue: approving again starts a fresh session."
+)
 
 
 class ControlRefused(ActionRefused):
@@ -117,6 +131,10 @@ class Grant:
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
+    # v0.1.28: the control session's id (its audit trail), step budget and steps used so far (budget resets per grant)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
+    step_budget: int = 40
+    steps_used: int = 0
 
 
 # The grant was paused or ended while an action was running (the engine's cancellation).
@@ -137,6 +155,7 @@ class LogEntry:
     undo: dict[str, Any] | None = None
     agent_id: str = ""  # who did it (undo and the action log are per agent)
     source: str = AGENT  # the action engine source it ran as
+    session: str = ""  # v0.1.28: the control session (grant id) this step belongs to
 
 
 @dataclass
@@ -170,6 +189,9 @@ class ComputerControl:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         always_allowed: Callable[[str, str], bool] = lambda _agent_id, _cat: False,
         allow_always: Callable[[str, str], None] = lambda _agent_id, _cat: None,
+        step_budget: int = DEFAULT_STEP_BUDGET,
+        audit_trail: bool = True,
+        settings: Callable[[], Any] | None = None,
     ) -> None:
         import sys
 
@@ -180,6 +202,11 @@ class ComputerControl:
         self.on_event = on_event
         self.always_allowed = always_allowed
         self.allow_always = allow_always
+        # v0.1.28: the step budget and the audit trail follow the live settings when given (the person can
+        # change them in Settings without restarting); otherwise the constructor values hold.
+        self.step_budget = max(1, int(step_budget))
+        self.audit_trail = bool(audit_trail)
+        self._settings = settings
         self.platform = hooks.platform or sys.platform
         self.engine: ActionEngine = hooks.engine or ActionEngine(clock=clock, platform=self.platform)
         self.engine.set_agent_rate(rate_per_s, clock)
@@ -187,6 +214,10 @@ class ComputerControl:
         self.engine.add_takeover_listener(self._on_user_action)
         self.log_folder = log_folder
         self.log: deque[LogEntry] = deque(maxlen=300)
+        # v0.1.28: per-session audit trails (session id -> steps in order, oldest first), bounded like the log
+        self.sessions: dict[str, list[LogEntry]] = {}
+        self._session_order: list[str] = []
+        self._session_agents: dict[str, str] = {}  # session id -> agent name (for the trail view)
         self.grant: Grant | None = None
         self._lock = threading.RLock()
         self._own_mouse_until = 0.0  # the agent's own mouse input may echo back until then
@@ -195,6 +226,20 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+
+    def _budget(self) -> int:
+        """The configured step budget (live when the app's settings are wired in)."""
+        if self._settings is not None:
+            with contextlib.suppress(Exception):
+                return max(1, int(getattr(self._settings(), "control_step_budget", self.step_budget)))
+        return self.step_budget
+
+    def _trail_on(self) -> bool:
+        """The visual audit trail switch (live when the app's settings are wired in)."""
+        if self._settings is not None:
+            with contextlib.suppress(Exception):
+                return bool(getattr(self._settings(), "control_audit_trail", self.audit_trail))
+        return self.audit_trail
 
     @property
     def bucket(self) -> Any:
@@ -228,6 +273,10 @@ class ComputerControl:
             "paused": bool(g.paused),
             "paused_reason": g.paused,
             "expires_in_s": max(0, int(g.expires - self.clock())),
+            "session": g.id,
+            "step_budget": g.step_budget,
+            "steps_used": g.steps_used,
+            "steps_left": max(0, g.step_budget - g.steps_used),
         }
 
     def _check_expiry(self) -> Grant | None:
@@ -269,7 +318,10 @@ class ComputerControl:
             raise ControlRefused("the user did not allow it" if res.get("answer") else "no answer from the user")
         with self._lock:
             now = self.clock()
-            self.grant = Grant(agent_id, agent_name, now, now + ttl)
+            g = Grant(agent_id, agent_name, now, now + ttl)
+            g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
+            self.grant = g
+            self._start_session(g)
             self._grace_until = now + GRACE_S
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(agent_name)
@@ -312,9 +364,59 @@ class ComputerControl:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
         if g is not None:
+            self._trail_event(g, {"event": "ended", "reason": reason, "steps_used": g.steps_used})
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
+
+    # ------------------------------------------------------- v0.1.28 sessions
+    def _start_session(self, g: Grant) -> None:
+        """A new grant starts a fresh audit trail (bounded) and a fresh step budget."""
+        self.sessions[g.id] = []
+        self._session_agents[g.id] = g.agent_name
+        self._session_order.append(g.id)
+        self._prune_sessions()
+        self._trail_event(
+            g,
+            {
+                "event": "started",
+                "agent": g.agent_name,
+                "agent_id": g.agent_id,
+                "step_budget": g.step_budget,
+                "started": g.started,
+            },
+        )
+
+    def _prune_sessions(self) -> None:
+        """Keep only the newest sessions, in memory and on disk (the PNG thumbnails are pruned with the log)."""
+        while len(self._session_order) > MAX_SESSIONS:
+            old = self._session_order.pop(0)
+            self.sessions.pop(old, None)
+            self._session_agents.pop(old, None)
+            if self.log_folder is not None:
+                with contextlib.suppress(Exception):
+                    (self.log_folder / f"session-{old}.jsonl").unlink(missing_ok=True)
+
+    def _session_file(self, session_id: str) -> Path | None:
+        if self.log_folder is None:
+            return None
+        return self.log_folder / f"session-{session_id}.jsonl"
+
+    def _trail_event(self, g: Grant, event: dict[str, Any]) -> None:
+        """One line in the session's persisted trail (the audit trail switch gates this)."""
+        if not self._trail_on():
+            return
+        path = self._session_file(g.id)
+        if path is None:
+            return
+        try:
+            import json
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": time.time(), "session": g.id, **event}, default=str) + "\n")
+        except Exception:
+            pass
 
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
@@ -372,6 +474,12 @@ class ComputerControl:
             raise
         except ActionRefused as exc:
             raise ControlRefused(str(exc)) from None
+        # v0.1.28: the per-session step budget. Each action (and undo) counts one step; an exhausted session
+        # refuses politely, in plain words, until the person approves again (a new grant = a fresh budget).
+        with self._lock:
+            if g.steps_used >= g.step_budget:
+                raise ControlRefused(BUDGET_EXHAUSTED.format(budget=g.step_budget))
+            g.steps_used += 1
         return g
 
     def _confirm_risky(self, g: Grant, label: str, what: str) -> None:
@@ -665,7 +773,14 @@ class ComputerControl:
         a.ok = True
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        # v0.1.28: the agent is told its remaining budget with every action result
+        return {
+            "ok": True,
+            "action": action,
+            "detail": detail,
+            "log_id": entry.id,
+            "steps_left": max(0, g.step_budget - g.steps_used),
+        }
 
     def _window_title(self) -> str:
         try:
@@ -693,9 +808,23 @@ class ComputerControl:
         step().key("enter")
 
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
-        e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
+        e = LogEntry(
+            uuid.uuid4().hex[:10],
+            time.time(),
+            g.agent_name,
+            action,
+            detail,
+            result,
+            "",
+            undo,
+            g.agent_id,
+            session=g.id,
+        )
         self.engine.audit(AGENT, g.agent_name, action, detail, result)
-        if self.log_folder is not None:
+        # v0.1.28: the visual audit trail (on by default): a screenshot thumbnail per step, persisted with the
+        # session's trail. Off: the step is still in the in-memory action log (undo, the safety log), but no
+        # picture is kept and nothing is written to the session file.
+        if self.log_folder is not None and self._trail_on():
             try:
                 img = self.hooks.grab()
                 if img is not None:
@@ -709,26 +838,81 @@ class ComputerControl:
                 e.thumb = ""
         with self._lock:
             self.log.append(e)
+            if self._trail_on():  # off: no per-session trail at all (the safety action log above still runs)
+                trail = self.sessions.setdefault(g.id, [])
+                if len(trail) >= TRAIL_CAP:
+                    trail.pop(0)
+                trail.append(e)
+        if self._trail_on():
+            self._trail_event(
+                g,
+                {
+                    "event": "step",
+                    "id": e.id,
+                    "agent": e.agent,
+                    "agent_id": e.agent_id,
+                    "action": e.action,
+                    "detail": e.detail,
+                    "result": e.result,
+                    "thumb": e.thumb,
+                },
+            )
         return e
 
-    def actions(self, limit: int = 50, agent_id: str | None = None) -> list[dict[str, Any]]:
-        """The newest actions; only ``agent_id``'s own when given (an agent's view of the log)."""
+    def actions(
+        self, limit: int = 50, agent_id: str | None = None, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The newest actions; only ``agent_id``'s own when given (an agent's view of the log), and only one
+        session's when ``session_id`` is given (the visual audit trail)."""
         with self._lock:
-            items = [e for e in self.log if agent_id is None or e.agent_id == agent_id][-limit:]
-        return [
-            {
-                "id": e.id,
-                "ts": e.ts,
-                "agent": e.agent,
-                "action": e.action,
-                "detail": e.detail,
-                "result": e.result,
-                "thumb": e.thumb,
-                "undoable": e.undo is not None,
-                "source": e.source,
-            }
-            for e in reversed(items)
-        ]
+            items = [
+                e
+                for e in self.log
+                if (agent_id is None or e.agent_id == agent_id) and (session_id is None or e.session == session_id)
+            ][-limit:]
+        return [self._entry_dict(e) for e in reversed(items)]
+
+    @staticmethod
+    def _entry_dict(e: LogEntry) -> dict[str, Any]:
+        return {
+            "id": e.id,
+            "ts": e.ts,
+            "agent": e.agent,
+            "action": e.action,
+            "detail": e.detail,
+            "result": e.result,
+            "thumb": e.thumb,
+            "undoable": e.undo is not None,
+            "source": e.source,
+            "session": e.session,
+        }
+
+    def session_trail(self, session_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """v0.1.28: one control session's audit trail, oldest first (the live session when ``session_id`` is not
+        given): timestamp, action, detail, result and screenshot thumbnail per step - the replay view."""
+        with self._lock:
+            sid = session_id or (self.grant.id if self.grant is not None else None)
+            if sid is None and self._session_order:
+                sid = self._session_order[-1]
+            entries = list(self.sessions.get(sid, []) if sid else [])[-limit:]
+        return [self._entry_dict(e) for e in entries]
+
+    def sessions_summary(self) -> list[dict[str, Any]]:
+        """v0.1.28: the recent control sessions (newest last): who, how many steps, the budget, still active."""
+        with self._lock:
+            active = self.grant.id if self.grant is not None else None
+            out = []
+            for sid in self._session_order:
+                steps = len(self.sessions.get(sid, []))
+                out.append(
+                    {
+                        "session": sid,
+                        "agent": self._session_agents.get(sid, ""),
+                        "steps": steps,
+                        "active": sid == active,
+                    }
+                )
+        return out
 
     def undo_last(self, agent_id: str) -> dict[str, Any]:
         """An agent undoes its own newest undoable action (cursor move, scroll, typed text). It needs the same live,

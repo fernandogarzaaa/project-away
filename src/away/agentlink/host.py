@@ -219,6 +219,9 @@ def build_core(
         on_event=emit,
         always_allowed=always,
         allow_always=registry.allow_always,
+        step_budget=int(getattr(s, "control_step_budget", 40)),
+        audit_trail=bool(getattr(s, "control_audit_trail", True)),
+        settings=settings,  # v0.1.28: the step budget and the audit trail switch follow the live config
     )
     jobs = shared_runner(Path(data_dir) / "diagnostics", command=job_command)
     from away.agentlink.inbox import Inbox
@@ -1320,6 +1323,9 @@ class AgentLinkHost:
             "prompts": core.prompts.pending(),
             "control": core.control.status(),
             "actions": core.control.actions(20),
+            # v0.1.28: the current session's visual audit trail + the recent sessions (Settings > Agent Link)
+            "control_trail": core.control.session_trail(limit=100),
+            "control_sessions": core.control.sessions_summary(),
             "changes": core.changes.history(20),
             "access": list(self.gate.recent)[-20:] if self.gate else [],
             "results": self._results,
