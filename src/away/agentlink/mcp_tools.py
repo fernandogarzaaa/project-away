@@ -190,15 +190,23 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         monitor: int | None = None,
         region: dict | None = None,
         elements: bool = False,
+        annotate: bool = False,
     ) -> list:
         """A screenshot plus the focused window (needs "See my screen when I allow"; the person sees a flash).
         Orient, then zoom: first a wide shot (default: the whole desktop at scale 0.5; the metadata lists every
         monitor with index, x, y, w, h), then `monitor`=N for one display or `region`={x, y, width, height} in
         screen coordinates to read small text (scale up to 1.0). The longest side is capped at 2560 px.
         Screen point = origin + image point / scale (or pass from_image=true to pointer actions).
-        elements=true adds the UI element tree (names you can pass to pointer actions)."""
+        elements=true adds the UI element tree (names you can pass to pointer actions).
+        annotate=true draws numbered red boxes over detected interactable regions (set-of-mark prompting): use
+        this for canvas apps, games and remote desktops where the UI tree is empty. The picture comes back with
+        [1]..[N] boxes and the metadata lists each box id with its screen coordinates; click one with
+        pointer(action="click", element="mark:14") instead of estimating pixels. Edge-based detection, no AI:
+        a box may be a button, a panel or a scrollbar, so confirm visually before risky clicks."""
         raw, meta = _image(
-            await call(ctx, "get_screen", elements=elements, scale=scale, monitor=monitor, region=region)
+            await call(
+                ctx, "get_screen", elements=elements, scale=scale, monitor=monitor, region=region, annotate=annotate
+            )
         )
         return [Image(data=raw, format="jpeg"), json.dumps(meta, default=str)]
 
@@ -281,8 +289,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     ) -> dict:
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
         right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
-        screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
-        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
+        screen x,y, an element name from get_screen(elements=true), a numbered box from get_screen(annotate=true)
+        as element="mark:14" (or "#14"), or image x,y with from_image=true (your last screenshot's origin and
+        scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(

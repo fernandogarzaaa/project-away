@@ -503,6 +503,7 @@ class Service:
         scale: float | None = None,
         monitor: int | None = None,
         region: Any = None,
+        annotate: bool = False,
     ) -> tuple[bytes, dict[str, Any]]:
         """A screenshot (+ the focused window and optionally the UI element tree). Needs "See my screen when I
         allow"; flashes an indicator each time (``quiet`` is only used by the live view, which keeps a permanent
@@ -510,7 +511,12 @@ class Service:
 
         v0.1.21: ``scale`` 0.1-1.0 (default 0.5), ``monitor`` 1..N (one display) or ``region`` {x, y, width,
         height} in screen coordinates (zoom in); the longest side is capped at 2560 px (1600 for the live view).
-        The metadata lists the monitors and the area/scale used: orient with a wide shot, then zoom."""
+        The metadata lists the monitors and the area/scale used: orient with a wide shot, then zoom.
+
+        v0.1.27: ``annotate=true`` draws numbered red boxes over detected interactable regions (set-of-mark
+        prompting) for canvas apps, games and remote desktops where the UIA tree is empty; the boxes are listed
+        in ``meta["annotations"]`` with screen coordinates, and clicks can reference them as
+        ``pointer(action="click", element="mark:14")`` (or ``"#14"``)."""
         from away.agentlink import screenshot as shot
 
         self.require(agent, perms.SCREEN)
@@ -538,7 +544,11 @@ class Service:
         if not quiet or agent.id not in self._watchers:
             # v0.1.24 hardening: "quiet" only skips the notice while this agent's live view badge is on screen
             self._flash(f"{agent.name} looked at your screen", "screenshot")
-        jpeg = shot.render(img, p)
+        pil = shot.to_image(img, p)
+        annotations: list[dict[str, Any]] = []
+        if annotate:
+            pil, annotations = self._annotate(pil, p, agent.id)
+        jpeg = shot.to_jpeg(pil, p)
         self.control.scales[agent.id] = p.scale
         self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
         meta: dict[str, Any] = shot.meta(p, ds, len(jpeg))
@@ -559,7 +569,47 @@ class Service:
             "Orient with a wide shot (scale 0.3-0.5), then zoom with monitor=N or region={x,y,width,height} "
             "(screen coordinates). " + meta.pop("to_screen")
         )
+        if annotate:
+            meta["annotations"] = annotations
+            meta["annotate_note"] = (
+                f"the picture has {len(annotations)} numbered red boxes [1]..[{len(annotations)}] drawn over "
+                "detected regions; each row lists id, label and screen coordinates. Click one with "
+                'pointer(action="click", element="mark:14") (or "#14") instead of estimating pixels. '
+                "Use this for canvas apps, games and remote desktops where the UIA tree is empty; it is a "
+                "fallback, not a replacement for elements=true on native apps."
+            )
         return jpeg, meta
+
+    def _annotate(self, pil: Any, p: Any, agent_id: str) -> tuple[Any, list[dict[str, Any]]]:
+        """v0.1.27: detect regions, draw the numbered boxes on the screenshot, cache the click points per agent."""
+        from away.agentlink import setofmark as som
+
+        regions = som.detect_regions(pil)
+        entries: list[dict[str, Any]] = []
+        marks: dict[int, tuple[int, int]] = {}
+        for r in regions:
+            x, y, w, h = r.box
+            sx0, sy0 = p.to_screen(float(x), float(y))
+            sx1, sy1 = p.to_screen(float(x + w), float(y + h))
+            cx, cy = round((sx0 + sx1) / 2), round((sy0 + sy1) / 2)
+            marks[r.id] = (cx, cy)
+            entries.append(
+                {
+                    "id": r.id,
+                    "label": f"region {r.id}",
+                    "confidence": r.confidence,
+                    "image": {"x": x, "y": y, "width": w, "height": h},
+                    "screen": {
+                        "x": round(min(sx0, sx1)),
+                        "y": round(min(sy0, sy1)),
+                        "width": round(abs(sx1 - sx0)),
+                        "height": round(abs(sy1 - sy0)),
+                    },
+                    "center": {"x": cx, "y": cy},
+                }
+            )
+        self.control.marks[agent_id] = marks
+        return som.draw_marks(pil, regions), entries
 
     def screen_watch(
         self,

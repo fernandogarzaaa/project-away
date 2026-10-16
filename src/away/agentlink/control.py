@@ -195,6 +195,9 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+        # v0.1.27: agent -> {mark id: (screen x, screen y)} of the numbered boxes from its last
+        # get_screen(annotate=true) (set-of-mark prompting for empty UIA trees)
+        self.marks: dict[str, dict[int, tuple[int, int]]] = {}
 
     @property
     def bucket(self) -> Any:
@@ -329,6 +332,7 @@ class ComputerControl:
             self._end(reason)
         self.views.pop(agent_id, None)
         self.scales.pop(agent_id, None)
+        self.marks.pop(agent_id, None)
 
     # -------------------------------------------------------------- takeover
     def note_own_mouse(self, seconds: float = MOUSE_ECHO_S) -> None:
@@ -448,8 +452,20 @@ class ComputerControl:
     def _where(label: str, x: int, y: int) -> str:
         return f"'{label[:60]}'" if label.strip() else f"the spot at ({x}, {y})"
 
+    # v0.1.27: a numbered box from get_screen(annotate=true): "mark:14", "mark 14", "#14"
+    MARK_REF = re.compile(r"(?i)^(?:mark[:#]?\s*|#)(\d{1,4})$")
+
     def _point(self, agent_id: str, x: Any, y: Any, element: str | None, from_image: bool) -> tuple[int, int, str]:
         if element:
+            mark = self.MARK_REF.match(str(element).strip())
+            if mark is not None:  # a set-of-mark reference: needs no UI Automation
+                mid = int(mark.group(1))
+                pt = self.marks.get(agent_id, {}).get(mid)
+                if pt is None:
+                    raise ControlRefused(
+                        f"no annotation {mid} on your last screenshot; call get_screen(annotate=true) first"
+                    )
+                return int(pt[0]), int(pt[1]), f"mark {mid}"
             if not getattr(self.hooks.uia, "available", False):
                 raise ControlRefused("acting by element name needs UI Automation (Windows); use coordinates")
             el = self.hooks.uia.find(str(element))
