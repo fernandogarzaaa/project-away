@@ -358,11 +358,6 @@ class ComputerControl:
         return True
 
     # ---------------------------------------------------------------- acting
-    def require_grant(self, agent_id: str) -> Grant:
-        """The live, unpaused grant for this agent (raises ControlRefused otherwise): the approved-session
-        gate for tools that ride the computer-control session, like the staged shell."""
-        return self._require(agent_id)
-
     def _require(self, agent_id: str) -> Grant:
         g = self._check_expiry()
         if g is None:
@@ -668,9 +663,20 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
+        foreground = self._foreground_state()
+        focused = self._focused_label()
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        return {
+            "ok": True,
+            "action": action,
+            "detail": detail,
+            "log_id": entry.id,
+            # the observed effect: what the desktop looks like right after the input landed, so the
+            # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+            "foreground": foreground,
+            "focused": focused,
+        }
 
     def _window_title(self) -> str:
         try:
@@ -678,6 +684,16 @@ class ComputerControl:
         except Exception:
             fg = {}
         return str(fg.get("title", ""))
+
+    def _foreground_state(self) -> dict[str, str]:
+        """Best-effort post-action foreground window (title + process name). Never raises: if the hook
+        fails, the action already succeeded and the agent still gets its result, just without the
+        observed window state."""
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
     def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks

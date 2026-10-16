@@ -62,7 +62,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 17 (shell). Related tools are one tool with an `action`
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox). Related tools are one tool with an `action`
     # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
@@ -282,7 +282,10 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
         right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
         screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
-        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
+        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first.
+        The result reports the observed effect: `foreground` (the foreground window's title and process name
+        right after the action) and `focused` (the focused UI element's label, when UI Automation has one).
+        Check these: they tell you whether the click actually landed where you intended."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -304,33 +307,18 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
         (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab"."""
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". The result reports the observed
+        effect: `foreground` (the foreground window's title and process name right after the action) and
+        `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "keyboard", action=action, text=text, keys=keys)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser."""
+        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser.
+        The result reports the observed effect: `foreground` (the foreground window's title and process name
+        right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
-
-    @mcp.tool()
-    async def shell(
-        ctx: Context,
-        action: str = "run",
-        command: str | None = None,
-        argv: list[str] | None = None,
-        why: str | None = None,
-        limit: int | None = None,
-    ) -> dict:
-        """Run a command on the person's PC, in two safety tiers (needs "Let it use my computer", inside an
-        approved computer session: control action="request" first).
-        - action="list": the tier-1 read-only commands (device/camera/process lists, the away CLI, the app log).
-        - action="run": tier 1 = `command` set to one of those names runs at once (fixed, read-only, no shell
-          is ever involved); tier 2 = anything else via `argv` asks the person first, every time, showing the
-          exact command. `why` is your reason, shown with the approval question. Output is capped at 64 KB
-          and secrets are hidden; password fields and credential stores are never touched.
-        - action="log": every shell call so far (command, tier, result)."""
-        return await group(ctx, "shell", action=action, command=command, argv=argv, why=why, limit=limit)
 
     @mcp.tool()
     async def disconnect(ctx: Context) -> dict:
