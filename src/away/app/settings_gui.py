@@ -1398,7 +1398,14 @@ def camera_diagnose_worker(
         fps = spec.fps if spec is not None else 30
         devs = (lister or (lambda: diagnose.diagnose_devices(None)))()
         out.put("diagnosing every camera on every backend (this takes a while)...")
-        (runner or diagnose.run_diagnose)(devs, width=width, height=height, fps=fps, out=lambda m: out.put(str(m)))
+        (runner or diagnose.run_diagnose)(
+            devs,
+            width=width,
+            height=height,
+            fps=fps,
+            out=lambda m: out.put(str(m)),
+            consent=diagnose.read_consent,
+        )
         out.put({"done": True})
     except Exception as exc:
         out.put({"error": f"camera diagnosis failed: {exc}"})
@@ -2579,6 +2586,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         tools.grid(row=11, column=0, columnspan=6, sticky="w", pady=(4, 0))
         self.cam_diag_btn = ttk.Button(tools, text="Diagnose", command=self._cam_diagnose)
         self.cam_diag_btn.pack(side="left", padx=2)
+        # v0.1.28: a fix button the diagnose output can ask for, e.g. "[fix:open:camera_privacy]" ->
+        # "Open camera privacy settings". It is packed only while a diagnosis offers it.
+        self.cam_fix_action: str | None = None
+        self.cam_fix_btn = ttk.Button(tools, text="", command=self._cam_fix)
         ttk.Button(tools, text="Retry cameras", command=self._cam_retry).pack(side="left", padx=2)
         # v0.1.23: stop using a camera that keeps failing (it is kept, with its settings, to turn back on)
         ttk.Button(tools, text="Turn off failing camera", command=self._cam_turn_off).pack(side="left", padx=2)
@@ -2650,6 +2661,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self._report(err)
             return
         self._cam_out_set("diagnosing: every camera on every backend; this takes a while...")
+        self._cam_hide_fix()
         self.cam_diag_btn.configure(state="disabled")
         self._cam_diag_thread = threading.Thread(
             target=camera_diagnose_worker,
@@ -2662,11 +2674,16 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.root.after(200, self._cam_diag_poll)
 
     def _cam_diag_poll(self) -> None:
+        from away.multicam import diagnose
+
         running = self._cam_diag_thread is not None and self._cam_diag_thread.is_alive()
         while not self._cam_diag_q.empty():
             msg = self._cam_diag_q.get_nowait()
             if isinstance(msg, str):
-                self._cam_out_add(msg)
+                action, text = diagnose.split_fix_marker(msg)  # v0.1.28: fix markers become a button
+                self._cam_out_add(text)
+                if action:
+                    self._cam_show_fix(action)
             elif isinstance(msg, dict) and "error" in msg:
                 self._cam_out_add(f"error: {msg['error']}")
         if running:
@@ -2675,6 +2692,43 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._cam_tools.end("test")
         self.cam_diag_btn.configure(state="normal")
         self._cam_refresh()
+
+    # v0.1.28: the diagnose's fix markers, e.g. "[fix:open:camera_privacy]", surface as a button next to
+    # Diagnose. The label matches the self-test's fix buttons.
+    CAM_DIAGNOSE_FIX_LABELS: ClassVar[dict[str, str]] = {"open:camera_privacy": "Open camera privacy settings"}
+
+    def _cam_show_fix(self, action: str) -> None:
+        label = self.CAM_DIAGNOSE_FIX_LABELS.get(action)
+        if not label:
+            return
+        self.cam_fix_action = action
+        self.cam_fix_btn.configure(text=label)
+        self.cam_fix_btn.pack(side="left", padx=2)
+
+    def _cam_hide_fix(self) -> None:
+        self.cam_fix_action = None
+        self.cam_fix_btn.pack_forget()
+
+    def _cam_fix(self) -> None:
+        from away.selftest import fixes
+
+        action = self.cam_fix_action
+        if not action:
+            return
+        self.cam_fix_btn.configure(state="disabled")
+
+        def work() -> None:
+            res = fixes.apply(action)
+            ok = bool(res.get("ok"))
+            message = str(res.get("message") or "Done.")
+
+            def done() -> None:
+                self._report(None if ok else message, message if ok else None)
+                self.cam_fix_btn.configure(state="normal")
+
+            self.root.after(0, done)
+
+        threading.Thread(target=work, daemon=True, name="camera-diagnose-fix").start()
 
     def _cam_selected(self) -> int | None:
         sel = self.cam_tree.selection()
