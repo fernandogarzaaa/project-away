@@ -27,9 +27,11 @@ from away.multicam import capture
 def _clean_camera_state():
     capture._abort_opens.clear()
     capture._open_now.clear()
+    capture._open_state.handover_gen = None
     yield
     capture._abort_opens.clear()
     capture._open_now.clear()
+    capture._open_state.handover_gen = None
     assert capture.opens_in_progress() == 0
 
 
@@ -360,3 +362,59 @@ def test_handover_generation_increments_by_exactly_one() -> None:
     assert capture._handover_gen == before + 1
     assert capture.wait_devices_free(timeout=0.5) is True
     assert capture._handover_gen == before + 2
+
+
+def test_search_cancelled_sees_handover_that_finished_mid_open() -> None:
+    """_Search.cancelled() must fire when the generation changed mid-open.
+
+    Regression test for the follow-up CodeRabbit finding: the gate-acquisition check
+    alone leaves a window where a hand-over finishes after the open takes the gate
+    but before _open_camera's first _check(). Publishing the generation thread-locally
+    closes it: every in-flight check sees the finished hand-over.
+    """
+    from away.multicam.capture import _Search
+
+    search = _Search("cam", object(), 1.0, 1.0, time.monotonic, time.sleep, 30.0, 0.5)
+    # Simulate open_camera() having published this thread's generation.
+    capture._open_state.handover_gen = capture._handover_gen
+    try:
+        assert search.cancelled() is False
+        # A hand-over runs to completion while the open is in flight.
+        assert capture.wait_devices_free(timeout=0.5) is True
+        assert search.cancelled() is True
+        with pytest.raises(capture.OpenCancelled):
+            search._check()
+    finally:
+        capture._open_state.handover_gen = None
+
+
+def test_search_without_thread_generation_uses_event_only() -> None:
+    """_Search without a thread-local generation behaves exactly like before (event only)."""
+    from away.multicam.capture import _Search
+
+    capture._open_state.handover_gen = None
+    search = _Search("cam", object(), 1.0, 1.0, time.monotonic, time.sleep, 30.0, 0.5)
+    assert search.cancelled() is False
+    capture._abort_opens.set()
+    try:
+        assert search.cancelled() is True
+    finally:
+        capture._abort_opens.clear()
+
+
+def test_open_camera_publishes_generation_thread_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """open_camera must publish its recorded generation for the calling thread."""
+    seen: dict[str, object] = {}
+
+    def fake_open_camera(src: object, *args: object, **kwargs: object) -> None:
+        seen["thread_gen"] = getattr(capture._open_state, "handover_gen", "MISSING")
+        return None
+
+    monkeypatch.setattr(capture, "_open_camera", fake_open_camera)
+    gen_before = capture._handover_gen
+    capture.open_camera(0, cv2=object())
+    assert seen.get("thread_gen") == gen_before
+    # The generation must not leak to later opens on this thread.
+    assert getattr(capture._open_state, "handover_gen", "MISSING") is None
