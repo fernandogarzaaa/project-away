@@ -414,10 +414,10 @@ def play_chunks(synth: Callable[[str], tuple[Any, int]], pieces: list[str], play
 
 def sd_play(samples: Any, sr: int, volume: float = 1.0) -> None:  # pragma: no cover - audio device
     import numpy as np
-    import sounddevice as sd
 
-    sd.play(np.asarray(samples, dtype=np.float32) * float(volume), int(sr))
-    sd.wait()
+    from away.voice import audio_out
+
+    audio_out.play_blocking(np.asarray(samples, dtype=np.float32) * float(volume), int(sr))
 
 
 def providers() -> list[str]:
