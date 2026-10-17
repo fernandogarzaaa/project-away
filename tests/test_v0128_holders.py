@@ -258,7 +258,7 @@ def test_holders_is_a_known_diagnose_kind(tmp_path: Path) -> None:
     done = _wait_done(r, job.id)
     assert done.state == "done"
     res = done.public()["result"]
-    assert set(res) == {"now", "last_used"}
+    assert set(res) == {"now", "last_used", "elapsed_s", "budget_hit"}
     assert done.public()["output"]  # plain-words lines for the agent too
     with pytest.raises(ValueError, match="unknown check"):
         r.start("not-a-kind")
