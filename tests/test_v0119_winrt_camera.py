@@ -997,7 +997,7 @@ def test_diagnose_reports_every_backend_and_mode(monkeypatch: pytest.MonkeyPatch
         return FakeWinrtCap(cv2, f.mode(), 30.0 if f.fps >= 30 else 0.0)
 
     fmts = [nf(640, 480, 30, i=0), nf(1280, 720, 30, i=1), nf(640, 480, 15, "YUY2", 2)]
-    out = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         [d for d in _devs() if d.name != BROADCAST],
         cv2=cv2,
         out=lines.append,
@@ -1011,7 +1011,7 @@ def test_diagnose_reports_every_backend_and_mode(monkeypatch: pytest.MonkeyPatch
         clock=clock,
         sleep=clock.sleep,
     )
-    assert out == lines
+    assert report.lines == lines
     text = "\n".join(lines)
     assert "camera 0: JoyCam" in text and "camera 1: HD User Facing" in text
     assert "DirectShow (index 0): OpenCV cannot list this backend's formats" in text
@@ -1026,7 +1026,7 @@ def test_diagnose_reports_every_backend_and_mode(monkeypatch: pytest.MonkeyPatch
 def test_diagnose_without_winrt_and_off_windows() -> None:
     clock = Clock()
     cv2 = FakeCV2({}, clock)
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         _devs()[:1],
         cv2=cv2,
         windows=True,
@@ -1035,7 +1035,7 @@ def test_diagnose_without_winrt_and_off_windows() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert any("WinRT: unavailable" in ln and "project-away[winrt]" in ln for ln in lines)
+    assert any("WinRT: unavailable" in ln and "project-away[winrt]" in ln for ln in report.lines)
     nix = diagnose.run_diagnose(
         [CameraDevice(None, "/dev/video0", "Integrated Camera")],
         cv2=FakeCV2({("/dev/video0", None): (True, 30.0)}, clock),
@@ -1044,13 +1044,15 @@ def test_diagnose_without_winrt_and_off_windows() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert any("default (index /dev/video0)" in ln for ln in nix) and any(": ok 30.0 fps" in ln for ln in nix)
-    assert diagnose.run_diagnose([], cv2=cv2, windows=False) == ["no cameras found"]
+    assert any("default (index /dev/video0)" in ln for ln in nix.lines) and any(
+        ": ok 30.0 fps" in ln for ln in nix.lines
+    )
+    assert diagnose.run_diagnose([], cv2=cv2, windows=False).lines == ["no cameras found"]
 
 
 def test_diagnose_winrt_errors_are_printed() -> None:
     clock = Clock()
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         _devs()[1:2],
         cv2=FakeCV2({}, clock),
         windows=True,
@@ -1060,9 +1062,9 @@ def test_diagnose_winrt_errors_are_printed() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert lines[-2] == "  WinRT: WinRT does not list a camera named 'HD User Facing'"
+    assert report.lines[-2] == "  WinRT: WinRT does not list a camera named 'HD User Facing'"
     # v0.1.28: a camera that never opens gets the lens-cover / kill-key guidance last
-    assert lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"
+    assert report.lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"
 
     class Dead:
         error = "busy"
@@ -1073,7 +1075,7 @@ def test_diagnose_winrt_errors_are_printed() -> None:
         def release(self) -> None:
             pass
 
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         _devs()[1:2],
         cv2=FakeCV2({}, clock),
         windows=True,
@@ -1084,8 +1086,8 @@ def test_diagnose_winrt_errors_are_printed() -> None:
         clock=clock,
         sleep=clock.sleep,
     )
-    assert lines[-2] == "    640x480@30 MJPG: did not open (busy)"
-    assert lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"  # v0.1.28: never opened -> lens-cover / kill-key
+    assert report.lines[-2] == "    640x480@30 MJPG: did not open (busy)"
+    assert report.lines[-1] == f"  {diagnose.SHUTTER_GUIDANCE}"  # v0.1.28: never opened -> lens-cover / kill-key
 
 
 def test_diagnose_modes_and_candidates() -> None:

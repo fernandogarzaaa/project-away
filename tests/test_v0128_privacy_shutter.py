@@ -114,7 +114,7 @@ def run(devices: list[CameraDevice], opens: bool, **kw: Any) -> list[str]:
         sleep=clock.sleep,
         budget_s=None,
         **kw,
-    )
+    ).lines
 
 
 # ----------------------------------------------------------------------------- the consent store
@@ -235,6 +235,6 @@ def test_stopped_run_emits_no_shutter_guidance() -> None:
         sleep=clock.sleep,
         budget_s=60.0,
         consent=lambda: "Allow",
-    )
+    ).lines
     assert any("Camera privacy" in ln for ln in lines)
     assert not any("lens cover" in ln for ln in lines)

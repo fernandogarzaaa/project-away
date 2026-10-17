@@ -701,7 +701,13 @@ def cmd_cameras_diagnose(
         if not devs:
             return _fail(f"camera {device!r} not found (see `away cameras list`)" if device else "no cameras found")
         seconds = diagnose.MEASURE_S if args.seconds is None else float(args.seconds)
-        print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
+        quick = bool(getattr(args, "quick", False))
+        if quick:
+            # v0.1.28 (CodeRabbit): the mode store is what saved_modes reads; configure() does not activate it
+            capture.use_mode_store(capture.default_mode_file())
+            print("quick check: opening each camera on its remembered backend only...", flush=True)
+        else:
+            print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
         budget = getattr(args, "budget", None)
         seen_fixes: list[str] = []
 
@@ -711,7 +717,7 @@ def cmd_cameras_diagnose(
                 seen_fixes.append(action)
             print(text, flush=True)
 
-        (runner or diagnose.run_diagnose)(
+        report = (runner or diagnose.run_diagnose)(
             devs,
             width=width,
             height=height,
@@ -721,9 +727,15 @@ def cmd_cameras_diagnose(
             budget_s=diagnose.BUDGET_S if budget is None else float(budget),
             include_virtual=bool(getattr(args, "include_virtual", False) or device not in (None, "")),
             consent=diagnose.read_consent,
+            quick=quick,
         )
         if "open:camera_privacy" in seen_fixes:
             print("fix: open Settings > Privacy > Camera and allow camera access, then diagnose again.", flush=True)
+        # (proposal #10): one machine-readable line carrying the structured per-camera results, so an
+        # Agent Link check can lift it out of this subprocess's output into the job's ``result`` dict.
+        structured = getattr(report, "result", None)
+        if isinstance(structured, dict) and isinstance(structured.get("cameras"), list):
+            print(diagnose.RESULT_MARKER, json.dumps(structured, separators=(",", ":")), flush=True)
     for line in pc_context_lines():  # v0.1.23: who else uses the camera / the CPU
         print(line)
     return 0
@@ -1554,6 +1566,11 @@ def build_parser() -> argparse.ArgumentParser:
     cm.add_argument("--save", action="store_true", help="test: save the camera settings that worked together")
     cm.add_argument(
         "--budget", type=float, default=None, help="diagnose: stop after this many seconds (default 60, 0 = no limit)"
+    )
+    cm.add_argument(
+        "--quick",
+        action="store_true",
+        help="diagnose: quick triage - open each camera on its remembered backend only, skip the mode sweep",
     )
     cm.add_argument(
         "--include-virtual", action="store_true", help="diagnose: also check virtual cameras (NVIDIA Broadcast, OBS)"
