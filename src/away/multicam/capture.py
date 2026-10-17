@@ -741,6 +741,7 @@ def reset_session_modes() -> None:
 _slow_known: dict[str, float] = {}  # camera -> best fps of a full sweep that stayed below the minimum
 _opening = 0  # opens in progress in this process (a device may be held before HeldCapture exists)
 _abort_opens = threading.Event()  # set while handing the cameras over: every open in progress gives up
+_open_gate = threading.Lock()  # v0.1.29: native camera backends are not thread safe: one open at a time per process
 
 
 def opens_in_progress() -> int:
@@ -760,6 +761,16 @@ def wait_devices_free(
     _abort_opens.set()
     try:
         deadline = clock() + timeout
+        # v0.1.29: do not declare the devices free while a native open is still mid-flight. An
+        # in-progress open sees _abort_opens and gives up between attempts, then releases the
+        # gate; waiting for the gate (up to the timeout) keeps hand-over from interleaving
+        # with it. The gate is released right away: new opens during hand-over still fail
+        # fast on _abort_opens instead of blocking behind the whole hand-over.
+        remaining = deadline - clock()
+        if remaining > 0 and _open_gate.acquire(timeout=remaining):
+            _open_gate.release()
+        else:
+            log.warning("camera hand-over: an open did not finish within %.1f s", timeout)
         while held_cameras() or opens_in_progress():
             if clock() >= deadline:
                 log.warning(
@@ -1573,28 +1584,33 @@ def open_camera(
     with _lock:
         _opening += 1
     try:
-        return _open_camera(
-            src,
-            width,
-            height,
-            fps,
-            fourcc,
-            cv2=cv2,
-            devices=devices,
-            label=label,
-            low_res=low_res,
-            virtual_fallback=virtual_fallback,
-            first_frame_s=first_frame_s,
-            retry_frame_s=retry_frame_s,
-            clock=clock,
-            sleep=sleep,
-            msmf_lister=msmf_lister,
-            min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
-            measure_s=MEASURE_S if measure_s is None else float(measure_s),
-            sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
-            backend=backend,
-            good_fps=TRACKING_FPS if good_fps is None else float(good_fps),
-        )
+        # v0.1.29: serialize whole opens. Two threads inside _open_camera raced in native
+        # DirectShow/MediaFoundation/WinRT code (native access violations in the log); the
+        # _opening counter alone never stopped that. No re-entrancy: _open_camera never
+        # calls open_camera, and wait_devices_free never runs while the gate is held.
+        with _open_gate:
+            return _open_camera(
+                src,
+                width,
+                height,
+                fps,
+                fourcc,
+                cv2=cv2,
+                devices=devices,
+                label=label,
+                low_res=low_res,
+                virtual_fallback=virtual_fallback,
+                first_frame_s=first_frame_s,
+                retry_frame_s=retry_frame_s,
+                clock=clock,
+                sleep=sleep,
+                msmf_lister=msmf_lister,
+                min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
+                measure_s=MEASURE_S if measure_s is None else float(measure_s),
+                sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
+                backend=backend,
+                good_fps=TRACKING_FPS if good_fps is None else float(good_fps),
+            )
     finally:
         with _lock:
             _opening -= 1
