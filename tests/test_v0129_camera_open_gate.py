@@ -346,3 +346,17 @@ def test_queued_open_proceeds_when_no_handover_ran(
     t.join(10)
     assert not t.is_alive()
     assert opened == [True]
+
+
+def test_handover_generation_increments_by_exactly_one() -> None:
+    """wait_devices_free must bump the generation counter by exactly one per run.
+
+    Pins the counter semantics the stale-open cancellation relies on: a queued open
+    compares the recorded generation against the current one, so the increment must
+    be exactly one (not zero, not two, not a decrement).
+    """
+    before = capture._handover_gen
+    assert capture.wait_devices_free(timeout=0.5) is True
+    assert capture._handover_gen == before + 1
+    assert capture.wait_devices_free(timeout=0.5) is True
+    assert capture._handover_gen == before + 2
