@@ -591,6 +591,7 @@ class ComputerControl:
         """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
+        extra: dict[str, Any] = {}  # per-action result fields beyond ok/action/detail/log_id
         before = None
         try:
             before = self.hooks.cursor_pos()
@@ -615,6 +616,9 @@ class ComputerControl:
             elif action == "right_click":
                 step().click_button("right", 1)
             detail = f"({x}, {y})" + (f" '{label}'" if label else "")
+            # proposal #6: the resolved pre-click label reaches the agent in the result, so it can see
+            # e.g. "clicked 'Desktop', not 'Start'" and self-correct instead of taking another screenshot
+            extra["target_label"] = label
             if action == "move" and before is not None:
                 undo = {"move": list(before)}
         elif action == "drag":
@@ -720,6 +724,8 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
+        # the feature's click-verification extras (e.g. target_label) ride along in `extra`; the
+        # observed effect fields stay explicit for a stable result shape.
         foreground = self._foreground_state()
         focused = self._focused_label()
         if not record:
@@ -734,6 +740,7 @@ class ComputerControl:
                 # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
                 "foreground": foreground,
                 "focused": focused,
+                **extra,
             }
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
@@ -747,6 +754,7 @@ class ComputerControl:
             # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
             "foreground": foreground,
             "focused": focused,
+            **extra,
         }
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
