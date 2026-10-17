@@ -3,6 +3,7 @@
     python scripts/mutation.py                 # all groups
     python scripts/mutation.py filters cursor  # selected groups
     python scripts/mutation.py --summary       # just aggregate existing reports
+    python scripts/mutation.py --list-groups   # print the group list as JSON (for CI matrix)
 
 Reports land in .testteeth-reports/<group>.json (git-ignored).
 """
@@ -85,7 +86,12 @@ def summary() -> int:
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--list-groups" in args:
+        print(json.dumps(list(GROUPS)))
+        raise SystemExit(0)
     if "--summary" not in args:
         for grp in args or list(GROUPS):
+            if grp not in GROUPS:
+                raise SystemExit(f"unknown mutation group: {grp}")
             run(grp)
     raise SystemExit(summary())
