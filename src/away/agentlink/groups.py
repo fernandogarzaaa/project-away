@@ -70,7 +70,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "scroll": GroupAction("act", ("dy", "dx", "x", "y", "element", "from_image"), fixed={"action": "scroll"}),
     },
     "keyboard": {
-        "type": GroupAction("act", ("text",), fixed={"action": "type_text"}),
+        "type": GroupAction("act", ("text", "expect"), fixed={"action": "type_text"}),
         "press": GroupAction("act", ("keys",), fixed={"action": "press_keys"}),
     },
     "inbox": {  # v0.1.22 "Talk to your agent"

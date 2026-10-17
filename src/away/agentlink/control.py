@@ -591,6 +591,7 @@ class ComputerControl:
         """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
+        extra: dict[str, Any] = {}
         before = None
         try:
             before = self.hooks.cursor_pos()
@@ -655,6 +656,20 @@ class ComputerControl:
             if not text or len(text) > 2000:
                 raise ControlRefused("type between 1 and 2000 characters at a time")
             self._typing_target_ok()
+            label = self._focused_label()
+            title = self._window_title()
+            extra["target"] = {"window": title, "element": label}
+            expect = str(kw.get("expect") or "").strip()
+            if expect and expect.lower() not in title.lower():
+                if title.strip():
+                    raise ControlRefused(
+                        f"the focused window ({title!r}) does not contain {expect!r}: "
+                        "refusing to type into the wrong window"
+                    )
+                raise ControlRefused(
+                    f"I cannot see a focused window title to check {expect!r} against: "
+                    "refusing to type into the wrong window"
+                )
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
             if not hasattr(b, "type_text"):
@@ -747,6 +762,7 @@ class ComputerControl:
             # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
             "foreground": foreground,
             "focused": focused,
+            **extra,
         }
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:

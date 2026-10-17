@@ -585,6 +585,54 @@ def test_password_fields_terminals_and_secure_desktop_are_blocked() -> None:
     assert b5.calls == []
 
 
+def test_type_text_returns_focused_window_and_element() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "type_text", text="hello")
+    assert res["ok"] is True
+    assert res["target"] == {"window": "Untitled - Notepad", "element": "Body"}
+    assert any(c[0] == "type_text" for c in backend.calls)
+
+
+def test_type_text_expect_match_types_case_insensitively() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "type_text", text="hello", expect="NOTEPAD")
+    assert res["ok"] is True
+    assert any(c[0] == "type_text" for c in backend.calls)
+
+
+def test_type_text_expect_mismatch_refuses_before_typing() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="refusing to type into the wrong window"):
+        ctl.act("a1", "type_text", text="hello", expect="chrome")
+    assert backend.calls == []  # refused before a single keystroke
+
+
+def test_type_text_expect_refuses_when_window_title_is_unknown() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock, uia=FakeUIA(focused=None), fg={})
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="refusing to type into the wrong window"):
+        ctl.act("a1", "type_text", text="hello", expect="notepad")
+    assert backend.calls == []
+
+
+def test_keyboard_group_passes_expect_through() -> None:
+    from away.agentlink import groups
+
+    method, args = groups.resolve("keyboard", {"action": "type", "text": "hi", "expect": "notes"})
+    assert method == "act"
+    assert args == {"action": "type_text", "text": "hi", "expect": "notes"}
+
+
 def test_risky_click_asks_and_always_allow_sticks() -> None:
     clock = Clock()
     uia = FakeUIA(
