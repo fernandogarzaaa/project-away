@@ -11,8 +11,11 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
 3. **Takeover.** Any real input (physical mouse/keyboard - told apart from the agent's own input by
    :class:`~away.app.autopause.ManualInputGuard` and short echo windows: typing never hides a real mouse movement,
    and each typed chunk hides key presses for a moment only - or a hand gesture) pauses the agent instantly and
-   interrupts the action in progress; resuming needs a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or
-   holding an open palm ~1 s (never delayed by the short grace right after approval).
+   interrupts the action in progress. While paused a slim banner stays on screen ("Paused - you took over from
+   <agent>") with "Let <agent> continue" and "Stop" buttons whose click IS the answer: no second approval
+   round-trip through the agent. Resuming through the agent still needs a new approval. Global stop:
+   Ctrl+Alt+Esc, saying "stop", or holding an open palm ~1 s (never delayed by the short grace right after
+   approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
    secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
@@ -156,6 +159,8 @@ class ControlHooks:
     platform: str = ""
     overlay_on: Callable[[str], None] = lambda _name: None
     overlay_off: Callable[[], None] = lambda: None
+    # the takeover banner (proposal #16): shown instead of overlay_off() while the grant is paused
+    overlay_paused: Callable[[str], None] = lambda _name: None
     sleep: Callable[[float], None] = time.sleep
     engine: Any = None  # the shared ActionEngine in the app; None = a private one (tests, headless)
 
@@ -355,12 +360,47 @@ class ComputerControl:
                 return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
             g.cancel.set()  # stop the action in progress (typing, a drag) before its next step
+        # the banner stays up while paused ("Paused - you took over from <agent>", with buttons to continue or
+        # stop), instead of the border vanishing with no explanation
         with contextlib.suppress(Exception):
-            self.hooks.overlay_off()
+            self.hooks.overlay_paused(g.agent_name)
         self._emit("control.paused", {"agent": g.agent_name, "reason": g.paused})
         return True
 
+    def paused_banner_answer(self, answer: str) -> bool:
+        """The user answered the paused banner directly: the click IS the answer (no prompt round-trip).
+
+        "continue" resumes the grant without asking again (the banner click itself is covered by the same short
+        grace as an approval click, so it is not a takeover); anything else stops the grant. True when it acted
+        on a live grant; False when the grant had already ended another way (the banner closes with its stop
+        file, and a click on a stale banner does nothing).
+        """
+        with self._lock:
+            g = self.grant
+            if g is None:
+                return False
+            name = g.agent_name
+            stop = answer != "continue"
+            resumed = answer == "continue" and bool(g.paused)
+            if resumed:
+                g.paused = ""
+                g.cancel = threading.Event()  # the old takeover does not cancel new actions
+                self._grace_until = self.clock() + GRACE_S  # the banner click itself is not a takeover
+        if stop:
+            self._end("the user chose to stop")
+            return True
+        with contextlib.suppress(Exception):
+            self.hooks.overlay_on(name)  # back to the control border/banner (this clears the paused one)
+        if resumed:
+            self._emit("control.resumed", {"agent": name, "via": "paused banner"})
+        return True
+
     # ---------------------------------------------------------------- acting
+    def require_grant(self, agent_id: str) -> Grant:
+        """The live, unpaused grant for this agent (raises ControlRefused otherwise): the approved-session
+        gate for tools that ride the computer-control session, like the staged shell."""
+        return self._require(agent_id)
+
     def _require(self, agent_id: str) -> Grant:
         g = self._check_expiry()
         if g is None:
@@ -680,12 +720,34 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
+        foreground = self._foreground_state()
+        focused = self._focused_label()
         if not record:
             self._audit(g, action, detail, "done")
-            return {"ok": True, "action": action, "detail": detail, "log_id": "", "undo": undo}
+            return {
+                "ok": True,
+                "action": action,
+                "detail": detail,
+                "log_id": "",
+                "undo": undo,
+                # the observed effect: what the desktop looks like right after the input landed, so the
+                # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+                "foreground": foreground,
+                "focused": focused,
+            }
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id, "undo": undo}
+        return {
+            "ok": True,
+            "action": action,
+            "detail": detail,
+            "log_id": entry.id,
+            "undo": undo,
+            # the observed effect: what the desktop looks like right after the input landed, so the
+            # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+            "foreground": foreground,
+            "focused": focused,
+        }
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
         """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
@@ -759,6 +821,16 @@ class ComputerControl:
         except Exception:
             fg = {}
         return str(fg.get("title", ""))
+
+    def _foreground_state(self) -> dict[str, str]:
+        """Best-effort post-action foreground window (title + process name). Never raises: if the hook
+        fails, the action already succeeded and the agent still gets its result, just without the
+        observed window state."""
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
     def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
