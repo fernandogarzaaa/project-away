@@ -261,3 +261,88 @@ def test_wait_devices_free_logs_held_cameras_comma_separated(
         capture._hold("0", -1)
         capture._hold("1", -1)
     assert "0, 1" in caplog.text
+
+
+def test_queued_open_is_cancelled_if_handover_finished_while_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open queued on the gate while a hand-over timed out must not open afterwards.
+
+    Regression test for the CodeRabbit finding on the gate fix: if a native open holds
+    _open_gate past the hand-over timeout, a queued open_camera() call would previously
+    acquire the gate after wait_devices_free() cleared _abort_opens and open a camera
+    after the runner handed the devices over. The hand-over generation must cancel it.
+    """
+    opened: list[bool] = []
+    errors: list[BaseException] = []
+
+    def fake_open_camera(src: object, *args: object, **kwargs: object) -> None:
+        opened.append(True)
+        return None
+
+    monkeypatch.setattr(capture, "_open_camera", fake_open_camera)
+
+    # Wedge the gate: simulates a native open stuck past the hand-over timeout.
+    assert capture._open_gate.acquire(blocking=False)
+
+    def run() -> None:
+        try:
+            capture.open_camera(0, cv2=object())
+        except BaseException as exc:  # the test must not hide thread errors
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    try:
+        t.start()
+        # Wait until the open is queued (counted, blocked on the gate).
+        deadline = time.monotonic() + 5
+        while capture.opens_in_progress() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert capture.opens_in_progress() == 1
+        time.sleep(0.1)  # let the thread reach the gate
+        assert t.is_alive()
+
+        # Hand-over: cannot get the gate, drain loop sees the queued open, times out.
+        assert capture.wait_devices_free(timeout=0.5) is False
+    finally:
+        capture._open_gate.release()
+
+    t.join(10)
+    assert not t.is_alive()
+    # The queued open must have been cancelled, never reaching _open_camera.
+    assert not opened
+    assert len(errors) == 1
+    assert isinstance(errors[0], capture.OpenCancelled)
+
+
+def test_queued_open_proceeds_when_no_handover_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generation check must not cancel opens when no hand-over happened."""
+    opened: list[bool] = []
+
+    def fake_open_camera(src: object, *args: object, **kwargs: object) -> None:
+        opened.append(True)
+        return None
+
+    monkeypatch.setattr(capture, "_open_camera", fake_open_camera)
+
+    assert capture._open_gate.acquire(blocking=False)
+
+    def run() -> None:
+        capture.open_camera(0, cv2=object())
+
+    t = threading.Thread(target=run)
+    try:
+        t.start()
+        deadline = time.monotonic() + 5
+        while capture.opens_in_progress() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert capture.opens_in_progress() == 1
+        time.sleep(0.1)
+    finally:
+        capture._open_gate.release()
+
+    t.join(10)
+    assert not t.is_alive()
+    assert opened == [True]

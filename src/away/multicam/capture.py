@@ -741,6 +741,8 @@ def reset_session_modes() -> None:
 _slow_known: dict[str, float] = {}  # camera -> best fps of a full sweep that stayed below the minimum
 _opening = 0  # opens in progress in this process (a device may be held before HeldCapture exists)
 _abort_opens = threading.Event()  # set while handing the cameras over: every open in progress gives up
+_handover_gen = 0  # bumped every time wait_devices_free finishes: an open queued on the gate while a
+# hand-over ran must not proceed afterwards (the event is already cleared by then)
 _open_gate = threading.Lock()  # v0.1.29: native camera backends are not thread safe: one open at a time per process
 
 
@@ -784,6 +786,15 @@ def wait_devices_free(
         return True
     finally:
         _abort_opens.clear()
+        # v0.1.29: a hand-over ran. An open that queued on _open_gate while this ran must
+        # see that and give up instead of opening after the hand-over finished: the event
+        # above is already cleared, so the in-flight cancellation check cannot see it.
+        # (A hand-over cannot return True while an open is queued: the queued open holds
+        # _opening > 0, so the drain loop keeps waiting. A changed generation therefore
+        # always means the hand-over timed out and the open is stale.)
+        global _handover_gen
+        with _lock:
+            _handover_gen += 1
 
 
 class OpenCancelled(RuntimeError):
@@ -1583,12 +1594,19 @@ def open_camera(
     global _opening
     with _lock:
         _opening += 1
+        # v0.1.29: record the hand-over generation before queuing on the gate. If a
+        # hand-over finishes while this open is queued, the generation changes and the
+        # open is stale: it must give up instead of opening after the hand-over.
+        queued_gen = _handover_gen
     try:
         # v0.1.29: serialize whole opens. Two threads inside _open_camera raced in native
         # DirectShow/MediaFoundation/WinRT code (native access violations in the log); the
         # _opening counter alone never stopped that. No re-entrancy: _open_camera never
         # calls open_camera, and wait_devices_free never runs while the gate is held.
         with _open_gate:
+            with _lock:
+                if _handover_gen != queued_gen:
+                    raise OpenCancelled("camera open cancelled (a hand-over finished while the open was queued)")
             return _open_camera(
                 src,
                 width,
