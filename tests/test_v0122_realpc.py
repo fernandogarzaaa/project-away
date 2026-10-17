@@ -325,7 +325,9 @@ def test_job_output_hides_driver_noise(tmp_path: Path) -> None:
     assert job.state == "done"
     assert job.output[-1].startswith("(hid 299 camera-driver messages")
     assert "camera 0: JoyCam" in job.output and len(job.output) == 4
-    assert job.result == {"exit_code": 0, "driver_messages_hidden": 299}
+    assert job.result["exit_code"] == 0 and job.result["driver_messages_hidden"] == 299
+    # v0.1.28: every check's structured result carries elapsed_s and budget_hit
+    assert job.result["budget_hit"] is False and job.result["elapsed_s"] >= 0.0
 
 
 def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
@@ -352,7 +354,7 @@ def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
             ),
         )
 
-    out = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         devs,
         cv2=types.SimpleNamespace(),
         backends=("winrt",),
@@ -361,18 +363,25 @@ def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
         clock=clock,
         driver_state_run=fake_cim,
     )
+    out = report.lines
     # v0.1.28: the driver-state step runs first, so it explains the backend failures below
     assert out[0] == "driver state (from Windows):"
     assert "  HD User Facing: disabled (code 22)" in out
     assert "camera 0: JoyCam" in out
+    assert report.result["driver_state"] == [
+        {"name": "JoyCam", "status": "OK", "code": 0, "meaning": "working, no error"},
+        {"name": "HD User Facing", "status": "Error", "code": 22, "meaning": "disabled"},
+    ]
     assert any("NVIDIA Broadcast (virtual) - skipped" in x for x in out)
     assert not any(x == "camera 1: HD User Facing" for x in out)
     assert out[-1].startswith("stopped after 60 s (time limit)")
+    assert report.result["stopped"] is True
+    assert [c["name"] for c in report.result["cameras"]] == ["JoyCam"]
 
 
 def test_diagnose_checks_a_virtual_camera_when_asked() -> None:
     devs = [CameraDevice(2, "camera 2", "NVIDIA Broadcast", virtual=True), CameraDevice(0, "camera 0", "JoyCam")]
-    out = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         devs,
         cv2=types.SimpleNamespace(),
         backends=("winrt",),
@@ -381,7 +390,9 @@ def test_diagnose_checks_a_virtual_camera_when_asked() -> None:
         include_virtual=True,
         budget_s=0,
     )
+    out = report.lines
     assert "camera 2: NVIDIA Broadcast (virtual)" in out and not any("time limit" in x for x in out)
+    assert report.result["stopped"] is False
 
 
 def test_cli_has_budget_and_include_virtual() -> None:
@@ -755,7 +766,7 @@ def test_mcp_has_the_inbox_tool_and_resource(cfg_core) -> None:
     core, *_ = cfg_core
     mcp = mcp_tools.build(api.LocalBackend(core.service))
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert "inbox" in names and len(names) == 16
+    assert "inbox" in names and "shell" in names and len(names) == 17
     uris = {str(r.uri) for r in asyncio.run(mcp.list_resources())}
     assert "away://inbox" in uris
     assert "inbox(action=list|read|reply)" in INSTRUCTIONS and "user.message" in INSTRUCTIONS

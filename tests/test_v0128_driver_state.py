@@ -59,18 +59,16 @@ def _devs() -> list[CameraDevice]:
 
 
 def _run_diagnose(**kw: Any) -> tuple[list[str], dict[str, Any]]:
-    result: dict[str, Any] = {}
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         _devs(),
         cv2=ClosedCV2(),
         windows=True,
         msmf_lister=lambda: [],
         winrt_available=lambda: (False, "no winrt here"),
         measure_s=0.1,
-        result=result,
         **kw,
     )
-    return lines, result
+    return report.lines, report.result
 
 
 # ----------------------------------------------------------------------------- parsing and words
@@ -155,30 +153,29 @@ def test_run_diagnose_driver_state_no_cameras_listed() -> None:
 
 def test_run_diagnose_skips_driver_state_off_windows() -> None:
     run = make_run()
-    result: dict[str, Any] = {}
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         [CameraDevice(None, "/dev/video0", "Integrated Camera")],
         cv2=ClosedCV2(),
         windows=False,
-        result=result,
         driver_state_run=run,
     )
+    lines = report.lines
     assert not any("driver state" in ln for ln in lines)
-    assert result["driver_state"] == []
+    assert report.result["driver_state"] == []
     assert run.calls == []  # the query never runs off Windows
 
 
 def test_run_diagnose_no_cameras_never_queries_drivers() -> None:
     run = make_run()
-    lines = diagnose.run_diagnose([], cv2=ClosedCV2(), windows=True, driver_state_run=run)
-    assert lines == ["no cameras found"]
+    report = diagnose.run_diagnose([], cv2=ClosedCV2(), windows=True, driver_state_run=run)
+    assert report.lines == ["no cameras found"]
     assert run.calls == []
 
 
 def test_run_diagnose_budget_over_skips_driver_state() -> None:
     run = make_run()
     ticks = iter([0.0, 1000.0])  # the second clock() call is already past the budget
-    lines = diagnose.run_diagnose(
+    report = diagnose.run_diagnose(
         _devs(),
         cv2=ClosedCV2(),
         windows=True,
@@ -187,6 +184,7 @@ def test_run_diagnose_budget_over_skips_driver_state() -> None:
         sleep=lambda s: None,
         driver_state_run=run,
     )
+    lines = report.lines
     assert run.calls == []
     assert not any("driver state" in ln for ln in lines)
     assert any("stopped after 60 s" in ln for ln in lines)
