@@ -11,8 +11,11 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
 3. **Takeover.** Any real input (physical mouse/keyboard - told apart from the agent's own input by
    :class:`~away.app.autopause.ManualInputGuard` and short echo windows: typing never hides a real mouse movement,
    and each typed chunk hides key presses for a moment only - or a hand gesture) pauses the agent instantly and
-   interrupts the action in progress; resuming needs a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or
-   holding an open palm ~1 s (never delayed by the short grace right after approval).
+   interrupts the action in progress. While paused a slim banner stays on screen ("Paused - you took over from
+   <agent>") with "Let <agent> continue" and "Stop" buttons whose click IS the answer: no second approval
+   round-trip through the agent. Resuming through the agent still needs a new approval. Global stop:
+   Ctrl+Alt+Esc, saying "stop", or holding an open palm ~1 s (never delayed by the short grace right after
+   approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
    secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
@@ -99,6 +102,9 @@ ACTIONS = (
     "open_app",
     "open_url",
 )
+# An action sequence is one MCP call, not one grant: it is bounded so a single call cannot queue an unbounded
+# batch of input.
+SEQUENCE_MAX_STEPS = 25
 
 
 class ControlRefused(ActionRefused):
@@ -153,6 +159,8 @@ class ControlHooks:
     platform: str = ""
     overlay_on: Callable[[str], None] = lambda _name: None
     overlay_off: Callable[[], None] = lambda: None
+    # the takeover banner (proposal #16): shown instead of overlay_off() while the grant is paused
+    overlay_paused: Callable[[str], None] = lambda _name: None
     sleep: Callable[[float], None] = time.sleep
     engine: Any = None  # the shared ActionEngine in the app; None = a private one (tests, headless)
 
@@ -352,12 +360,47 @@ class ComputerControl:
                 return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
             g.cancel.set()  # stop the action in progress (typing, a drag) before its next step
+        # the banner stays up while paused ("Paused - you took over from <agent>", with buttons to continue or
+        # stop), instead of the border vanishing with no explanation
         with contextlib.suppress(Exception):
-            self.hooks.overlay_off()
+            self.hooks.overlay_paused(g.agent_name)
         self._emit("control.paused", {"agent": g.agent_name, "reason": g.paused})
         return True
 
+    def paused_banner_answer(self, answer: str) -> bool:
+        """The user answered the paused banner directly: the click IS the answer (no prompt round-trip).
+
+        "continue" resumes the grant without asking again (the banner click itself is covered by the same short
+        grace as an approval click, so it is not a takeover); anything else stops the grant. True when it acted
+        on a live grant; False when the grant had already ended another way (the banner closes with its stop
+        file, and a click on a stale banner does nothing).
+        """
+        with self._lock:
+            g = self.grant
+            if g is None:
+                return False
+            name = g.agent_name
+            stop = answer != "continue"
+            resumed = answer == "continue" and bool(g.paused)
+            if resumed:
+                g.paused = ""
+                g.cancel = threading.Event()  # the old takeover does not cancel new actions
+                self._grace_until = self.clock() + GRACE_S  # the banner click itself is not a takeover
+        if stop:
+            self._end("the user chose to stop")
+            return True
+        with contextlib.suppress(Exception):
+            self.hooks.overlay_on(name)  # back to the control border/banner (this clears the paused one)
+        if resumed:
+            self._emit("control.resumed", {"agent": name, "via": "paused banner"})
+        return True
+
     # ---------------------------------------------------------------- acting
+    def require_grant(self, agent_id: str) -> Grant:
+        """The live, unpaused grant for this agent (raises ControlRefused otherwise): the approved-session
+        gate for tools that ride the computer-control session, like the staged shell."""
+        return self._require(agent_id)
+
     def _require(self, agent_id: str) -> Grant:
         g = self._check_expiry()
         if g is None:
@@ -366,13 +409,20 @@ class ComputerControl:
             raise ControlRefused(f"{g.agent_name} is using the computer, not this agent")
         if g.paused:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
+        self._policy_check(agent_id)
+        return g
+
+    def _policy_check(self, agent_id: str) -> None:
+        """The engine's per-action policy (secure desktop, rate limit) without repeating the grant approval.
+
+        Called once per single action by :meth:`_require`, and once per sub-step by :meth:`act_sequence`, so a
+        batch cannot spend the whole rate-limit budget on one check."""
         try:  # the engine's agent policy: secure desktop (fail closed on Windows) and the rate limit
             self.engine.check(AGENT, agent_id, secure_desktop=self.hooks.secure_desktop, platform=self.platform)
         except ControlRefused:
             raise
         except ActionRefused as exc:
             raise ControlRefused(str(exc)) from None
-        return g
 
     def _confirm_risky(self, g: Grant, label: str, what: str) -> None:
         m = RISKY.search(label or "")
@@ -529,9 +579,16 @@ class ComputerControl:
         kw: dict[str, Any],
         b: Any,
         a: Action,
+        *,
+        record: bool = True,
     ) -> dict[str, Any]:
         """One action inside the engine's :meth:`~away.actions_engine.ActionEngine.begin`: ``a.step()`` before
-        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish."""
+        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish.
+
+        ``record=False`` is for :meth:`act_sequence`: the sub-step still gets its engine audit entry and all the
+        safety checks, but it does not append its own :class:`LogEntry` - the sequence records one entry with all
+        the sub-step detail.
+        """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
         extra: dict[str, Any] = {}  # per-action result fields beyond ok/action/detail/log_id
@@ -667,14 +724,111 @@ class ComputerControl:
             self._open_app(name, step, wait)
             detail = name
         a.ok = True
-        # the observed effect: what the desktop looks like right after the input landed. Best effort and
-        # never failing: the action already succeeded. `foreground`/`focused` use the same shape as the
-        # richer action results (proposal #3), so the agent can see e.g. "clicked 'Desktop', not 'Start'"
-        extra["foreground"] = self._foreground_state()
-        extra["focused"] = self._focused_label()
+        # the feature's click-verification extras (e.g. target_label) ride along in `extra`; the
+        # observed effect fields stay explicit for a stable result shape.
+        foreground = self._foreground_state()
+        focused = self._focused_label()
+        if not record:
+            self._audit(g, action, detail, "done")
+            return {
+                "ok": True,
+                "action": action,
+                "detail": detail,
+                "log_id": "",
+                "undo": undo,
+                # the observed effect: what the desktop looks like right after the input landed, so the
+                # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+                "foreground": foreground,
+                "focused": focused,
+                **extra,
+            }
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id, **extra}
+        return {
+            "ok": True,
+            "action": action,
+            "detail": detail,
+            "log_id": entry.id,
+            "undo": undo,
+            # the observed effect: what the desktop looks like right after the input landed, so the
+            # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+            "foreground": foreground,
+            "focused": focused,
+            **extra,
+        }
+
+    def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
+        """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
+        still runs through :meth:`_act`, so the risky/unknown "Are you sure?" prompts, the password and terminal
+        refusals, the per-step engine audit and the per-step rate limit apply exactly as they do for single
+        actions - a batch is not a rubber stamp. Stops at the first refusal, cancel or takeover and reports how
+        far it got; a part-way stop or refusal still records one combined log entry with the completed steps."""
+        if not isinstance(steps, list) or not steps:
+            raise ControlRefused("sequence needs at least one step, e.g. [{'action': 'move', 'x': 10, 'y': 10}]")
+        if len(steps) > SEQUENCE_MAX_STEPS:
+            raise ControlRefused(f"a sequence is limited to {SEQUENCE_MAX_STEPS} steps at a time")
+        plan: list[tuple[str, dict[str, Any]]] = []
+        for i, s in enumerate(steps, 1):
+            if not isinstance(s, dict):
+                raise ControlRefused(f"step {i} must be an object like {{'action': 'move', ...}}")
+            action = s.get("action")
+            if action not in ACTIONS:
+                raise ControlRefused(f"step {i}: unknown action {action!r}; use {', '.join(ACTIONS)}")
+            plan.append((str(action), {k: v for k, v in s.items() if k != "action"}))
+        g = self._require(agent_id)
+        b = self.hooks.backend
+        done: list[dict[str, Any]] = []
+        try:
+            with self.engine.begin(
+                AGENT, "sequence", actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
+            ) as a:
+                for action, kw in plan:
+                    a.step()  # a pause, takeover or stop ends the batch before its next sub-step
+                    # one rate-limit token per sub-step, like one per single action: a batch must not spend
+                    # the whole budget on the single grant-time check
+                    self._policy_check(agent_id)
+                    done.append(self._act(g, agent_id, action, kw, b, a, record=False))
+        except ActionCancelled:
+            reason = g.paused or g.ended or "it was stopped"
+            self._log(
+                g,
+                "sequence",
+                f"stopped part-way after {len(done)} of {len(plan)} steps ({reason}): {self._seq_detail(done)}",
+                "stopped",
+                None,
+            )
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": reason})
+            raise ControlRefused(f"stopped part-way because {reason}") from None
+        except ControlRefused as exc:
+            # A refusal mid-batch (a denied "Are you sure?", a password field, a terminal, the rate limit):
+            # the earlier sub-steps already ran, so the action log still gets one combined entry - no silent gap.
+            self._log(
+                g,
+                "sequence",
+                f"refused after {len(done)} of {len(plan)} steps ({exc}): {self._seq_detail(done)}",
+                "refused",
+                None,
+            )
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": str(exc)})
+            raise
+        detail = self._seq_detail(done)
+        undos = [r["undo"] for r in done if r.get("undo")]
+        undo: dict[str, Any] | None = {"sequence": undos} if undos else None
+        entry = self._log(g, "sequence", detail, "done", undo)
+        self._emit("control.action", {"agent": g.agent_name, "action": "sequence", "detail": detail, "id": entry.id})
+        return {"ok": True, "action": "sequence", "detail": detail, "log_id": entry.id, "steps": done}
+
+    @staticmethod
+    def _seq_detail(done: list[dict[str, Any]]) -> str:
+        """One line per completed sub-step, shared by the done / stopped / refused sequence log entries."""
+        return "; ".join(f"{n}. {r['action']}: {r['detail']}" for n, r in enumerate(done, 1))
+
+    def _window_title(self) -> str:
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return str(fg.get("title", ""))
 
     def _foreground_state(self) -> dict[str, str]:
         """Best-effort post-action foreground window (title + process name). Never raises: if the hook
@@ -685,13 +839,6 @@ class ComputerControl:
         except Exception:
             fg = {}
         return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
-
-    def _window_title(self) -> str:
-        try:
-            fg = self.hooks.foreground() or {}
-        except Exception:
-            fg = {}
-        return str(fg.get("title", ""))
 
     def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
@@ -711,9 +858,13 @@ class ComputerControl:
         self.note_own_keys()
         step().key("enter")
 
+    def _audit(self, g: Grant, action: str, detail: str, result: str) -> None:
+        """The engine's audit trail: one entry per action (or per sub-step of a sequence), never batched."""
+        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
-        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+        self._audit(g, action, detail, result)
         if self.log_folder is not None:
             try:
                 img = self.hooks.grab()
@@ -773,26 +924,33 @@ class ComputerControl:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
         b = self.hooks.backend
         u = e.undo or {}
-        if "keys" in u:
+        sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
+        if any("keys" in s for s in sub):
             self.note_own_keys()
         else:
             self.note_own_mouse()
         source = USER if agent_id is None else AGENT
         try:
             with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
-                if "move" in u:
-                    a.step().move(int(u["move"][0]), int(u["move"][1]))
-                elif "scroll" in u:
-                    dy, dx = u["scroll"]
-                    if dy:
-                        a.step().scroll(dy)
-                    if dx and hasattr(b, "hscroll"):
-                        a.step().hscroll(dx)
-                elif "keys" in u and hasattr(b, "hotkey"):
-                    a.step().hotkey(list(u["keys"]))
+                for s in sub:
+                    self._apply_undo_step(a, b, s)
                 a.ok = True
         except ActionCancelled as exc:
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         e.result = "undone"
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}
+
+    @staticmethod
+    def _apply_undo_step(a: Action, b: Any, u: dict[str, Any]) -> None:
+        """Undo one undoable step (a single action's undo record, or one element of a sequence's)."""
+        if "move" in u:
+            a.step().move(int(u["move"][0]), int(u["move"][1]))
+        elif "scroll" in u:
+            dy, dx = u["scroll"]
+            if dy:
+                a.step().scroll(dy)
+            if dx and hasattr(b, "hscroll"):
+                a.step().hscroll(dx)
+        elif "keys" in u and hasattr(b, "hotkey"):
+            a.step().hotkey(list(u["keys"]))
