@@ -56,6 +56,70 @@ def _r(id: str, title: str, status: str, summary: str, fix: Fix | None = None, /
 
 
 # ------------------------------------------------------------------------------------------------ cameras
+# v0.1.28 (proposal #11): a driver-broken camera gets its own fix button. The structured evidence is PR #46's
+# ``driver_state`` rows (``{"name", "status", "code", "meaning"}``; a non-zero code means the driver is broken);
+# the prose fallback covers an explicit ``"verdict": "driver"`` or driver words in the message.
+DRIVER_PROSE = ("driver", "devmgmt", "device manager", "uninstall device", "configmanager")
+
+
+def _driver_state_row(rows: Any, name: str) -> dict[str, Any] | None:
+    """The PR #46 ``driver_state`` row for this camera (exact name match first), or None."""
+    if not isinstance(rows, list):
+        return None
+    want = name.strip().lower()
+    fallback: dict[str, Any] | None = None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        rn = str(r.get("name") or "").strip().lower()
+        if not rn:
+            continue
+        if rn == want:
+            return r
+        if fallback is None and (rn in want or want in rn):
+            fallback = r
+    return fallback
+
+
+def _driver_broken(code: Any, status: str) -> bool | None:
+    """True when the driver-state row says the driver is broken, False when it says it is fine, None when unclear."""
+    try:
+        if code is not None and str(code).strip() != "":
+            return int(code) != 0
+    except (TypeError, ValueError):
+        return None
+    st = status.strip().lower()
+    if st in ("ok", "working", "working, no error"):
+        return False
+    if st in ("error", "degraded"):
+        return True
+    return None
+
+
+def _driver_reason(who: dict[str, Any], name: str) -> str | None:
+    """Plain words appended to the camera summary when the verdict is a broken driver, else None.
+
+    Prefers the structured ``driver_state`` rows when the environment carries them (matched by camera name);
+    otherwise falls back to the prose verdict (an explicit ``"verdict": "driver"``, or driver words in the
+    message). Never depends on the structured data being there."""
+    if str(who.get("verdict") or "").strip().lower() == "driver":
+        row = _driver_state_row(who.get("driver_state"), name)
+        meaning = str((row or {}).get("meaning") or "").strip()
+        return f" Its driver looks broken{f' (Windows says: {meaning})' if meaning else ''}."
+    row = _driver_state_row(who.get("driver_state"), name)
+    if row is not None:
+        broken = _driver_broken(row.get("code"), str(row.get("status") or ""))
+        if broken:
+            meaning = str(row.get("meaning") or "").strip()
+            return f" Its driver looks broken{f' (Windows says: {meaning})' if meaning else ''}."
+        if broken is False:
+            return None
+    low = str(who.get("message") or "").lower()
+    if any(p in low for p in DRIVER_PROSE):
+        return " This points at the camera's driver, not at another app using the camera."
+    return None
+
+
 def _camera_fix(env: Env, name: str) -> tuple[str, Fix, list[str]]:
     who: dict[str, Any] = {}
     try:
@@ -72,6 +136,11 @@ def _camera_fix(env: Env, name: str) -> tuple[str, Fix, list[str]]:
         if a == "use_broadcast":
             fix = Fix("use_broadcast", "Use it through NVIDIA Broadcast")
             break
+    else:
+        reason = _driver_reason(who, name)  # v0.1.28 (proposal #11): driver-broken cameras get a fix button
+        if reason is not None:
+            msg = msg.rstrip() + reason
+            fix = Fix("guide:uninstall_driver", "Fix the camera driver")
     return msg, fix, users
 
 
