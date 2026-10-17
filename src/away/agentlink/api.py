@@ -119,7 +119,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
         "json",
         "POST",
         "/v1/selftest",
-        "Run the PC self-test {wait, only}; the report goes to every connected agent (diagnose)",
+        "Run the PC self-test {wait, only}; the report is pushed to the share_logs audience (diagnose)",
     ),
     "selftest_latest": ("json", "GET", "/v1/selftest/latest", "The newest self-test report (redacted)"),
     "get_bundle": ("json", "POST", "/v1/bundle", "Build a diagnostics bundle (share_logs)"),

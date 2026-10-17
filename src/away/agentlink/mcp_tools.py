@@ -168,9 +168,10 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
           (base64). action="logs": the app log tail (`lines`).
         - action="selftest": run the one-click PC self-test (cameras, hand tracking, pointer, microphone, speech,
-          voices, pop-ups, link, PC load, models); `wait`=true returns the report, otherwise it arrives as the event
-          selftest.completed, in your inbox and as away://selftest/latest. action="selftest_latest": the newest
-          report. Every result is pass/warn/fail in plain words with the fix the person can press."""
+          voices, pop-ups, link, PC load, models); `wait`=true returns the report, otherwise it is pushed to the
+          agents the person let "Share my logs and recordings" (their inbox and wake-up address).
+          action="selftest_latest": the newest report (any agent can read it). Every result is pass/warn/fail in
+          plain words with the fix the person can press."""
         if action == "download":
             data = await group(ctx, "diagnostics", action="download", path=path)
             raw = data if isinstance(data, bytes) else base64.b64decode(data["b64"])

@@ -328,7 +328,7 @@ class AgentLinkHost:
         self._link_failures = 0
         self._link_starting = False
         self.named: Any = None  # v0.1.24 your own named Cloudflare tunnel (stable address)
-        self.selftest = self._make_selftest()  # v0.1.24 one-click self-test, reported to every connected agent
+        self.selftest = self._make_selftest()  # v0.1.27 one-click self-test, reported to share_logs agents only
         self.core.service.selftest = self.selftest
 
     def _make_selftest(self) -> Any:
@@ -349,6 +349,7 @@ class AgentLinkHost:
             post=post_json,
             keep_dirs=[self.data_dir],
             on_done=done,
+            audience="share_logs",  # v0.1.27: one audience policy; the report carries environment detail
         )
 
     # --------------------------------------------------------------- config
@@ -1326,14 +1327,20 @@ class AgentLinkHost:
             from away.selftest import pcenv
 
             return pcenv.probe(self.app, self, str(req.get("probe") or ""), list(req.get("args") or []))
-        if a == "pccheck_share":  # v0.1.24: only to agents with share_logs, never the event stream
+        if a == "pccheck_share":  # v0.1.27: the one audience policy (share_logs), never the event stream
             from away.agentlink.inbox import post_json
             from away.selftest import pccheck
 
             rep = req.get("report")
             if not isinstance(rep, dict):
                 raise ValueError("no report to send")
-            return pccheck.share(rep, self.core.registry.reconnectable(), inbox=self.core.service.inbox, post=post_json)
+            return pccheck.share(
+                rep,
+                self.core.registry.reconnectable(),
+                inbox=self.core.service.inbox,
+                post=post_json,
+                audience="share_logs",
+            )
         if a == "want_health":
             self._health_until = time.monotonic() + HEALTH_WANT_S
             return {}

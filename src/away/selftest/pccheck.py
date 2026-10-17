@@ -8,8 +8,8 @@ The checks only read measurements from an environment (:class:`PcEnv`); the real
 :class:`away.selftest.pcenv.RealPcEnv`, tests use fakes. The report is redacted twice (the self-test's
 :func:`~away.selftest.redact.redact_report` and Agent Link's ``redact_text``), saved as JSON, HTML and text, and
 ``verified.json`` maps the README's untested items to pass / fail. It is sent to connected agents only when the
-person asks for it, and then only to agents allowed to "Share my logs and recordings" or "Run camera and speed
-checks" (v0.1.24 hardening rules: no event-stream broadcast, so other agents never see it).
+person asks for it, and then only to agents allowed to "Share my logs and recordings" (the one audience policy,
+shared with the self-test: no event-stream broadcast, so other agents never see it).
 """
 
 from __future__ import annotations
@@ -633,8 +633,9 @@ def finish(
 
 # ---------------------------------------------------------------------------------------------- sharing
 def may_receive(agent: Any) -> bool:
-    """Only agents allowed to "Share my logs and recordings" get the report (like the self-test report since the
-    v0.1.24 hardening: "Run camera and speed checks" alone is not enough to read it)."""
+    """Only agents allowed to "Share my logs and recordings" get a report. This is the one audience policy for
+    both reports (proposal #14): the self-test and Check my PC go through this same filter, so "Run camera and
+    speed checks" alone is not enough to be sent either one."""
     from away.agentlink import perms
 
     scopes = set(getattr(agent, "scopes", None) or [])
@@ -659,18 +660,26 @@ def share(
     inbox: Any = None,
     post: Callable[..., Any] | None = None,
     background: bool = True,
+    audience: str = "share_logs",
 ) -> dict[str, Any]:
-    """Send the report to the allowed agents (an inbox note + their wake-up address). No event-stream broadcast:
-    every connected agent can read that, including ones without either permission."""
+    """Send the report to the audience the policy allows (an inbox note + their wake-up address). The audience
+    filter lives in :func:`away.selftest.deliver.deliver`; the event stream is never used for this report, since
+    every connected agent can read it, including ones outside the audience."""
     from away.selftest import deliver as dl
 
     every = list(agents)
-    allowed = [a for a in every if may_receive(a)]
     out = dl.deliver(
-        report, allowed, inbox=None, events=None, post=post, background=background, event="pccheck.completed"
+        report,
+        every,
+        inbox=None,
+        events=None,
+        post=post,
+        background=background,
+        event="pccheck.completed",
+        audience=audience,
     )
+    allowed = [a for a in every if may_receive(a)] if audience == "share_logs" else list(every)
     if inbox is not None and allowed:
         with contextlib.suppress(Exception):
             out["inbox_id"] = inbox.add(note_text(report), allowed, source="system", wake=False).id
-    out["skipped_agents"] = [str(getattr(a, "name", "?")) for a in every if not may_receive(a)]
     return out

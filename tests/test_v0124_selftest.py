@@ -287,8 +287,9 @@ def test_redaction_removes_tokens_user_names_and_outside_paths(tmp_path: Path) -
 
 # ------------------------------------------------------------------------------------------------- delivery
 class Agent:
-    def __init__(self, name: str, wake: str = "") -> None:
+    def __init__(self, name: str, wake: str = "", scopes: tuple[str, ...] = ()) -> None:
         self.id, self.name, self.wake_url, self.kind = name.lower(), name, wake, "remote"
+        self.scopes = list(scopes)
 
 
 class Hub:
@@ -300,10 +301,15 @@ class Hub:
         return {"seq": len(self.events)}
 
 
-def test_report_goes_to_every_connected_agent_not_just_one(tmp_path: Path) -> None:
+def test_report_only_reaches_share_logs_agents(tmp_path: Path) -> None:
+    """Proposal #14: the self-test report and Check my PC share one audience policy (share_logs)."""
     from away.agentlink.inbox import Inbox
 
-    agents = [Agent("Hark", "https://hark.example/hook"), Agent("Muse"), Agent("Claude", "https://claude.example/w")]
+    agents = [
+        Agent("Hark", "https://hark.example/hook", ("read", "share_logs")),
+        Agent("Muse", scopes=("read", "share_logs")),
+        Agent("Spy", "https://spy.example/w", ("read", "diagnose")),  # diagnose alone is not enough
+    ]
     inbox = Inbox(background=False, path=tmp_path / "inbox.json")
     hub, posts = Hub(), []
     env = FakeEnv(mic={"device": "C:\\Users\\fernando\\mic", "rms_db": -90.0, "peak_db": -80.0})
@@ -313,17 +319,42 @@ def test_report_goes_to_every_connected_agent_not_just_one(tmp_path: Path) -> No
     )  # fmt: skip
     out = svc.run_now(trigger="tray")
     rep, delivery = out["report"], out["delivery"]
-    assert rep["status"] == FAIL and rep["redacted"] and rep["delivered_to"] == ["Hark", "Muse", "Claude"]
+    assert rep["status"] == FAIL and rep["redacted"] and rep["delivered_to"] == ["Hark", "Muse"]
     assert "fernando" not in json.dumps(rep)
-    assert {a: inbox.unread(a) for a in ("hark", "muse", "claude")} == {"hark": 1, "muse": 1, "claude": 1}
+    assert {a: inbox.unread(a) for a in ("hark", "muse")} == {"hark": 1, "muse": 1}
+    assert inbox.unread("spy") == 0
     note = inbox.for_agent("muse")[0]
     assert note.source == "system" and "Microphone" in note.text and "selftest/latest" in note.text
-    assert sorted(u for u, _ in posts) == ["https://claude.example/w", "https://hark.example/hook"]
+    assert [u for u, _p in posts] == ["https://hark.example/hook"]
     assert all(p["event"] == "selftest.completed" and p["report"]["id"] == rep["id"] for _, p in posts)
-    assert hub.events[0][0] == "selftest.completed" and hub.events[0][1]["status"] == FAIL
-    assert {r["agent"]: r["webhook"] for r in delivery["agents"]} == {"Hark": "ok", "Muse": "none", "Claude": "ok"}
+    assert hub.events == []  # the stream reaches every connected agent, so the share_logs audience skips it
+    assert delivery["skipped_agents"] == ["Spy"]
+    assert {r["agent"]: r["webhook"] for r in delivery["agents"]} == {"Hark": "ok", "Muse": "none"}
     saved = runmod.load_latest(tmp_path)
     assert saved is not None and saved["id"] == rep["id"] and svc.latest() == saved
+
+
+def test_deliver_audience_share_logs_filters_targets_and_skips_the_event_stream() -> None:
+    hub = Hub()
+    posts: list[tuple[str, dict[str, Any]]] = []
+    agents = [Agent("Ok", "https://ok.example", ("share_logs",)), Agent("No", "https://no.example", ("read",))]
+    res = dl.deliver(
+        {"id": "x", "results": []},
+        agents,
+        events=hub,
+        post=lambda u, p: posts.append((u, p)),
+        background=False,
+        audience="share_logs",
+    )
+    assert [r["agent"] for r in res["agents"]] == ["Ok"]
+    assert res["skipped_agents"] == ["No"]
+    assert [u for u, _p in posts] == ["https://ok.example"]
+    assert hub.events == []
+
+
+def test_deliver_rejects_an_unknown_audience() -> None:
+    with pytest.raises(ValueError, match="unknown audience"):
+        dl.deliver({"id": "x"}, [], audience="everyone")
 
 
 def test_no_agent_connected_keeps_the_report_local(tmp_path: Path) -> None:
@@ -361,7 +392,7 @@ def test_agents_trigger_it_with_the_diagnose_permission(tmp_path: Path) -> None:
 
     core = make_core(tmp_path)
     reader, _ = core.registry.issue("Reader", ["read"], 3600)
-    doctor, _ = core.registry.issue("Doctor", ["read", "diagnose"], 3600)
+    doctor, _ = core.registry.issue("Doctor", ["read", "diagnose", "share_logs"], 3600)
     with pytest.raises(NotAvailable):
         core.service.run_selftest(doctor)  # outside the app
     core.service.selftest = SelftestService(
@@ -372,11 +403,11 @@ def test_agents_trigger_it_with_the_diagnose_permission(tmp_path: Path) -> None:
         core.service.run_selftest(reader)
     got = core.service.run_selftest(doctor, wait=True)
     assert got["state"] == "done" and got["report"]["trigger"] == "Doctor"
-    # the report reached both agents, not only the one that asked
-    assert core.service.inbox.unread(reader.id, reader.name) == 1
-    assert core.service.selftest_latest(reader)["id"] == got["report"]["id"]
-    evs = core.events.since(0, ("selftest",))
-    assert evs and evs[-1]["topic"] == "selftest.completed"
+    # the report is pushed only to the share_logs audience, not to every connected agent
+    assert core.service.inbox.unread(reader.id, reader.name) == 0
+    assert core.service.inbox.unread(doctor.id, doctor.name) == 1
+    assert core.service.selftest_latest(reader)["id"] == got["report"]["id"]  # pull access is unchanged
+    assert core.events.since(0, ("selftest",)) == []  # the stream reaches everyone, so it is skipped
 
 
 def test_rest_and_mcp_resource(tmp_path: Path) -> None:
