@@ -179,6 +179,12 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self._replay_idx: int | None = None
         self._replay_session: str = ""
 
+        # v0.1.28 "Recently": who looked through your camera or at your screen (and what you sent)
+        rf = ttk.LabelFrame(f, text="Recently", padding=6)
+        rf.pack(fill="x", pady=6)
+        self.recently = tk.Listbox(rf, height=4)
+        self.recently.pack(fill="x")
+
         ch = ttk.LabelFrame(f, text="Changes your agents made", padding=6)
         ch.pack(fill="x", pady=6)
         self.autofix = tk.StringVar(value="ask")
@@ -318,6 +324,7 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         if st.get("autofix") and self.autofix.get() != st["autofix"]:
             self.autofix.set(st["autofix"])
         self._fill(self.prefs, self._prefs_items())
+        self._fill(self.recently, self.m.capture_lines(st))
         self.m.want_health()
         self.health.set("\n".join(self.m.health_lines(st.get("health"))))
         if self.adv_open.get():

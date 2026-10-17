@@ -345,6 +345,22 @@ class AgentLinkModel:
             )
         return out
 
+    @staticmethod
+    def _clock(t: float) -> str:
+        """A time of day in plain words: "12:33 AM" (no leading zero)."""
+        s = time.strftime("%I:%M %p", time.localtime(t))
+        return s[1:] if s.startswith("0") else s
+
+    @staticmethod
+    def capture_lines(st: dict[str, Any]) -> list[str]:
+        """v0.1.28 "Recently": who looked through your camera or at your screen, in plain words."""
+        out = []
+        for c in st.get("captures") or []:
+            out.append(f"{c['text']} \u2014 {AgentLinkModel._clock(float(c['t']))}")
+        if not out:
+            out.append("Nothing yet. When an agent looks through your camera or at your screen, it shows up here.")
+        return out
+
     def set_talk(self, agent_id: str, wake_word: str | None = None, wake_url: str | None = None) -> str:
         """v0.1.22: an agent's own wake word and "wake me" address. Returns "" or a plain error."""
         from away.agentlink.inbox import check_wake_url
