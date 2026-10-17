@@ -4,7 +4,10 @@ They run in their own process (the tray owns the app's main thread, Tk wants its
 through files next to SPEC: a click writes ``<id>.answer.json``; the app writes ``<id>.done`` when the prompt was
 answered another way (gesture, voice, timeout), and the window closes itself. ``control`` draws a bright border
 around the screen with the banner "<agent> is using your computer - move your hand or mouse to take over" (or, in
-``watch`` mode, a small "watching your screen" badge) until its stop file appears.
+``watch`` mode, a small "watching your screen" badge) until its stop file appears. In ``paused`` mode it shows a
+slim top-center banner, "Paused - you took over from <agent>", with "Let <agent> continue" and "Stop" buttons
+whose click IS the answer (no prompt round-trip): the buttons write ``<id>.answer.json`` and the app's watcher
+feeds it straight to the grant.
 """
 
 from __future__ import annotations
@@ -72,6 +75,18 @@ def toast_geometry(work: tuple[int, int, int, int], w: int, h: int, margin: int 
     return x, y
 
 
+def paused_banner_texts(spec: dict[str, Any]) -> dict[str, Any]:
+    """What the paused banner shows (pure, for tests): "Paused" over who took over, with two buttons whose click
+    IS the answer (no prompt round-trip). Plain words: the person took over, and either lets the agent continue
+    or stops it."""
+    name = str(spec.get("agent") or "").strip() or "Your AI agent"
+    return {
+        "title": "Paused",
+        "text": f"You took over from {name}.",
+        "buttons": [("continue", f"Let {name} continue"), ("stop", "Stop")],
+    }
+
+
 def write_ack(path: Path | None, data: dict[str, Any]) -> None:
     """Tell the app whether the window really showed (``{"shown": true, "x", "y", ...}`` or an ``error``)."""
     if path is None:
@@ -129,7 +144,7 @@ def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-te
     elif kind in ("toast", "flash"):
         _toast(root, spec, flash=kind == "flash")
     elif kind == "control":
-        _control(root, spec)
+        _control(root, spec, Path(spec_path))
     root.mainloop()
     return 0
 
@@ -361,32 +376,86 @@ def _border(root: Any, color: str, width: int) -> list[Any]:  # pragma: no cover
     return edges
 
 
-def _control(root: Any, spec: dict[str, Any]) -> None:  # pragma: no cover
+def _control(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragma: no cover
     import tkinter as tk
 
     stop = Path(str(spec.get("stop_file")))
     name = str(spec.get("agent") or "Your AI agent")
-    watch = spec.get("mode") == "watch"
-    edges = [] if watch else _border(root, BORDER, 6)
+    mode = str(spec.get("mode") or "control")
+    watch = mode == "watch"
+    paused = mode == "paused"
+    edges = [] if (watch or paused) else _border(root, BORDER, 6)
     banner = tk.Toplevel(root)
     banner.overrideredirect(True)
     banner.attributes("-topmost", True)
-    color = "#6e40c9" if watch else BORDER
-    banner.configure(bg=color)
-    text = (
-        f"\u25c9  {name} is watching your screen"
-        if watch
-        else f"{name} is using your computer \u2014 move your hand or mouse to take over"
-    )
-    tk.Label(
-        banner, text=text, bg=color, fg="white", font=("Segoe UI", 11 if watch else 13, "bold"), padx=16, pady=6
-    ).pack()
+    answer_file = spec_path.with_name(f"{spec.get('id') or spec_path.stem}.answer.json") if paused else None
+    if paused:
+        t = paused_banner_texts(spec)
+        banner.configure(bg="#1f2328")
+        row = tk.Frame(banner, bg="#1f2328")
+        row.pack(padx=14, pady=8)
+        tk.Label(row, text=t["title"], bg="#1f2328", fg="white", font=("Segoe UI", 12, "bold")).pack(
+            side="left", padx=(0, 8)
+        )
+        tk.Label(row, text=t["text"], bg="#1f2328", fg="#d7dde3", font=("Segoe UI", 11)).pack(side="left")
+
+        def answer(value: str) -> None:
+            try:
+                tmp = answer_file.with_name(answer_file.name + ".tmp")  # type: ignore[union-attr]
+                tmp.write_text(json.dumps({"answer": value}), encoding="utf-8")
+                tmp.replace(answer_file)  # type: ignore[arg-type]
+            except OSError:
+                pass
+            root.after(200, root.destroy)  # the click IS the answer: close, the app feeds it to the grant
+
+        buttons = tk.Frame(banner, bg="#1f2328")
+        buttons.pack(padx=14, pady=(0, 10))
+        tk.Button(
+            buttons,
+            text=t["buttons"][0][1],
+            font=("Segoe UI", 11, "bold"),
+            bg="#1a7f37",
+            fg="white",
+            activebackground="#2da44e",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=4,
+            command=functools.partial(answer, "continue"),
+        ).pack(side="left", padx=(0, 8))
+        tk.Button(
+            buttons,
+            text=t["buttons"][1][1],
+            font=("Segoe UI", 11),
+            bg="#6e7681",
+            fg="white",
+            activebackground="#8b949e",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=4,
+            command=functools.partial(answer, "stop"),
+        ).pack(side="left")
+    else:
+        color = "#6e40c9" if watch else BORDER
+        banner.configure(bg=color)
+        text = (
+            f"\u25c9  {name} is watching your screen"
+            if watch
+            else f"{name} is using your computer \u2014 move your hand or mouse to take over"
+        )
+        tk.Label(
+            banner, text=text, bg=color, fg="white", font=("Segoe UI", 11 if watch else 13, "bold"), padx=16, pady=6
+        ).pack()
     banner.update_idletasks()
     _place(banner, banner.winfo_reqwidth(), banner.winfo_reqheight(), "top-right" if watch else "top-center")
     started = time.monotonic()
 
     def poll() -> None:
-        if stop.exists() or time.monotonic() - started > 4 * 3600:
+        done = stop.exists() or time.monotonic() - started > 4 * 3600
+        if answer_file is not None and answer_file.exists():
+            done = True  # answered another way (the app consumes the answer file)
+        if done:
             stop.unlink(missing_ok=True)
             for e in edges:
                 e.destroy()

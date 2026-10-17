@@ -30,3 +30,4 @@ squashfs-root/
 packaging/linux/appimagetool-*.AppImage
 packaging/linux/runtime-*
 .venv-b17/
+.venv

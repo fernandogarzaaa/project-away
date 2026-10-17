@@ -364,7 +364,7 @@ async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") 
 or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
 `ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
 
-**Tools (16; 15 in v0.1.21, `inbox` added in v0.1.22).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
+**Tools (17; 15 in v0.1.21, `inbox` added in v0.1.22, `shell` in v0.1.28).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
 
 | Tool | Actions / arguments | Permission |
 |---|---|---|
@@ -382,6 +382,7 @@ or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
 | `open` | `app` (`name`), `url` (`url`) | use my computer |
+| `shell` | `list`, `run` (`command` = tier-1 name \| `argv` = tier 2, `why`), `log` (`limit`) - staged shell: tier 1 read-only diagnostics run at once in an approved session, tier 2 asks the person every time | use my computer |
 | `disconnect` | (none) | always |
 
 Example: `settings(action="change", changes=[{"key": "hands.cursor.gain", "value": 1.6}], why="you said it is too
@@ -1680,7 +1681,8 @@ When the app is running, the self-test runs inside it, so the cameras are not ta
 cameras (opens each one, measures its real frame rate, names the app holding a busy camera and offers to close
 it), hand tracking speed, the graphics card (see *GPU tracking* below), the smooth pointer's update rate, the
 big pointer, that only one copy is running, the microphone level, speech to text on a short phrase, the speaking
-voices, pop-up messages, Agent Link, PC load and the models. A check that crashes or runs past its time limit
+voices, pop-up messages, the Windows Start key (presses Win and checks Start really opens), Agent Link, PC load
+and the models. A check that crashes or runs past its time limit
 becomes a "could not run" line; it never breaks the report.
 
 Where the report goes: to **every** connected agent (its inbox, its wake-up address when one is set, and the
@@ -2152,6 +2154,24 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
+
+## What's new in 0.1.28
+
+* **Agents that drive your PC got sharper.** Several computer actions now run in one call instead of one round
+  trip at a time (#43), and after each action the agent sees what the desktop actually looks like (which window
+  is in front, what has focus), so it can tell when a click missed and try again instead of guessing (#42).
+  The Windows key now opens Start reliably for agents (#48), and opening an app verifies it really opened (#67
+  follow-up in #48's batch).
+* **A safety-gated shell for agents (opt-in).** Agents can run a small allowlist of read-only system queries
+  (device status, logs, process lists) without full freedom; anything destructive, network-facing, or touching
+  credentials still asks you first, and every invocation is logged (#67).
+* **Camera diagnose is faster and speaks agent.** A quick-triage mode checks each camera on its remembered
+  backend and mode only, skipping the minute-long sweep (#58), and the full diagnose now returns structured
+  per-camera results (which backends opened, at what fps, driver state, verdict) instead of prose the agent
+  had to parse (#47).
+* **Clearer control states.** When you take over from an agent, a slim banner stays on screen with
+  [Let it continue] and [Stop], instead of the overlay vanishing with no explanation (#51). A new
+  "who looked at me" history shows which agent used your camera or screen and when (#62).
 
 ## What's new in 0.1.27
 
