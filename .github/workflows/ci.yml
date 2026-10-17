@@ -176,9 +176,13 @@ jobs:
       groups: ${{ steps.list.outputs.groups }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - id: list
         run: |
-          GROUPS=$(python3 scripts/mutation.py --list-groups)
+          python --version
+          GROUPS=$(python scripts/mutation.py --list-groups)
           echo "groups=$GROUPS" >> "$GITHUB_OUTPUT"
 
   mutation:
