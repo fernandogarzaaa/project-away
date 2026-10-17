@@ -336,6 +336,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". The result reports the observed
         effect: `foreground` (the foreground window's title and process name right after the action) and
         `focused` (the focused UI element's label, when UI Automation has one)."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
