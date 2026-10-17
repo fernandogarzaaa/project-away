@@ -13,6 +13,7 @@ when one of these functions actually runs.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 _sd_lock = threading.Lock()
@@ -32,11 +33,27 @@ def play(samples: Any, sr: int) -> None:
 
 
 def play_blocking(samples: Any, sr: int) -> None:
-    """Like :func:`play`, then wait for the stream to finish. The wait happens
-    OUTSIDE the lock, so a barge-in :func:`stop` lands at once instead of queueing
-    behind the whole utterance."""
-    play(samples, sr)
-    _sd().wait()
+    """Like :func:`play`, then wait for the stream to finish.
+
+    The wait happens OUTSIDE the lock so a barge-in :func:`stop` lands at once
+    instead of queueing behind the whole utterance. The stream teardown
+    (``close()``) happens UNDER the lock: ``sounddevice.wait()`` closes the
+    stream in a ``finally`` block and ``sounddevice.stop()`` also closes it, so
+    leaving the teardown unlocked would let the two ``Pa_CloseStream`` calls
+    race on the same handle (``Stream.close()`` is not idempotent). We therefore
+    poll for completion ourselves and close under the lock instead of calling
+    ``sounddevice.wait()``.
+    """
+    sd = _sd()
+    with _sd_lock:
+        sd.play(samples, int(sr))
+        stream = sd.get_stream()
+    try:
+        while stream.active:
+            time.sleep(0.005)
+    finally:
+        with _sd_lock:
+            stream.close()
 
 
 def stop() -> None:

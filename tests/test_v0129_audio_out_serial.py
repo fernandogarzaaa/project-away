@@ -21,21 +21,47 @@ import numpy as np
 import pytest
 
 
+class _FakeStream:
+    """Stand-in for sounddevice's stream: ``active`` until stopped or the fake
+    playback elapses, ``close()`` recorded so tests can see the teardown."""
+
+    def __init__(self, play_s: float = 0.05, on_close: Any = None) -> None:
+        self._active = True
+        self._done_at = time.perf_counter() + play_s
+        self.close_calls = 0
+        self._on_close = on_close
+
+    @property
+    def active(self) -> bool:
+        if self._active and time.perf_counter() >= self._done_at:
+            self._active = False
+        return self._active
+
+    @property
+    def closed(self) -> bool:
+        return self.close_calls > 0
+
+    def close(self) -> None:
+        if self._on_close is not None:
+            self._on_close()
+        self.close_calls += 1
+
+
 class _FakeSD:
     """Fake ``sounddevice`` module recording (name, enter, exit) for every call.
 
     ``play``/``stop`` sleep briefly to widen the race window, the way the real
-    native calls do. ``wait`` either returns at once or blocks on ``wait_release``,
-    so tests can observe a thread parked inside playback.
+    native calls do. Each ``play()`` mints a fresh stream (like the real
+    convenience API); ``stop()`` deactivates and closes the current stream, the
+    way ``sounddevice.stop()`` stops and closes it.
     """
 
-    def __init__(self, block_wait: bool = False, op_s: float = 0.01) -> None:
+    def __init__(self, play_s: float = 0.05, op_s: float = 0.01) -> None:
         self.events: list[tuple[str, float, float]] = []
         self._ev_lock = threading.Lock()
         self.op_s = op_s
-        self.block_wait = block_wait
-        self.wait_started = threading.Event()
-        self.wait_release = threading.Event()
+        self.play_s = play_s
+        self._stream = _FakeStream(play_s=play_s, on_close=lambda: self._span("close"))
         self.play_calls: list[tuple[Any, int]] = []
 
     def _span(self, name: str) -> None:
@@ -45,24 +71,24 @@ class _FakeSD:
         with self._ev_lock:
             self.events.append((name, enter, done))
 
+    def get_stream(self) -> _FakeStream:
+        return self._stream
+
     def play(self, samples: Any, sr: int) -> None:
+        self._stream = _FakeStream(play_s=self.play_s, on_close=lambda: self._span("close"))
         with self._ev_lock:
             self.play_calls.append((samples, sr))
         self._span("play")
 
     def stop(self) -> None:
+        self._stream._active = False
         self._span("stop")
-
-    def wait(self) -> None:
-        if not self.block_wait:
-            return
-        self.wait_started.set()
-        assert self.wait_release.wait(timeout=15), "fake wait() was never released"
+        self._stream.close()
 
 
 def _assert_no_overlap(events: list[tuple[str, float, float]]) -> None:
-    spans = sorted((enter, done) for name, enter, done in events if name in ("play", "stop"))
-    assert spans, "expected some recorded play/stop calls"
+    spans = sorted((enter, done) for name, enter, done in events if name in ("play", "stop", "close"))
+    assert spans, "expected some recorded play/stop/close calls"
     for (_, done1), (enter2, _) in itertools.pairwise(spans):
         assert enter2 >= done1, "two sounddevice output calls overlapped in time"
 
@@ -102,18 +128,22 @@ def test_concurrent_output_calls_never_overlap(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_play_blocking_does_not_hold_lock_during_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Barge-in latency guard: ``play_blocking`` must wait for the stream OUTSIDE the
-    lock, so an interrupt ``stop()`` lands at once instead of queueing behind the whole
-    utterance. Fails if the wait is moved inside the lock."""
-    fake = _FakeSD(block_wait=True)
+    """Barge-in latency guard: ``play_blocking`` polls for completion OUTSIDE the
+    lock, so an interrupt ``stop()`` lands at once instead of queueing behind the
+    whole utterance. The teardown ``close()`` still happens under the lock, so it
+    cannot race ``stop()``'s own close (``Stream.close()`` is not idempotent)."""
+    fake = _FakeSD(play_s=30.0)  # stays active until stop(); no auto-finish flakiness
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     from away.voice import audio_out
-    from away.voice.natural import sd_play
 
     samples = np.zeros(16, dtype=np.float32)
-    player = threading.Thread(target=sd_play, args=(samples, 24000))
+    player = threading.Thread(target=audio_out.play_blocking, args=(samples, 24000))
     player.start()
-    assert fake.wait_started.wait(timeout=15), "playback never reached wait()"
+    deadline = time.perf_counter() + 15
+    while not fake.play_calls and time.perf_counter() < deadline:
+        time.sleep(0.01)
+    assert fake.play_calls, "playback never started"
+    time.sleep(0.05)  # let the player enter its poll loop
     stop_done = threading.Event()
 
     def do_stop() -> None:
@@ -122,13 +152,11 @@ def test_play_blocking_does_not_hold_lock_during_wait(monkeypatch: pytest.Monkey
 
     stopper = threading.Thread(target=do_stop)
     stopper.start()
-    try:
-        assert stop_done.wait(timeout=10), "stop() blocked behind play_blocking's wait()"
-    finally:
-        fake.wait_release.set()
+    assert stop_done.wait(timeout=10), "stop() blocked behind play_blocking's wait"
     player.join(timeout=15)
     stopper.join(timeout=15)
     assert not player.is_alive() and not stopper.is_alive()
+    assert fake.get_stream().close_calls >= 1, "teardown close never ran"
 
 
 def test_stop_without_sounddevice_loaded_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,3 +244,42 @@ def test_sd_play_default_volume_leaves_samples_unchanged(monkeypatch: pytest.Mon
     sd_play(samples, 24000, volume=0.5)
     got2, _ = fake.play_calls[1]
     np.testing.assert_allclose(got2, samples * 0.5, err_msg="volume scaling broken")
+
+
+def test_play_blocking_waits_for_stream_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``play_blocking`` must not return while the stream is still active (mutant:
+    the wait loop removed would return at once, cutting the audio off)."""
+    fake = _FakeSD(play_s=30.0)  # stays active until stopped
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(8, dtype=np.float32)
+    done = threading.Event()
+
+    def run() -> None:
+        audio_out.play_blocking(samples, 24000)
+        done.set()
+
+    t = threading.Thread(target=run)
+    t.start()
+    time.sleep(0.2)
+    try:
+        assert not done.is_set(), "play_blocking returned while the stream was active"
+    finally:
+        audio_out.stop()  # like barge-in: ends the wait
+    assert done.wait(timeout=10), "play_blocking did not return after stop"
+    t.join(timeout=10)
+    assert not t.is_alive()
+
+
+def test_play_blocking_teardown_closes_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``play_blocking`` must close the stream when playback finishes (mutant: the
+    teardown ``close()`` -> ``pass`` survived because every other test also called
+    ``stop()``, which closes too)."""
+    fake = _FakeSD(play_s=0.05)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(8, dtype=np.float32)
+    audio_out.play_blocking(samples, 24000)  # returns when the stream auto-completes
+    assert fake.get_stream().close_calls == 1, "play_blocking never closed the stream"
