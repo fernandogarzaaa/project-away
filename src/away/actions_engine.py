@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import ctypes
 import logging
 import re
 import sys
@@ -136,6 +137,92 @@ def current_attribution() -> str | None:
     return getattr(_attr, "source", None)
 
 
+# ------------------------------------------------ Windows system-key taps (proposal #4)
+# A lone Win keypress must be HELD, not tapped. pynput's Controller.press()/release() sends two back-to-back
+# SendInput events with no dwell in between; the Windows shell discards the zero-dwell tap (down and up land in
+# the same input batch with identical timestamps), so `press_keys keys="win"` returned "ok" while Start never
+# opened. A human-like hold (80-120 ms) through native SendInput makes it through. Windows only: every other
+# platform keeps the existing pynput path.
+_WIN_TAP_HOLD_S = 0.10  # 100 ms: inside the 80-120 ms band the shell answers to
+_WIN_TAP_VKS = {"cmd": 0x5B, "cmd_l": 0x5B, "cmd_r": 0x5C}  # VK_LWIN / VK_RWIN
+
+
+# The Windows INPUT layout in fixed-width types. DWORD is 32 bits on Windows, but ctypes maps
+# wintypes.DWORD to c_ulong (64 bits on Linux), so the wintypes aliases would give the wrong
+# sizeof(INPUT) off Windows. Fixed widths keep the layout identical on every host, which also makes
+# the 40-byte cbSize assertion testable anywhere (CodeRabbit: SendInput rejects a cbSize that is not
+# sizeof(INPUT) with ERROR_INVALID_PARAMETER).
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_void_p),  # ULONG_PTR: pointer-sized, like the real field
+    ]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_uint16),
+        ("wScan", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_uint32),
+        ("wParamL", ctypes.c_uint16),
+        ("wParamH", ctypes.c_uint16),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_uint32), ("u", _INPUT_UNION)]
+
+
+def _sendinput_key(vk: int, down: bool) -> None:
+    """One keyboard event through the native Windows input queue.
+
+    Raises :class:`OSError` when nothing was injected: a silent no-op here is exactly the class of bug this
+    fixes (the old path always answered "ok").
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("_sendinput_key is Windows only")
+    import ctypes
+
+    INPUT_KEYBOARD, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC = 1, 0x0002, 0
+    user32 = ctypes.windll.user32
+    ki = _KEYBDINPUT(
+        wVk=vk,
+        wScan=user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC),
+        dwFlags=0 if down else KEYEVENTF_KEYUP,
+        time=0,
+        dwExtraInfo=0,
+    )
+    sent = user32.SendInput(1, ctypes.byref(_INPUT(INPUT_KEYBOARD, _INPUT_UNION(ki=ki))), ctypes.sizeof(_INPUT))
+    if sent != 1:
+        raise OSError(f"SendInput injected {sent}/1 keyboard events (vk=0x{vk:02X})")
+
+
+def _win_tap(key: str, hold_s: float = _WIN_TAP_HOLD_S) -> None:
+    """Press and release one Windows system key with a real hold; the key is always released."""
+    vk = _WIN_TAP_VKS[key]
+    _sendinput_key(vk, True)
+    try:
+        time.sleep(hold_s)
+    finally:
+        _sendinput_key(vk, False)
+
+
 # --------------------------------------------------------------------------------------------- the backend
 class OSInputBackend:  # pragma: no cover - needs a desktop session
     """The real mouse and keyboard (pynput). Built only by :meth:`ActionEngine.os_backend`."""
@@ -208,7 +295,12 @@ class OSInputBackend:  # pragma: no cover - needs a desktop session
 
     def hotkey(self, keys: list[str]) -> None:
         """Press a chord and always attempt to release every key touched (a failure part-way must never leave a
-        modifier logically held). An original press error wins over a cleanup error."""
+        modifier logically held). An original press error wins over a cleanup error. A lone Windows system key
+        (the Win key) goes through the native held tap instead: pynput's instant down/up is swallowed by the
+        shell, so Start would never open."""
+        if len(keys) == 1 and sys.platform == "win32" and str(keys[0]).lower() in _WIN_TAP_VKS:
+            _win_tap(str(keys[0]).lower())
+            return
         objs = [self._key(k) for k in keys]
         attempted: list[Any] = []
         try:
