@@ -40,6 +40,19 @@
 - 3 new tests, all proven to fail without the fix. ruff/mypy clean. Mutation re-run in progress.
 - NOTE: head changed -> CI re-runs and CodeRabbit must re-review the new head before merge.
 
+## Thread-local rework (2026-10-17 ~21:00 UTC)
+- The signature-threading approach pulled _open_camera (130 mutants) into scope: 67.2% FAIL.
+- Reworked to thread-local: open_camera publishes queued_gen to _open_state.handover_gen;
+  _Search.cancelled() stays a staticmethod, also firing on generation mismatch. No signature
+  changes. 3 tests updated (all ERROR without the fix). Mutation: 97.7% PASS.
+- Pushed as c133f63b; PR #71 head updated; CI run 39071831255 in progress.
+
+## Post-read cancellation (2026-10-17 ~21:55 UTC, review 5560274653 on head c133f63b)
+- Finding (Major, valid): read_first() can outlast a hand-over; with measure_s=0 nothing
+  re-checks cancellation before run() returns the camera. Fix: check self.cancelled() after
+  the blocking read in _Search.run() success path and in reopen(): release cap, raise
+  OpenCancelled. 2 new tests, both proven to fail without the fix. Mutation re-run in progress.
+
 # Fix A: camera open gate - state (HOLD as of 2026-10-17 ~20:36 PST)
 
 Budget: run_id=away-fixA-camera-gate-01 (preserved).

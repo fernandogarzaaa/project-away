@@ -418,4 +418,3 @@ def test_open_camera_publishes_generation_thread_locally(
     assert seen.get("thread_gen") == gen_before
     # The generation must not leak to later opens on this thread.
     assert getattr(capture._open_state, "handover_gen", "MISSING") is None
-
