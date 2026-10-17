@@ -26,15 +26,16 @@ TILE_LETTER = {"claude_desktop": "C", "claude_ai": "C", "chatgpt": "G", "cursor"
 
 
 def build_tab(win: Any, nb: Any, model: AgentLinkModel | None = None) -> Any:  # pragma: no cover - widgets
-    return AgentLinkTab(win, nb, model or AgentLinkModel())
+    f = win._scroll_tab(nb, "Agent Link")
+    return AgentLinkTab(win, f, model or AgentLinkModel())
 
 
 class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
-    def __init__(self, win: Any, nb: Any, model: AgentLinkModel) -> None:
+    def __init__(self, win: Any, parent: Any, model: AgentLinkModel) -> None:
         self.win, self.m = win, model
         tk, ttk = win.tk, win.ttk
         self.tk, self.ttk = tk, ttk
-        f = win._scroll_tab(nb, "Agent Link")
+        f = parent  # the frame to fill; build_tab makes a tab, agents_tab embeds in the Agents tab
         self.frame = f
         ttk.Label(
             f,
