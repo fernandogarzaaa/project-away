@@ -717,6 +717,47 @@ def test_from_image_coordinates_use_the_last_screenshot_scale() -> None:
     assert backend.calls[-1] == ("move", (200, 100))
 
 
+def test_act_result_reports_the_observed_effect() -> None:
+    """Proposal #3: every action result names the foreground window (title + process) and the focused
+    element, so the agent sees where its input actually landed and can self-correct."""
+    clock = Clock()
+    uia = FakeUIA(focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)))
+    ctl, _, _ = _control(clock, uia=uia, fg={"title": "Untitled - Notepad", "process": "notepad.exe"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "move", x=10, y=10)
+    assert res["ok"] is True and res["action"] == "move"
+    assert res["foreground"] == {"title": "Untitled - Notepad", "process": "notepad.exe"}
+    assert res["focused"] == "OK"
+    assert "log_id" in res and "detail" in res
+
+
+def test_act_result_when_nothing_is_focused_or_foreground_unknown() -> None:
+    clock = Clock()
+    ctl, _, _ = _control(clock, fg=None)  # foreground hook returns None; no UIA element
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "move", x=10, y=10)
+    assert res["foreground"] == {"title": "", "process": ""}
+    assert res["focused"] == ""
+
+
+def test_act_result_survives_a_broken_foreground_hook() -> None:
+    """Post-state capture is best effort: a failing hook must not fail an action that succeeded."""
+    clock = Clock()
+    uia = FakeUIA(focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)))
+    ctl, backend, _ = _control(clock, uia=uia)
+    ctl.request("a1", "Claude")
+
+    def boom() -> None:
+        raise RuntimeError("no window info")
+
+    ctl.hooks.foreground = boom  # type: ignore[method-assign]
+    res = ctl.act("a1", "move", x=10, y=10)
+    assert res["ok"] is True
+    assert backend.calls == [("move", (10, 10))]
+    assert res["foreground"] == {"title": "", "process": ""}
+    assert res["focused"] == "OK"
+
+
 # ---------------------------------------------------------------------------------------- detectors
 def test_detectors() -> None:
     from away.agentlink.detectors import Detectors
