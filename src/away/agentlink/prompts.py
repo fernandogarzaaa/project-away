@@ -510,11 +510,27 @@ class SubprocessUI:  # pragma: no cover - starts GUI processes; smoke-tested und
 
     def overlay(self, name: str, stop_file: Path, mode: str = "control") -> Any:
         spec = self.folder / f"overlay-{uuid.uuid4().hex[:8]}.json"
-        spec.write_text(json.dumps({"agent": name, "stop_file": str(stop_file), "mode": mode}), encoding="utf-8")
+        spec.write_text(
+            json.dumps({"id": spec.stem, "agent": name, "stop_file": str(stop_file), "mode": mode}), encoding="utf-8"
+        )
         proc = self._spawn(["agent-ui", "control", str(spec)])
         if proc is None:
             raise RuntimeError(f"could not open the on-screen border: {self.last_spawn_error}")
         return proc
+
+    def paused_banner(self, name: str, stop_file: Path) -> tuple[Any, Path]:
+        """The paused-state banner (proposal #16): "Paused - you took over from <name>" with "Let <name>
+        continue" and "Stop" buttons whose click IS the answer. Returns the window process and the answer file
+        the app watches (``<id>.answer.json``, written by the banner next to the spec)."""
+        spec = self.folder / f"paused-{uuid.uuid4().hex[:8]}.json"
+        spec.write_text(
+            json.dumps({"id": spec.stem, "agent": name, "stop_file": str(stop_file), "mode": "paused"}),
+            encoding="utf-8",
+        )
+        proc = self._spawn(["agent-ui", "control", str(spec)])
+        if proc is None:
+            raise RuntimeError(f"could not open the paused banner: {self.last_spawn_error}")
+        return proc, self.folder / f"{spec.stem}.answer.json"
 
 
 def window_process_options(platform: str | None = None, env: Any = None) -> dict[str, Any]:
