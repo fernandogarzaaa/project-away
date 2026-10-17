@@ -22,6 +22,16 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
     "gestures": (["src/away/hands/gestures.py"], ["tests/test_gestures.py"]),
     "cursor": (["src/away/hands/cursor.py"], ["tests/test_cursor.py"]),
     "cleanup": (["src/away/voice/cleanup.py"], ["tests/test_cleanup.py"]),
+    # Voice Studio: profile validation/deletion, clone-engine lifecycle, and interruption/playback state.
+    "voice_studio": (
+        [
+            "src/away/voice/voice_profiles.py",
+            "src/away/voice/voice_cloning.py",
+            "src/away/voice/speech.py",
+            "src/away/liveagent/speech.py",
+        ],
+        ["tests/test_voice_studio.py"],
+    ),
     "vad": (["src/away/voice/vad.py"], ["tests/test_voice.py"]),
     "dictation": (["src/away/voice/dictation.py"], ["tests/test_voice.py"]),
     "wifi_features": (["src/away/wifi/features.py"], ["tests/test_wifi.py"]),
