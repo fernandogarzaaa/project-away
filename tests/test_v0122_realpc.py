@@ -325,7 +325,9 @@ def test_job_output_hides_driver_noise(tmp_path: Path) -> None:
     assert job.state == "done"
     assert job.output[-1].startswith("(hid 299 camera-driver messages")
     assert "camera 0: JoyCam" in job.output and len(job.output) == 4
-    assert job.result == {"exit_code": 0, "driver_messages_hidden": 299}
+    assert job.result["exit_code"] == 0 and job.result["driver_messages_hidden"] == 299
+    # v0.1.28: every check's structured result carries elapsed_s and budget_hit
+    assert job.result["budget_hit"] is False and job.result["elapsed_s"] >= 0.0
 
 
 def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
@@ -744,7 +746,7 @@ def test_mcp_has_the_inbox_tool_and_resource(cfg_core) -> None:
     core, *_ = cfg_core
     mcp = mcp_tools.build(api.LocalBackend(core.service))
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert "inbox" in names and len(names) == 16
+    assert "inbox" in names and "shell" in names and len(names) == 17
     uris = {str(r.uri) for r in asyncio.run(mcp.list_resources())}
     assert "away://inbox" in uris
     assert "inbox(action=list|read|reply)" in INSTRUCTIONS and "user.message" in INSTRUCTIONS
