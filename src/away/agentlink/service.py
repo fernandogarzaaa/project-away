@@ -2,9 +2,10 @@
 these methods with the authenticated :class:`~away.agentlink.auth.Agent`; the permission check happens here, once,
 so every transport enforces exactly the same rules.
 
-What no method can ever do: run a shell command, read or write an arbitrary file (only the bundles / recordings /
+What no method can ever do: read or write an arbitrary file (only the bundles / recordings /
 logs listed by :mod:`safepaths`), inject input without the "use my computer" permission and an approval on the PC,
-or change ``allow_shell`` / the agents' own permissions.
+run a shell outside the staged :meth:`run_shell` (tier-1 allowlist or per-call approval, never credential
+stores), or change ``allow_shell`` / the agents' own permissions.
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from away.agentlink import about, perms, safepaths
+from away.agentlink import shell as sh
 from away.agentlink.auth import Agent, AgentRegistry
+from away.agentlink.bundle import redact_text
 from away.agentlink.changes import ChangeManager
 from away.agentlink.control import ComputerControl, ControlRefused
 from away.agentlink.jobs import JobRunner
@@ -176,6 +179,8 @@ class Service:
         self.events = events or EventHub()
         self.started = time.time()
         self.captures: deque[Capture] = deque(maxlen=4)
+        # v0.1.28 "Recently": plain-language history of who looked through the camera or at the screen
+        self.capture_history: deque[dict[str, Any]] = deque(maxlen=20)
         self._record_lock = threading.Lock()
         self._watchers: set[str] = set()
         self.watching = watching
@@ -479,8 +484,10 @@ class Service:
             raise NotAvailable("no camera picture right now (is the camera running and not paused?)")
         from away.agentlink.desktop import to_jpeg
 
-        self._flash(f"{agent.name} looked through your camera", "camera picture")
+        notice = f"{agent.name} looked through your camera"
+        self._flash(notice, "camera picture")
         jpeg, scale = to_jpeg(frame, int(self._s("snapshot_max_width", 320)), 60)
+        self._log_capture(notice)  # v0.1.28: only after the picture exists
         self.events.publish("look.taken", {"agent": agent.name})
         return jpeg, {"camera": camera or "primary", "scale": scale}
 
@@ -542,10 +549,12 @@ class Service:
             )
         except shot.ScreenRequestError as exc:
             raise ValueError(str(exc)) from None
+        notice = f"{agent.name} looked at your screen"
         if not quiet or agent.id not in self._watchers:
             # v0.1.24 hardening: "quiet" only skips the notice while this agent's live view badge is on screen
-            self._flash(f"{agent.name} looked at your screen", "screenshot")
+            self._flash(notice, "screenshot")
         jpeg = shot.render(img, p)
+        self._log_capture(notice)  # v0.1.28: after the picture exists; the badge is the indicator for quiet views
         self.control.scales[agent.id] = p.scale
         self.control.views[agent.id] = (float(p.origin[0]), float(p.origin[1]), float(p.scale))
         meta: dict[str, Any] = shot.meta(p, ds, len(jpeg))
@@ -638,13 +647,24 @@ class Service:
                 f"the {what} was not taken because the on-screen notice that tells the person could not be shown"
             )
 
+    def _log_capture(self, text: str) -> None:
+        """v0.1.28 "Recently": the history entry for a capture. Called only after the image is made, so the
+        history can never claim a capture that was refused (no notice, so no capture) or that failed before a
+        picture existed. The live-view badge counts as the visible indicator for badge-backed captures."""
+        self.capture_history.append({"text": text, "t": time.time()})
+
     def user_capture(self, kind: str, jpeg: bytes, meta: dict[str, Any]) -> Capture:
         """The user pushed a capture to their agents ("hey agent, look" / the summon gesture)."""
         import uuid
 
         c = Capture(uuid.uuid4().hex[:8], time.time(), kind, jpeg, meta)
         self.captures.append(c)
+        self._log_capture(f"You sent a {kind} picture to your agents")  # v0.1.28 "Recently"
         return c
+
+    def capture_feed(self, limit: int = 10) -> list[dict[str, Any]]:
+        """v0.1.28 "Recently": who looked through the camera or at the screen, newest first."""
+        return list(reversed(self.capture_history))[: max(0, limit)]
 
     def last_capture(self, agent: Agent) -> tuple[bytes, dict[str, Any]]:
         for c in reversed(self.captures):
@@ -812,6 +832,12 @@ class Service:
         # element names resolve through hooks.uia: the smart pointer's cache + fuzzy matcher when the app runs
         return self.control.act(agent.id, action, **kw)
 
+    def act_sequence(self, agent: Agent, steps: Any = None) -> dict[str, Any]:
+        """v0.1.27+: several computer actions in one call (``control(action="sequence", steps=[...])``): one grant
+        check, one log entry, stops at the first refusal, cancel or takeover."""
+        self.require(agent, perms.CONTROL)
+        return self.control.act_sequence(agent.id, steps)
+
     def stop_control(self, agent: Agent) -> dict[str, Any]:
         if self.control.grant is not None and self.control.grant.agent_id == agent.id:
             self.control.stop("the agent finished")
@@ -827,6 +853,233 @@ class Service:
         if bool(self._s("share_control_history", False)):
             return self.control.actions(limit)
         return self.control.actions(limit, agent_id=agent.id)
+
+    # --------------------------------------------------------- staged shell (proposal #26)
+    @property
+    def _shell_audit(self) -> sh.ShellAudit:
+        audit = getattr(self, "_shell_audit_obj", None)
+        if audit is None:
+            audit = sh.ShellAudit(self.data_dir / "agentlink" / "shell-audit.jsonl")
+            self._shell_audit_obj = audit
+        return audit
+
+    def _shell_log_tail(self, kb: int = 32) -> str:
+        p = self.data_dir / "logs" / "away.log"
+        try:
+            with p.open("rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - kb * 1024))
+                return fh.read().decode("utf-8", "replace")
+        except OSError:
+            return "(no away.log yet)"
+
+    def run_shell(
+        self,
+        agent: Agent,
+        action: str = "run",
+        command: str | None = None,
+        argv: list[str] | None = None,
+        why: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Safety-gated shell with staged access (proposal #26), under "use my computer".
+
+        - ``action="list"``: the tier-1 read-only commands (no session grant needed to look).
+        - ``action="log"``: every shell invocation so far (command, tier, result summary).
+        - ``action="run"`` with ``command`` = a tier-1 name: fixed, read-only, runs at once inside an
+          approved computer session (no per-call approval).
+        - ``action="run"`` with ``argv``: tier 2, anything else. The person is asked first, every time,
+          through the same prompt path as risky clicks; only "Allow" runs it.
+
+        Never a shell (``shell=False``), never credential stores or password material (refused outright),
+        64 KB output cap, secrets redacted, every invocation audited.
+        """
+        if action == "list":
+            self.require(agent, perms.CONTROL)
+            return {
+                "tier1": sh.describe(),
+                "note": "tier 1 runs at once inside an approved computer session (control action=request); "
+                "anything else asks the person first, every time.",
+            }
+        if action == "log":
+            self.require(agent, perms.CONTROL)
+            return {"entries": self._shell_audit.tail(limit or 30)}
+        if action != "run":
+            raise ValueError(f"shell: action must be run|list|log (got {action!r})")
+        self.require(agent, perms.CONTROL)
+        # the approved session: same per-session grant as computer control (expires, takeover pauses it)
+        self.control.require_grant(agent.id)
+
+        if command and argv:
+            raise ValueError("shell: pass either command (tier 1) or argv (tier 2), not both")
+        if command:
+            return self._run_shell_tier1(agent, command, why)
+        if argv:
+            return self._run_shell_argv(agent, [str(a) for a in argv], why)
+        raise ValueError("shell: action=run needs command (a tier-1 name) or argv (a command list)")
+
+    def _run_shell_tier1(self, agent: Agent, command: str, why: str | None) -> dict[str, Any]:
+        kind = sh.tier1_kind(command)  # KeyError -> unknown command (REST 404)
+        audit = self._shell_audit
+        if kind == "unavailable":
+            audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": 1,
+                    "command": command,
+                    "argv": [],
+                    "approved": False,
+                    "refused": "not available on this PC",
+                }
+            )
+            raise NotAvailable(f"shell: {command!r} is not available on this PC")
+        if kind == "in_process":
+            text = sh.serve_in_process(command, log_tail=self._shell_log_tail)
+            text = redact_text(text)
+            audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": 1,
+                    "command": command,
+                    "argv": [],
+                    "approved": False,
+                    "rc": 0,
+                    "out_bytes": len(text.encode("utf-8")),
+                    "truncated": False,
+                    "summary": sh.summarize(text, 0),
+                }
+            )
+            return {
+                "tier": 1,
+                "command": command,
+                "approved": False,
+                "rc": 0,
+                "timed_out": False,
+                "truncated": False,
+                "stdout": text,
+                "stderr": "",
+            }
+        fixed = sh.tier1_argv(command)
+        assert fixed is not None
+        return self._run_shell_exec(agent, fixed, tier=1, name=command, why=why, approved=False)
+
+    def _run_shell_argv(self, agent: Agent, argv: list[str], why: str | None) -> dict[str, Any]:
+        try:
+            tier, name = sh.classify(argv)  # ShellRefused -> REST 400, before anything runs
+        except sh.ShellRefused as e:
+            self._shell_audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": 2,
+                    "command": argv[0],
+                    "argv": [redact_text(a) for a in argv],
+                    "approved": False,
+                    "refused": str(e),
+                }
+            )
+            raise
+        if tier == 2:
+            details = [
+                "Tier 2: anything outside the read-only tier-1 list. It runs once, only with your approval.",
+                "No shell is involved: the words below go to the program exactly as written.",
+            ]
+            if sh.has_metachars(argv):
+                details.append(
+                    "It contains shell-looking characters (; | $ ...): they are passed to the program "
+                    "as-is and do nothing special, but double-check the command."
+                )
+            if why:
+                details.append(f"The agent's reason: {why[:300]}")
+            res = self.prompts.ask(
+                f"{agent.name} wants to run this command on your PC:\n{' '.join(argv)}",
+                ["Allow", "Deny"],
+                title="Run this command?",
+                agent=agent.name,
+                details=details,
+                timeout_s=60.0,
+                urgency="high",
+                kind="confirm",
+            )
+            if res.get("answer") != "Allow":
+                self._shell_audit.append(
+                    {
+                        "agent": agent.name,
+                        "agent_id": agent.id,
+                        "tier": 2,
+                        "command": argv[0],
+                        "argv": [redact_text(a) for a in argv],
+                        "approved": False,
+                        "refused": f"the user answered {res.get('answer')!r}",
+                    }
+                )
+                raise ControlRefused(f"the user did not allow the command ({argv[0][:60]})")
+            # the grant can expire, pause or be revoked while the prompt waited: re-check it now, so a
+            # stale "Allow" cannot start the command without a live grant
+            try:
+                self.control.require_grant(agent.id)
+            except ControlRefused as e:
+                self._shell_audit.append(
+                    {
+                        "agent": agent.name,
+                        "agent_id": agent.id,
+                        "tier": 2,
+                        "command": argv[0],
+                        "argv": [redact_text(a) for a in argv],
+                        "approved": True,
+                        "refused": f"the computer session ended while awaiting approval ({e})",
+                    }
+                )
+                raise
+            return self._run_shell_exec(agent, argv, tier=2, name=argv[0], why=why, approved=True)
+        return self._run_shell_exec(agent, argv, tier=1, name=name or argv[0], why=why, approved=False)
+
+    def _run_shell_exec(
+        self, agent: Agent, argv: list[str], *, tier: int, name: str, why: str | None, approved: bool
+    ) -> dict[str, Any]:
+        try:
+            res = sh.run(argv)
+        except sh.ShellNotAvailable as e:
+            self._shell_audit.append(
+                {
+                    "agent": agent.name,
+                    "agent_id": agent.id,
+                    "tier": tier,
+                    "command": name,
+                    "argv": [redact_text(a) for a in argv],
+                    "approved": approved,
+                    "refused": f"not available on this PC ({e})",
+                }
+            )
+            raise NotAvailable(str(e)) from None
+        stdout, stderr = redact_text(res["stdout"]), redact_text(res["stderr"])
+        self._shell_audit.append(
+            {
+                "agent": agent.name,
+                "agent_id": agent.id,
+                "tier": tier,
+                "command": name,
+                "argv": [redact_text(a) for a in argv],
+                "approved": approved,
+                "rc": res["rc"],
+                "timed_out": res["timed_out"],
+                "truncated": res["truncated"],
+                "out_bytes": res["out_bytes"],
+                "summary": sh.summarize(stdout, res["rc"]),
+            }
+        )
+        return {
+            "tier": tier,
+            "command": name,
+            "approved": approved,
+            "rc": res["rc"],
+            "timed_out": res["timed_out"],
+            "truncated": res["truncated"],
+            "stdout": stdout,
+            "stderr": stderr,
+        }
 
     # --------------------------------------------------------- session
     def disconnect(self, agent: Agent) -> dict[str, Any]:

@@ -709,7 +709,7 @@ def cmd_cameras_diagnose(
         else:
             print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
         budget = getattr(args, "budget", None)
-        (runner or diagnose.run_diagnose)(
+        report = (runner or diagnose.run_diagnose)(
             devs,
             width=width,
             height=height,
@@ -720,6 +720,11 @@ def cmd_cameras_diagnose(
             include_virtual=bool(getattr(args, "include_virtual", False) or device not in (None, "")),
             quick=quick,
         )
+        # (proposal #10): one machine-readable line carrying the structured per-camera results, so an
+        # Agent Link check can lift it out of this subprocess's output into the job's ``result`` dict.
+        structured = getattr(report, "result", None)
+        if isinstance(structured, dict) and isinstance(structured.get("cameras"), list):
+            print(diagnose.RESULT_MARKER, json.dumps(structured, separators=(",", ":")), flush=True)
     for line in pc_context_lines():  # v0.1.23: who else uses the camera / the CPU
         print(line)
     return 0
