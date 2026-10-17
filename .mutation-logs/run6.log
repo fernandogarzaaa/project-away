@@ -1,0 +1,33 @@
+--------------------S..TT....T.....T.............S.SS..S..S..S.S.SSS...SS..S...S.....SSS.SSS.................... 112 mutants
+testteeth: mutation grade for code changed vs 347d51f82e8f5976360741889395640d0a5564c7
+
+src/away/multicam/capture.py
+  <module>                             0.0%    0/1   killed  WEAK
+      L744  constant          `0` -> `1`  [survived]
+  wait_devices_free                  100.0%   20/20  killed  ok
+  _Search.cancelled                  100.0%    6/6   killed  ok
+  _Search.run                         41.4%   24/58  killed  WEAK
+      L1175 comparison        `self.clock() >= deadline` -> `(self.clock() > deadline)`  [survived]
+      L1181 remove-call       `self._check()` -> `pass`  [survived]
+      L1182 remove-call       `self.done.add(k)` -> `pass`  [survived]
+      L1188 remove-call       `cap.release()` -> `pass`  [survived]
+      L1194 constant          `True` -> `False`  [survived]
+      L1197 comparison        `mode.fourcc == "MJPG"` -> `(mode.fourcc != 'MJPG')`  [survived]
+      L1201 remove-call       `cap.release()` -> `pass`  [not covered]
+      L1203 boolean           `not cap.isOpened() or apply...` -> `(not cap.isOpened() and app...`  [not covered]
+      ... 26 more surviving
+  _Search.reopen                      45.5%    5/11  killed  WEAK
+      L1304 remove-call       `self._check()` -> `pass`  [survived]
+      L1309 remove-call       `cap.release()` -> `pass`  [not covered]
+      L1311 comparison        `cand.factory is None` -> `(cand.factory is not None)`  [survived]
+      L1312 remove-call       `apply_mode(cap, cand.mode, ...` -> `pass`  [survived]
+      L1313 constant          `2.0` -> `3.0`  [survived]
+      L1316 remove-call       `cap.release()` -> `pass`  [not covered]
+  open_camera                        100.0%   16/16  killed  ok
+
+Mutants: 112  killed: 71  survived: 21  not covered: 20  timeouts: 4
+Failure-path gaps: 0
+Mutation score: 63.4%  (FAIL: --fail-under 80)
+Time: baseline 40.0s, total 1090.0s
+Next: `testteeth suggest` prints an agent-ready brief for each surviving mutant.
+EXIT: 1
