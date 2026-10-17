@@ -341,7 +341,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser.
+        / Spotlight (not terminals or system tools); after launching, the foreground window is checked for up
+        to ~3 s and the result carries a `warning` when the app could not be confirmed open (the launcher
+        keystrokes may have done nothing). action="url" opens an http(s) `url` in the default browser.
         The result reports the observed effect: `foreground` (the foreground window's title and process name
         right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
