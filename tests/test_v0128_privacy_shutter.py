@@ -144,6 +144,26 @@ def test_read_consent_empty_hkcu_value_falls_back_to_hklm() -> None:
     assert diagnose.read_consent(wr) == "Deny"
 
 
+def test_read_consent_empty_everywhere_means_could_not_check() -> None:
+    wr = FakeWinreg(
+        {
+            ("HKCU", diagnose.CONSENT_KEY): {"Value": ""},
+            ("HKLM", diagnose.CONSENT_KEY): {"Value": "  "},
+        }
+    )
+    assert diagnose.read_consent(wr) is None
+
+
+def test_read_consent_none_value_falls_back_to_hklm() -> None:
+    wr = FakeWinreg(
+        {
+            ("HKCU", diagnose.CONSENT_KEY): {"Value": None},
+            ("HKLM", diagnose.CONSENT_KEY): {"Value": "Allow"},
+        }
+    )
+    assert diagnose.read_consent(wr) == "Allow"
+
+
 def test_read_consent_missing_key_means_could_not_check() -> None:
     assert diagnose.read_consent(FakeWinreg({})) is None
 
