@@ -75,6 +75,8 @@ class _FakeSD:
         return self._stream
 
     def play(self, samples: Any, sr: int) -> None:
+        # Like the real sd.play(): stop (and close) any current stream first.
+        self.stop()
         self._stream = _FakeStream(play_s=self.play_s, on_close=lambda: self._span("close"))
         with self._ev_lock:
             self.play_calls.append((samples, sr))
@@ -283,3 +285,56 @@ def test_play_blocking_teardown_closes_stream(monkeypatch: pytest.MonkeyPatch) -
     samples = np.zeros(8, dtype=np.float32)
     audio_out.play_blocking(samples, 24000)  # returns when the stream auto-completes
     assert fake.get_stream().close_calls == 1, "play_blocking never closed the stream"
+
+
+def test_barge_in_stop_does_not_double_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``play_blocking`` + barge-in ``stop()`` must close the stream exactly once.
+
+    ``sd.stop()`` closes the stream itself; the teardown ``close()`` must skip a
+    stream ``stop()`` already closed instead of re-entering Pa_CloseStream on a
+    dead handle. Fails on the unfixed code with close_calls == 2.
+    """
+    fake = _FakeSD(play_s=30.0)  # stays active until stop()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(16, dtype=np.float32)
+    player = threading.Thread(target=audio_out.play_blocking, args=(samples, 24000))
+    player.start()
+    deadline = time.perf_counter() + 15
+    while not fake.play_calls and time.perf_counter() < deadline:
+        time.sleep(0.01)
+    assert fake.play_calls, "playback never started"
+    time.sleep(0.05)
+    stream = fake.get_stream()
+    audio_out.stop()  # barge-in
+    player.join(timeout=15)
+    assert not player.is_alive()
+    assert stream.close_calls == 1, f"stream closed {stream.close_calls} times (double close)"
+
+
+def test_play_interrupting_play_blocking_does_not_double_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``play()`` while ``play_blocking`` polls must close the old stream once.
+
+    ``sd.play()`` stops (and closes) any current stream first; the polling
+    ``play_blocking`` teardown must recognize the already-closed stream.
+    """
+    fake = _FakeSD(play_s=30.0)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(16, dtype=np.float32)
+    player = threading.Thread(target=audio_out.play_blocking, args=(samples, 24000))
+    player.start()
+    deadline = time.perf_counter() + 15
+    while not fake.play_calls and time.perf_counter() < deadline:
+        time.sleep(0.01)
+    assert fake.play_calls, "playback never started"
+    time.sleep(0.05)
+    old_stream = fake.get_stream()
+    audio_out.play(samples, 24000)
+    player.join(timeout=15)
+    assert not player.is_alive()
+    assert old_stream.close_calls == 1, f"old stream closed {old_stream.close_calls} times"

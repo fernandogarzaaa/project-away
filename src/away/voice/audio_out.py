@@ -17,6 +17,26 @@ import time
 from typing import Any
 
 _sd_lock = threading.Lock()
+# Streams that sd.stop() already closed. play_blocking's teardown must skip
+# its close() for these: Stream.close() has no double-close guard and
+# sd.stop() closes the stream itself, so closing again would re-enter
+# Pa_CloseStream on a dead handle. At most one entry: sounddevice keeps a
+# single current output stream (play() stops the previous one first).
+_closed_by_stop: list[Any] = []
+
+
+def _note_stopped(stream: Any) -> None:
+    """Remember that the stream was closed via sd.stop(); caller holds _sd_lock."""
+    _closed_by_stop.clear()
+    if stream is not None:
+        _closed_by_stop.append(stream)
+
+
+def _current_stream(sd: Any) -> Any | None:
+    try:
+        return sd.get_stream()
+    except Exception:
+        return None  # play()/rec()/playrec() was not called yet
 
 
 def _sd() -> Any:
@@ -29,7 +49,11 @@ def play(samples: Any, sr: int) -> None:
     """Start ``samples`` on the default output stream. Serialized with every other
     output-stream call in this process. Returns at once; does not wait."""
     with _sd_lock:
-        _sd().play(samples, int(sr))
+        sd = _sd()
+        prev = _current_stream(sd)
+        sd.play(samples, int(sr))
+        # sd.play() stops (and closes) any current stream first.
+        _note_stopped(prev)
 
 
 def play_blocking(samples: Any, sr: int) -> None:
@@ -42,22 +66,34 @@ def play_blocking(samples: Any, sr: int) -> None:
     leaving the teardown unlocked would let the two ``Pa_CloseStream`` calls
     race on the same handle (``Stream.close()`` is not idempotent). We therefore
     poll for completion ourselves and close under the lock instead of calling
-    ``sounddevice.wait()``.
+    ``sounddevice.wait()``. When :func:`stop` (or another :func:`play`) already
+    closed this stream, the teardown skips its ``close()`` instead of closing
+    the dead handle a second time.
     """
     sd = _sd()
     with _sd_lock:
+        prev = _current_stream(sd)
         sd.play(samples, int(sr))
+        _note_stopped(prev)
         stream = sd.get_stream()
     try:
         while stream.active:
             time.sleep(0.005)
     finally:
         with _sd_lock:
-            stream.close()
+            if _closed_by_stop and _closed_by_stop[0] is stream:
+                _closed_by_stop.clear()
+            else:
+                stream.close()
 
 
 def stop() -> None:
     """Stop the default output stream. Serialized with every other output-stream
-    call in this process."""
+    call in this process. ``sd.stop()`` closes the stream itself; the closure is
+    recorded so a concurrent :func:`play_blocking` teardown does not close it
+    again."""
     with _sd_lock:
-        _sd().stop()
+        sd = _sd()
+        stream = _current_stream(sd)
+        sd.stop()
+        _note_stopped(stream)
