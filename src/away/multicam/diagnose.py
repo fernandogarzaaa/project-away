@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -161,6 +162,74 @@ def speed_verdict(fps: float | None) -> str:
     return " - too slow for tracking"
 
 
+# ----------------------------------------------------------------------- privacy + shutter (v0.1.28)
+# Three invisible causes of "enumerates but never opens": the Windows camera privacy consent is off, a
+# physical lens cover / privacy shutter is closed, or the camera kill key (often an Fn key) is switched off.
+# The diagnose now reports the consent store's verdict in plain words and points at the two physical causes.
+
+CONSENT_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+FIX_MARKER_RE = re.compile(r"^\[fix:([A-Za-z0-9_:.-]+)\]\s*")
+PRIVACY_FIX = "open:camera_privacy"  # away.selftest.fixes.OPEN_TARGETS: the fix button the Settings panel shows
+SHUTTER_GUIDANCE = (
+    "the camera is listed but never opens: this also happens when a lens cover is closed "
+    "or the camera kill key is off (often an Fn key or a physical switch on the laptop)"
+)
+
+
+def read_consent(winreg_mod: Any = None, platform: str | None = None) -> str | None:
+    """The webcam consent store's global ``Value`` ("Allow"/"Deny" as Windows writes it), or None when it
+    cannot be read. Never raises: off Windows, missing ``winreg``, a missing key or no permission all
+    mean "could not check". ``winreg_mod``/``platform`` are injectable for tests."""
+    plat = sys.platform if platform is None else platform
+    wr = winreg_mod
+    if wr is None:
+        if plat != "win32":
+            return None
+        try:
+            import winreg as wr  # type: ignore[no-redef]
+        except ImportError:
+            return None
+    roots = [getattr(wr, "HKEY_CURRENT_USER", None), getattr(wr, "HKEY_LOCAL_MACHINE", None)]
+    for root in roots:
+        if root is None:
+            continue
+        try:
+            with wr.OpenKey(root, CONSENT_KEY) as key:
+                value = wr.QueryValueEx(key, "Value")[0]
+        except OSError:
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+        # an empty Value is not a verdict; fall through to the next root
+    return None
+
+
+def consent_line(reader: Callable[[], str | None] | None = None) -> str | None:
+    """Plain-words camera privacy verdict for the diagnose report, or None when it could not be checked
+    (off Windows, or an unreadable store, the line is skipped entirely). A denied verdict carries the
+    ``[fix:open:camera_privacy]`` marker so the Settings > Cameras panel shows the fix button."""
+    value = (reader or read_consent)()
+    if value is None:
+        return None
+    verdict = value.strip().lower()
+    if verdict == "deny":
+        return (
+            f"[fix:{PRIVACY_FIX}] Camera privacy: Windows is blocking apps from using the camera. "
+            "Allow camera access in Settings > Privacy > Camera."
+        )
+    if verdict == "allow":
+        return "Camera privacy: Windows lets apps use the camera."
+    return None
+
+
+def split_fix_marker(line: str) -> tuple[str | None, str]:
+    """``("[fix:open:camera_privacy] text")`` -> ``("open:camera_privacy", "text")``; any other line ->
+    ``(None, line)``. CLI and Settings strip the marker before showing the text to people."""
+    m = FIX_MARKER_RE.match(line)
+    return (m.group(1), line[m.end() :]) if m else (None, line)
+
+
 def _quick_probe(
     dev: CameraDevice,
     devices: Sequence[CameraDevice],
@@ -292,6 +361,7 @@ def run_diagnose(
     include_virtual: bool = False,
     enumerated_by: str | None = None,
     quick: bool = False,
+    consent: Callable[[], str | None] | None = None,
 ) -> DiagnoseReport:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
     (Settings shows them while the diagnosis runs) and the :class:`DiagnoseReport` holds both the prose
@@ -302,7 +372,9 @@ def run_diagnose(
     ``enumerated_by`` names where ``devices`` came from; it defaults to ``capture.last_source``.
 
     v0.1.28: ``quick`` opens each camera on its remembered backend in its remembered mode only (no mode sweep),
-    for a fast triage answer; a camera with no remembered mode needs a full check once first."""
+    for a fast triage answer; a camera with no remembered mode needs a full check once first.
+    v0.1.28: ``consent`` (a :func:`read_consent`-shaped reader; None = skip) reports the Windows camera privacy
+    verdict first, and a camera that is listed but never opens gets the lens-cover / kill-key guidance."""
     lines: list[str] = []
     say = out or (lambda _m: None)
     started = clock()
@@ -322,6 +394,10 @@ def run_diagnose(
         except ImportError:
             emit("OpenCV is not installed (pip install 'project-away[hands]'); only WinRT can be checked")
     use = list(backends or (BACKENDS if win else ("default",)))
+    if consent is not None:
+        privacy = consent_line(consent)
+        if privacy is not None:
+            emit(privacy)
     source = enumerated_by or getattr(capture, "last_source", "") or "unknown"
     if not devices:
         emit("no cameras found")
@@ -438,6 +514,9 @@ def run_diagnose(
                     if best[0] > 0:
                         rec["error"] = None  # a measured fps wins over earlier mode failures (prose keeps them)
                     emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
+        # v0.1.28: a camera that is listed but never opened gets the lens-cover / kill-key guidance
+        if not stopped and not any(r.get("opened") for r in cam["backends"].values()):
+            emit(f"  {SHUTTER_GUIDANCE}")
         cams.append(_finish_camera(cam))
         saved = capture.saved_mode_info().get(dev.name)
         modes = capture.saved_modes().get(dev.name)
