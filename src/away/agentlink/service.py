@@ -832,6 +832,12 @@ class Service:
         # element names resolve through hooks.uia: the smart pointer's cache + fuzzy matcher when the app runs
         return self.control.act(agent.id, action, **kw)
 
+    def ui_query(self, agent: Agent) -> dict[str, Any]:
+        """v0.1.28 proposal #24: the foreground window's interactable UI elements with short ids
+        (``[{id, name, role, bounds}]``) an agent can pass back to pointer/keyboard as ``element_id``."""
+        self.require(agent, perms.CONTROL)
+        return self.control.ui_query(agent.id)
+
     def act_sequence(self, agent: Agent, steps: Any = None) -> dict[str, Any]:
         """v0.1.27+: several computer actions in one call (``control(action="sequence", steps=[...])``): one grant
         check, one log entry, stops at the first refusal, cancel or takeover."""

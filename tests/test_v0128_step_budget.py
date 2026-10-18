@@ -138,13 +138,14 @@ def test_pausing_and_resuming_keeps_counting_the_same_session(tmp_path: Path) ->
         ctl.act("a1", "move", x=3, y=3)
 
 
-def test_undo_counts_as_a_step(tmp_path: Path) -> None:
+def test_undo_does_not_count_as_a_step(tmp_path: Path) -> None:
     ctl = _control(Clock(), tmp_path, step_budget=2)
     _session(ctl)
-    ctl.act("a1", "move", x=50, y=50)  # undoable: moving back is one step
-    ctl.undo_last("a1")
+    ctl.act("a1", "move", x=50, y=50)  # undoable
+    ctl.undo_last("a1")  # putting back is free: it does not spend the session's budget
+    ctl.act("a1", "move", x=60, y=60)  # second step still available
     with pytest.raises(ControlRefused):
-        ctl.act("a1", "move", x=60, y=60)
+        ctl.act("a1", "move", x=70, y=70)  # now the budget is exhausted
 
 
 def test_the_budget_follows_the_live_settings(tmp_path: Path) -> None:
