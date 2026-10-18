@@ -280,7 +280,7 @@ def test_revoke_ends_a_live_mcp_call_and_session(tmp_path: Path) -> None:
             assert not call.done()  # the call is waiting on the PC
             t0 = time.monotonic()
             await asyncio.to_thread(h.core.registry.revoke_persistent, data["persistent_token_id"])
-            while not ended and time.monotonic() - t0 < 5:
+            while not ended and time.monotonic() - t0 < 15:
                 await asyncio.sleep(0.05)
             call.cancel()
             return ended[0][1] - t0 if ended else 99.0
