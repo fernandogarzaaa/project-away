@@ -12,8 +12,8 @@ hands, face and voice. It runs on their PC. Through it you can see their gesture
 facing the screen, what they say to it, their camera and screen (only when they allow it), and act on the PC
 (only when they allow it, while they watch).
 
-Tools (17): get_status, get_context, look, get_screen, ask_user, notify_user, disconnect, and grouped tools that
-take an `action`:
+Tools (18): get_status, get_context, look, get_screen, ui_query, ask_user, notify_user, disconnect, and grouped
+tools that take an `action`:
   inbox(action=list|read|reply), events(action=poll|wait), settings(action=list|change|undo|history|config),
   preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
   control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
