@@ -8,6 +8,7 @@ through a shell). Output is kept in ``<data>/diagnostics/cameras-<kind>-<time>.t
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -160,7 +161,7 @@ class JobRunner:
         with self._lock:
             return next((j for j in self.jobs.values() if j.state == "running"), None)
 
-    def start(self, kind: str, device: str | None = None, seconds: float | None = None) -> Job:
+    def start(self, kind: str, device: str | None = None, seconds: float | None = None, quick: bool = False) -> Job:
         if kind not in KINDS:
             raise ValueError(f"unknown check {kind!r}; use {', '.join(KINDS)}")
         if self.running() is not None:
@@ -173,6 +174,8 @@ class JobRunner:
                     raise ValueError("camera name has characters that are not allowed")
                 args.append(str(device))
             args += ["--seconds", f"{max(0.3, min(float(seconds or 1.0), 5.0)):g}"]
+            if quick:
+                args.append("--quick")  # v0.1.28: quick triage - the remembered backend only, no mode sweep
         elif kind == "sweep":
             args = ["cameras", "test", "--seconds", f"{max(2.0, min(float(seconds or 10.0), 30.0)):g}"]
         job = Job(_new_id(), kind, self.clock())
@@ -183,6 +186,10 @@ class JobRunner:
         return job
 
     def _run(self, job: Job, args: list[str]) -> None:
+        # v0.1.28: every check's structured result carries elapsed_s and budget_hit (whether a time limit
+        # stopped the check), so a triage agent can tell a fast failure from a timed-out one.
+        t0 = self.clock()
+        budget_hit = False
         try:
             if job.kind == "benchmark":
                 job.result = self.bench()
@@ -197,20 +204,32 @@ class JobRunner:
                 proc = self.runner(self.command(args), **kw)
                 deadline = time.time() + 600
                 assert proc.stdout is not None
+                structured: dict[str, Any] | None = None
                 for line in proc.stdout:
+                    parsed = _diagnose_marker(line.rstrip())
+                    if parsed is not None:  # (proposal #10): machine-readable result, not agent prose
+                        structured = parsed
+                        continue
                     shown = noise.feed(line.rstrip())
                     if shown is not None:
                         job.output.append(shown)
                     if time.time() > deadline:
                         proc.kill()
+                        budget_hit = True
                         job.output.append("(stopped after 10 minutes)")
                         break
                 rc = proc.wait(timeout=30)
                 if noise.summary():
                     job.output.append(noise.summary())
                 job.result = {"exit_code": rc}
+                if structured is not None:  # (proposal #10): per-camera verdicts for agents/MCP
+                    job.result["cameras"] = structured.get("cameras", [])
+                    job.result["stopped"] = bool(structured.get("stopped"))
                 if noise.hidden():
                     job.result["driver_messages_hidden"] = noise.hidden()
+                budget_hit = budget_hit or any("stopped after" in ln and "(time limit)" in ln for ln in job.output)
+            job.result["elapsed_s"] = round(self.clock() - t0, 1)
+            job.result["budget_hit"] = budget_hit
             self.out_dir.mkdir(parents=True, exist_ok=True)
             f = self.out_dir / f"cameras-{job.kind}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
             f.write_text("\n".join(job.output) + "\n", encoding="utf-8")
@@ -219,6 +238,9 @@ class JobRunner:
             job.state = "done"
         except Exception as exc:
             job.output.append(f"failed: {exc}")
+            # v0.1.28: the result contract holds on the failure path too (CodeRabbit)
+            job.result["elapsed_s"] = round(self.clock() - t0, 1)
+            job.result["budget_hit"] = budget_hit
             job.finished = self.clock()
             job.state = "failed"
 
@@ -262,6 +284,27 @@ class JobRunner:
         with self._lock:
             reason = "expired" if key in self._expired else "unknown"
         raise JobLookupError(key, reason)
+
+
+def _diagnose_marker(line: str) -> dict[str, Any] | None:
+    """The ``AWAY-DIAGNOSE-JSON: {...}`` line ``away cameras diagnose`` prints (proposal #10): the structured
+    per-camera result. Returns None for any other line; a malformed marker is ignored (the prose stays).
+
+    The marker is schema-checked: ``cameras`` must be a list and ``stopped`` a bool. Anything else
+    returns None so the line stays visible as prose instead of publishing a mistyped result."""
+    from away.multicam.diagnose import RESULT_MARKER
+
+    if not line.startswith(RESULT_MARKER):
+        return None
+    try:
+        data = json.loads(line[len(RESULT_MARKER) :].strip())
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("cameras"), list) or not isinstance(data.get("stopped"), bool):
+        return None
+    return data
 
 
 def normalize_id(job_id: Any) -> str:

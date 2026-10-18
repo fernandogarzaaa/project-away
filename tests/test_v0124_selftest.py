@@ -52,6 +52,14 @@ class FakeEnv:
             },
             "load": {"cpu_pct": 30.0, "top": [{"name": "Project Away", "cpu_pct": 12.0, "pid": 1}]},
             "models": {"missing": [], "rows": [{"title": "Hand tracking", "current_title": "MediaPipe", "on": True}]},
+            "winkey": {
+                "supported": True,
+                "opened": True,
+                "ms": 320.0,
+                "process": "StartMenuExperienceHost.exe",
+                "title": "Start",
+                "class": "Windows.UI.Core.CoreWindow",
+            },
         }
         self.data.update(over)
 
@@ -79,7 +87,7 @@ def test_a_healthy_pc_passes_everything() -> None:
     ids = {r.id for r in rep.results}
     for want in ("camera:JoyCam", "tracking", "gpu", "glide", "big_cursor", "single", "duplicates", "mic", "stt",
                  "tts:Windows voice", "tts:Natural (Kokoro)", "notify", "link", "link:tunnel", "relay:Cloudflare",
-                 "link:agents", "cpu", "models"):  # fmt: skip
+                 "link:agents", "cpu", "models", "winkey"):  # fmt: skip
         assert want in ids, want
 
 
@@ -182,6 +190,40 @@ def test_link_rules_with_a_fake_tunnel() -> None:
     got = statuses(ck.check_link(FakeEnv(link=link)))
     assert got == {"link": PASS, "link:tunnel": FAIL, "link:backup": WARN, "relay:Pinggy": WARN}
     assert ck.check_link(FakeEnv(link={"enabled": False}))[0].status == SKIP
+
+
+def test_winkey_rules() -> None:
+    """Proposal #4: the Win keypress must really open Start; skips gracefully where it cannot run."""
+    ok = ck.check_winkey(FakeEnv())[0]
+    assert ok.status == PASS and ok.id == "winkey" and "320 ms" in ok.summary
+    shut = ck.check_winkey(FakeEnv(winkey={"supported": True, "opened": False, "ms": 2010.0}))[0]
+    assert shut.status == FAIL and "did not open within 2 s" in shut.summary
+    assert shut.fix is not None and shut.fix.action == "rerun:winkey" and shut.fix.label == "Try again"
+    sec = ck.check_winkey(FakeEnv(winkey={"supported": True, "opened": False, "secure_desktop": True}))[0]
+    assert sec.status == FAIL and "security prompt" in sec.summary
+    broke = ck.check_winkey(FakeEnv(winkey={"supported": True, "opened": False, "reason": "the keypress failed"}))[0]
+    assert broke.status == FAIL and "did not work" in broke.summary
+    skip = ck.check_winkey(FakeEnv(winkey={"supported": False, "reason": "the Windows key check only runs"}))[0]
+    assert skip.status == SKIP
+
+
+def test_winkey_start_menu_host_matching() -> None:
+    from away.selftest.env import _start_menu_host
+
+    win11 = {"process": "StartMenuExperienceHost.exe", "title": "Start", "class": "Windows.UI.Core.CoreWindow"}
+    win10 = {"process": "explorer.exe", "title": "Start", "class": "Windows.UI.Core.CoreWindow"}
+    taskbar = {"process": "explorer.exe", "title": "", "class": "Shell_TrayWnd"}
+    other = {"process": "notepad.exe", "title": "Untitled", "class": "Notepad"}
+    assert _start_menu_host(win11) and _start_menu_host(win10)
+    assert not _start_menu_host(taskbar) and not _start_menu_host(other) and not _start_menu_host({})
+
+
+def test_winkey_env_skips_gracefully_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from away.selftest.env import RealEnv
+
+    monkeypatch.setattr("sys.platform", "linux")
+    out = RealEnv(cfg=C.AppConfig()).winkey()
+    assert out["supported"] is False and "Windows" in str(out["reason"])
 
 
 def test_load_and_models_rules() -> None:

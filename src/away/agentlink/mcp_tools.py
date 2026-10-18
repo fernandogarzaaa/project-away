@@ -62,7 +62,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox). Related tools are one tool with an `action`
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 18 (shell, ui_query). Related tools are one
+    # tool with an `action`
     # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
@@ -137,6 +138,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         kind: str | None = None,
         device: str | None = None,
         seconds: float | None = None,
+        quick: bool | None = None,
         job_id: str | None = None,
         note: str | None = None,
         path: str | None = None,
@@ -147,8 +149,21 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """Find out what is wrong. run/job need "Run camera and speed checks"; record, bundle, files, download
         and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
-          `device`), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns a job id.
+          `device`; `quick`=true opens each camera on its remembered backend only and skips the mode sweep, a
+          fast triage answer), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns
+          a job id. Every check's result carries `elapsed_s` and `budget_hit` (whether a time limit stopped it).
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
+          A finished "cameras" check also carries `result.cameras`, one structured dict per camera: `id`
+          (per-device identifier; names can collide), `name`,
+          `enumerated_by` (v4l2|dshow|wmi|system_profiler|probe), `backends` (per backend id: `opened` bool,
+          `fps` measured best or null, `error` text or null), `driver` (`status` ok|error|unknown and
+          `config_error`; minimal until proposal #9's driver-state helper lands), `holder` (Project Away
+          itself when it holds the camera, or null; other apps are not detected yet, so null does
+          not mean the camera is free), and `verdict` (ok = frames flowed; driver = driver/config
+          problem, e.g. "Element not
+          found"; held = another app holds it; privacy = OS privacy blocked it; unknown = could not tell).
+          `result.stopped` is true when the time budget cut the check short. Prefer this over parsing the
+          prose `output`.
         - action="record": record the next `seconds` (max 120) of hand landmarks and events (never video).
         - action="bundle": build a diagnostics bundle (logs, redacted config, camera checks, last 30 s).
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
@@ -170,6 +185,7 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             kind=kind,
             device=device,
             seconds=seconds,
+            quick=quick,
             job_id=job_id,
             note=note,
             lines=lines,
@@ -259,13 +275,33 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
-    async def control(ctx: Context, action: str, why: str | None = None, minutes: float | None = None) -> Any:
+    async def ui_query(ctx: Context) -> dict:
+        """The foreground window's interactable UI elements with exact screen bounds (after control
+        action="request" was approved; Windows UI Automation, no screenshot taken): [{id, name, role,
+        bounds}]. Pass an `id` back as element_id= to pointer or keyboard actions to act on it exactly -
+        no pixel guessing. Ids are yours only, expire with your next ui_query call, and stop resolving
+        if the foreground window changes."""
+        return await call(ctx, "ui_query")
+
+    @mcp.tool()
+    async def control(
+        ctx: Context,
+        action: str,
+        why: str | None = None,
+        minutes: float | None = None,
+        steps: list[dict] | None = None,
+    ) -> Any:
         """Using the person's computer (needs "Let it use my computer").
         - action="request": ask to use it (`why`; expires after `minutes`, default 30). Wait for their approval.
         - action="resume": continue after they took over (any move of their hand, mouse or keyboard pauses you).
         - action="stop": you are done (removes the border and banner). action="undo": undo your last undoable
-          action. action="log": your recent actions."""
-        return await group(ctx, "control", action=action, why=why, minutes=minutes)
+          action. action="log": your recent actions. action="sequence": run several actions in one call
+          (`steps`: a list like [{"action": "move", "x": 10, "y": 10}, {"action": "click"}]; each step is one
+          pointer/keyboard/open action with its usual arguments). One approval covers the whole sequence, but
+          risky steps still ask the person one by one, and the sequence stops at the first refusal or takeover.
+          Each step counts against the action rate limit like a single action, and the whole sequence is undone
+          with action="undo". Keep sequences short and related."""
+        return await group(ctx, "control", action=action, why=why, minutes=minutes, steps=steps)
 
     @mcp.tool()
     async def pointer(
@@ -274,17 +310,23 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         x: float | None = None,
         y: float | None = None,
         element: str | None = None,
+        element_id: str | None = None,
         from_image: bool = False,
         x2: float | None = None,
         y2: float | None = None,
         to_element: str | None = None,
+        to_element_id: str | None = None,
         dy: float | None = None,
         dx: float | None = None,
     ) -> dict:
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
-        right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
-        screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
-        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first."""
+        right_click | drag (to x2,y2 or `to_element`/`to_element_id`) | scroll (dy > 0 up, dy < 0 down, dx
+        sideways). Target screen x,y, an element name from get_screen(elements=true), an element id from
+        ui_query (exact bounds, no guessing), or image x,y with from_image=true (your last screenshot's origin
+        and scale are applied). An id beats a name beats coordinates. Risky buttons (send, pay, delete...) ask
+        the person first. The result reports the observed effect: `foreground` (the foreground window's title
+        and process name right after the action) and `focused` (the focused UI element's label, when UI
+        Automation has one). Check these: they tell you whether the click actually landed where you intended."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -294,26 +336,58 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             x=x,
             y=y,
             element=element,
+            element_id=element_id,
             from_image=from_image or None,
             x2=x2,
             y2=y2,
             to_element=to_element,
+            to_element_id=to_element_id,
             dy=dy,
             dx=dx,
         )
 
     @mcp.tool()
-    async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
+    async def keyboard(
+        ctx: Context, action: str, text: str | None = None, keys: str | None = None, element_id: str | None = None
+    ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
         (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab"."""
-        return await group(ctx, "keyboard", action=action, text=text, keys=keys)
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". Pass element_id= (from ui_query) to
+        click that field first so the input lands there. The result reports the observed effect: `foreground`
+        (the foreground window's title and process name right after the action) and `focused` (the focused UI
+        element's label, when UI Automation has one)."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys, element_id=element_id)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser."""
+        / Spotlight (not terminals or system tools); action="system" opens an allowlisted Windows system tool by
+        `name` (device-manager or a Windows Settings page such as windows-update: use the name with
+        spaces or dashes, e.g. "Device Manager"): it is launched straight through the shell, with no keystrokes
+        and no command line, so opening it is navigation only and anything consequential inside it still asks
+        first; action="url" opens an http(s) `url` in the default browser.
+        The result reports the observed effect: `foreground` (the foreground window's title and process name
+        right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
+
+    @mcp.tool()
+    async def shell(
+        ctx: Context,
+        action: str = "run",
+        command: str | None = None,
+        argv: list[str] | None = None,
+        why: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """Run a command on the person's PC, in two safety tiers (needs "Let it use my computer", inside an
+        approved computer session: control action="request" first).
+        - action="list": the tier-1 read-only commands (device/camera/process lists, the away CLI, the app log).
+        - action="run": tier 1 = `command` set to one of those names runs at once (fixed, read-only, no shell
+          is ever involved); tier 2 = anything else via `argv` asks the person first, every time, showing the
+          exact command. `why` is your reason, shown with the approval question. Output is capped at 64 KB
+          and secrets are hidden; password fields and credential stores are never touched.
+        - action="log": every shell call so far (command, tier, result)."""
+        return await group(ctx, "shell", action=action, command=command, argv=argv, why=why, limit=limit)
 
     @mcp.tool()
     async def disconnect(ctx: Context) -> dict:
