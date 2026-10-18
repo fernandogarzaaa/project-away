@@ -385,9 +385,11 @@ class Service:
         checks = [str(c) for c in only] if isinstance(only, (list, tuple)) else None
         from away.selftest.run import Busy
 
+        joined_existing = False
         try:
             started = st.start(trigger=agent.name, only=checks)
         except Busy:
+            joined_existing = True
             started = {
                 "state": "running",
                 "note": "a self-test was already running; its report goes to the agents allowed to see it",
@@ -395,7 +397,19 @@ class Service:
         if not wait:
             return started
         st.wait(180.0)
-        return {"state": "done", "report": st.latest()}
+        rep = st.latest()
+        out: dict[str, Any] = {"state": "done", "report": rep}
+        if joined_existing and rep is not None:
+            # The caller waited for a run it did not start. Say whose report this is so
+            # the caller does not mistake another agent's (or the person's) report for
+            # the result of a run it triggered.
+            out["joined"] = True
+            out["trigger"] = rep.get("trigger")
+            out["note"] = (
+                "this is the report from the already-running self-test "
+                f"(triggered by {rep.get('trigger')!r}); it is not a run you started"
+            )
+        return out
 
     def selftest_latest(self, agent: Agent) -> dict[str, Any]:
         """v0.1.24: the newest self-test report (redacted), or a hint to run one.

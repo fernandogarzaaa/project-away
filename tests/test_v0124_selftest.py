@@ -593,3 +593,46 @@ def test_model_bench_hook_result_becomes_a_selftest_line(monkeypatch: pytest.Mon
     assert seen == [("CFG", "DIR", False)]  # reads the last result; never starts a benchmark by itself
     mod.SELFTEST_HOOK["check"] = lambda *a, **k: {"status": "weird"}  # type: ignore[attr-defined]
     assert ck.check_model_bench(env, mod.SELFTEST_HOOK)[0].status == WARN  # type: ignore[attr-defined]
+
+
+def test_run_selftest_wait_joins_existing_run_with_attribution(tmp_path: Path) -> None:
+    """Re-audit: a concurrent caller that waits for an already-running test must be told
+    whose report it is receiving, not mistake it for a run it started.
+
+    Agent A starts a self-test in the background. Agent B calls run_selftest(wait=True)
+    while A's test runs. B's response must carry joined=True and the trigger name, so B
+    knows the report came from A's run.
+    """
+    core = make_core(tmp_path)
+    core.service.selftest = SelftestService(
+        tmp_path, lambda _i: FakeEnv(), agents=core.registry.reconnectable, inbox=core.service.inbox,
+        events=core.events, background=True,
+    )  # fmt: skip
+    agent_a, _ = core.registry.issue("AgentA", ["read", "diagnose"], 3600)
+    agent_b, _ = core.registry.issue("AgentB", ["read", "diagnose"], 3600)
+
+    # A starts a test in the background (slow fake env so B can join mid-run).
+    started_a = core.service.run_selftest(agent_a, wait=False)
+    assert started_a["state"] == "running"
+
+    # B asks to wait for the running test. B did not start a run.
+    got_b = core.service.run_selftest(agent_b, wait=True)
+    assert got_b["state"] == "done"
+    assert got_b.get("joined") is True, "B must be told it joined an existing run"
+    assert got_b.get("trigger") == "AgentA", "B must see whose run produced the report"
+    assert "not a run you started" in got_b.get("note", "")
+
+    # The report itself carries the trigger for independent verification.
+    assert got_b["report"]["trigger"] == "AgentA"
+
+    # A caller that actually starts its own run gets no joined flag.
+    core2 = make_core(tmp_path / "second")
+    core2.service.selftest = SelftestService(
+        tmp_path / "second", lambda _i: FakeEnv(), agents=core2.registry.reconnectable,
+        inbox=core2.service.inbox, events=core2.events, background=False,
+    )  # fmt: skip
+    agent_c, _ = core2.registry.issue("AgentC", ["read", "diagnose"], 3600)
+    got_c = core2.service.run_selftest(agent_c, wait=True)
+    assert got_c["state"] == "done"
+    assert "joined" not in got_c, "a self-started run must not carry the joined flag"
+    assert got_c["report"]["trigger"] == "AgentC"
