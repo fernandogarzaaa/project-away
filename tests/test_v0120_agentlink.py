@@ -633,6 +633,38 @@ def test_keyboard_group_passes_expect_through() -> None:
     assert args == {"action": "type_text", "text": "hi", "expect": "notes"}
 
 
+def test_type_text_expect_revalidates_after_user_prompt() -> None:
+    # Regression: if the focused window changes while a confirmation prompt
+    # is up (e.g. for a newline in the text), the expect check must run again
+    # before typing. Otherwise the text goes into the wrong window.
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(
+        clock,
+        uia=uia,
+        fg={"process": "notepad.exe", "title": "Untitled - Notepad"},
+        answers=["Allow", "Allow"],  # grant approval, then the Enter confirmation
+    )
+    # Simulate a window change during the user prompt: the first
+    # _window_title() call (initial validation) sees Notepad, the second
+    # (re-validation after the prompt) sees a different window.
+    titles = ["Untitled - Notepad", "Some Other Window"]
+    orig = ctl._window_title
+    calls = {"n": 0}
+
+    def shifting_title() -> str:
+        calls["n"] += 1
+        if calls["n"] <= len(titles):
+            return titles[calls["n"] - 1]
+        return orig()
+
+    ctl._window_title = shifting_title  # type: ignore[method-assign]
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="focused window changed while confirming"):
+        ctl.act("a1", "type_text", text="hello\nworld", expect="notepad")
+    assert backend.calls == []  # refused before a single keystroke
+
+
 def test_risky_click_asks_and_always_allow_sticks() -> None:
     clock = Clock()
     uia = FakeUIA(

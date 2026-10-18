@@ -672,6 +672,15 @@ class ComputerControl:
                 )
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
+                # Re-validate after the user prompt: the focused window may have
+                # changed while the prompt was up. Fail closed if it did.
+                if expect:
+                    title = self._window_title()
+                    if expect.lower() not in title.lower():
+                        raise ControlRefused(
+                            f"the focused window changed while confirming ({title!r} does not contain "
+                            f"{expect!r}): refusing to type into the wrong window"
+                        )
             if not hasattr(b, "type_text"):
                 raise ControlRefused("typing is not supported on this system")
             with self._lock:
