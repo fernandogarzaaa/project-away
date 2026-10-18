@@ -93,7 +93,7 @@ def _control(
 def test_ui_query_lists_elements_with_ids_names_roles_and_bounds() -> None:
     clock = Clock()
     ctl, _, _ = _control(clock, uia=FakeUIA(), fg={"title": "Mail", "process": "mail.exe"})
-    res = ctl.ui_query()
+    res = ctl.ui_query("a1")
     assert res["available"] is True
     assert res["count"] == 3  # the disabled pane is not interactable
     assert res["window"] == {"title": "Mail", "process": "mail.exe"}
@@ -107,7 +107,7 @@ def test_ui_query_lists_elements_with_ids_names_roles_and_bounds() -> None:
 def test_ui_query_degrades_when_uia_is_missing() -> None:
     clock = Clock()
     ctl, _, _ = _control(clock)  # default hooks: NullUIA
-    res = ctl.ui_query()
+    res = ctl.ui_query("a1")
     assert res["available"] is False and res["reason"]
 
 
@@ -130,12 +130,12 @@ def test_ids_expire_on_requery() -> None:
     uia = FakeUIA()
     ctl, _, _ = _control(clock, ["Allow"], uia=uia)
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "click", element_id="e3")  # the old Subject
     cancel = Element("Cancel", "ButtonControl", rect=(0, 0, 10, 10))
     root = Element("Dialog", "WindowControl", rect=(0, 0, 40, 40), children=[cancel])
     uia._root = root
-    ctl.ui_query()
+    ctl.ui_query("a1")
     with pytest.raises(ControlRefused, match="unknown element id"):
         ctl.act("a1", "click", element_id="e3")  # the old Subject is gone; ids are per-query
     ctl.act("a1", "click", element_id="e2")  # Cancel is now e2
@@ -146,7 +146,7 @@ def test_click_by_element_id_uses_exact_bounds() -> None:
     clock = Clock()
     ctl, backend, asked = _control(clock, ["Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "click", element_id="e3")  # Subject: named and harmless, no question asked
     assert len(asked) == 1 and asked[0]["kind"] == "approve"  # only the control request asked
     assert backend.calls[-2:] == [("move", (25, 10)), ("click", (1,))]
@@ -156,7 +156,7 @@ def test_unknown_element_id_is_refused() -> None:
     clock = Clock()
     ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     with pytest.raises(ControlRefused, match="unknown element id"):
         ctl.act("a1", "click", element_id="e99")
 
@@ -165,7 +165,7 @@ def test_element_id_beats_name_and_coordinates() -> None:
     clock = Clock()
     ctl, backend, _ = _control(clock, ["Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "click", x=1, y=2, element="Whatever", element_id="e3")
     assert backend.calls[-2:] == [("move", (25, 10)), ("click", (1,))]
 
@@ -174,7 +174,7 @@ def test_risky_element_id_still_asks() -> None:
     clock = Clock()
     ctl, backend, asked = _control(clock, ["Allow", "Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "click", element_id="e2")  # Send: exact bounds do not skip the risky-click question
     assert asked[-1]["kind"] == "confirm"
     assert backend.calls[-2:] == [("move", (120, 110)), ("click", (1,))]
@@ -184,7 +184,7 @@ def test_drag_to_element_id() -> None:
     clock = Clock()
     ctl, backend, _ = _control(clock, ["Allow", "Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "drag", element_id="e3", to_element_id="e2")  # dropping on Send asks
     assert backend.calls[0] == ("move", (25, 10))
     assert backend.calls[1] == ("press", ())
@@ -195,7 +195,7 @@ def test_scroll_to_element_id_moves_there_first() -> None:
     clock = Clock()
     ctl, backend, _ = _control(clock, ["Allow"], uia=FakeUIA())
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "scroll", dy=-3.0, element_id="e3")
     assert backend.calls[:2] == [("move", (25, 10)), ("scroll", (-3.0,))]
 
@@ -206,7 +206,7 @@ def test_type_with_element_id_clicks_the_field_first() -> None:
     uia = FakeUIA(focused=Element("Subject", "EditControl", rect=(0, 0, 50, 20)))
     ctl, backend, _ = _control(clock, ["Allow"], uia=uia)
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "type_text", text="hello", element_id="e3")
     assert backend.calls[0] == ("move", (25, 10))
     assert backend.calls[1] == ("click", (1,))
@@ -218,7 +218,7 @@ def test_press_keys_with_element_id_focuses_first() -> None:
     uia = FakeUIA(focused=Element("Subject", "EditControl", rect=(0, 0, 50, 20)))
     ctl, backend, _ = _control(clock, ["Allow"], uia=uia)
     ctl.request("a1", "Claude")
-    ctl.ui_query()
+    ctl.ui_query("a1")
     ctl.act("a1", "press_keys", keys="a", element_id="e3")
     assert backend.calls[:3] == [("move", (25, 10)), ("click", (1,)), ("key", ("a",))]
 
@@ -301,3 +301,66 @@ def core(tmp_path: Path) -> Any:
     )
     c.prompts.polite = lambda: True
     return c
+
+
+# ------------------------------------------------- stale-id hardening (audit: risk D)
+class MovedUIA(FakeUIA):
+    """element_at reports a different control at the old spot: the queried element moved or is gone."""
+
+    def element_at(self, x: int, y: int) -> Element | None:
+        return Element("Delete", "ButtonControl", rect=(x - 5, y - 5, x + 5, y + 5))
+
+
+def test_element_id_refused_after_foreground_window_changes() -> None:
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "MailWnd", "rect": [0, 0, 800, 600]}
+    ctl, backend, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")  # e2 = Send at (120, 110) in Mail
+    fg.update({"title": "Browser", "process": "browser.exe", "class": "BrowserWnd", "rect": [0, 0, 1024, 768]})
+    with pytest.raises(ControlRefused, match="foreground window changed"):
+        ctl.act("a1", "click", element_id="e2")  # must not click the stale spot in the new window
+    assert backend.calls == []
+
+
+def test_element_ids_are_isolated_per_agent() -> None:
+    clock = Clock()
+    uia = FakeUIA()
+    fg = {"title": "Mail", "process": "mail.exe"}
+    ctl, backend, _ = _control(clock, ["Allow", "Allow"], uia=uia, fg=fg)
+    ctl.ui_query("a1")  # a1 sees Mail: e2 = Send at (120, 110)
+    cancel = Element("Cancel", "ButtonControl", rect=(0, 0, 10, 10))
+    uia._root = Element("Dialog", "WindowControl", rect=(0, 0, 40, 40), children=[cancel])
+    ctl.ui_query("a2")  # a2 sees Dialog: e2 = Cancel at (5, 5)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "click", element_id="e2")  # a1's e2 is still Send, not a2's Cancel
+    assert backend.calls[-2:] == [("move", (120, 110)), ("click", (1,))]
+
+
+def test_element_id_refused_when_element_moved() -> None:
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe"}
+    ctl, backend, _ = _control(clock, ["Allow"], uia=MovedUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")  # e3 = Subject at (25, 10)
+    with pytest.raises(ControlRefused, match="gone or has moved"):
+        ctl.act("a1", "click", element_id="e3")  # something else is at that spot now
+    assert backend.calls == []
+
+
+def test_element_id_without_query_is_refused() -> None:
+    clock = Clock()
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg={"title": "Mail", "process": "mail.exe"})
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e1")  # this agent never queried
+
+
+def test_element_id_still_works_when_window_unchanged() -> None:
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "MailWnd", "rect": [0, 0, 800, 600]}
+    ctl, backend, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.act("a1", "click", element_id="e3")  # Subject: same window, still there
+    assert backend.calls[-2:] == [("move", (25, 10)), ("click", (1,))]

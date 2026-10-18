@@ -277,7 +277,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         """The foreground window's interactable UI elements with exact screen bounds (after control
         action="request" was approved; Windows UI Automation, no screenshot taken): [{id, name, role,
         bounds}]. Pass an `id` back as element_id= to pointer or keyboard actions to act on it exactly -
-        no pixel guessing. Ids expire with the next ui_query call."""
+        no pixel guessing. Ids are yours only, expire with your next ui_query call, and stop resolving
+        if the foreground window changes."""
         return await call(ctx, "ui_query")
 
     @mcp.tool()

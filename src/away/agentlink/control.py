@@ -146,6 +146,15 @@ class LogEntry:
 
 
 @dataclass
+class _ElementQuery:
+    """One agent's last ui_query: the foreground window fingerprint at query time plus the id -> Element
+    snapshot. An element id resolves only while the same window is still in the foreground."""
+
+    window: tuple[str, str, str, tuple[int, ...] | None] | None  # (title, process, class, rect)
+    elements: dict[str, desktop.Element]
+
+
+@dataclass
 class ControlHooks:
     """Platform access, injectable for tests."""
 
@@ -203,9 +212,11 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
-        # v0.1.28 proposal #24 (hybrid grounding): the last ui_query's elements, id -> Element. A pointer or
-        # keyboard action may pass element_id=... instead of coordinates; it resolves here, then acts as usual.
-        self._elements: dict[str, desktop.Element] = {}
+        # v0.1.28 proposal #24 (hybrid grounding): each agent's last ui_query result: the foreground
+        # window fingerprint plus id -> Element. A pointer or keyboard action may pass element_id=...
+        # instead of coordinates; it resolves here, then acts as usual. Ids are per-agent: one agent's
+        # query never replaces another's, and an id stops resolving when the foreground window changes.
+        self._element_queries: dict[str, _ElementQuery] = {}
 
     @property
     def bucket(self) -> Any:
@@ -508,9 +519,26 @@ class ComputerControl:
     UI_QUERY_NODES = 400
     UI_QUERY_LIMIT = 200
 
-    def ui_query(self) -> dict[str, Any]:
+    def _window_fingerprint(self) -> tuple[str, str, str, tuple[int, ...] | None] | None:
+        """(title, process, class, rect) of the foreground window, or None when it cannot be told."""
+        try:
+            fg = self.hooks.foreground()
+        except Exception:
+            return None
+        if not fg:
+            return None
+        rect = fg.get("rect")
+        return (
+            str(fg.get("title", "")),
+            str(fg.get("process", "")),
+            str(fg.get("class", "")),
+            tuple(int(v) for v in rect) if rect else None,
+        )
+
+    def ui_query(self, agent_id: str) -> dict[str, Any]:
         """The foreground window's interactable elements: ``[{id, name, role, bounds}]`` with screen-pixel
-        bounds. Ids are only valid until the next query (each query replaces the registry)."""
+        bounds. Ids belong to the querying agent only and stay valid until that agent's next query; an id
+        stops resolving when the foreground window changes, so a stale id can never click into a new window."""
         uia = self.hooks.uia
         if not getattr(uia, "available", False):
             return {
@@ -537,7 +565,7 @@ class ComputerControl:
             registry[eid] = el
             items.append({"id": eid, "name": el.name, "role": el.control_type, "bounds": list(rect)})
         with self._lock:
-            self._elements = registry
+            self._element_queries[str(agent_id)] = _ElementQuery(self._window_fingerprint(), registry)
         window: dict[str, str] | None = None
         try:
             fg = self.hooks.foreground()
@@ -548,12 +576,42 @@ class ComputerControl:
         self._emit("control.ui_query", {"count": len(items)})
         return {"available": True, "window": window, "count": len(items), "elements": items}
 
-    def _resolve_element_id(self, element_id: str) -> desktop.Element:
-        """A ui_query id back to its element; :class:`ControlRefused` when the id is unknown or has no bounds."""
-        el = self._elements.get(str(element_id).strip())
+    def _resolve_element_id(self, agent_id: str, element_id: str) -> desktop.Element:
+        """A ui_query id back to its element. Refuses when the id is unknown, belongs to another agent's
+        query, or the foreground window changed since the query: a stale id never clicks."""
+        key = str(element_id).strip()
+        with self._lock:
+            query = self._element_queries.get(str(agent_id))
+        if query is None:
+            raise ControlRefused(f"unknown element id {element_id!r}; call ui_query first and use one of its ids")
+        if query.window != self._window_fingerprint():
+            raise ControlRefused(
+                "the foreground window changed since your ui_query; run ui_query again and use a fresh id"
+            )
+        el = query.elements.get(key)
         if el is None or el.center is None:
             raise ControlRefused(f"unknown element id {element_id!r}; call ui_query first and use one of its ids")
+        self._revalidate_element(el)
         return el
+
+    def _revalidate_element(self, el: desktop.Element) -> None:
+        """Refuse when the live UI no longer shows this element where the snapshot recorded it. A missing or
+        inconclusive live lookup does not refuse: only a positive mismatch does."""
+        center = el.center
+        if center is None:
+            return
+        try:
+            live = self.hooks.uia.element_at(center[0], center[1])
+        except Exception:
+            return  # cannot confirm; the foreground-window check above already passed
+        if live is None:
+            return  # cannot confirm
+        if el.automation_id and live.automation_id:
+            if live.automation_id != el.automation_id:
+                raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
+            return
+        if el.name and (live.name != el.name or live.control_type != el.control_type):
+            raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
 
     def _focus_element_id(self, g: Grant, agent_id: str, step: Callable[[], Any], element_id: str) -> str:
         """Click the center of a ui_query element so keyboard input lands in it; returns the element's name."""
@@ -567,8 +625,8 @@ class ComputerControl:
     def _point(
         self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
     ) -> tuple[int, int, str]:
-        if element_id:  # exact bounds from the last ui_query; beats fuzzy name matching and coordinates
-            el = self._resolve_element_id(element_id)
+        if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
+            el = self._resolve_element_id(agent_id, element_id)
             center = el.center
             assert center is not None  # _resolve_element_id refuses bound-less elements
             return int(center[0]), int(center[1]), el.name
