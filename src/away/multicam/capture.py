@@ -741,6 +741,11 @@ def reset_session_modes() -> None:
 _slow_known: dict[str, float] = {}  # camera -> best fps of a full sweep that stayed below the minimum
 _opening = 0  # opens in progress in this process (a device may be held before HeldCapture exists)
 _abort_opens = threading.Event()  # set while handing the cameras over: every open in progress gives up
+_handover_gen = 0  # bumped every time wait_devices_free finishes: an open queued on the gate while a
+# hand-over ran must not proceed afterwards (the event is already cleared by then)
+_open_gate = threading.Lock()  # v0.1.29: native camera backends are not thread safe: one open at a time per process
+_open_state = threading.local()  # per-thread generation of the open currently in _open_camera, so
+# _Search.cancelled() can see a hand-over that finished after the open passed the gate check
 
 
 def opens_in_progress() -> int:
@@ -760,6 +765,16 @@ def wait_devices_free(
     _abort_opens.set()
     try:
         deadline = clock() + timeout
+        # v0.1.29: do not declare the devices free while a native open is still mid-flight. An
+        # in-progress open sees _abort_opens and gives up between attempts, then releases the
+        # gate; waiting for the gate (up to the timeout) keeps hand-over from interleaving
+        # with it. The gate is released right away: new opens during hand-over still fail
+        # fast on _abort_opens instead of blocking behind the whole hand-over.
+        remaining = deadline - clock()
+        if remaining > 0 and _open_gate.acquire(timeout=remaining):
+            _open_gate.release()
+        else:
+            log.warning("camera hand-over: an open did not finish within %.1f s", timeout)
         while held_cameras() or opens_in_progress():
             if clock() >= deadline:
                 log.warning(
@@ -773,6 +788,15 @@ def wait_devices_free(
         return True
     finally:
         _abort_opens.clear()
+        # v0.1.29: a hand-over ran. An open that queued on _open_gate while this ran must
+        # see that and give up instead of opening after the hand-over finished: the event
+        # above is already cleared, so the in-flight cancellation check cannot see it.
+        # (A hand-over cannot return True while an open is queued: the queued open holds
+        # _opening > 0, so the drain loop keeps waiting. A changed generation therefore
+        # always means the hand-over timed out and the open is stale.)
+        global _handover_gen
+        with _lock:
+            _handover_gen += 1
 
 
 class OpenCancelled(RuntimeError):
@@ -1131,7 +1155,13 @@ class _Search:
 
     @staticmethod
     def cancelled() -> bool:
-        return _abort_opens.is_set()
+        if _abort_opens.is_set():
+            return True
+        # v0.1.29: a hand-over that finished after this thread's open passed the gate
+        # check (generation changed, event already cleared) cancels it like one still
+        # in progress. _open_state is set by open_camera() for the calling thread only.
+        gen = getattr(_open_state, "handover_gen", None)
+        return gen is not None and _handover_gen != gen
 
     def _check(self) -> None:
         if self.cancelled():
@@ -1572,29 +1602,59 @@ def open_camera(
     global _opening
     with _lock:
         _opening += 1
+        # v0.1.29: record the hand-over generation before queuing on the gate. If a
+        # hand-over finishes while this open is queued, the generation changes and the
+        # open is stale: it must give up instead of opening after the hand-over.
+        queued_gen = _handover_gen
     try:
-        return _open_camera(
-            src,
-            width,
-            height,
-            fps,
-            fourcc,
-            cv2=cv2,
-            devices=devices,
-            label=label,
-            low_res=low_res,
-            virtual_fallback=virtual_fallback,
-            first_frame_s=first_frame_s,
-            retry_frame_s=retry_frame_s,
-            clock=clock,
-            sleep=sleep,
-            msmf_lister=msmf_lister,
-            min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
-            measure_s=MEASURE_S if measure_s is None else float(measure_s),
-            sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
-            backend=backend,
-            good_fps=TRACKING_FPS if good_fps is None else float(good_fps),
-        )
+        # v0.1.29: serialize whole opens. Two threads inside _open_camera raced in native
+        # DirectShow/MediaFoundation/WinRT code (native access violations in the log); the
+        # _opening counter alone never stopped that. No re-entrancy: _open_camera never
+        # calls open_camera, and wait_devices_free never runs while the gate is held.
+        # v0.1.29: bounded gate acquisition. If another thread's native open stalls
+        # while holding the gate, a queued open must not block forever: re-check the
+        # hand-over generation between attempts and fail promptly if a hand-over
+        # finished while this open was queued on the gate.
+        while not _open_gate.acquire(timeout=0.5):
+            with _lock:
+                if _handover_gen != queued_gen:
+                    raise OpenCancelled("camera open cancelled (a hand-over finished while the open was queued)")
+        try:
+            with _lock:
+                if _handover_gen != queued_gen:
+                    raise OpenCancelled("camera open cancelled (a hand-over finished while the open was queued)")
+            # v0.1.29: publish the generation for this thread so _Search.cancelled()
+            # (called deep inside _open_camera) sees a hand-over that finishes after
+            # this check. No re-entrancy: _open_camera never calls open_camera.
+            _open_state.handover_gen = queued_gen
+            try:
+                return _open_camera(
+                    src,
+                    width,
+                    height,
+                    fps,
+                    fourcc,
+                    cv2=cv2,
+                    devices=devices,
+                    label=label,
+                    low_res=low_res,
+                    virtual_fallback=virtual_fallback,
+                    first_frame_s=first_frame_s,
+                    retry_frame_s=retry_frame_s,
+                    clock=clock,
+                    sleep=sleep,
+                    msmf_lister=msmf_lister,
+                    min_fps=MIN_CAMERA_FPS if min_fps is None else float(min_fps),
+                    measure_s=MEASURE_S if measure_s is None else float(measure_s),
+                    sweep_budget_s=SWEEP_BUDGET_S if sweep_budget_s is None else float(sweep_budget_s),
+                    backend=backend,
+                    good_fps=TRACKING_FPS if good_fps is None else float(good_fps),
+                )
+            finally:
+                # v0.1.29: never leak the generation to a later open on this thread.
+                _open_state.handover_gen = None
+        finally:
+            _open_gate.release()
     finally:
         with _lock:
             _opening -= 1
