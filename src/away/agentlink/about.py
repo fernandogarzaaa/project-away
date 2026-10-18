@@ -17,7 +17,7 @@ tools that take an `action`:
   inbox(action=list|read|reply), events(action=poll|wait), settings(action=list|change|undo|history|config),
   preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
   control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
-  keyboard(action=type|press), open(action=app|url), shell(action=list|run|log).
+  keyboard(action=type|press), open(action=app|url|system), shell(action=list|run|log).
 For example settings action="change", pointer action="click", diagnostics action="job" job_id="82557239" (check ids
 are strings; a result is kept about 10 minutes after the check finished). The older one-purpose names
 (change_settings, get_job, act...) still work over REST and /v1/rpc.
@@ -50,10 +50,10 @@ How to work with the human through Project Away:
   thumbs up; low-risk threshold changes may apply immediately if they chose "Just do it and tell me".
   Everything can be undone.
 - Using the computer (only with the "use my computer" permission): control action="request" and wait for the
-  person's approval; act with element names when available (get_screen with elements=true), else coordinates.
-  Each approved session has a step budget (default 40 actions; every action result tells you how many steps
-  are left, `steps_left`): when it is used up, tell the person what is done and what is left, and ask them to
-  let you continue.
+  person's approval; act with element ids when available (ui_query), element names (get_screen with
+  elements=true), else coordinates. Each approved session has a step budget (default 40 actions; every action
+  result tells you how many steps are left, `steps_left`): when it is used up, tell the person what is done
+  and what is left, and ask them to let you continue.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
   control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
   the person first, and so does a click, drag, Enter or shortcut on something Project Away cannot identify.
@@ -105,7 +105,7 @@ def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autof
         '  `user.message` event and in inbox action="list"; answer with inbox action="reply" (shown + read aloud).',
         "",
         "## Tools",
-        "- get_status, get_context, look, get_screen, ask_user, notify_user, disconnect.",
+        "- get_status, get_context, look, get_screen, ui_query, ask_user, notify_user, disconnect.",
         "- Grouped, with an `action`: inbox, events, settings, preferences, diagnostics, control, pointer,",
         "  keyboard, open",
         '  (e.g. settings action="change", diagnostics action="job" job_id="...").',

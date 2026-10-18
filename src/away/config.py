@@ -456,9 +456,6 @@ class AgentLinkConfig:
     local_ttl_days: int = 30  # an agent on this PC (Claude Desktop, Cursor) stays connected this long
     pairing_ttl_s: int = 600  # a pairing link / QR / 6-digit code works once, within this time
     control_ttl_min: int = 30  # "Let it use my computer" ends after this; approved again every session
-    # v0.1.28: per-session step budget + visual audit trail for "Let it use my computer"
-    control_step_budget: int = 40  # an approved control session ends after this many actions; fresh each session
-    control_audit_trail: bool = True  # keep a per-session step-by-step record of every computer action + screenshot
     port: int = 0  # local server port on 127.0.0.1 (0 = any free port)
     rate_per_s: float = 10.0  # requests per second per client (burst rate_burst)
     rate_burst: int = 40
@@ -629,7 +626,6 @@ def validate_agent_link(a: AgentLinkConfig) -> None:
         ("local_ttl_days", 1, 365),
         ("pairing_ttl_s", 60, 3600),
         ("control_ttl_min", 1, 240),
-        ("control_step_budget", 1, 1000),
         ("refresh_ttl_days", 1, 365),
         ("port", 0, 65535),
         ("rate_burst", 1, 1000),

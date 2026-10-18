@@ -44,7 +44,7 @@ from away.app import selftest
 from away.voice import speech, weak_speech
 from away.voice.weak_speech import confidence_of, is_filler, should_drop, weak_evidence
 
-GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17), + ui_query (18)
+GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + ui_query, + shell (18 tools)
     "inbox",
     "get_status",
     "get_context",
@@ -54,10 +54,10 @@ GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17), + ui_qu
     "diagnostics",
     "look",
     "get_screen",
+    "ui_query",
     "ask_user",
     "notify_user",
     "control",
-    "ui_query",
     "pointer",
     "keyboard",
     "open",
@@ -1009,7 +1009,7 @@ def test_old_names_and_groups_both_dispatch(core) -> None:
     assert "diagnostics" in enum and "change_settings" in enum
 
 
-def test_mcp_lists_exactly_18_grouped_tools(core) -> None:
+def test_mcp_lists_exactly_17_tools(core) -> None:
     pytest.importorskip("mcp")
     from away.agentlink import api, mcp_tools
 

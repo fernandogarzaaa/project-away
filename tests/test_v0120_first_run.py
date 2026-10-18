@@ -39,10 +39,34 @@ def keys(steps: list[fr.Step]) -> list[str]:
 # ============================================================================== steps + plug-ins
 def test_default_steps_without_gesture_studio() -> None:
     steps = fr.build_steps(zones_available=lambda: False)
-    assert keys(steps) == ["welcome", "camera", "framing", "tutorial", "comfort", "gaze", "done"]
+    assert keys(steps) == ["welcome", "camera", "framing", "tutorial", "comfort", "gaze", "agent", "done"]
     for s in steps:
         assert s.title and s.body and s.button
         assert "config" not in s.body.lower() and "yaml" not in s.body.lower()  # plain words only
+
+
+def test_first_run_offers_an_optional_agent_connect_page_last() -> None:
+    """Proposal #23: the flagship 'bridge between you and your AI agents' gets one final wizard page."""
+    steps = fr.default_steps()
+    ks = keys(steps)
+    assert "agent" in ks
+    agent = next(s for s in steps if s.key == "agent")
+    assert "agent" in agent.title.lower()
+    assert agent.button == "Connect one now"  # the proposal's one button
+    assert ks.index("agent") == ks.index("done") - 1  # the final page, skippable like the others
+    assert "config" not in agent.body.lower() and "yaml" not in agent.body.lower()  # plain words only
+
+
+def test_agent_step_is_optional_and_skippable(tmp_path: Path) -> None:
+    flow = fr.FirstRun(fr.build_steps(zones_available=lambda: False), tmp_path / "fr.json")
+    flow.go("agent")
+    flow.skip()  # "Later": the page must never block finishing the guide
+    assert flow.results["agent"] == fr.SKIPPED
+    assert flow.at_end and flow.step.key == "done"
+    flow2 = fr.FirstRun(fr.build_steps(zones_available=lambda: False), tmp_path / "fr2.json")
+    flow2.go("agent")
+    flow2.next(fr.step_result("agent", False))
+    assert flow2.results["agent"] == fr.DONE  # pressing Next counts as done
 
 
 def test_zone_placeholder_appears_when_gesture_studio_is_installed() -> None:
@@ -66,6 +90,7 @@ def test_a_plugin_replaces_the_placeholder_and_adds_a_custom_gesture_offer() -> 
         "comfort",
         "gaze",
         "custom_gesture",
+        "agent",
         "done",
     ]
     assert [s.title for s in steps if s.key == "custom_gesture"] == ["Make your own gesture"]
@@ -85,19 +110,19 @@ def test_discover_plugins_skips_missing_modules() -> None:
 # ============================================================================== navigation + state
 def test_every_step_is_skippable_and_the_dots_show_it(tmp_path: Path) -> None:
     flow = fr.FirstRun(fr.build_steps(zones_available=lambda: False), tmp_path / "fr.json")
-    assert flow.dots()[0] == ("welcome", fr.CURRENT) and flow.position() == (1, 7)
+    assert flow.dots()[0] == ("welcome", fr.CURRENT) and flow.position() == (1, 8)
     flow.next()
     flow.skip()  # camera
     flow.next(fr.step_result("framing", True))
     assert [s for _k, s in flow.dots()][:4] == [fr.DONE, fr.SKIPPED, fr.DONE, fr.CURRENT]
-    for _ in range(3):
+    for _ in range(4):
         flow.skip()
     assert flow.at_end and flow.step.key == "done"
     flow.skip()  # stays on the last step
     assert flow.at_end
-    assert flow.summary() == "1 of 5 steps done, 4 skipped (you can do them later)"
+    assert flow.summary() == "1 of 6 steps done, 5 skipped (you can do them later)"
     flow.back()
-    assert flow.step.key == "gaze"
+    assert flow.step.key == "agent"
     flow.go("camera")
     flow.next(fr.DONE)  # going back and doing a skipped step counts
     assert flow.results["camera"] == fr.DONE

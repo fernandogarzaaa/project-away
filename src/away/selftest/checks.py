@@ -56,6 +56,73 @@ def _r(id: str, title: str, status: str, summary: str, fix: Fix | None = None, /
 
 
 # ------------------------------------------------------------------------------------------------ cameras
+# v0.1.28 (proposal #11): a driver-broken camera gets its own fix button. The structured evidence is PR #46's
+# ``driver_state`` rows (``{"name", "status", "code", "meaning"}``; a non-zero code means the driver is broken);
+# the prose fallback covers an explicit ``"verdict": "driver"`` or driver words in the message.
+DRIVER_PROSE = ("driver", "devmgmt", "device manager", "uninstall device", "configmanager")
+
+
+def _driver_state_row(rows: Any, name: str) -> dict[str, Any] | None:
+    """The PR #46 ``driver_state`` row for this camera (exact name match only), or None.
+
+    Substring matching was removed: similar camera names (e.g. "HD Webcam" vs
+    "HD Webcam Pro") could associate the wrong device's driver state, leading
+    to a fix recommendation for the wrong camera. An unmatched camera gets no
+    driver-specific guidance rather than a possibly-wrong one.
+    """
+    if not isinstance(rows, list):
+        return None
+    want = name.strip().lower()
+    if not want:
+        return None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        rn = str(r.get("name") or "").strip().lower()
+        if rn and rn == want:
+            return r
+    return None
+
+
+def _driver_broken(code: Any, status: str) -> bool | None:
+    """True when the driver-state row says the driver is broken, False when it says it is fine, None when unclear."""
+    try:
+        if code is not None and str(code).strip() != "":
+            return int(code) != 0
+    except (TypeError, ValueError):
+        return None
+    st = status.strip().lower()
+    if st in ("ok", "working", "working, no error"):
+        return False
+    if st in ("error", "degraded"):
+        return True
+    return None
+
+
+def _driver_reason(who: dict[str, Any], name: str) -> str | None:
+    """Plain words appended to the camera summary when the verdict is a broken driver, else None.
+
+    Prefers the structured ``driver_state`` rows when the environment carries them (matched by camera name);
+    otherwise falls back to the prose verdict (an explicit ``"verdict": "driver"``, or driver words in the
+    message). Never depends on the structured data being there."""
+    if str(who.get("verdict") or "").strip().lower() == "driver":
+        row = _driver_state_row(who.get("driver_state"), name)
+        meaning = str((row or {}).get("meaning") or "").strip()
+        return f" Its driver looks broken{f' (Windows says: {meaning})' if meaning else ''}."
+    row = _driver_state_row(who.get("driver_state"), name)
+    if row is not None:
+        broken = _driver_broken(row.get("code"), str(row.get("status") or ""))
+        if broken:
+            meaning = str(row.get("meaning") or "").strip()
+            return f" Its driver looks broken{f' (Windows says: {meaning})' if meaning else ''}."
+        if broken is False:
+            return None
+    low = str(who.get("message") or "").lower()
+    if any(p in low for p in DRIVER_PROSE):
+        return " This points at the camera's driver, not at another app using the camera."
+    return None
+
+
 def _camera_fix(env: Env, name: str) -> tuple[str, Fix, list[str]]:
     who: dict[str, Any] = {}
     try:
@@ -72,6 +139,11 @@ def _camera_fix(env: Env, name: str) -> tuple[str, Fix, list[str]]:
         if a == "use_broadcast":
             fix = Fix("use_broadcast", "Use it through NVIDIA Broadcast")
             break
+    else:
+        reason = _driver_reason(who, name)  # v0.1.28 (proposal #11): driver-broken cameras get a fix button
+        if reason is not None:
+            msg = msg.rstrip() + reason
+            fix = Fix("guide:uninstall_driver", "Fix the camera driver")
     return msg, fix, users
 
 
@@ -399,7 +471,7 @@ LINKS = (
 def check_link(env: Env) -> list[Result]:
     k = env.link()
     if not k.get("enabled", True):
-        return [_r("link", "Agent Link", SKIP, "Agent Link is turned off.")]
+        return [_r("link", "Agents", SKIP, "Agent Link is turned off.")]
     out = []
     srv = k.get("server") or {}
     if srv.get("running"):
@@ -410,7 +482,7 @@ def check_link(env: Env) -> list[Result]:
         out.append(
             _r(
                 "link",
-                "Agent Link",
+                "Agents",
                 PASS if ok else FAIL,
                 msg,
                 None if ok else Fix("restart_link", "Restart Agent Link"),
@@ -419,7 +491,7 @@ def check_link(env: Env) -> list[Result]:
             )
         )
     else:
-        out.append(_r("link", "Agent Link", PASS, "Ready (it starts when an agent connects)."))
+        out.append(_r("link", "Agents", PASS, "Ready (it starts when an agent connects)."))
     for key, title, fix in LINKS:
         t = k.get(key)
         if not t:
@@ -590,7 +662,7 @@ CHECKS: tuple[tuple[str, str, Callable[[Env], list[Result]]], ...] = (
     ("stt", "Speech to text", check_stt),
     ("tts", "Speaking voices", check_tts),
     ("notify", "Pop-up messages", check_notification),
-    ("link", "Agent Link", check_link),
+    ("link", "Agents", check_link),
     ("load", "PC load", check_load),
     ("models", "Models", check_models),
     ("winkey", "Windows Start key", check_winkey),

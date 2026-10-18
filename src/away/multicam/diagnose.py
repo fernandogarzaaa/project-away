@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -161,6 +162,74 @@ def speed_verdict(fps: float | None) -> str:
     return " - too slow for tracking"
 
 
+# ----------------------------------------------------------------------- privacy + shutter (v0.1.28)
+# Three invisible causes of "enumerates but never opens": the Windows camera privacy consent is off, a
+# physical lens cover / privacy shutter is closed, or the camera kill key (often an Fn key) is switched off.
+# The diagnose now reports the consent store's verdict in plain words and points at the two physical causes.
+
+CONSENT_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+FIX_MARKER_RE = re.compile(r"^\[fix:([A-Za-z0-9_:.-]+)\]\s*")
+PRIVACY_FIX = "open:camera_privacy"  # away.selftest.fixes.OPEN_TARGETS: the fix button the Settings panel shows
+SHUTTER_GUIDANCE = (
+    "the camera is listed but never opens: this also happens when a lens cover is closed "
+    "or the camera kill key is off (often an Fn key or a physical switch on the laptop)"
+)
+
+
+def read_consent(winreg_mod: Any = None, platform: str | None = None) -> str | None:
+    """The webcam consent store's global ``Value`` ("Allow"/"Deny" as Windows writes it), or None when it
+    cannot be read. Never raises: off Windows, missing ``winreg``, a missing key or no permission all
+    mean "could not check". ``winreg_mod``/``platform`` are injectable for tests."""
+    plat = sys.platform if platform is None else platform
+    wr = winreg_mod
+    if wr is None:
+        if plat != "win32":
+            return None
+        try:
+            import winreg as wr  # type: ignore[no-redef]
+        except ImportError:
+            return None
+    roots = [getattr(wr, "HKEY_CURRENT_USER", None), getattr(wr, "HKEY_LOCAL_MACHINE", None)]
+    for root in roots:
+        if root is None:
+            continue
+        try:
+            with wr.OpenKey(root, CONSENT_KEY) as key:
+                value = wr.QueryValueEx(key, "Value")[0]
+        except OSError:
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+        # an empty Value is not a verdict; fall through to the next root
+    return None
+
+
+def consent_line(reader: Callable[[], str | None] | None = None) -> str | None:
+    """Plain-words camera privacy verdict for the diagnose report, or None when it could not be checked
+    (off Windows, or an unreadable store, the line is skipped entirely). A denied verdict carries the
+    ``[fix:open:camera_privacy]`` marker so the Settings > Cameras panel shows the fix button."""
+    value = (reader or read_consent)()
+    if value is None:
+        return None
+    verdict = value.strip().lower()
+    if verdict == "deny":
+        return (
+            f"[fix:{PRIVACY_FIX}] Camera privacy: Windows is blocking apps from using the camera. "
+            "Allow camera access in Settings > Privacy > Camera."
+        )
+    if verdict == "allow":
+        return "Camera privacy: Windows lets apps use the camera."
+    return None
+
+
+def split_fix_marker(line: str) -> tuple[str | None, str]:
+    """``("[fix:open:camera_privacy] text")`` -> ``("open:camera_privacy", "text")``; any other line ->
+    ``(None, line)``. CLI and Settings strip the marker before showing the text to people."""
+    m = FIX_MARKER_RE.match(line)
+    return (m.group(1), line[m.end() :]) if m else (None, line)
+
+
 def _quick_probe(
     dev: CameraDevice,
     devices: Sequence[CameraDevice],
@@ -292,6 +361,8 @@ def run_diagnose(
     include_virtual: bool = False,
     enumerated_by: str | None = None,
     quick: bool = False,
+    consent: Callable[[], str | None] | None = None,
+    driver_state_run: Callable[..., Any] | None = None,
 ) -> DiagnoseReport:
     """Diagnose every camera in ``devices`` on every backend; each line is passed to ``out`` as it is made
     (Settings shows them while the diagnosis runs) and the :class:`DiagnoseReport` holds both the prose
@@ -299,10 +370,16 @@ def run_diagnose(
 
     v0.1.22: virtual cameras (NVIDIA Broadcast, OBS...) are skipped unless ``include_virtual`` (or the camera was
     named), and the whole run stops after ``budget_s`` seconds (None or 0 = no limit) with a line saying so.
+
+    v0.1.28: on Windows the driver-state step (proposal #9) runs first: ``result["driver_state"]`` gains a list
+    of ``{name, status, code, meaning}`` rows from the PowerShell CIM query, so a disabled/broken driver
+    explains the "did not open" lines below it. ``driver_state_run`` fakes the query in tests.
     ``enumerated_by`` names where ``devices`` came from; it defaults to ``capture.last_source``.
 
     v0.1.28: ``quick`` opens each camera on its remembered backend in its remembered mode only (no mode sweep),
-    for a fast triage answer; a camera with no remembered mode needs a full check once first."""
+    for a fast triage answer; a camera with no remembered mode needs a full check once first.
+    v0.1.28: ``consent`` (a :func:`read_consent`-shaped reader; None = skip) reports the Windows camera privacy
+    verdict first, and a camera that is listed but never opens gets the lens-cover / kill-key guidance."""
     lines: list[str] = []
     say = out or (lambda _m: None)
     started = clock()
@@ -322,10 +399,19 @@ def run_diagnose(
         except ImportError:
             emit("OpenCV is not installed (pip install 'project-away[hands]'); only WinRT can be checked")
     use = list(backends or (BACKENDS if win else ("default",)))
+    if consent is not None:
+        privacy = consent_line(consent)
+        if privacy is not None:
+            emit(privacy)
     source = enumerated_by or getattr(capture, "last_source", "") or "unknown"
     if not devices:
         emit("no cameras found")
         return DiagnoseReport(lines, {"cameras": [], "stopped": False})
+    # v0.1.28 (proposal #9): the driver-state step runs first, so a disabled/broken driver explains the
+    # "did not open" lines below; the rows also land in the structured result for agents.
+    driver_state: list[dict[str, Any]] = []
+    if not over():
+        driver_state = _driver_state(emit, windows=win, run=driver_state_run)
     stopped = False
     cams: list[dict[str, Any]] = []
     for dev in devices:
@@ -438,6 +524,9 @@ def run_diagnose(
                     if best[0] > 0:
                         rec["error"] = None  # a measured fps wins over earlier mode failures (prose keeps them)
                     emit(f"  {label}: fastest mode {best[1]} at {best[0]:.1f} fps{speed_verdict(best[0])}")
+        # v0.1.28: a camera that is listed but never opened gets the lens-cover / kill-key guidance
+        if not stopped and not any(r.get("opened") for r in cam["backends"].values()):
+            emit(f"  {SHUTTER_GUIDANCE}")
         cams.append(_finish_camera(cam))
         saved = capture.saved_mode_info().get(dev.name)
         modes = capture.saved_modes().get(dev.name)
@@ -452,7 +541,7 @@ def run_diagnose(
             f"stopped after {budget:g} s (time limit) - the cameras checked so far are above; "
             "name one camera to check just that one"
         )
-    return DiagnoseReport(lines, {"cameras": cams, "stopped": stopped})
+    return DiagnoseReport(lines, {"cameras": cams, "stopped": stopped, "driver_state": driver_state})
 
 
 def _rate_of(text: str) -> float | None:
@@ -539,6 +628,126 @@ def _winrt(
     if (rec["fps"] or 0) > 0:
         rec["error"] = None  # a measured fps wins over earlier format failures (prose keeps them)
     return rec
+
+
+# -------------------------------------------------------------------------------- driver state
+# v0.1.28 (proposal #9): a camera that enumerates but never opens is usually a driver problem, not a camera
+# problem. The Windows PnP list says why, per camera: Name, Status and ConfigManagerErrorCode. Code meanings
+# are Microsoft's CM_PROB list; the ones a camera hits are spelled out in plain words. Like
+# capture.windows_camera_names, the query goes through an injectable ``run`` so CI fakes the CIM output.
+DRIVER_STATE_QUERY = (
+    "Get-CimInstance -ClassName Win32_PnPEntity -Filter \"PNPClass='Camera' OR PNPClass='Image' OR "
+    "Service='usbvideo'\" | Select-Object Name, Status, ConfigManagerErrorCode | ConvertTo-Json -Depth 1"
+)
+DRIVER_STATE_TIMEOUT_S = 15
+
+# ConfigManagerErrorCode -> what it means, in plain words (a code missing here gets "problem code N").
+CONFIG_MANAGER_ERROR_WORDS = {
+    0: "working, no error",
+    10: "cannot start",
+    18: "its drivers need to be reinstalled",
+    19: "its driver settings are damaged",
+    22: "disabled",
+    24: "not found (drivers missing or not present)",
+    28: "its drivers are not installed",
+    31: "not working properly (driver problem)",
+    32: "this driver is disabled; another driver is in use",
+    37: "Windows could not start its driver",
+    38: "Windows could not load its driver",
+    39: "its driver is missing or damaged",
+    41: "driver loaded but the camera was not found",
+    43: "stopped by Windows (the camera reported a problem)",
+    44: "shut down by an app or service",
+    45: "not connected to the computer",
+    47: "prepared for safe removal but still plugged in",
+    52: "its driver signature could not be verified",
+}
+
+
+def parse_driver_state(text: str) -> list[dict[str, Any]]:
+    """``ConvertTo-Json`` output of the PnP camera query -> ``[{name, status, code}]`` rows (code may be None)."""
+    import json
+
+    try:
+        data = json.loads(text.lstrip("\ufeff"))  # PowerShell can emit a BOM
+    except ValueError:
+        return []
+    if data is None:
+        return []
+    rows = [data] if isinstance(data, dict) else data  # a single device comes back as one object, not a list
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Name") or "").strip()
+        if not name:
+            continue
+        code: int | None = None
+        raw = item.get("ConfigManagerErrorCode")
+        try:
+            code = int(raw) if raw is not None and str(raw).strip() != "" else None
+        except (TypeError, ValueError):
+            code = None
+        out.append({"name": name, "status": str(item.get("Status") or "").strip() or "unknown", "code": code})
+    return out
+
+
+def driver_state_word(code: int | None) -> str:
+    """A ConfigManagerErrorCode in plain words."""
+    if code is None:
+        return "driver state unknown"
+    return CONFIG_MANAGER_ERROR_WORDS.get(code, f"problem code {code} (check Device Manager)")
+
+
+def windows_driver_state(run: Callable[..., Any] | None = None) -> list[dict[str, Any]] | None:
+    """The Windows PnP camera list as ``[{name, status, code}]``; None when the CIM query itself failed."""
+    import subprocess
+
+    runner = run or subprocess.run
+    try:
+        r = runner(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", DRIVER_STATE_QUERY],
+            stdin=subprocess.DEVNULL,  # a windowed exe has no usable stdin handle to inherit
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=DRIVER_STATE_TIMEOUT_S,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    return parse_driver_state(r.stdout or "")
+
+
+def _driver_state(
+    emit: Callable[[str], None], *, windows: bool, run: Callable[..., Any] | None = None
+) -> list[dict[str, Any]]:
+    """Emit the driver-state step (one line per PnP-listed camera) and return the same rows as structured data.
+
+    [] and no lines on non-Windows; one honest line when the query failed. Runs before the backends are probed,
+    so a disabled/broken driver explains the "did not open" lines below it."""
+    entries: list[dict[str, Any]] = []
+    if not windows:
+        return entries
+    states = windows_driver_state(run)
+    if states is None:
+        emit("driver state: could not read the Windows driver list (the PowerShell query failed)")
+        return entries
+    if not states:
+        emit("driver state: Windows lists no cameras (PNPClass Camera/Image, usbvideo service)")
+        return entries
+    emit("driver state (from Windows):")
+    for s in states:
+        word = driver_state_word(s["code"])
+        entries.append({"name": s["name"], "status": s["status"], "code": s["code"], "meaning": word})
+        code_txt = f" (code {s['code']})" if s["code"] is not None else ""
+        emit(f"  {s['name']}: {word}{code_txt}")
+    return entries
 
 
 # ------------------------------------------------------------------------------------------- driver noise
