@@ -550,7 +550,7 @@ def test_takeover_pauses_and_resume_needs_approval() -> None:
     assert ctl.user_input("hand") is False  # already paused
     ctl.resume("a1")
     assert asked[-1]["question"] == "Claude stopped because you moved the mouse. Let it keep going?"
-    assert asked[-1]["options"] == ["Continue", "Yes, until I take over again", "Stop"]
+    assert asked[-1]["options"] == ["Continue", "Yes, for the rest of this session", "Stop"]
     ctl.act("a1", "click", x=5, y=5)
     clock.advance(2.5)
     assert ctl.user_input("hand")  # a hand gesture also takes over
@@ -583,17 +583,17 @@ def test_resume_prompt_names_each_takeover_source_in_plain_words() -> None:
         with pytest.raises(ControlRefused, match="did not let it continue"):
             ctl.resume("a1")  # the queued answers ran out: no answer ends the grant
         assert asked[-1]["question"] == question
-        assert asked[-1]["options"] == ["Continue", "Yes, until I take over again", "Stop"]
+        assert asked[-1]["options"] == ["Continue", "Yes, for the rest of this session", "Stop"]
 
 
 def test_resume_until_takeover_suppresses_reprompts_but_takeover_still_pauses() -> None:
     clock = Clock()
-    ctl, backend, asked = _control(clock, ["Allow", "Yes, until I take over again"], uia=FakeUIA())
+    ctl, backend, asked = _control(clock, ["Allow", "Yes, for the rest of this session"], uia=FakeUIA())
     ctl.request("a1", "Claude")
     clock.advance(1.0)
     assert ctl.user_input("mouse")
     prompts = len(asked)
-    ctl.resume("a1")  # the person picks "Yes, until I take over again"
+    ctl.resume("a1")  # the person picks "Yes, for the rest of this session"
     assert len(asked) == prompts + 1
     assert ctl.grant is not None and ctl.grant.no_reprompt
     clock.advance(1.0)
@@ -623,7 +623,7 @@ def test_resume_continue_still_prompts_next_time() -> None:
 
 def test_resume_until_takeover_is_per_session() -> None:
     clock = Clock()
-    ctl, backend, asked = _control(clock, ["Allow", "Yes, until I take over again", "Allow", "Continue"], uia=FakeUIA())
+    ctl, backend, asked = _control(clock, ["Allow", "Yes, for the rest of this session", "Allow", "Continue"], uia=FakeUIA())
     ctl.request("a1", "Claude")
     clock.advance(1.0)
     assert ctl.user_input("mouse")

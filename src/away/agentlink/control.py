@@ -117,7 +117,7 @@ class Grant:
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
-    # proposal #21: the person picked "Yes, until I take over again". resume() then skips the prompt for the rest
+    # proposal #21: the person picked "Yes, for the rest of this session". resume() then skips the prompt for the rest
     # of the session. A takeover still pauses at once; nothing auto-resumes.
     no_reprompt: bool = False
 
@@ -303,26 +303,26 @@ class ComputerControl:
         if not g.paused:
             return self.status()
         answer = "Continue"
-        if not g.no_reprompt:  # the person picked "Yes, until I take over again" earlier this session
+        if not g.no_reprompt:  # the person picked "Yes, for the rest of this session" earlier this session
             reason = _pause_in_plain_words(g.paused)
             res = self.ask(
                 f"{g.agent_name} stopped because {reason}. Let it keep going?",
-                ["Continue", "Yes, until I take over again", "Stop"],
+                ["Continue", "Yes, for the rest of this session", "Stop"],
                 title="Resume?",
                 agent=g.agent_name,
                 details=[
                     "It still stops the moment you take over again.",
-                    "'Yes, until I take over again' skips this question for the rest of the session.",
+                    "'Yes, for the rest of this session' skips this question until the grant ends.",
                 ],
                 timeout_s=60.0,
                 urgency="high",
                 kind="approve",
             )
             answer = res.get("answer") or ""
-            if answer == "Yes, until I take over again":
+            if answer == "Yes, for the rest of this session":
                 with self._lock:
                     g.no_reprompt = True
-        if answer != "Continue" and answer != "Yes, until I take over again":
+        if answer != "Continue" and answer != "Yes, for the rest of this session":
             self._end("the user chose to stop")
             raise ControlRefused("the user did not let it continue")
         with self._lock:
