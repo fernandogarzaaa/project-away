@@ -418,3 +418,56 @@ def test_open_camera_publishes_generation_thread_locally(
     assert seen.get("thread_gen") == gen_before
     # The generation must not leak to later opens on this thread.
     assert getattr(capture._open_state, "handover_gen", "MISSING") is None
+
+
+def test_queued_open_fails_promptly_if_handover_finishes_while_waiting_for_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open blocked on gate acquisition must notice a hand-over promptly.
+
+    Regression test for the CodeRabbit full-review finding: if a native open stalls
+    while holding _open_gate, a queued open_camera() must not block on the gate
+    forever. The bounded acquire loop re-checks the hand-over generation between
+    attempts and raises OpenCancelled instead of waiting indefinitely.
+    """
+    opened: list[bool] = []
+    errors: list[BaseException] = []
+
+    def fake_open_camera(src: object, *args: object, **kwargs: object) -> None:
+        opened.append(True)
+        return None
+
+    monkeypatch.setattr(capture, "_open_camera", fake_open_camera)
+
+    # Wedge the gate: simulates a native open stalled while holding it.
+    assert capture._open_gate.acquire(blocking=False)
+
+    def run() -> None:
+        try:
+            capture.open_camera(0, cv2=object())
+        except BaseException as exc:  # the test must not hide thread errors
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    try:
+        t.start()
+        # Wait until the open is queued (counted, blocked on the gate).
+        deadline = time.monotonic() + 5
+        while capture.opens_in_progress() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert capture.opens_in_progress() == 1
+        time.sleep(0.2)  # let the thread reach the gate acquire loop
+
+        # A hand-over finishes while the open is queued on the gate.
+        with capture._lock:
+            capture._handover_gen += 1
+
+        # The queued open must fail promptly, not block until the gate is free.
+        t.join(timeout=5)
+        assert not t.is_alive(), "queued open did not notice the hand-over"
+        assert len(errors) == 1
+        assert isinstance(errors[0], capture.OpenCancelled)
+        assert not opened
+    finally:
+        capture._open_gate.release()
+        t.join(timeout=5)

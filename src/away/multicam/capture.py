@@ -1611,7 +1611,15 @@ def open_camera(
         # DirectShow/MediaFoundation/WinRT code (native access violations in the log); the
         # _opening counter alone never stopped that. No re-entrancy: _open_camera never
         # calls open_camera, and wait_devices_free never runs while the gate is held.
-        with _open_gate:
+        # v0.1.29: bounded gate acquisition. If another thread's native open stalls
+        # while holding the gate, a queued open must not block forever: re-check the
+        # hand-over generation between attempts and fail promptly if a hand-over
+        # finished while this open was queued on the gate.
+        while not _open_gate.acquire(timeout=0.5):
+            with _lock:
+                if _handover_gen != queued_gen:
+                    raise OpenCancelled("camera open cancelled (a hand-over finished while the open was queued)")
+        try:
             with _lock:
                 if _handover_gen != queued_gen:
                     raise OpenCancelled("camera open cancelled (a hand-over finished while the open was queued)")
@@ -1645,6 +1653,8 @@ def open_camera(
             finally:
                 # v0.1.29: never leak the generation to a later open on this thread.
                 _open_state.handover_gen = None
+        finally:
+            _open_gate.release()
     finally:
         with _lock:
             _opening -= 1
