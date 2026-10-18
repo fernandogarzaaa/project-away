@@ -1,8 +1,9 @@
-"""One place that runs the self-test and hands the report out (v0.1.24).
+"""One place that runs the self-test and hands the report out (v0.1.27).
 
 Used by the tray ("Run self-test"), Settings (through the running app), ``away selftest`` and agents (the
 ``selftest`` op, "Run checks" permission). It runs the checks, redacts the report, saves it as the latest and
-delivers it to every connected agent (:mod:`away.selftest.deliver`). One self-test at a time.
+delivers it to the audience the policy allows (:mod:`away.selftest.deliver`; ``audience="share_logs"``: only
+agents the person let "Share my logs and recordings", the same audience as Check my PC). One self-test at a time.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ class SelftestService:
         keep_dirs: list[Path] | None = None,
         on_done: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
         background: bool = True,
+        audience: str = "share_logs",
     ) -> None:
         self.data_dir = Path(data_dir)
         self.env_factory = env_factory  # env_factory(interactive) -> Env
@@ -42,6 +44,7 @@ class SelftestService:
         self.keep_dirs = keep_dirs if keep_dirs is not None else [self.data_dir]
         self.on_done = on_done
         self.background = background
+        self.audience = audience
         self.state: dict[str, Any] = {"running": False, "step": "", "done": 0, "total": 0, "id": ""}
         self.last_delivery: dict[str, Any] = {}
         self._done = threading.Event()
@@ -64,7 +67,13 @@ class SelftestService:
             except Exception:
                 agents = []
             delivery = dl.deliver(
-                public, agents, inbox=self.inbox, events=self.events, post=self.post, background=self.background
+                public,
+                agents,
+                inbox=self.inbox,
+                events=self.events,
+                post=self.post,
+                background=self.background,
+                audience=self.audience,
             )
             public["delivered_to"] = [r["agent"] for r in delivery.get("agents", [])]
             runmod.save_latest(public, self.data_dir)
