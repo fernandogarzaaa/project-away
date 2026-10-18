@@ -184,23 +184,51 @@ def test_undo_all_by_user_puts_back_everything_undoable() -> None:
     ctl, _, _, _ = _control(clock)
     ctl.hooks.cursor_pos = lambda: (50, 60)
     ctl.request("a1", "Claude")
+    g = ctl.grant
     ctl.act("a1", "move", x=100, y=200)  # undoable (cursor position known)
     ctl.act("a1", "scroll", dy=5)  # undoable
     ctl.act("a1", "type_text", text="hello")  # undoable
     ctl.act("a1", "click", x=5, y=5)  # clicks can't be put back
     ctl.stop("stopped")
-    res = ctl.undo_all_by_user()
+    assert g is not None
+    receipt = ctl.receipt(g)
+    item_ids = [i["id"] for i in receipt["items"]]
+    res = ctl.undo_all_by_user(item_ids)
     assert res["count"] == 3
     assert res["undone"] == ["Typed 5 characters", "Scrolled", "Moved the mouse"]
-    again = ctl.undo_all_by_user()
+    again = ctl.undo_all_by_user(item_ids)
     assert again == {"undone": [], "count": 0}
 
 
 def test_undo_all_by_user_needs_no_grant() -> None:
     clock = Clock()
     ctl, _, _, _ = _control(clock)
-    res = ctl.undo_all_by_user()  # nothing logged yet
+    res = ctl.undo_all_by_user([])  # nothing logged yet
     assert res == {"undone": [], "count": 0}
+
+
+def test_undo_all_by_user_does_not_touch_other_agents() -> None:
+    # Regression: "Undo all" on one agent's receipt must not undo another
+    # agent's actions, nor the same agent's actions from a prior grant.
+    clock = Clock()
+    ctl, _, _, _ = _control(clock, answers=["Allow", "Allow"])
+    ctl.hooks.cursor_pos = lambda: (50, 60)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "type_text", text="from-a1-first")
+    ctl.stop("stopped")
+    ctl.request("a2", "Grok")
+    g2 = ctl.grant
+    ctl.act("a2", "type_text", text="from-a2")
+    ctl.stop("stopped")
+    assert g2 is not None
+    receipt_a2 = ctl.receipt(g2)
+    ids_a2 = [i["id"] for i in receipt_a2["items"]]
+    res = ctl.undo_all_by_user(ids_a2)
+    assert res["count"] == 1
+    assert res["undone"] == ["Typed 7 characters"]
+    # a1's action is still done (not undone)
+    a1_entries = [e for e in ctl.log if e.agent_id == "a1"]
+    assert all(e.result == "done" for e in a1_entries)
 
 
 # ------------------------------------------------------- plain words, no jargon

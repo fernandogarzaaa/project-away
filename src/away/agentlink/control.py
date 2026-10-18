@@ -1003,26 +1003,31 @@ class ComputerControl:
         """The person pressed Undo in Agent Link (no grant needed: it is their own input)."""
         return self._undo(None)
 
-    def undo_all_by_user(self) -> dict[str, Any]:
-        """The person pressed "Undo all" on a consent receipt (proposal #17): put back every action that can be
-        put back (cursor moves, scrolls, typed text). No grant needed: it is their own input. Clicks and key
-        presses can't be put back."""
+    def undo_all_by_user(self, item_ids: list[str]) -> dict[str, Any]:
+        """The person pressed "Undo all" on a consent receipt (proposal #17): put back every undoable action
+        listed on that receipt (cursor moves, scrolls, typed text). Only the receipt's own items are touched:
+        never another agent's actions, never an unrelated prior session. No grant needed: it is their own input.
+        Clicks and key presses can't be put back."""
+        ids = set(item_ids)
         undone: list[str] = []
         while True:
             try:
-                r = self._undo(None)
+                r = self._undo(None, only_ids=ids)
             except ControlRefused:
                 break
             undone.append(describe_action(r["undone"], r["detail"]))
         return {"undone": undone, "count": len(undone)}
 
-    def _undo(self, agent_id: str | None) -> dict[str, Any]:
+    def _undo(self, agent_id: str | None, only_ids: set[str] | None = None) -> dict[str, Any]:
         with self._lock:
             e = next(
                 (
                     x
                     for x in reversed(self.log)
-                    if x.undo is not None and x.result == "done" and (agent_id is None or x.agent_id == agent_id)
+                    if x.undo is not None
+                    and x.result == "done"
+                    and (agent_id is None or x.agent_id == agent_id)
+                    and (only_ids is None or x.id in only_ids)
                 ),
                 None,
             )
