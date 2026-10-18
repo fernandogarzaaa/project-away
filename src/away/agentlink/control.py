@@ -133,6 +133,16 @@ class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
 
 
+# v0.1.28: grant ends now tell the user in plain words ("time ran out", "you stopped it") so a silently
+# expired grant is not a mystery. Maps the internal end reasons to non-technical phrasing.
+END_CAUSE = {
+    "expired": "time ran out",
+    "stopped": "you stopped it",
+    "the user chose to stop": "you stopped it",
+    "the agent was disconnected": "it was disconnected",
+}
+
+
 @dataclass
 class Grant:
     agent_id: str
@@ -211,11 +221,13 @@ class ComputerControl:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         always_allowed: Callable[[str, str], bool] = lambda _agent_id, _cat: False,
         allow_always: Callable[[str, str], None] = lambda _agent_id, _cat: None,
+        notify: Callable[..., Any] | None = None,
     ) -> None:
         import sys
 
         self.hooks = hooks
         self.ask = ask
+        self.notify = notify  # plain-words toast when a grant ends; None = silent (tests, headless)
         self.ttl_s = float(ttl_s)
         self.clock = clock
         self.on_event = on_event
@@ -364,6 +376,15 @@ class ComputerControl:
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
+            if self.notify is not None:
+                cause = END_CAUSE.get(reason, reason)
+                with contextlib.suppress(Exception):
+                    # a toast failure must never break grant teardown
+                    self.notify(
+                        f"{g.agent_name}'s turn with your computer just ended ({cause}).",
+                        level="info",
+                        agent=g.agent_name,
+                    )
 
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
