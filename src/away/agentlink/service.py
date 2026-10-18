@@ -398,7 +398,14 @@ class Service:
         return {"state": "done", "report": st.latest()}
 
     def selftest_latest(self, agent: Agent) -> dict[str, Any]:
-        """v0.1.24: the newest self-test report (redacted), or a hint to run one."""
+        """v0.1.24: the newest self-test report (redacted), or a hint to run one.
+
+        v0.1.27: reading a report needs the diagnose permission ("Run camera and speed checks", which covers
+        running checks and reading their results) or the share_logs permission (the push audience). A report
+        from another agent's or the person's run is not readable with the bare read scope: the audience
+        policy applies to the pull path too."""
+        if not agent.has(perms.DIAGNOSE) and not agent.has(perms.SHARE_LOGS):
+            self.require(agent, perms.DIAGNOSE)  # raises Forbidden naming the diagnose permission
         st = self.selftest
         rep = st.latest() if st is not None else None
         if rep is None:

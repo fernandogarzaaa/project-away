@@ -364,8 +364,45 @@ def test_agents_trigger_it_with_the_diagnose_permission(tmp_path: Path) -> None:
     # the report is pushed only to the share_logs audience, not to every connected agent
     assert core.service.inbox.unread(reader.id, reader.name) == 0
     assert core.service.inbox.unread(doctor.id, doctor.name) == 1
-    assert core.service.selftest_latest(reader)["id"] == got["report"]["id"]  # pull access is unchanged
+    with pytest.raises(Forbidden, match="Run camera and speed checks"):
+        core.service.selftest_latest(reader)  # pull needs the diagnose permission too, not just read
+    diag, _ = core.registry.issue("Diag", ["read", "diagnose"], 3600)
+    assert core.service.selftest_latest(diag)["id"] == got["report"]["id"]  # diagnose can read results
     assert core.events.since(0, ("selftest",)) == []  # the stream reaches everyone, so it is skipped
+
+
+def test_selftest_latest_needs_the_diagnose_permission(tmp_path: Path) -> None:
+    """Audit (risk A): the pull path enforces an authorization gate like every other sensitive read path.
+
+    A read-only agent cannot retrieve the report; diagnose (run checks, read their results) can; share_logs
+    can. This holds for the grouped tool, the REST route and the MCP resource, which all funnel through
+    ``Service.selftest_latest``."""
+    from away.agentlink.service import Forbidden
+
+    core = make_core(tmp_path)
+    core.service.selftest = SelftestService(
+        tmp_path, lambda _i: FakeEnv(), agents=core.registry.reconnectable, inbox=core.service.inbox,
+        events=core.events, background=False,
+    )  # fmt: skip
+    runner, _ = core.registry.issue("Runner", ["read", "diagnose", "share_logs"], 3600)
+    got = core.service.run_selftest(runner, wait=True)
+    assert got["state"] == "done"
+
+    reader, _ = core.registry.issue("Reader", ["read"], 3600)
+    with pytest.raises(Forbidden, match="Run camera and speed checks"):
+        core.service.selftest_latest(reader)
+
+    diag, _ = core.registry.issue("Diag", ["read", "diagnose"], 3600)
+    assert core.service.selftest_latest(diag)["id"] == got["report"]["id"]
+
+    logger, _ = core.registry.issue("Logger", ["read", "share_logs"], 3600)
+    assert core.service.selftest_latest(logger)["id"] == got["report"]["id"]
+
+    # the fallback path (no live service, report loaded from disk) is gated the same way
+    core.service.selftest = None
+    with pytest.raises(Forbidden, match="Run camera and speed checks"):
+        core.service.selftest_latest(reader)
+    assert core.service.selftest_latest(diag)["id"] == got["report"]["id"]
 
 
 def test_rest_and_mcp_resource(tmp_path: Path) -> None:
