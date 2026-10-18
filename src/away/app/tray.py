@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from typing import Any
 
 from away import config as cfgmod
@@ -72,6 +74,27 @@ def open_path(path: str) -> None:  # pragma: no cover - launches a GUI app
         subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def menu_safe(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Wrap a pystray menu callback: it runs on the tray's window-message thread, where an
+    escaping exception (a COM error deep in the app, a torn-down icon, ...) would break the
+    message loop and take the tray down with it. Log it and keep the menu alive instead."""
+    import functools
+    import logging
+
+    def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                logging.getLogger("away.tray").warning("tray menu %r failed (ignored): %s", name, exc)
+                return None
+
+        return wrapper
+
+    return deco
 
 
 class TrayController:
@@ -347,6 +370,181 @@ class TrayGuard:
                     logging.getLogger("away.tray").info("tray icon %s failed (ignored): %s", step, exc)
 
 
+class TrayMenuCallbacks:
+    """The pystray menu callbacks, kept at module level (instead of closures in :func:`main`)
+    so tests can drive them directly with fakes.
+
+    ``icon`` is assigned after the pystray Icon exists; callbacks only run on user clicks,
+    which happen after that. Every callback that runs on pystray's window-message thread is
+    wrapped in :func:`menu_safe`: an escaping exception there would break the message loop
+    and take the tray down with it.
+    """
+
+    def __init__(self, ctl: TrayController, app: Any, updates: Any, guard: TrayGuard) -> None:
+        self.ctl = ctl
+        self.app = app
+        self.updates = updates  # set after UpdateManager is built (it needs our notify/quit_app)
+        self.guard = guard
+        self.icon: Any = None
+        self.gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
+        self.gate_hint = {"shown": False}
+
+    # -- icon / menu plumbing -------------------------------------------------
+    def _set_icon(self, icon: Any) -> None:
+        icon.icon = make_icon_image(self.ctl.paused, state=self.ctl.icon_state())
+        icon.title = self.ctl.tooltip()
+
+    def refresh(self, icon: Any) -> None:
+        self.guard.call(self._set_icon, icon)
+
+    def notify(self, title: str, message: str) -> None:
+        if self.guard.stopping:
+            return
+        try:
+            with self.guard._lock:
+                self.icon.notify(message, title)
+        except Exception:
+            from away.app.frozen import notify as desktop_notify
+
+            desktop_notify(title, message)
+
+    def safe_update_menu(self, icon: Any = None) -> None:
+        # some pystray backends cannot rebuild the menu from another thread; the next open does
+        ic = icon if icon is not None else self.icon
+        if ic is not None:
+            self.guard.call(ic.update_menu)
+
+    def quit_for_update(self) -> None:
+        # Runs on the update worker thread. pystray's icon.stop() only posts a message to the tray
+        # loop, but the app shutdown (camera/voice threads) can hang; the installer waits for this
+        # process to be gone, so after a short grace the process exits no matter what.
+        from away.app.updater import exit_after_update
+
+        on_quit = self.on_quit
+        icon = self.icon
+        exit_after_update(lambda: on_quit(icon, None))
+
+    # -- menu callbacks ---------------------------------------------------------
+    @menu_safe("pause")
+    def on_pause(self, icon: Any, _item: Any) -> None:
+        self.ctl.toggle_pause()
+        self.refresh(icon)
+
+    @menu_safe("dictation")
+    def on_dictation(self, icon: Any, _item: Any) -> None:
+        self.ctl.toggle_dictation()
+        self.refresh(icon)
+
+    @menu_safe("mic")
+    def on_mic(self, icon: Any, _item: Any) -> None:
+        self.ctl.toggle_mic()
+        self.refresh(icon)
+
+    @menu_safe("settings")
+    def on_settings(self, _icon: Any, _item: Any) -> None:
+        open_settings(self.ctl)
+
+    @menu_safe("edit config")
+    def on_edit_yaml(self, _icon: Any, _item: Any) -> None:
+        open_path(self.ctl.settings_path())
+
+    @menu_safe("quit")
+    def on_quit(self, icon: Any, _item: Any) -> None:
+        self.updates.stop()
+        self.ctl.quit()
+        self.guard.stop(icon)
+
+    @menu_safe("install update")
+    def on_update(self, _icon: Any, _item: Any) -> None:
+        threading.Thread(target=self.updates.install_now, name="away-update-install", daemon=True).start()
+
+    @menu_safe("check updates")
+    def on_check_updates(self, _icon: Any, _item: Any) -> None:
+        threading.Thread(target=self.updates.check_now, name="away-update-check", daemon=True).start()
+
+    @menu_safe("run update installer")
+    def on_run_installer(self, _icon: Any, _item: Any) -> None:
+        self.updates.run_installer()
+
+    @menu_safe("face gate")
+    def on_face_gate(self, icon: Any, _item: Any) -> None:
+        try:
+            on = self.ctl.set_face_gate(not self.ctl.face_gate_on())
+            self.notify("Project Away", "Face gate on" if on else "Face gate off: speech is typed without a wake word")
+        except Exception as exc:
+            self.notify("Project Away", f"could not change the face gate: {exc}")
+        self.safe_update_menu(icon)
+
+    @menu_safe("gpu pack install")
+    def on_gpu_install(self, icon: Any, _item: Any) -> None:
+        from away.app import gpupack
+
+        def run() -> None:
+            self.gpu_offer["installing"] = True
+            self.notify("Project Away", "Downloading the GPU pack (~570 MB)...")
+            try:
+                gpupack.install()
+                self.gpu_offer["text"] = None
+                self.notify("Project Away", "GPU pack installed: restart Project Away to use the GPU for speech")
+            except Exception as exc:
+                self.notify("Project Away: GPU pack", f"download failed: {exc} (try again to resume)")
+            finally:
+                self.gpu_offer["installing"] = False
+                self.safe_update_menu(icon)
+
+        threading.Thread(target=run, name="gpu-pack", daemon=True).start()
+
+    @menu_safe("retry cameras")
+    def on_retry_cameras(self, _icon: Any, _item: Any) -> None:
+        self.ctl.retry_cameras()
+
+    @menu_safe("turn off camera")
+    def on_turn_off_camera(self, _icon: Any, _item: Any) -> None:
+        app = self.app
+        [app.turn_off_camera(d) for d in (app.camera_unavailable or {}).get("devices", [])]
+
+    @menu_safe("record shortcut")
+    def on_record_shortcut(self, _icon: Any, _item: Any) -> None:
+        self.ctl.toggle_shortcut_recording()
+
+    @menu_safe("stop shortcut")
+    def on_stop_shortcut(self, _icon: Any, _item: Any) -> None:
+        self.ctl.stop_shortcut()
+
+    @menu_safe("stop everything")
+    def on_stop_everything(self, _icon: Any, _item: Any) -> None:
+        self.ctl.stop_everything()
+
+    @menu_safe("disconnect agents")
+    def on_disconnect_agents(self, _icon: Any, _item: Any) -> None:
+        self.ctl.disconnect_agents()
+
+    @menu_safe("reset cursor size")
+    def on_reset_cursor(self, _icon: Any, _item: Any) -> None:
+        self.app.reset_cursor_size()
+
+    @menu_safe("check my PC")
+    def on_check_pc(self, _icon: Any, _item: Any) -> None:
+        self.ctl.run_check_pc()
+
+    @menu_safe("run self-test")
+    def on_run_selftest(self, _icon: Any, _item: Any) -> None:
+        self.ctl.run_selftest()
+
+    def on_gate_hint(self, _event: Any) -> None:
+        """Bus handler for "voice.gate_hint": show the face-gate menu item once."""
+        self.gate_hint["shown"] = True
+        self.safe_update_menu()
+
+    def sync_icon(self, icon: Any) -> None:
+        """Bus handler: refresh the tray icon after state changes (pause, voice, cameras...)."""
+        if self.guard.stopping:
+            return
+        self.ctl.paused = bool(self.app.pipeline.paused)
+        self.refresh(icon)
+        self.guard.call(icon.update_menu)
+
+
 def com_apartment(platform: str | None = None, ole32: Any = None) -> str:
     """v0.1.23: the tray's main thread is a single-threaded COM apartment (what Shell_NotifyIcon and the tray's
     window expect), set before anything else touches COM. Returns "sta", "already" (set earlier, maybe as MTA by
@@ -377,6 +575,7 @@ def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[A
     """Tray menu (v0.1.20): "Only respond when I'm looking at the screen" (a check box) and "Guided first run"."""
     from away.comfort import actions
 
+    @menu_safe("attention gate")
     def on_gate(_icon: Any, _item: Any) -> None:
         on = not actions.switch_value(ctl.app.cfg, "attention.enabled")
         err = actions.set_switch_in_file("attention.enabled", on, live_cfg=ctl.app.cfg)
@@ -388,8 +587,13 @@ def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[A
             on_gate,
             checked=lambda _i: actions.switch_value(ctl.app.cfg, "attention.enabled"),
         ),
-        pystray.MenuItem("Guided first run...", lambda _icon, _item: actions.launch_first_run()),
-        pystray.MenuItem("Calibrate tracking...", lambda _icon, _item: actions.launch_calibrate()),  # v0.1.25
+        pystray.MenuItem(
+            "Guided first run...", menu_safe("guided first run")(lambda _icon, _item: actions.launch_first_run())
+        ),
+        pystray.MenuItem(
+            "Calibrate tracking...",
+            menu_safe("calibrate tracking")(lambda _icon, _item: actions.launch_calibrate()),
+        ),  # v0.1.25
     ]
 
 
@@ -431,167 +635,37 @@ def update_menu_items(
     ]
 
 
-def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
-    import contextlib
-    import logging
-    import threading
-
-    from away.control.monitors import enable_dpi_awareness
-
-    enable_dpi_awareness()  # before pystray/pynput/tkinter (Windows; no-op elsewhere)
-    com_apartment()  # v0.1.23: STA on the tray thread before pystray / SAPI / pycaw touch COM
-    import pystray
-
-    from away.app.frozen import setup_logging
-    from away.app.runner import AwayApp
-    from away.app.updater import UpdateManager, exit_after_update
-
-    setup_logging()  # away.* INFO -> away.log (windowed app) or the terminal
-    from away.app import crashlog
-
-    crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
-    from away.app import instance
-
-    if not instance.acquire():  # v0.1.23: already running: show its Settings instead of a second app
-        logging.getLogger("away.tray").info("Project Away is already running: opening its Settings")
-        with contextlib.suppress(Exception):
-            subprocess.Popen(TrayController.settings_command())
-        return 0
-    had_config = cfgmod.config_path().exists()  # v0.1.20: an existing user is not shown the first-run guide
-    cfg, _ = cfgmod.load()
-    app = AwayApp(cfg)
-    ctl = TrayController(app)
-    ctl.paused = not cfg.app.always_on  # app.always_on: false starts paused (and muted)
-    app.start()
-    if not cfg.app.start_minimized:
-        open_settings(ctl)
-    from away.app import first_run
-
-    first_start = first_run.should_auto_open()  # v0.1.20: once ever; a new user gets the guide, others a hint
-    if first_start:
-        first_run.mark_seen()
-
-    guard = TrayGuard()
-
-    def _set_icon(ic: Any) -> None:
-        ic.icon = make_icon_image(ctl.paused, state=ctl.icon_state())
-        ic.title = ctl.tooltip()
-
-    def refresh(icon: Any) -> None:
-        guard.call(_set_icon, icon)
-
-    def on_pause(icon: Any, _item: Any) -> None:
-        ctl.toggle_pause()
-        refresh(icon)
-
-    def on_dictation(icon: Any, _item: Any) -> None:
-        ctl.toggle_dictation()
-        refresh(icon)
-
-    def on_mic(icon: Any, _item: Any) -> None:
-        ctl.toggle_mic()
-        refresh(icon)
-
-    def on_settings(_icon: Any, _item: Any) -> None:
-        open_settings(ctl)
-
-    def on_edit_yaml(_icon: Any, _item: Any) -> None:
-        open_path(ctl.settings_path())
-
-    def on_quit(icon: Any, _item: Any) -> None:
-        updates.stop()
-        ctl.quit()
-        guard.stop(icon)
-
-    def notify(title: str, message: str) -> None:
-        if guard.stopping:
-            return
-        try:
-            with guard._lock:
-                icon.notify(message, title)
-        except Exception:
-            from away.app.frozen import notify as desktop_notify
-
-            desktop_notify(title, message)
-
-    def _safe_update_menu(ic: Any) -> None:
-        # some pystray backends cannot rebuild the menu from another thread; the next open does
-        guard.call(ic.update_menu)
-
-    def quit_for_update() -> None:
-        # Runs on the update worker thread. pystray's icon.stop() only posts a message to the tray loop, but
-        # the app shutdown (camera/voice threads) can hang; the installer waits for this process to be gone,
-        # so after a short grace the process exits no matter what.
-        exit_after_update(lambda: on_quit(icon, None))
-
-    updates = UpdateManager(
-        cfg.updates,
-        notify=notify,
-        on_change=lambda: _safe_update_menu(icon),
-        quit_app=quit_for_update,
-        is_idle=ctl.is_idle,
-    )
-
-    from away.liveagent.integrate import hook_updates
-    from away.liveagent.integrate import menu_items as live_menu_items
-
-    hook_updates(updates)  # Away's own copy of opencode is updated when Away checks for updates
-
-    def on_update(_icon: Any, _item: Any) -> None:
-        threading.Thread(target=updates.install_now, name="away-update-install", daemon=True).start()
-
-    def on_check_updates(_icon: Any, _item: Any) -> None:
-        threading.Thread(target=updates.check_now, name="away-update-check", daemon=True).start()
-
-    def on_run_installer(_icon: Any, _item: Any) -> None:
-        updates.run_installer()
-
-    gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
-    gate_hint = {"shown": False}
-
-    def on_face_gate(icon: Any, _item: Any) -> None:
-        try:
-            on = ctl.set_face_gate(not ctl.face_gate_on())
-            notify("Project Away", "Face gate on" if on else "Face gate off: speech is typed without a wake word")
-        except Exception as exc:
-            notify("Project Away", f"could not change the face gate: {exc}")
-        _safe_update_menu(icon)
-
-    def on_gpu_install(icon: Any, _item: Any) -> None:
-        from away.app import gpupack
-
-        def run() -> None:
-            gpu_offer["installing"] = True
-            notify("Project Away", "Downloading the GPU pack (~570 MB)...")
-            try:
-                gpupack.install()
-                gpu_offer["text"] = None
-                notify("Project Away", "GPU pack installed: restart Project Away to use the GPU for speech")
-            except Exception as exc:
-                notify("Project Away: GPU pack", f"download failed: {exc} (try again to resume)")
-            finally:
-                gpu_offer["installing"] = False
-                _safe_update_menu(icon)
-
-        threading.Thread(target=run, name="gpu-pack", daemon=True).start()
-
-    menu = pystray.Menu(
+def build_tray_menu(
+    pystray: Any,
+    ctl: TrayController,
+    app: Any,
+    callbacks: TrayMenuCallbacks,
+    updates: Any,
+    live_menu_items: Any,
+    open_settings_tab: Callable[[str], None],
+) -> Any:
+    """Build the pystray menu. Extracted from :func:`main` so tests can drive it with a fake
+    ``pystray`` module and verify the wiring."""
+    notify = callbacks.notify
+    gpu_offer = callbacks.gpu_offer
+    gate_hint = callbacks.gate_hint
+    return pystray.Menu(
         pystray.MenuItem(lambda _i: ctl.title(), None, enabled=False),
-        pystray.MenuItem(lambda _i: "Resume" if ctl.paused else "Pause", on_pause, default=True),
-        pystray.MenuItem("Mic on", on_mic, checked=lambda _i: ctl.mic_on()),
+        pystray.MenuItem(lambda _i: "Resume" if ctl.paused else "Pause", callbacks.on_pause, default=True),
+        pystray.MenuItem("Mic on", callbacks.on_mic, checked=lambda _i: ctl.mic_on()),
         pystray.MenuItem(
             lambda _i: "Start listening" if ctl.voice_state() == "stopped" else "Stop listening / dictation",
-            on_dictation,
+            callbacks.on_dictation,
         ),
         pystray.MenuItem(
             "Face gate (type only when facing the camera)",
-            on_face_gate,
+            callbacks.on_face_gate,
             checked=lambda _i: ctl.face_gate_on(),
             visible=lambda _i: gate_hint["shown"] or not ctl.face_gate_on(),
         ),
         pystray.MenuItem(
             "Install GPU pack (faster speech)",
-            on_gpu_install,
+            callbacks.on_gpu_install,
             visible=lambda _i: bool(gpu_offer["text"]),
             enabled=lambda _i: not gpu_offer["installing"],
         ),
@@ -603,41 +677,83 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
         ),
         pystray.MenuItem(
             "Retry cameras",
-            lambda _icon, _item: ctl.retry_cameras(),
+            callbacks.on_retry_cameras,
             visible=lambda _i: ctl.camera_retry_stopped(),
         ),
         pystray.MenuItem(
             lambda _i: "Turn off " + ", ".join((getattr(app, "camera_unavailable", None) or {}).get("devices") or []),
-            lambda _icon, _item: [app.turn_off_camera(d) for d in (app.camera_unavailable or {}).get("devices", [])],
+            callbacks.on_turn_off_camera,
             visible=lambda _i: bool(camera_menu_text(app)),
         ),
         *comfort_menu_items(pystray, ctl, notify),  # v0.1.20: attention gate switch + guided first run
         pystray.MenuItem(
             lambda _i: "Stop recording shortcut" if ctl.shortcut_recording() else "Record a shortcut",
-            lambda _icon, _item: ctl.toggle_shortcut_recording(),
+            callbacks.on_record_shortcut,
         ),
         pystray.MenuItem(
-            "Stop shortcut", lambda _icon, _item: ctl.stop_shortcut(), visible=lambda _i: ctl.shortcut_playing()
+            "Stop shortcut",
+            callbacks.on_stop_shortcut,
+            visible=lambda _i: ctl.shortcut_playing(),
         ),
-        pystray.MenuItem("Stop everything", lambda _icon, _item: ctl.stop_everything()),
+        pystray.MenuItem("Stop everything", callbacks.on_stop_everything),
         pystray.MenuItem(
             lambda _i: f"Disconnect AI agents ({ctl.agent_badge()})",
-            lambda _icon, _item: ctl.disconnect_agents(),
+            callbacks.on_disconnect_agents,
             visible=lambda _i: bool(ctl.agent_badge()),
         ),
-        *live_menu_items(pystray, app, lambda tab: _open_settings_tab(ctl, tab)),  # "Live agent: on (Big Pickle)"
+        *live_menu_items(pystray, app, open_settings_tab),  # "Live agent: on (Big Pickle)"
         pystray.MenuItem(  # v0.1.23
-            "Reset cursor size to normal", lambda _icon, _item: app.reset_cursor_size()
+            "Reset cursor size to normal", callbacks.on_reset_cursor
         ),
-        pystray.MenuItem("Check my PC", lambda _icon, _item: ctl.run_check_pc()),  # v0.1.24
-        pystray.MenuItem("Run self-test", lambda _icon, _item: ctl.run_selftest()),  # v0.1.24
-        pystray.MenuItem("Settings...", on_settings),
-        pystray.MenuItem("Edit config file", on_edit_yaml),
-        *update_menu_items(pystray, updates, on_update, on_run_installer, on_check_updates),
-        pystray.MenuItem("Quit", on_quit),
+        pystray.MenuItem("Check my PC", callbacks.on_check_pc),  # v0.1.24
+        pystray.MenuItem("Run self-test", callbacks.on_run_selftest),  # v0.1.24
+        pystray.MenuItem("Settings...", callbacks.on_settings),
+        pystray.MenuItem("Edit config file", callbacks.on_edit_yaml),
+        *update_menu_items(
+            pystray, updates, callbacks.on_update, callbacks.on_run_installer, callbacks.on_check_updates
+        ),
+        pystray.MenuItem("Quit", callbacks.on_quit),
     )
-    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
-    app.tray_icon = icon  # v0.1.24: Check my PC reads whether it shows and its tooltip
+
+
+def acquire_single_instance() -> bool:
+    """True when this process owns the single app instance; False when another copy is running."""
+    from away.app import instance
+
+    return instance.acquire()
+
+
+def open_running_settings() -> None:
+    """Ask the already-running copy to open Settings. Best effort; never raises."""
+    import contextlib
+    import logging
+
+    logging.getLogger("away.tray").info("Project Away is already running: opening its Settings")
+    with contextlib.suppress(Exception):
+        subprocess.Popen(TrayController.settings_command())
+
+
+def load_tray_config() -> tuple[Any, bool]:
+    """Load the app config. Returns (cfg, had_config); had_config tells first-run apart."""
+    had_config = cfgmod.config_path().exists()  # v0.1.20: an existing user is not shown the first-run guide
+    cfg, _ = cfgmod.load()
+    return cfg, had_config
+
+
+def create_tray_app(cfg: Any) -> tuple[Any, TrayController]:
+    """Build the AwayApp and its TrayController, apply the startup pause state, start the app."""
+    from away.app.runner import AwayApp
+
+    app = AwayApp(cfg)
+    ctl = TrayController(app)
+    ctl.paused = not cfg.app.always_on  # app.always_on: false starts paused (and muted)
+    app.start()
+    return app, ctl
+
+
+def subscribe_tray_bus(app: Any, ctl: TrayController, callbacks: Any, icon: Any) -> None:
+    """Subscribe the icon-refresh and activity handlers to the app bus."""
+    notify = callbacks.notify
     topics = (
         "voice.state",
         "app.paused",
@@ -649,40 +765,101 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     )
     # v0.1.20: the attention gate and connected AI agents change the tray title
     for topic in (*topics, "attention.state", "agentlink.changed", "camera.handover"):
-        app.bus.subscribe(topic, lambda _e: _sync(icon))
+        app.bus.subscribe(topic, lambda _e: callbacks.sync_icon(icon))
     app.bus.subscribe("action.fired", lambda _e: ctl.mark_activity())
     app.bus.subscribe("app.notice", lambda e: notify(str(e.data.get("title", "Project Away")), str(e.data["message"])))
+    app.bus.subscribe("voice.gate_hint", callbacks.on_gate_hint)
 
-    def _gate_hint(_e: Any) -> None:
-        gate_hint["shown"] = True
-        _safe_update_menu(icon)
 
-    app.bus.subscribe("voice.gate_hint", _gate_hint)
+def setup_tray_runtime(app: Any, ctl: TrayController, cfg: Any, pystray: Any) -> tuple[Any, Any, Any]:
+    """Wire the tray runtime: callbacks, update manager, menu, icon, bus subscriptions.
+
+    Returns (callbacks, updates, icon).
+    """
+    from away.app.updater import UpdateManager
+
+    guard = TrayGuard()
+    callbacks = TrayMenuCallbacks(ctl, app, None, guard)  # updates wired in below
+    updates = UpdateManager(
+        cfg.updates,
+        notify=callbacks.notify,
+        on_change=callbacks.safe_update_menu,
+        quit_app=callbacks.quit_for_update,
+        is_idle=ctl.is_idle,
+    )
+    callbacks.updates = updates
+    from away.liveagent.integrate import hook_updates
+    from away.liveagent.integrate import menu_items as live_menu_items
+
+    hook_updates(updates)  # Away's own copy of opencode is updated when Away checks for updates
+    menu = build_tray_menu(
+        pystray,
+        ctl,
+        app,
+        callbacks,
+        updates,
+        live_menu_items,
+        lambda tab: _open_settings_tab(ctl, tab),
+    )
+    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
+    callbacks.icon = icon
+    app.tray_icon = icon  # v0.1.24: Check my PC reads whether it shows and its tooltip
+    subscribe_tray_bus(app, ctl, callbacks, icon)
+    return callbacks, updates, icon
+
+
+def maybe_offer_gpu_pack(callbacks: Any) -> None:
+    """One-time notification about the GPU pack while the offer is live."""
+    gpu_offer = callbacks.gpu_offer
     if gpu_offer["text"]:
         from away.app.notices import once
 
         if once("gpu-pack-offer"):  # one notification ever; the menu item stays until it is installed
-            notify(
+            callbacks.notify(
                 "Project Away: faster speech available", f"{gpu_offer['text']}. Use the tray menu: Install GPU pack."
             )
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a desktop session
+    import logging
+
+    from away.control.monitors import enable_dpi_awareness
+
+    enable_dpi_awareness()  # before pystray/pynput/tkinter (Windows; no-op elsewhere)
+    com_apartment()  # v0.1.23: STA on the tray thread before pystray / SAPI / pycaw touch COM
+    import pystray
+
+    from away.app.frozen import setup_logging
+
+    setup_logging()  # away.* INFO -> away.log (windowed app) or the terminal
+    from away.app import crashlog
+
+    crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
+    if not acquire_single_instance():  # v0.1.23: already running: show its Settings instead of a second app
+        open_running_settings()
+        return 0
+    cfg, had_config = load_tray_config()
+    app, ctl = create_tray_app(cfg)
+    if not cfg.app.start_minimized:
+        open_settings(ctl)
+    from away.app import first_run
+
+    first_start = first_run.should_auto_open()  # v0.1.20: once ever; a new user gets the guide, others a hint
+    if first_start:
+        first_run.mark_seen()
+    callbacks, updates, icon = setup_tray_runtime(app, ctl, cfg, pystray)
+    maybe_offer_gpu_pack(callbacks)
     ctl.mark_activity()  # the idle clock starts at launch
     if first_start:
         if had_config:
-            notify("Project Away", "New: a guided tour and comfort helpers. Tray menu > Guided first run...")
+            callbacks.notify("Project Away", "New: a guided tour and comfort helpers. Tray menu > Guided first run...")
         else:
             from away.comfort.actions import launch_first_run
 
             launch_first_run()
     if crash_note:
         ctl.crash_note = f"{crash_note} ({crashlog.crash_log_path()})"
-        notify("Project Away", ctl.crash_note)
-
-    def _sync(ic: Any) -> None:
-        if guard.stopping:
-            return
-        ctl.paused = bool(app.pipeline.paused)
-        refresh(ic)
-        guard.call(ic.update_menu)
+        callbacks.notify("Project Away", ctl.crash_note)
 
     updates.start()  # reports the last install; first check right away, then every 24 h (unless updates.check: false)
     icon.run()
