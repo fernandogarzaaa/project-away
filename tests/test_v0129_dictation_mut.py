@@ -129,3 +129,34 @@ def test_cleaner_empty_returns_empty_status() -> None:
     r = s.stop()
     assert r.status == "empty"
     assert r.raw == "hello world"
+
+
+def test_feed_2d_chunk_flattened() -> None:
+    # Tests reshape(-1) mutant (line 97): 2D chunk must be flattened
+    s, _, _, _ = make_session(["hello"])
+    s.start()
+    chunk_2d = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    s.feed(chunk_2d)
+    # Should not crash; chunks are flattened
+    assert len(s._chunks) == 1
+    assert s._chunks[0].shape == (4,)
+    s.cancel()
+
+
+def test_seconds_calculation_affects_silence_phrase() -> None:
+    # Tests len(speech)/self.sr mutant (line 133): seconds must be divided, not multiplied
+    # A very short utterance with a silence phrase should be filtered
+    from tests.test_voice import Clock, EnergyVAD, EventBus, SR
+
+    bus = EventBus()
+    asr = FakeASR(["um"])  # "um" is a silence phrase
+    sink = ListSink()
+    s = DictationSession(asr, RuleCleaner(), sink, EnergyVAD(SR), bus, SR, clock=Clock())
+    s.start()
+    # Feed a very short audio (0.1s) - should be detected as short silence phrase
+    short = np.zeros(int(SR * 0.1), dtype=np.float32)
+    s.feed(short)
+    r = s.stop()
+    # With correct seconds (0.1), "um" might be kept or filtered based on threshold
+    # The key is that seconds is calculated correctly (not huge)
+    assert r.seconds < 1.0  # Would be huge if multiplied (0.1 * 16000 = 1600)
