@@ -58,6 +58,22 @@ def db(x: float) -> float:
     return 20.0 * math.log10(max(float(x), 1e-9))
 
 
+def _start_menu_host(fg: dict[str, Any]) -> bool:
+    """True when the foreground window is the Start menu (proposal #4: the Win keypress worked).
+
+    Windows 11 hosts Start in StartMenuExperienceHost.exe; Windows 10 hosts it inside explorer.exe, where the
+    taskbar (also explorer.exe) is told apart by the window class.
+    """
+    proc = str(fg.get("process") or "").lower()
+    if proc == "startmenuexperiencehost.exe":
+        return True
+    return (
+        proc == "explorer.exe"
+        and str(fg.get("class") or "") == "Windows.UI.Core.CoreWindow"
+        and str(fg.get("title") or "").lower() == "start"
+    )
+
+
 class RealEnv:
     def __init__(
         self,
@@ -413,6 +429,57 @@ class RealEnv:
             "Self-test: this is how messages from your agents look.", "info", False, agent="Project Away"
         )
         return {"shown": bool(res.get("shown")), "via": res.get("via"), "reason": res.get("reason")}
+
+    # ---------------------------------------------------------------- Windows Start key (proposal #4)
+    def winkey(self) -> dict[str, Any]:
+        """Press the Win key through the action engine and watch for the Start menu.
+
+        The press takes the same path agents use (:meth:`away.actions_engine.ActionEngine.call`), so this
+        check proves the proposal #4 fix on the real PC. Like the pop-up test above, the keypress really
+        happens: the person asked for a self-test. Returns ``supported: False`` (with a reason) where the
+        check cannot run: anywhere but Windows, or with no keyboard backend.
+        """
+        if sys.platform != "win32":
+            return {"supported": False, "reason": "the Windows key check only runs on Windows"}
+        from away import actions_engine as eng
+        from away.agentlink import desktop
+
+        try:
+            secure = bool(desktop.secure_desktop_active())
+        except Exception:
+            secure = False
+        engine = eng.get_engine()
+        target = engine.backend if getattr(engine, "backend", None) is not None else None
+        if target is None:
+            try:
+                target = engine.os_backend()
+            except Exception as exc:
+                return {"supported": False, "reason": f"no keyboard backend ({exc})"}
+        t0 = time.monotonic()
+        try:
+            engine.client(eng.USER, target).key("cmd")
+        except Exception as exc:
+            ms = (time.monotonic() - t0) * 1000.0
+            return {"supported": True, "opened": False, "ms": ms, "reason": f"the keypress failed ({exc})"}
+        seen: dict[str, Any] | None = None
+        while time.monotonic() - t0 < 2.0:
+            fg = desktop.foreground_window() or {}
+            if _start_menu_host(fg):
+                seen = fg
+                break
+            time.sleep(0.05)
+        ms = (time.monotonic() - t0) * 1000.0
+        out: dict[str, Any] = {"supported": True, "opened": seen is not None, "ms": ms}
+        if seen is not None:
+            out["process"] = seen.get("process")
+            out["title"] = seen.get("title")
+            out["class"] = seen.get("class")
+        else:
+            fg = desktop.foreground_window() or {}
+            out["foreground"] = {k: fg.get(k) for k in ("process", "title", "class")}
+        if secure:
+            out["secure_desktop"] = True
+        return out
 
     # ---------------------------------------------------------------- link
     def link(self) -> dict[str, Any]:

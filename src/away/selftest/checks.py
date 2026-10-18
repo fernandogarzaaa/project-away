@@ -45,6 +45,7 @@ class Env(Protocol):  # every method may raise; see away.selftest.env.RealEnv fo
     def stt(self, phrase: str) -> dict[str, Any]: ...
     def tts(self) -> list[dict[str, Any]]: ...
     def notification(self) -> dict[str, Any]: ...
+    def winkey(self) -> dict[str, Any]: ...
     def link(self) -> dict[str, Any]: ...
     def load(self) -> dict[str, Any]: ...
     def models(self) -> dict[str, Any]: ...
@@ -470,7 +471,7 @@ LINKS = (
 def check_link(env: Env) -> list[Result]:
     k = env.link()
     if not k.get("enabled", True):
-        return [_r("link", "Agent Link", SKIP, "Agent Link is turned off.")]
+        return [_r("link", "Agents", SKIP, "Agent Link is turned off.")]
     out = []
     srv = k.get("server") or {}
     if srv.get("running"):
@@ -481,7 +482,7 @@ def check_link(env: Env) -> list[Result]:
         out.append(
             _r(
                 "link",
-                "Agent Link",
+                "Agents",
                 PASS if ok else FAIL,
                 msg,
                 None if ok else Fix("restart_link", "Restart Agent Link"),
@@ -490,7 +491,7 @@ def check_link(env: Env) -> list[Result]:
             )
         )
     else:
-        out.append(_r("link", "Agent Link", PASS, "Ready (it starts when an agent connects)."))
+        out.append(_r("link", "Agents", PASS, "Ready (it starts when an agent connects)."))
     for key, title, fix in LINKS:
         t = k.get(key)
         if not t:
@@ -577,6 +578,36 @@ def check_models(env: Env) -> list[Result]:
     return [_r("models", "Models", PASS, "All present" + (f" ({using})." if using else "."), **d)]
 
 
+# --------------------------------------------------------------------------- Windows Start key (proposal #4)
+WINKEY_LIMIT_MS = 2000.0  # the Start menu must gain foreground within this long of the Win keypress
+
+
+def check_winkey(env: Env) -> list[Result]:
+    """The proposal #4 regression check: the Win keypress must really open Start, not just return ok."""
+    out = env.winkey()
+    if not out.get("supported", True):
+        return [_r("winkey", "Windows Start key", SKIP, str(out.get("reason") or "not available on this PC"))]
+    d = {k: out.get(k) for k in ("ms", "process", "title", "class", "foreground") if out.get(k) is not None}
+    if out.get("opened"):
+        ms = float(out.get("ms") or 0.0)
+        return [
+            _r(
+                "winkey",
+                "Windows Start key",
+                PASS,
+                f"The Start menu opened {ms:.0f} ms after the Win key press.",
+                **d,
+            )
+        ]
+    if out.get("secure_desktop"):
+        msg = "A Windows security prompt is on screen, so the Start menu could not open."
+    elif out.get("reason"):
+        msg = f"The Win keypress did not work ({out.get('reason')})."
+    else:
+        msg = f"The Start menu did not open within {WINKEY_LIMIT_MS / 1000:.0f} s of the Win key press."
+    return [_r("winkey", "Windows Start key", FAIL, msg, Fix("rerun:winkey", "Try again"), **d)]
+
+
 # --------------------------------------------------------------------------------- model benchmark (optional)
 def model_bench_hook() -> dict[str, Any] | None:
     """The model benchmark's self-test hook, ``away.app.model_bench.SELFTEST_HOOK`` (feat/model-refresh), or None
@@ -631,9 +662,10 @@ CHECKS: tuple[tuple[str, str, Callable[[Env], list[Result]]], ...] = (
     ("stt", "Speech to text", check_stt),
     ("tts", "Speaking voices", check_tts),
     ("notify", "Pop-up messages", check_notification),
-    ("link", "Agent Link", check_link),
+    ("link", "Agents", check_link),
     ("load", "PC load", check_load),
     ("models", "Models", check_models),
+    ("winkey", "Windows Start key", check_winkey),
 )
 _BENCH = model_bench_hook()
 if _BENCH is not None:  # only once away.app.model_bench is on main
