@@ -133,6 +133,17 @@ def test_read_consent_falls_back_to_hklm() -> None:
     assert diagnose.read_consent(wr) == "Deny"
 
 
+def test_read_consent_empty_hkcu_value_falls_back_to_hklm() -> None:
+    # an empty Value is not a verdict; the HKLM fallback must still be tried
+    wr = FakeWinreg(
+        {
+            ("HKCU", diagnose.CONSENT_KEY): {"Value": "  "},
+            ("HKLM", diagnose.CONSENT_KEY): {"Value": "Deny"},
+        }
+    )
+    assert diagnose.read_consent(wr) == "Deny"
+
+
 def test_read_consent_missing_key_means_could_not_check() -> None:
     assert diagnose.read_consent(FakeWinreg({})) is None
 

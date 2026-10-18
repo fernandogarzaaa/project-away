@@ -199,7 +199,9 @@ def read_consent(winreg_mod: Any = None, platform: str | None = None) -> str | N
         except OSError:
             continue
         text = str(value or "").strip()
-        return text or None
+        if text:
+            return text
+        # an empty Value is not a verdict; fall through to the next root
     return None
 
 
