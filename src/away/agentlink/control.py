@@ -18,7 +18,9 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
-   secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
+   secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools, except the
+   hardcoded ``SAFE_SYSTEM_TOOLS`` allowlist launched straight through the shell (no keystrokes, no command
+   line) - opening one is navigation only, anything consequential inside it still asks first; Win+R / Win+X are
    blocked.
 5. **Risky clicks ask first.** Clicking an element named like Send / Submit / Pay / Buy / Purchase / Delete /
    Confirm / Install / Uninstall..., dragging onto or from one (the Recycle Bin, the Trash), or pressing Enter while
@@ -37,6 +39,7 @@ the "Are you sure?" prompts, screenshots and undo.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import threading
 import time
@@ -64,6 +67,7 @@ from away.agentlink import desktop
 __all__ = [
     "CONSEQUENTIAL_KEYS",
     "RISKY",
+    "SAFE_SYSTEM_TOOLS",
     "SHORTCUT_MODIFIERS",
     "ComputerControl",
     "ControlHooks",
@@ -79,6 +83,24 @@ ALLOW_SESSION = "Allow for this session"
 
 BLOCKED_COMBOS = ({"cmd", "r"}, {"cmd", "x"}, {"ctrl", "alt", "delete"}, {"ctrl", "shift", "esc"})
 BLOCKED_APPS = desktop.TERMINAL_PROCESSES
+# Allowlisted Windows system tools (proposal #2): the only system tools an agent may open, selected by a
+# hardcoded key - the launch target is hardcoded too, so no command line is ever built and the name cannot
+# smuggle one in. Opening one is navigation only: anything consequential done inside it still goes through
+# the normal ask-first rules. Terminals, PowerShell, regedit and mmc-for-other-snapins stay BLOCKED:
+# devmgmt.msc runs under mmc.exe, so it is launched by its .msc file path explicitly, not by unblocking mmc.
+# Task Manager is deliberately NOT allowlisted: its File > Run new task dialog executes arbitrary commands,
+# which would bypass the terminal block through an allowlisted tool.
+SAFE_SYSTEM_TOOLS: dict[str, str] = {
+    "device-manager": r"C:\Windows\System32\devmgmt.msc",
+    "windows-update": "ms-settings:windowsupdate",
+    "network": "ms-settings:network",
+    "bluetooth": "ms-settings:bluetooth",
+    "display": "ms-settings:display",
+    "sound": "ms-settings:sound",
+    "apps": "ms-settings:appsfeatures",
+    "storage": "ms-settings:storagesense",
+    "about": "ms-settings:about",
+}
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+&'-]{0,39}$")
 ENTER_KEYS = ("enter", "return")
 # v0.1.24 hardening: the moment after approval (the click or thumbs up that allowed it) is not a takeover, but only
@@ -155,6 +177,7 @@ class ControlHooks:
     secure_desktop: Callable[[], bool] = desktop.secure_desktop_active
     grab: Callable[[], Any] = desktop.grab_screen
     open_url: Callable[[str], Any] | None = None
+    system_launcher: Callable[[str], Any] | None = None  # launch an allowlisted system tool (os.startfile)
     cursor_pos: Callable[[], tuple[int, int] | None] = lambda: None
     platform: str = ""
     overlay_on: Callable[[str], None] = lambda _name: None
@@ -708,17 +731,27 @@ class ComputerControl:
             detail = url[:200]
         elif action == "open_app":
             name = str(kw.get("name") or "").strip()
-            if not APP_NAME.match(name):
-                raise ControlRefused("give a plain app name, like 'Notepad' or 'Spotify'")
-            if BLOCKED_APPS.match(name.replace(" ", "")) or name.lower() in (
-                "command prompt",
-                "terminal",
-                "powershell",
-                "registry editor",
-            ):
-                raise ControlRefused("agents cannot open terminals or system tools")
-            self._open_app(name, step, wait)
-            detail = name
+            if kw.get("system"):
+                # Proposal #2: an allowlisted system tool, launched through the shell - no synthetic
+                # keystrokes, no command line built. The blocklist above stays untouched.
+                key = name.lower().replace(" ", "-")
+                target = SAFE_SYSTEM_TOOLS.get(key)
+                if target is None:
+                    raise ControlRefused("unknown system tool; use one of: " + ", ".join(sorted(SAFE_SYSTEM_TOOLS)))
+                self._open_system_tool(target)
+                detail = f"system tool '{key}'"
+            else:
+                if not APP_NAME.match(name):
+                    raise ControlRefused("give a plain app name, like 'Notepad' or 'Spotify'")
+                if BLOCKED_APPS.match(name.replace(" ", "")) or name.lower() in (
+                    "command prompt",
+                    "terminal",
+                    "powershell",
+                    "registry editor",
+                ):
+                    raise ControlRefused("agents cannot open terminals or system tools")
+                self._open_app(name, step, wait)
+                detail = name
         a.ok = True
         foreground = self._foreground_state()
         focused = self._focused_label()
@@ -849,6 +882,20 @@ class ComputerControl:
         wait(0.8)
         self.note_own_keys()
         step().key("enter")
+
+    def _open_system_tool(self, target: str) -> None:
+        """Launch an allowlisted ``SAFE_SYSTEM_TOOLS`` target through the shell: no synthetic keystrokes,
+        no command line is ever built (``target`` is hardcoded, never from agent input). Windows only."""
+        if self.platform != "win32":
+            raise ControlRefused("system tools are only available on Windows")
+        launcher = self.hooks.system_launcher
+        if launcher is not None:
+            launcher(target)
+            return
+        startfile = getattr(os, "startfile", None)
+        if startfile is None:  # not Windows (platform check above already covers this)
+            raise ControlRefused("system tools are only available on Windows")
+        startfile(target)
 
     def _audit(self, g: Grant, action: str, detail: str, result: str) -> None:
         """The engine's audit trail: one entry per action (or per sub-step of a sequence), never batched."""
