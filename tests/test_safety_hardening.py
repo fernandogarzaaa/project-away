@@ -31,7 +31,9 @@ class Clock:
 class FakeUIA:
     available = True
 
-    def __init__(self, focused: Element | None = None, at: Any = None, elements: Any = ()) -> None:
+    def __init__(
+        self, focused: Element | None = None, at: Any = None, elements: Any = ()
+    ) -> None:
         self._focused, self._at, self._els = focused, at, list(elements)
 
     def focused(self) -> Element | None:
@@ -76,7 +78,9 @@ def _control(
         foreground=lambda: None,
         grab=lambda: None,
         sleep=sleep or (lambda _s: None),
-        uia=uia if uia is not None else FakeUIA(focused=TEXT_BOX, at=Element("Canvas", "PaneControl")),
+        uia=uia
+        if uia is not None
+        else FakeUIA(focused=TEXT_BOX, at=Element("Canvas", "PaneControl")),
     )
     ctl = ComputerControl(hooks, ask, ttl_s=1800, rate_per_s=50, clock=clock)
     return ctl, backend, asked
@@ -119,7 +123,9 @@ def test_undo_only_reverses_the_agents_own_actions_and_expires() -> None:
     clock.advance(1801)
     with pytest.raises(ControlRefused):
         ctl.undo_last("a2")
-    assert ctl.undo_last_by_user()["undone"] == "move"  # the person's own Undo button still works
+    assert (
+        ctl.undo_last_by_user()["undone"] == "move"
+    )  # the person's own Undo button still works
 
 
 def test_service_undo_passes_the_agent(tmp_path: Path) -> None:
@@ -127,7 +133,12 @@ def test_service_undo_passes_the_agent(tmp_path: Path) -> None:
     from away.agentlink.host import build_core
 
     cfg = C.AppConfig()
-    core = build_core(tmp_path, cfg=lambda: cfg, settings=lambda: cfg.agent_link, config_path=lambda: tmp_path / "c")
+    core = build_core(
+        tmp_path,
+        cfg=lambda: cfg,
+        settings=lambda: cfg.agent_link,
+        config_path=lambda: tmp_path / "c",
+    )
     seen: list[Any] = []
     core.control.undo_last = lambda *a, **k: seen.append((a, k)) or {}  # type: ignore[method-assign]
     a, _ = core.registry.issue("Claude", ["read", "control"], 3600)
@@ -141,7 +152,9 @@ def test_real_mouse_movement_pauses_the_agent_while_it_types_a_long_text() -> No
     ctl, backend, _ = _control(clock)
     ctl.request("a1", "Claude")
     clock.advance(1.0)
-    ctl.act("a1", "type_text", text="x" * 2000)  # used to hide every mouse movement for 40.5 s
+    ctl.act(
+        "a1", "type_text", text="x" * 2000
+    )  # used to hide every mouse movement for 40.5 s
     clock.advance(0.05)
     assert ctl.user_input("mouse")
     assert ctl.status()["paused"]
@@ -155,7 +168,9 @@ def test_keyboard_echo_is_ignored_only_briefly_after_each_typed_chunk() -> None:
     ctl.act("a1", "type_text", text="y" * 2000)
     assert not ctl.user_input("keyboard")  # the agent's own keys echoing back
     typed = [c for c in backend.calls if c[0] == "type_text"]
-    assert len(typed) > 1 and all(len(c[1][0]) <= 16 for c in typed)  # small chunks, one short window each
+    assert len(typed) > 1 and all(
+        len(c[1][0]) <= 16 for c in typed
+    )  # small chunks, one short window each
     clock.advance(1.0)
     assert ctl.user_input("keyboard")  # one second later a key press is the person
 
@@ -167,7 +182,9 @@ def test_mouse_echo_of_the_agents_own_move_is_ignored_but_not_for_long() -> None
     clock.advance(1.0)
     ctl.act("a1", "move", x=5, y=5)
     assert not ctl.user_input("mouse")
-    assert ctl.user_input("keyboard")  # a key press during a mouse move is never the agent's echo
+    assert ctl.user_input(
+        "keyboard"
+    )  # a key press during a mouse move is never the agent's echo
 
 
 def test_approval_grace_is_short_and_never_blocks_a_deliberate_stop() -> None:
@@ -179,7 +196,9 @@ def test_approval_grace_is_short_and_never_blocks_a_deliberate_stop() -> None:
     assert ctl.user_input("mouse")  # a second later, moving the mouse takes over
     ctl2, backend2, _ = _control(clock)
     ctl2.request("a1", "Claude")
-    assert ctl2.stop("you held up an open palm")  # inside the grace window: the stop still works at once
+    assert ctl2.stop(
+        "you held up an open palm"
+    )  # inside the grace window: the stop still works at once
     with pytest.raises(ControlRefused):
         ctl2.act("a1", "move", x=1, y=1)
     assert backend2.calls == []
@@ -230,7 +249,9 @@ def _run_in_thread(fn: Any) -> tuple[threading.Thread, dict[str, Any]]:
 
 def test_stop_interrupts_a_drag_in_the_middle_and_lets_go_of_the_button() -> None:
     clock = Clock()
-    backend = BlockingBackend("move", 4)  # start point + 2 steps done, blocked in the 3rd step
+    backend = BlockingBackend(
+        "move", 4
+    )  # start point + 2 steps done, blocked in the 3rd step
     ctl, _, _ = _control(clock, backend=backend)
     ctl.request("a1", "Claude")
     t, out = _run_in_thread(lambda: ctl.act("a1", "drag", x=0, y=0, x2=800, y2=0))
@@ -258,7 +279,9 @@ def test_moving_the_mouse_interrupts_typing_between_chunks() -> None:
     backend.go.set()
     t.join(5.0)
     assert isinstance(out.get("error"), ControlRefused) and "mouse" in str(out["error"])
-    assert [c[0] for c in backend.calls].count("type_text") == 2  # the rest of the text is never typed
+    assert [c[0] for c in backend.calls].count(
+        "type_text"
+    ) == 2  # the rest of the text is never typed
     assert backend.calls[-1] == ("release_modifiers", ())
 
 
@@ -270,7 +293,10 @@ def test_after_resume_a_new_action_is_not_cancelled_by_the_old_takeover() -> Non
     assert ctl.user_input("mouse")
     ctl.resume("a1")
     ctl.act("a1", "type_text", text="hello world, again")
-    assert "".join(c[1][0] for c in backend.calls if c[0] == "type_text") == "hello world, again"
+    assert (
+        "".join(c[1][0] for c in backend.calls if c[0] == "type_text")
+        == "hello world, again"
+    )
 
 
 def test_open_app_checks_for_a_stop_before_each_step() -> None:
@@ -286,7 +312,10 @@ def test_open_app_checks_for_a_stop_before_each_step() -> None:
     ctl.request("a1", "Claude")
     with pytest.raises(ControlRefused, match="stop"):
         ctl.act("a1", "open_app", name="Notepad")
-    assert backend.calls == [("key", ("cmd",)), ("release_modifiers", ())]  # never typed the name or pressed Enter
+    assert backend.calls == [
+        ("key", ("cmd",)),
+        ("release_modifiers", ()),
+    ]  # never typed the name or pressed Enter
 
 
 def test_open_app_warns_when_the_app_never_appears() -> None:
@@ -295,7 +324,10 @@ def test_open_app_warns_when_the_app_never_appears() -> None:
     clock = Clock()
     ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
     ctl.hooks.sleep = lambda s: clock.advance(s)
-    ctl.hooks.foreground = lambda: {"title": "Search", "process": "SearchHost.exe"}  # never the app
+    ctl.hooks.foreground = lambda: {
+        "title": "Search",
+        "process": "SearchHost.exe",
+    }  # never the app
     ctl.request("a1", "Claude")
     res = ctl.act("a1", "open_app", name="Notepad")
     assert res["ok"] is True
@@ -312,14 +344,20 @@ def test_open_app_short_names_need_exact_match() -> None:
     """Short app names (< 3 chars) must not substring-match: "a" must not match
     "Calculator", avoiding a false-positive verification."""
     from away.agentlink.control import ComputerControl
+
     # "a" in "Calculator" is a substring, but not a word and not the process
-    assert ComputerControl._name_matches("a", "Calculator", "ApplicationFrameHost.exe") is False
+    assert (
+        ComputerControl._name_matches("a", "Calculator", "ApplicationFrameHost.exe")
+        is False
+    )
     # exact process stem still matches
     assert ComputerControl._name_matches("a", "A", "a.exe") is True
     # whole word in title matches
     assert ComputerControl._name_matches("it", "IT Support", "explorer.exe") is True
     # but substring of a longer word does not
-    assert ComputerControl._name_matches("it", "Settings", "SystemSettings.exe") is False
+    assert (
+        ComputerControl._name_matches("it", "Settings", "SystemSettings.exe") is False
+    )
 
 
 def test_open_app_is_quiet_when_the_app_appears() -> None:
@@ -362,7 +400,9 @@ class BrokenUIA(FakeUIA):
         raise RuntimeError("COM error")
 
 
-@pytest.mark.parametrize("uia", [NoUIA(), FakeUIA(focused=TEXT_BOX, at=None), BrokenUIA()])
+@pytest.mark.parametrize(
+    "uia", [NoUIA(), FakeUIA(focused=TEXT_BOX, at=None), BrokenUIA()]
+)
 def test_a_click_on_something_it_cannot_identify_asks_first(uia: Any) -> None:
     clock = Clock()
     ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
@@ -376,7 +416,9 @@ def test_a_click_on_something_it_cannot_identify_asks_first(uia: Any) -> None:
 
 def test_allow_for_this_session_covers_unlabelled_clicks_until_the_grant_ends() -> None:
     clock = Clock()
-    ctl, backend, asked = _control(clock, ["Allow", "Allow for this session", "Allow"], uia=NoUIA())
+    ctl, backend, asked = _control(
+        clock, ["Allow", "Allow for this session", "Allow"], uia=NoUIA()
+    )
     ctl.request("a1", "Claude")
     ctl.act("a1", "click", x=1, y=1)
     n = len(asked)
@@ -385,19 +427,25 @@ def test_allow_for_this_session_covers_unlabelled_clicks_until_the_grant_ends() 
     ctl.stop()
     ctl.request("a1", "Claude")
     with pytest.raises(ControlRefused):
-        ctl.act("a1", "click", x=1, y=1)  # a new session asks again (and nobody answers)
+        ctl.act(
+            "a1", "click", x=1, y=1
+        )  # a new session asks again (and nobody answers)
 
 
 def test_a_drag_ending_on_a_risky_target_asks_with_the_destination() -> None:
     clock = Clock()
     file_el = Element("report.docx", "ListItemControl", rect=(0, 0, 40, 40))
     bin_el = Element("Recycle Bin", "ListItemControl", rect=(400, 0, 440, 40))
-    uia = FakeUIA(at=lambda x, y: file_el if x < 100 else bin_el, elements=[file_el, bin_el])
+    uia = FakeUIA(
+        at=lambda x, y: file_el if x < 100 else bin_el, elements=[file_el, bin_el]
+    )
     ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
     ctl.request("a1", "Claude")
     with pytest.raises(ControlRefused, match="did not allow"):
         ctl.act("a1", "drag", x=20, y=20, x2=420, y2=20)
-    assert "Recycle Bin" in asked[-1]["question"] and "press" not in [c[0] for c in backend.calls]
+    assert "Recycle Bin" in asked[-1]["question"] and "press" not in [
+        c[0] for c in backend.calls
+    ]
 
 
 def test_a_drag_to_an_unidentified_place_asks_and_a_labelled_drag_does_not() -> None:
@@ -407,20 +455,26 @@ def test_a_drag_to_an_unidentified_place_asks_and_a_labelled_drag_does_not() -> 
     uia = FakeUIA(at=lambda x, y: a if y < 45 else (b if y < 100 else None))
     ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=uia)
     ctl.request("a1", "Claude")
-    ctl.act("a1", "drag", x=20, y=20, x2=20, y2=70)  # both ends have a name: no question
+    ctl.act(
+        "a1", "drag", x=20, y=20, x2=20, y2=70
+    )  # both ends have a name: no question
     assert len(asked) == 1
     with pytest.raises(ControlRefused):
         ctl.act("a1", "drag", x=20, y=20, x2=20, y2=500)
     assert "(20, 500)" in asked[-1]["question"]
 
 
-def test_enter_and_shortcuts_without_a_known_focus_ask_but_typing_and_moving_do_not() -> None:
+def test_enter_and_shortcuts_without_a_known_focus_ask_but_typing_and_moving_do_not() -> (
+    None
+):
     clock = Clock()
     ctl, backend, asked = _control(clock, ["Allow", "Deny", "Deny"], uia=NoUIA())
     ctl.request("a1", "Claude")
     ctl.act("a1", "move", x=5, y=5)
     ctl.act("a1", "scroll", dy=-3)
-    ctl.act("a1", "type_text", text="hello")  # Linux: no UI Automation, typing itself is allowed
+    ctl.act(
+        "a1", "type_text", text="hello"
+    )  # Linux: no UI Automation, typing itself is allowed
     assert len(asked) == 1
     with pytest.raises(ControlRefused):
         ctl.act("a1", "press_keys", keys="enter")
@@ -428,7 +482,9 @@ def test_enter_and_shortcuts_without_a_known_focus_ask_but_typing_and_moving_do_
     with pytest.raises(ControlRefused):
         ctl.act("a1", "press_keys", keys="ctrl+s")
     assert "ctrl+s" in asked[-1]["question"]
-    ctl2, _, asked2 = _control(clock, ["Allow"])  # focus on a labelled text box: no questions
+    ctl2, _, asked2 = _control(
+        clock, ["Allow"]
+    )  # focus on a labelled text box: no questions
     ctl2.request("a1", "Claude")
     ctl2.act("a1", "press_keys", keys="ctrl+a")
     ctl2.act("a1", "type_text", text="hi\nthere")
@@ -446,7 +502,12 @@ def _core(tmp_path: Path, **kw: Any) -> Any:
     C.save(C.AppConfig(), cfgp)
     cfg = C.load(cfgp)[0]
     c = build_core(
-        tmp_path, cfg=lambda: cfg, settings=lambda: cfg.agent_link, config_path=lambda: cfgp, ui=NullUI(), **kw
+        tmp_path,
+        cfg=lambda: cfg,
+        settings=lambda: cfg.agent_link,
+        config_path=lambda: cfgp,
+        ui=NullUI(),
+        **kw,
     )
     c.prompts.polite = lambda: True
     c.cfg_obj = cfg  # type: ignore[attr-defined]
@@ -462,7 +523,11 @@ def test_no_camera_still_when_the_notice_cannot_be_shown(tmp_path: Path) -> None
 
     from away.agentlink.service import NotAvailable
 
-    core = _core(tmp_path, flash=_broken, camera_frame=lambda _c: np.zeros((480, 640, 3), dtype=np.uint8))
+    core = _core(
+        tmp_path,
+        flash=_broken,
+        camera_frame=lambda _c: np.zeros((480, 640, 3), dtype=np.uint8),
+    )
     a, _ = core.registry.issue("Agent", ["read", "snapshots"], 3600)
     seq = core.events.seq
     with pytest.raises(NotAvailable, match="notice"):
@@ -475,7 +540,9 @@ def test_no_screenshot_when_the_notice_cannot_be_shown(tmp_path: Path) -> None:
 
     from away.agentlink.service import NotAvailable
 
-    core = _core(tmp_path, flash=_broken, screen_grab=lambda: Image.new("RGB", (800, 600)))
+    core = _core(
+        tmp_path, flash=_broken, screen_grab=lambda: Image.new("RGB", (800, 600))
+    )
     a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
     with pytest.raises(NotAvailable, match="notice"):
         core.service.get_screen(a)
@@ -487,7 +554,9 @@ def test_quiet_screenshots_need_the_live_view_badge(tmp_path: Path) -> None:
     from PIL import Image
 
     flashes: list[str] = []
-    core = _core(tmp_path, flash=flashes.append, screen_grab=lambda: Image.new("RGB", (800, 600)))
+    core = _core(
+        tmp_path, flash=flashes.append, screen_grab=lambda: Image.new("RGB", (800, 600))
+    )
     a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
     core.service.get_screen(a, quiet=True)
     assert len(flashes) == 1  # not watching: an ordinary screenshot with its notice
@@ -496,7 +565,9 @@ def test_quiet_screenshots_need_the_live_view_badge(tmp_path: Path) -> None:
     assert len(flashes) == 1  # the live view's permanent badge is the notice
 
 
-def test_live_view_is_refused_and_unregistered_when_its_badge_fails(tmp_path: Path) -> None:
+def test_live_view_is_refused_and_unregistered_when_its_badge_fails(
+    tmp_path: Path,
+) -> None:
     from away.agentlink.service import NotAvailable
 
     core = _core(tmp_path, watching=_broken)
@@ -519,12 +590,18 @@ def test_host_reports_a_notice_that_could_not_be_shown(tmp_path: Path) -> None:
             self.shown.append(text)
 
     good = UI(True)
-    AgentLinkHost(None, data_dir=tmp_path / "a", ui=good, headless=True)._flash("Claude looked at your screen")
+    AgentLinkHost(None, data_dir=tmp_path / "a", ui=good, headless=True)._flash(
+        "Claude looked at your screen"
+    )
     assert good.shown
     with pytest.raises(RuntimeError):
-        AgentLinkHost(None, data_dir=tmp_path / "b", ui=UI(False), headless=True)._flash("x")
+        AgentLinkHost(
+            None, data_dir=tmp_path / "b", ui=UI(False), headless=True
+        )._flash("x")
     with pytest.raises(RuntimeError):
-        AgentLinkHost(None, data_dir=tmp_path / "c", ui=object(), headless=True)._watching("Claude", True)
+        AgentLinkHost(
+            None, data_dir=tmp_path / "c", ui=object(), headless=True
+        )._watching("Claude", True)
 
 
 def test_the_notice_window_launcher_reports_a_failed_start(tmp_path: Path) -> None:
@@ -561,7 +638,9 @@ def _api(tmp_path: Path) -> Any:
     return client, token, calls, spy, gate, core
 
 
-def test_an_oversized_json_body_is_refused_with_413_before_parsing(tmp_path: Path, monkeypatch: Any) -> None:
+def test_an_oversized_json_body_is_refused_with_413_before_parsing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     from away.agentlink import api
 
     client, token, calls, spy, _gate, _core_ = _api(tmp_path)
@@ -584,7 +663,9 @@ def test_an_oversized_json_body_is_refused_with_413_before_parsing(tmp_path: Pat
     assert calls == []
 
 
-def test_a_chunked_body_without_content_length_cannot_get_past_the_limit(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_chunked_body_without_content_length_cannot_get_past_the_limit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     from away.agentlink import api
 
     client, token, calls, spy, _gate, _core_ = _api(tmp_path)
@@ -601,7 +682,9 @@ def test_a_chunked_body_without_content_length_cannot_get_past_the_limit(tmp_pat
     assert r.status_code == 413 and calls == []
 
 
-def test_a_body_bigger_than_its_content_length_is_cut_off_at_the_asgi_level(tmp_path: Path) -> None:
+def test_a_body_bigger_than_its_content_length_is_cut_off_at_the_asgi_level(
+    tmp_path: Path,
+) -> None:
     import asyncio
 
     from away.agentlink import api
@@ -645,10 +728,18 @@ def test_normal_bodies_and_mcp_sized_bodies_still_work(tmp_path: Path) -> None:
 
     client, token, *_ = _api(tmp_path)
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = client.post("/v1/preferences", content=b'{"text": "' + b"z" * 500 + b'"}', headers=h)
+    r = client.post(
+        "/v1/preferences", content=b'{"text": "' + b"z" * 500 + b'"}', headers=h
+    )
     assert r.status_code == 200
-    assert api.MAX_JSON_BODY == 64 * 1024 and api.MAX_JSON_BODY <= api.MAX_MCP_BODY <= 1024 * 1024
-    assert api.body_limit("/mcp") == api.MAX_MCP_BODY and api.body_limit("/c/abcdefgh") == api.MAX_MCP_BODY
+    assert (
+        api.MAX_JSON_BODY == 64 * 1024
+        and api.MAX_JSON_BODY <= api.MAX_MCP_BODY <= 1024 * 1024
+    )
+    assert (
+        api.body_limit("/mcp") == api.MAX_MCP_BODY
+        and api.body_limit("/c/abcdefgh") == api.MAX_MCP_BODY
+    )
     assert api.body_limit("/v1/rpc/act") == api.MAX_JSON_BODY
 
 
@@ -663,7 +754,9 @@ def test_sharing_logs_and_recordings_is_a_separate_permission_off_by_default() -
     assert perms.SHARE_LOGS in perms.normalize("read,share_logs")
 
 
-def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(tmp_path: Path) -> None:
+def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(
+    tmp_path: Path,
+) -> None:
     from away.agentlink.service import Forbidden
 
     core = _core(tmp_path)
@@ -681,10 +774,14 @@ def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(tmp_path: Pat
         with pytest.raises(Forbidden, match="Share my logs and recordings"):
             call()
     with pytest.raises(ValueError):
-        svc.get_job(a)  # camera checks still work (here: a missing id, not a permission error)
+        svc.get_job(
+            a
+        )  # camera checks still work (here: a missing id, not a permission error)
 
 
-def test_existing_agents_are_not_silently_given_the_new_permission(tmp_path: Path) -> None:
+def test_existing_agents_are_not_silently_given_the_new_permission(
+    tmp_path: Path,
+) -> None:
     import json
 
     from away.agentlink import auth, perms
@@ -734,7 +831,9 @@ def _secret_log(home: str) -> str:
     )
 
 
-def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_folder(tmp_path: Path) -> None:
+def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_folder(
+    tmp_path: Path,
+) -> None:
     import zipfile
 
     from away.agentlink import bundle
@@ -753,7 +852,11 @@ def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_fold
         assert s not in text, s
     path = bundle.build(tmp_path, core.cfg_obj, {}, None, note="test")
     with zipfile.ZipFile(path) as z:
-        blob = "\n".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if n.startswith("logs/"))
+        blob = "\n".join(
+            z.read(n).decode("utf-8", "replace")
+            for n in z.namelist()
+            if n.startswith("logs/")
+        )
     assert "camera 0 opened at 30 fps" in blob
     for s in (*SECRETS, home):
         assert s not in blob, s
@@ -772,7 +875,9 @@ def test_action_log_shows_an_agent_only_its_own_actions(tmp_path: Path) -> None:
     ctl.act(b.id, "scroll", dy=-1)
     assert [e["agent"] for e in core.service.action_log(a)] == ["Claude"]
     assert [e["agent"] for e in core.service.action_log(b)] == ["Gemini"]
-    core.cfg_obj.agent_link.share_control_history = True  # the person allowed agents to see the whole history
+    core.cfg_obj.agent_link.share_control_history = (
+        True  # the person allowed agents to see the whole history
+    )
     assert {e["agent"] for e in core.service.action_log(a)} == {"Claude", "Gemini"}
 
 
@@ -814,26 +919,36 @@ def _host(tmp_path: Path) -> Any:
     return h, a, offs
 
 
-def test_removing_control_ends_the_session_and_turns_the_border_off(tmp_path: Path) -> None:
+def test_removing_control_ends_the_session_and_turns_the_border_off(
+    tmp_path: Path,
+) -> None:
     h, a, offs = _host(tmp_path)
     h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "screen"]})
     assert h.core.control.status() == {"active": False} and offs
     with pytest.raises(ControlRefused):
         h.core.control.act(a.id, "move", x=1, y=1)
-    assert a.id in h.core.service._watchers  # the screen permission is still on: its live view stays
+    assert (
+        a.id in h.core.service._watchers
+    )  # the screen permission is still on: its live view stays
 
 
-def test_removing_screen_stops_the_live_view_and_forgets_the_view(tmp_path: Path) -> None:
+def test_removing_screen_stops_the_live_view_and_forgets_the_view(
+    tmp_path: Path,
+) -> None:
     h, a, _ = _host(tmp_path)
     h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "control"]})
-    assert a.id not in h.core.service._watchers and a.id not in h.core.service._live_views
+    assert (
+        a.id not in h.core.service._watchers and a.id not in h.core.service._live_views
+    )
     assert h._watch_stop is None  # the badge is gone
     assert a.id not in h.core.control.views
     assert h.core.control.status()["active"]  # control is still allowed
 
 
 @pytest.mark.parametrize("how", ["revoke", "disconnect", "disconnect_all"])
-def test_revoke_and_disconnect_end_control_and_the_live_view(tmp_path: Path, how: str) -> None:
+def test_revoke_and_disconnect_end_control_and_the_live_view(
+    tmp_path: Path, how: str
+) -> None:
     h, a, offs = _host(tmp_path)
     if how == "revoke":
         h.handle({"action": "revoke", "agent_id": a.id})
@@ -846,18 +961,24 @@ def test_revoke_and_disconnect_end_control_and_the_live_view(tmp_path: Path, how
     assert a.id not in h.core.control.views
 
 
-def test_removing_control_mid_typing_stops_and_lets_go_of_the_keys(tmp_path: Path) -> None:
+def test_removing_control_mid_typing_stops_and_lets_go_of_the_keys(
+    tmp_path: Path,
+) -> None:
     h, a, _ = _host(tmp_path)
     backend = BlockingBackend("type_text", 2)
     h.core.control.hooks.backend = backend
     h.core.control.hooks.uia = FakeUIA(focused=TEXT_BOX)
-    t, out = _run_in_thread(lambda: h.core.control.act(a.id, "type_text", text="abcdefgh" * 20))
+    t, out = _run_in_thread(
+        lambda: h.core.control.act(a.id, "type_text", text="abcdefgh" * 20)
+    )
     assert backend.reached.wait(5.0)
     h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read"]})
     backend.go.set()
     t.join(5.0)
     assert isinstance(out.get("error"), ControlRefused)
-    assert [c[0] for c in backend.calls].count("type_text") == 2 and backend.calls[-1][0] == "release_modifiers"
+    assert [c[0] for c in backend.calls].count("type_text") == 2 and backend.calls[-1][
+        0
+    ] == "release_modifiers"
 
 
 def test_the_settings_window_sends_the_change_to_the_host(tmp_path: Path) -> None:
@@ -891,11 +1012,15 @@ def test_other_systems_have_no_secure_desktop_to_check(platform: str) -> None:
     clock = Clock()
     ctl, backend, _ = _control(clock, secure=_raises, platform=platform)
     ctl.request("a1", "Claude")
-    ctl.act("a1", "move", x=1, y=1)  # explicit: no secure desktop exists there, so a failing check is not a stop
+    ctl.act(
+        "a1", "move", x=1, y=1
+    )  # explicit: no secure desktop exists there, so a failing check is not a stop
     assert backend.calls == [("move", (1, 1))]
 
 
-def test_the_windows_detector_reports_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_windows_detector_reports_its_own_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import ctypes
 
     from away.agentlink import desktop
@@ -931,11 +1056,19 @@ def test_tray_tooltip_never_exceeds_the_windows_limit() -> None:
     ctl = TrayController(app)
     ctl.agent_badge = lambda: "Claude is using your computer"  # type: ignore[method-assign]
     ctl.crash_note = "crashed"
-    assert _utf16_len(ctl.title()) > 128  # the live log: "string too long (136, maximum length 128)"
+    assert (
+        _utf16_len(ctl.title()) > 128
+    )  # the live log: "string too long (136, maximum length 128)"
     tip = ctl.tooltip()
-    assert _utf16_len(tip) <= TOOLTIP_MAX and tip.endswith("\u2026") and tip.startswith("Project Away - active")
+    assert (
+        _utf16_len(tip) <= TOOLTIP_MAX
+        and tip.endswith("\u2026")
+        and tip.startswith("Project Away - active")
+    )
     assert tooltip_text("Project Away - active") == "Project Away - active"
-    emoji = "Project Away " + "\U0001f44b" * 80  # two UTF-16 units each; never cut in half
+    emoji = (
+        "Project Away " + "\U0001f44b" * 80
+    )  # two UTF-16 units each; never cut in half
     t = tooltip_text(emoji)
     assert _utf16_len(t) <= TOOLTIP_MAX
     t.encode("utf-16-le")  # no lone surrogate
@@ -964,7 +1097,10 @@ def test_near_homophones_of_the_agents_name_wake_it(said: str, body: str) -> Non
 def test_a_misheard_longer_name_and_claude_as_cloud() -> None:
     from away.voice import talk
 
-    agents = [{"id": "c1", "name": "Claude", "wake_word": ""}, {"id": "g1", "name": "Gemini", "wake_word": ""}]
+    agents = [
+        {"id": "c1", "name": "Claude", "wake_word": ""},
+        {"id": "g1", "name": "Gemini", "wake_word": ""},
+    ]
     r = talk.match("hey cloud open my notes", agents)
     assert r is not None and r.target == "c1" and r.body == "open my notes"
     r = talk.match("hey jemini what time is it", agents)
@@ -992,13 +1128,18 @@ def test_unrelated_phrases_do_not_wake_hark(said: str) -> None:
 def test_a_sound_alike_that_fits_two_agents_goes_to_neither() -> None:
     from away.voice import talk
 
-    agents = [{"id": "h1", "name": "Hark", "wake_word": ""}, {"id": "h2", "name": "Hurt", "wake_word": ""}]
+    agents = [
+        {"id": "h1", "name": "Hark", "wake_word": ""},
+        {"id": "h2", "name": "Hurt", "wake_word": ""},
+    ]
     assert talk.match("hey heart are you there", agents) is None
     r = talk.match("hey hurt are you there", agents)  # an exact name always wins
     assert r is not None and r.target == "h2"
 
 
-def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(tmp_path: Path) -> None:
+def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(
+    tmp_path: Path,
+) -> None:
     from away.agentlink import api
 
     client, token, *_ = _api(tmp_path)
@@ -1007,4 +1148,6 @@ def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(tmp_pa
     assert client.post("/v1/token/refresh", content=big, headers=h).status_code == 413
     h["Authorization"] = f"Bearer {token}"
     assert client.post("/v1/selftest", content=big, headers=h).status_code == 413
-    assert client.post("/v1/rpc/run_selftest", content=big, headers=h).status_code == 413
+    assert (
+        client.post("/v1/rpc/run_selftest", content=big, headers=h).status_code == 413
+    )
