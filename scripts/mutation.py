@@ -23,9 +23,18 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
     "landmarks": (["src/away/hands/landmarks.py"], ["tests/test_landmarks.py"]),
     "gestures": (["src/away/hands/gestures.py"], ["tests/test_gestures.py"]),
     "cursor": (["src/away/hands/cursor.py"], ["tests/test_cursor.py"]),
-    "cleanup": (["src/away/voice/cleanup.py"], ["tests/test_cleanup.py"]),
-    "vad": (["src/away/voice/vad.py"], ["tests/test_voice.py"]),
-    "dictation": (["src/away/voice/dictation.py"], ["tests/test_voice.py"]),
+    "cleanup": (
+        ["src/away/voice/cleanup.py"],
+        ["tests/test_cleanup.py", "tests/test_v0129_cleanup_mut.py"],
+    ),
+    "vad": (
+        ["src/away/voice/vad.py"],
+        ["tests/test_voice.py", "tests/test_v0129_vad_mut.py"],
+    ),
+    "dictation": (
+        ["src/away/voice/dictation.py"],
+        ["tests/test_voice.py", "tests/test_v0129_dictation_mut.py"],
+    ),
     "wifi_features": (["src/away/wifi/features.py"], ["tests/test_wifi.py"]),
     "wifi_classifier": (["src/away/wifi/classifier.py"], ["tests/test_wifi.py"]),
     "face": (
@@ -36,11 +45,14 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
             "src/away/face/commands.py",
             "src/away/face/tracking.py",
         ],
-        ["tests/test_face.py"],
+        ["tests/test_face.py", "tests/test_v0129_face_mut.py"],
     ),
     "fusion_events": (["src/away/fusion.py", "src/away/events.py"], ["tests/test_fusion_events.py"]),
     # v0.1.16
-    "autoscroll": (["src/away/hands/autoscroll.py"], ["tests/test_v0116_fixes.py", "tests/test_v019_features.py"]),
+    "autoscroll": (
+        ["src/away/hands/autoscroll.py"],
+        ["tests/test_v0116_fixes.py", "tests/test_v019_features.py", "tests/test_v0129_autoscroll_mut.py"],
+    ),
     "crashlog": (
         ["src/away/app/crashlog.py", "src/away/app/uiqueue.py"],
         ["tests/test_v0116_fixes.py", "tests/test_v0129_crashlog_mut.py"],
