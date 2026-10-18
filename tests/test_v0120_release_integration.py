@@ -296,7 +296,7 @@ def test_settings_tabs_start_with_getting_started_and_end_with_the_expert_pages(
         "Cameras",
         "Performance",
         "Gesture Studio",
-        "Agent Link",
+        "Agents",
         "Getting started",
         "Something new",
     ]
