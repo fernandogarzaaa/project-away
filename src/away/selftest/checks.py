@@ -62,22 +62,25 @@ DRIVER_PROSE = ("driver", "devmgmt", "device manager", "uninstall device", "conf
 
 
 def _driver_state_row(rows: Any, name: str) -> dict[str, Any] | None:
-    """The PR #46 ``driver_state`` row for this camera (exact name match first), or None."""
+    """The PR #46 ``driver_state`` row for this camera (exact name match only), or None.
+
+    Substring matching was removed: similar camera names (e.g. "HD Webcam" vs
+    "HD Webcam Pro") could associate the wrong device's driver state, leading
+    to a fix recommendation for the wrong camera. An unmatched camera gets no
+    driver-specific guidance rather than a possibly-wrong one.
+    """
     if not isinstance(rows, list):
         return None
     want = name.strip().lower()
-    fallback: dict[str, Any] | None = None
+    if not want:
+        return None
     for r in rows:
         if not isinstance(r, dict):
             continue
         rn = str(r.get("name") or "").strip().lower()
-        if not rn:
-            continue
-        if rn == want:
+        if rn and rn == want:
             return r
-        if fallback is None and (rn in want or want in rn):
-            fallback = r
-    return fallback
+    return None
 
 
 def _driver_broken(code: Any, status: str) -> bool | None:

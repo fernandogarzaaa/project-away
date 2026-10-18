@@ -90,6 +90,21 @@ def test_driver_state_rows_leave_a_working_driver_alone() -> None:
     assert res.fix is not None and res.fix.action == "retry_cameras"
 
 
+def test_driver_state_row_rejects_similar_names() -> None:
+    """Similar camera names must not match: "HD Webcam" must not pick up the
+    driver state for "HD Webcam Pro". A wrong-device fix recommendation is worse
+    than no driver-specific guidance."""
+    rows = [
+        {"name": "HD Webcam Pro", "status": "error", "code": 10, "meaning": "device cannot start"},
+    ]
+    # exact match works
+    assert ck._driver_state_row(rows, "HD Webcam Pro") == rows[0]
+    # similar but not identical names do NOT match
+    assert ck._driver_state_row(rows, "HD Webcam") is None
+    assert ck._driver_state_row(rows, "HD Webcam Pro Max") is None
+    assert ck._driver_state_row(rows, "") is None
+
+
 def test_prose_verdict_falls_back_without_structured_rows() -> None:
     res = ck.check_cameras(
         driver_env(
