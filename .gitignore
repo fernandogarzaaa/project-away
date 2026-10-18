@@ -30,3 +30,6 @@ squashfs-root/
 packaging/linux/appimagetool-*.AppImage
 packaging/linux/runtime-*
 .venv
+
+.mutation-logs/
+STATE.md

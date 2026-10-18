@@ -397,7 +397,7 @@ PC_CHECKS: tuple[tuple[str, str, Callable[[Any], list[Result]]], ...] = (
     ("notify", "Agent messages", ck.check_notification),
     ("secure_desktop", "Lock-screen detector", check_secure_desktop),
     ("echo", "Takeover timing", check_input_echo),
-    ("link", "Agent Link", check_link),
+    ("link", "Agents", check_link),
 )
 PC_CHECK_IDS = tuple(c[0] for c in PC_CHECKS)
 PC_LIMITS_S = {
