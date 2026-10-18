@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
+
+import numpy as np
 import pytest
 
 from away.face.commands import (
@@ -11,6 +14,8 @@ from away.face.commands import (
     brow_raise,
     mouth_open,
 )
+from away.face.gate import SpeechGate
+from away.face.speaker import pearson
 from away.face.speaking import SpeakingScorer, mouth_openness
 from away.face.tracking import FaceTracker
 
@@ -170,3 +175,56 @@ def test_wink_trigger_both_closed_no_fire() -> None:
     bs = {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.9}  # blink, not wink
     assert trig.update(0.0, bs) is None
     assert trig.update(0.5, bs) is None
+
+
+# speaker.py pearson (line 23 mutants)
+
+
+def test_pearson_identical() -> None:
+
+    a = np.array([1.0, 2.0, 3.0, 4.0])
+    assert pearson(a, a) == pytest.approx(1.0)
+
+
+def test_pearson_uncorrelated() -> None:
+
+    a = np.array([1.0, 2.0, 3.0, 4.0])
+    b = np.array([4.0, 3.0, 2.0, 1.0])
+    assert pearson(a, b) == pytest.approx(-1.0)
+
+
+def test_pearson_too_short() -> None:
+
+    assert pearson(np.array([1.0, 2.0]), np.array([1.0, 2.0])) == 0.0
+
+
+def test_pearson_mismatched_length() -> None:
+
+    assert pearson(np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])) == 0.0
+
+
+def test_pearson_zero_variance() -> None:
+
+    # Constant array: den = 0, returns 0.0 (tests den > 1e-12)
+    a = np.array([1.0, 1.0, 1.0, 1.0])
+    b = np.array([1.0, 2.0, 3.0, 4.0])
+    assert pearson(a, b) == 0.0
+
+
+# gate.py defaults (lines 38-45 mutants)
+
+
+def test_gate_defaults() -> None:
+    g = SpeechGate()
+    assert g.allow_without_face is True
+    # Verify defaults are stored (kills constant mutants)
+
+    sig = inspect.signature(SpeechGate.__init__)
+    assert sig.parameters["ambient_fraction"].default == 0.12
+    assert sig.parameters["loose_score"].default == 0.08
+    assert sig.parameters["pad_s"].default == 0.3
+    assert sig.parameters["starved_s"].default == 10.0
+    assert sig.parameters["presence_fraction"].default == 0.6
+    assert sig.parameters["min_loose"].default == 0.03
+    assert sig.parameters["baseline_frames"].default == 300
+    assert sig.parameters["baseline_min_frames"].default == 15
