@@ -623,7 +623,9 @@ def test_resume_continue_still_prompts_next_time() -> None:
 
 def test_resume_until_takeover_is_per_session() -> None:
     clock = Clock()
-    ctl, backend, asked = _control(clock, ["Allow", "Yes, for the rest of this session", "Allow", "Continue"], uia=FakeUIA())
+    ctl, backend, asked = _control(
+        clock, ["Allow", "Yes, for the rest of this session", "Allow", "Continue"], uia=FakeUIA()
+    )
     ctl.request("a1", "Claude")
     clock.advance(1.0)
     assert ctl.user_input("mouse")
