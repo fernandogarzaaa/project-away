@@ -11,11 +11,16 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
 3. **Takeover.** Any real input (physical mouse/keyboard - told apart from the agent's own input by
    :class:`~away.app.autopause.ManualInputGuard` and short echo windows: typing never hides a real mouse movement,
    and each typed chunk hides key presses for a moment only - or a hand gesture) pauses the agent instantly and
-   interrupts the action in progress; resuming needs a new approval. Global stop: Ctrl+Alt+Esc, saying "stop", or
-   holding an open palm ~1 s (never delayed by the short grace right after approval).
+   interrupts the action in progress. While paused a slim banner stays on screen ("Paused - you took over from
+   <agent>") with "Let <agent> continue" and "Stop" buttons whose click IS the answer: no second approval
+   round-trip through the agent. Resuming through the agent still needs a new approval. Global stop:
+   Ctrl+Alt+Esc, saying "stop", or holding an open palm ~1 s (never delayed by the short grace right after
+   approval).
 4. **No secrets, no shell.** Typing is refused into password fields (UI Automation ``IsPassword``; on Windows
    typing is refused altogether when UI Automation is unavailable) and into terminals; nothing works while the
-   secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools; Win+R / Win+X are
+   secure desktop (UAC / Ctrl+Alt+Del) is up; open_app refuses terminals and system tools, except the
+   hardcoded ``SAFE_SYSTEM_TOOLS`` allowlist launched straight through the shell (no keystrokes, no command
+   line) - opening one is navigation only, anything consequential inside it still asks first; Win+R / Win+X are
    blocked.
 5. **Risky clicks ask first.** Clicking an element named like Send / Submit / Pay / Buy / Purchase / Delete /
    Confirm / Install / Uninstall..., dragging onto or from one (the Recycle Bin, the Trash), or pressing Enter while
@@ -34,6 +39,7 @@ the "Are you sure?" prompts, screenshots and undo.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import threading
 import time
@@ -61,6 +67,7 @@ from away.agentlink import desktop
 __all__ = [
     "CONSEQUENTIAL_KEYS",
     "RISKY",
+    "SAFE_SYSTEM_TOOLS",
     "SHORTCUT_MODIFIERS",
     "ComputerControl",
     "ControlHooks",
@@ -76,6 +83,24 @@ ALLOW_SESSION = "Allow for this session"
 
 BLOCKED_COMBOS = ({"cmd", "r"}, {"cmd", "x"}, {"ctrl", "alt", "delete"}, {"ctrl", "shift", "esc"})
 BLOCKED_APPS = desktop.TERMINAL_PROCESSES
+# Allowlisted Windows system tools (proposal #2): the only system tools an agent may open, selected by a
+# hardcoded key - the launch target is hardcoded too, so no command line is ever built and the name cannot
+# smuggle one in. Opening one is navigation only: anything consequential done inside it still goes through
+# the normal ask-first rules. Terminals, PowerShell, regedit and mmc-for-other-snapins stay BLOCKED:
+# devmgmt.msc runs under mmc.exe, so it is launched by its .msc file path explicitly, not by unblocking mmc.
+# Task Manager is deliberately NOT allowlisted: its File > Run new task dialog executes arbitrary commands,
+# which would bypass the terminal block through an allowlisted tool.
+SAFE_SYSTEM_TOOLS: dict[str, str] = {
+    "device-manager": r"C:\Windows\System32\devmgmt.msc",
+    "windows-update": "ms-settings:windowsupdate",
+    "network": "ms-settings:network",
+    "bluetooth": "ms-settings:bluetooth",
+    "display": "ms-settings:display",
+    "sound": "ms-settings:sound",
+    "apps": "ms-settings:appsfeatures",
+    "storage": "ms-settings:storagesense",
+    "about": "ms-settings:about",
+}
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+&'-]{0,39}$")
 ENTER_KEYS = ("enter", "return")
 # v0.1.24 hardening: the moment after approval (the click or thumbs up that allowed it) is not a takeover, but only
@@ -99,10 +124,23 @@ ACTIONS = (
     "open_app",
     "open_url",
 )
+# An action sequence is one MCP call, not one grant: it is bounded so a single call cannot queue an unbounded
+# batch of input.
+SEQUENCE_MAX_STEPS = 25
 
 
 class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
+
+
+# v0.1.28: grant ends now tell the user in plain words ("time ran out", "you stopped it") so a silently
+# expired grant is not a mystery. Maps the internal end reasons to non-technical phrasing.
+END_CAUSE = {
+    "expired": "time ran out",
+    "stopped": "you stopped it",
+    "the user chose to stop": "you stopped it",
+    "the agent was disconnected": "it was disconnected",
+}
 
 
 @dataclass
@@ -160,6 +198,16 @@ class LogEntry:
 
 
 @dataclass
+class _ElementQuery:
+    """One agent's last ui_query: the foreground window fingerprint at query time plus the id -> Element
+    snapshot. An element id resolves only while the same window is still in the foreground."""
+
+    window: tuple[str, str, str, tuple[int, ...] | None] | None  # (title, process, class, rect)
+    elements: dict[str, desktop.Element]
+    generation: int = 0  # increments per agent per query; binds an id to one specific query attempt
+
+
+@dataclass
 class ControlHooks:
     """Platform access, injectable for tests."""
 
@@ -169,10 +217,13 @@ class ControlHooks:
     secure_desktop: Callable[[], bool] = desktop.secure_desktop_active
     grab: Callable[[], Any] = desktop.grab_screen
     open_url: Callable[[str], Any] | None = None
+    system_launcher: Callable[[str], Any] | None = None  # launch an allowlisted system tool (os.startfile)
     cursor_pos: Callable[[], tuple[int, int] | None] = lambda: None
     platform: str = ""
     overlay_on: Callable[[str], None] = lambda _name: None
     overlay_off: Callable[[], None] = lambda: None
+    # the takeover banner (proposal #16): shown instead of overlay_off() while the grant is paused
+    overlay_paused: Callable[[str], None] = lambda _name: None
     sleep: Callable[[float], None] = time.sleep
     engine: Any = None  # the shared ActionEngine in the app; None = a private one (tests, headless)
 
@@ -190,11 +241,13 @@ class ComputerControl:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         always_allowed: Callable[[str, str], bool] = lambda _agent_id, _cat: False,
         allow_always: Callable[[str, str], None] = lambda _agent_id, _cat: None,
+        notify: Callable[..., Any] | None = None,
     ) -> None:
         import sys
 
         self.hooks = hooks
         self.ask = ask
+        self.notify = notify  # plain-words toast when a grant ends; None = silent (tests, headless)
         self.ttl_s = float(ttl_s)
         self.clock = clock
         self.on_event = on_event
@@ -215,6 +268,12 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+        # v0.1.28 proposal #24 (hybrid grounding): each agent's last ui_query result: the foreground
+        # window fingerprint plus id -> Element. A pointer or keyboard action may pass element_id=...
+        # instead of coordinates; it resolves here, then acts as usual. Ids are per-agent: one agent's
+        # query never replaces another's, and an id stops resolving when the foreground window changes.
+        self._element_queries: dict[str, _ElementQuery] = {}
+        self._query_generations: dict[str, int] = {}  # agent -> last query generation number
 
     @property
     def bucket(self) -> Any:
@@ -341,10 +400,21 @@ class ComputerControl:
             if g is not None:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
+                # The grant is over: its agent's element ids must not outlive the session.
+                self._element_queries.pop(g.agent_id, None)
         if g is not None:
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
+            if self.notify is not None:
+                cause = END_CAUSE.get(reason, reason)
+                with contextlib.suppress(Exception):
+                    # a toast failure must never break grant teardown
+                    self.notify(
+                        f"{g.agent_name}'s turn with your computer just ended ({cause}).",
+                        level="info",
+                        agent=g.agent_name,
+                    )
 
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
@@ -359,6 +429,9 @@ class ComputerControl:
             self._end(reason)
         self.views.pop(agent_id, None)
         self.scales.pop(agent_id, None)
+        # Revocation invalidates the agent's element ids too: they must not survive disconnect.
+        with self._lock:
+            self._element_queries.pop(str(agent_id), None)
 
     # -------------------------------------------------------------- takeover
     def note_own_mouse(self, seconds: float = MOUSE_ECHO_S) -> None:
@@ -382,12 +455,47 @@ class ComputerControl:
                 return False  # our own key presses echoing back (one short window per typed chunk)
             g.paused = f"you used the {source}"
             g.cancel.set()  # stop the action in progress (typing, a drag) before its next step
+        # the banner stays up while paused ("Paused - you took over from <agent>", with buttons to continue or
+        # stop), instead of the border vanishing with no explanation
         with contextlib.suppress(Exception):
-            self.hooks.overlay_off()
+            self.hooks.overlay_paused(g.agent_name)
         self._emit("control.paused", {"agent": g.agent_name, "reason": g.paused})
         return True
 
+    def paused_banner_answer(self, answer: str) -> bool:
+        """The user answered the paused banner directly: the click IS the answer (no prompt round-trip).
+
+        "continue" resumes the grant without asking again (the banner click itself is covered by the same short
+        grace as an approval click, so it is not a takeover); anything else stops the grant. True when it acted
+        on a live grant; False when the grant had already ended another way (the banner closes with its stop
+        file, and a click on a stale banner does nothing).
+        """
+        with self._lock:
+            g = self.grant
+            if g is None:
+                return False
+            name = g.agent_name
+            stop = answer != "continue"
+            resumed = answer == "continue" and bool(g.paused)
+            if resumed:
+                g.paused = ""
+                g.cancel = threading.Event()  # the old takeover does not cancel new actions
+                self._grace_until = self.clock() + GRACE_S  # the banner click itself is not a takeover
+        if stop:
+            self._end("the user chose to stop")
+            return True
+        with contextlib.suppress(Exception):
+            self.hooks.overlay_on(name)  # back to the control border/banner (this clears the paused one)
+        if resumed:
+            self._emit("control.resumed", {"agent": name, "via": "paused banner"})
+        return True
+
     # ---------------------------------------------------------------- acting
+    def require_grant(self, agent_id: str) -> Grant:
+        """The live, unpaused grant for this agent (raises ControlRefused otherwise): the approved-session
+        gate for tools that ride the computer-control session, like the staged shell."""
+        return self._require(agent_id)
+
     def _require(self, agent_id: str) -> Grant:
         g = self._check_expiry()
         if g is None:
@@ -396,13 +504,20 @@ class ComputerControl:
             raise ControlRefused(f"{g.agent_name} is using the computer, not this agent")
         if g.paused:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
+        self._policy_check(agent_id)
+        return g
+
+    def _policy_check(self, agent_id: str) -> None:
+        """The engine's per-action policy (secure desktop, rate limit) without repeating the grant approval.
+
+        Called once per single action by :meth:`_require`, and once per sub-step by :meth:`act_sequence`, so a
+        batch cannot spend the whole rate-limit budget on one check."""
         try:  # the engine's agent policy: secure desktop (fail closed on Windows) and the rate limit
             self.engine.check(AGENT, agent_id, secure_desktop=self.hooks.secure_desktop, platform=self.platform)
         except ControlRefused:
             raise
         except ActionRefused as exc:
             raise ControlRefused(str(exc)) from None
-        return g
 
     def _confirm_risky(self, g: Grant, label: str, what: str) -> None:
         m = RISKY.search(label or "")
@@ -478,7 +593,138 @@ class ComputerControl:
     def _where(label: str, x: int, y: int) -> str:
         return f"'{label[:60]}'" if label.strip() else f"the spot at ({x}, {y})"
 
-    def _point(self, agent_id: str, x: Any, y: Any, element: str | None, from_image: bool) -> tuple[int, int, str]:
+    # v0.1.28 proposal #24 (hybrid grounding): UI Automation gives exact element bounds for free; raw pixel
+    # grounding is the weakest link. ui_query lists the foreground window's interactable elements with short
+    # ids; pointer and keyboard accept an element_id and resolve it to bounds, then act as with coordinates.
+    UI_QUERY_DEPTH = 4
+    UI_QUERY_NODES = 400
+    UI_QUERY_LIMIT = 200
+
+    def _window_fingerprint(self) -> tuple[str, str, str, tuple[int, ...] | None] | None:
+        """(title, process, class, rect) of the foreground window, or None when it cannot be told."""
+        try:
+            fg = self.hooks.foreground()
+        except Exception:
+            return None
+        if not fg:
+            return None
+        rect = fg.get("rect")
+        return (
+            str(fg.get("title", "")),
+            str(fg.get("process", "")),
+            str(fg.get("class", "")),
+            tuple(int(v) for v in rect) if rect else None,
+        )
+
+    def ui_query(self, agent_id: str) -> dict[str, Any]:
+        """The foreground window's interactable elements: ``[{id, name, role, bounds}]`` with screen-pixel
+        bounds. Ids belong to the querying agent only and stay valid until that agent's next query; an id
+        stops resolving when the foreground window changes, so a stale id can never click into a new window."""
+        aid = str(agent_id)
+        # Invalidate the prior registry at the START: a failed or incomplete query must not leave the old
+        # ids usable. The new registry is installed only on success below.
+        with self._lock:
+            self._element_queries.pop(aid, None)
+        uia = self.hooks.uia
+        if not getattr(uia, "available", False):
+            return {
+                "available": False,
+                "reason": str(getattr(uia, "reason", "UI Automation is not available on this system")),
+            }
+        try:
+            root = uia.tree(self.UI_QUERY_DEPTH, self.UI_QUERY_NODES)
+        except Exception as exc:  # the tree walk itself failed
+            return {"available": False, "reason": f"could not read the UI tree: {exc}"}
+        found: list[desktop.Element] = []
+        stack = [root] if root is not None else []
+        while stack and len(found) < self.UI_QUERY_LIMIT:
+            el = stack.pop()
+            if el.enabled and el.rect is not None:
+                found.append(el)
+            stack.extend(reversed(el.children or []))
+        registry: dict[str, desktop.Element] = {}
+        items: list[dict[str, Any]] = []
+        for i, el in enumerate(found, 1):
+            rect = el.rect
+            assert rect is not None  # filtered above
+            eid = f"e{i}"
+            registry[eid] = el
+            items.append({"id": eid, "name": el.name, "role": el.control_type, "bounds": list(rect)})
+        with self._lock:
+            gen = self._query_generations.get(aid, 0) + 1
+            self._query_generations[aid] = gen
+            self._element_queries[aid] = _ElementQuery(self._window_fingerprint(), registry, gen)
+        window: dict[str, str] | None = None
+        try:
+            fg = self.hooks.foreground()
+            if fg:
+                window = {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
+        except Exception:
+            window = None
+        self._emit("control.ui_query", {"count": len(items)})
+        return {"available": True, "window": window, "count": len(items), "elements": items}
+
+    def _resolve_element_id(self, agent_id: str, element_id: str) -> desktop.Element:
+        """A ui_query id back to its element. Refuses when the id is unknown, belongs to another agent's
+        query, or the foreground window changed since the query: a stale id never clicks."""
+        key = str(element_id).strip()
+        with self._lock:
+            query = self._element_queries.get(str(agent_id))
+        if query is None:
+            raise ControlRefused(f"unknown element id {element_id!r}; call ui_query first and use one of its ids")
+        current = self._window_fingerprint()
+        # A missing fingerprint must never compare equal to another missing fingerprint: without a valid
+        # foreground identity on both sides, the id cannot be trusted.
+        if query.window is None or current is None:
+            raise ControlRefused("could not verify the foreground window; run ui_query again and use a fresh id")
+        if query.window != current:
+            raise ControlRefused(
+                "the foreground window changed since your ui_query; run ui_query again and use a fresh id"
+            )
+        el = query.elements.get(key)
+        if el is None or el.center is None:
+            raise ControlRefused(f"unknown element id {element_id!r}; call ui_query first and use one of its ids")
+        self._revalidate_element(el)
+        return el
+
+    def _revalidate_element(self, el: desktop.Element) -> None:
+        """Refuse when the live UI no longer shows this element where the snapshot recorded it. Fail closed:
+        a missing, failed, or inconclusive live lookup refuses rather than falling back to the cached element."""
+        center = el.center
+        if center is None:
+            return
+        try:
+            live = self.hooks.uia.element_at(center[0], center[1])
+        except Exception as exc:
+            raise ControlRefused(
+                f"could not revalidate the element before acting ({exc}); run ui_query again and use a fresh id"
+            ) from exc
+        if live is None:
+            raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
+        if el.automation_id and live.automation_id:
+            if live.automation_id != el.automation_id:
+                raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
+            return
+        if el.name and (live.name != el.name or live.control_type != el.control_type):
+            raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
+
+    def _focus_element_id(self, g: Grant, agent_id: str, step: Callable[[], Any], element_id: str) -> str:
+        """Click the center of a ui_query element so keyboard input lands in it; returns the element's name."""
+        x, y, label = self._point(agent_id, None, None, None, element_id, False)
+        self._confirm_targets(g, f"click {self._where(label, x, y)}", [label])
+        self.note_own_mouse()
+        step().move(x, y)
+        step().click(1)
+        return label
+
+    def _point(
+        self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
+    ) -> tuple[int, int, str]:
+        if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
+            el = self._resolve_element_id(agent_id, element_id)
+            center = el.center
+            assert center is not None  # _resolve_element_id refuses bound-less elements
+            return int(center[0]), int(center[1]), el.name
         if element:
             if not getattr(self.hooks.uia, "available", False):
                 raise ControlRefused("acting by element name needs UI Automation (Windows); use coordinates")
@@ -559,9 +805,16 @@ class ComputerControl:
         kw: dict[str, Any],
         b: Any,
         a: Action,
+        *,
+        record: bool = True,
     ) -> dict[str, Any]:
         """One action inside the engine's :meth:`~away.actions_engine.ActionEngine.begin`: ``a.step()`` before
-        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish."""
+        every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish.
+
+        ``record=False`` is for :meth:`act_sequence`: the sub-step still gets its engine audit entry and all the
+        safety checks, but it does not append its own :class:`LogEntry` - the sequence records one entry with all
+        the sub-step detail.
+        """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
         before = None
@@ -571,7 +824,9 @@ class ComputerControl:
             before = None
         detail = ""
         if action in ("move", "click", "double_click", "right_click"):
-            x, y, label = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
+            x, y, label = self._point(
+                agent_id, kw.get("x"), kw.get("y"), kw.get("element"), kw.get("element_id"), bool(kw.get("from_image"))
+            )
             if action == "right_click":  # it only opens a menu: asks for a risky target only
                 self._confirm_risky(g, label, f"right-click '{label}'")
             elif action != "move":
@@ -591,9 +846,16 @@ class ComputerControl:
             if action == "move" and before is not None:
                 undo = {"move": list(before)}
         elif action == "drag":
-            x1, y1, l1 = self._point(agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image")))
+            x1, y1, l1 = self._point(
+                agent_id, kw.get("x"), kw.get("y"), kw.get("element"), kw.get("element_id"), bool(kw.get("from_image"))
+            )
             x2, y2, l2 = self._point(
-                agent_id, kw.get("x2"), kw.get("y2"), kw.get("to_element"), bool(kw.get("from_image"))
+                agent_id,
+                kw.get("x2"),
+                kw.get("y2"),
+                kw.get("to_element"),
+                kw.get("to_element_id"),
+                bool(kw.get("from_image")),
             )
             # both ends count: dropping a file on the Recycle Bin is as risky as clicking Delete
             self._confirm_targets(g, f"drag {self._where(l1, x1, y1)} to {self._where(l2, x2, y2)}", [l1, l2])
@@ -610,9 +872,14 @@ class ComputerControl:
         elif action == "scroll":
             dy = max(-50.0, min(50.0, float(kw.get("dy") or 0.0)))
             dx = max(-50.0, min(50.0, float(kw.get("dx") or 0.0)))
-            if kw.get("x") is not None or kw.get("element"):
+            if kw.get("x") is not None or kw.get("element") or kw.get("element_id"):
                 x, y, _l = self._point(
-                    agent_id, kw.get("x"), kw.get("y"), kw.get("element"), bool(kw.get("from_image"))
+                    agent_id,
+                    kw.get("x"),
+                    kw.get("y"),
+                    kw.get("element"),
+                    kw.get("element_id"),
+                    bool(kw.get("from_image")),
                 )
                 self.note_own_mouse()
                 step().move(x, y)
@@ -627,6 +894,10 @@ class ComputerControl:
             text = str(kw.get("text") or "")
             if not text or len(text) > 2000:
                 raise ControlRefused("type between 1 and 2000 characters at a time")
+            detail = f"{len(text)} characters"
+            if kw.get("element_id"):  # click the field first so the text lands there
+                tlabel = self._focus_element_id(g, agent_id, step, str(kw["element_id"]))
+                detail = f"{len(text)} characters into '{tlabel}'" if tlabel.strip() else detail
             self._typing_target_ok()
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
@@ -638,7 +909,6 @@ class ComputerControl:
                 chunk = text[i : i + TYPE_CHUNK]
                 self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
                 step().type_text(chunk)
-            detail = f"{len(text)} characters"
             undo = {"keys": ["cmd" if self.platform == "darwin" else "ctrl", "z"]}
         elif action == "press_keys":
             from away.control.keys import parse_combo
@@ -653,6 +923,8 @@ class ComputerControl:
                 raise ControlRefused(f"{combo} is blocked for agents")
             if not keys:
                 raise ControlRefused("no keys given")
+            if kw.get("element_id"):  # click the field first so the keys land there
+                self._focus_element_id(g, agent_id, step, str(kw["element_id"]))
             if any(k in ENTER_KEYS for k in keys) and len(keys) == 1:
                 self._confirm_keys(g, "press Enter")
             elif any(k in CONSEQUENTIAL_KEYS for k in keys) or any(k in SHORTCUT_MODIFIERS for k in keys):
@@ -681,21 +953,122 @@ class ComputerControl:
             detail = url[:200]
         elif action == "open_app":
             name = str(kw.get("name") or "").strip()
-            if not APP_NAME.match(name):
-                raise ControlRefused("give a plain app name, like 'Notepad' or 'Spotify'")
-            if BLOCKED_APPS.match(name.replace(" ", "")) or name.lower() in (
-                "command prompt",
-                "terminal",
-                "powershell",
-                "registry editor",
-            ):
-                raise ControlRefused("agents cannot open terminals or system tools")
-            self._open_app(name, step, wait)
-            detail = name
+            if kw.get("system"):
+                # Proposal #2: an allowlisted system tool, launched through the shell - no synthetic
+                # keystrokes, no command line built. The blocklist above stays untouched.
+                key = name.lower().replace(" ", "-")
+                target = SAFE_SYSTEM_TOOLS.get(key)
+                if target is None:
+                    raise ControlRefused("unknown system tool; use one of: " + ", ".join(sorted(SAFE_SYSTEM_TOOLS)))
+                self._open_system_tool(target)
+                detail = f"system tool '{key}'"
+            else:
+                if not APP_NAME.match(name):
+                    raise ControlRefused("give a plain app name, like 'Notepad' or 'Spotify'")
+                if BLOCKED_APPS.match(name.replace(" ", "")) or name.lower() in (
+                    "command prompt",
+                    "terminal",
+                    "powershell",
+                    "registry editor",
+                ):
+                    raise ControlRefused("agents cannot open terminals or system tools")
+                self._open_app(name, step, wait)
+                detail = name
         a.ok = True
+        foreground = self._foreground_state()
+        focused = self._focused_label()
+        if not record:
+            self._audit(g, action, detail, "done")
+            return {
+                "ok": True,
+                "action": action,
+                "detail": detail,
+                "log_id": "",
+                "undo": undo,
+                # the observed effect: what the desktop looks like right after the input landed, so the
+                # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+                "foreground": foreground,
+                "focused": focused,
+            }
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
-        return {"ok": True, "action": action, "detail": detail, "log_id": entry.id}
+        return {
+            "ok": True,
+            "action": action,
+            "detail": detail,
+            "log_id": entry.id,
+            "undo": undo,
+            # the observed effect: what the desktop looks like right after the input landed, so the
+            # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
+            "foreground": foreground,
+            "focused": focused,
+        }
+
+    def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
+        """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
+        still runs through :meth:`_act`, so the risky/unknown "Are you sure?" prompts, the password and terminal
+        refusals, the per-step engine audit and the per-step rate limit apply exactly as they do for single
+        actions - a batch is not a rubber stamp. Stops at the first refusal, cancel or takeover and reports how
+        far it got; a part-way stop or refusal still records one combined log entry with the completed steps."""
+        if not isinstance(steps, list) or not steps:
+            raise ControlRefused("sequence needs at least one step, e.g. [{'action': 'move', 'x': 10, 'y': 10}]")
+        if len(steps) > SEQUENCE_MAX_STEPS:
+            raise ControlRefused(f"a sequence is limited to {SEQUENCE_MAX_STEPS} steps at a time")
+        plan: list[tuple[str, dict[str, Any]]] = []
+        for i, s in enumerate(steps, 1):
+            if not isinstance(s, dict):
+                raise ControlRefused(f"step {i} must be an object like {{'action': 'move', ...}}")
+            action = s.get("action")
+            if action not in ACTIONS:
+                raise ControlRefused(f"step {i}: unknown action {action!r}; use {', '.join(ACTIONS)}")
+            plan.append((str(action), {k: v for k, v in s.items() if k != "action"}))
+        g = self._require(agent_id)
+        b = self.hooks.backend
+        done: list[dict[str, Any]] = []
+        try:
+            with self.engine.begin(
+                AGENT, "sequence", actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
+            ) as a:
+                for action, kw in plan:
+                    a.step()  # a pause, takeover or stop ends the batch before its next sub-step
+                    # one rate-limit token per sub-step, like one per single action: a batch must not spend
+                    # the whole budget on the single grant-time check
+                    self._policy_check(agent_id)
+                    done.append(self._act(g, agent_id, action, kw, b, a, record=False))
+        except ActionCancelled:
+            reason = g.paused or g.ended or "it was stopped"
+            self._log(
+                g,
+                "sequence",
+                f"stopped part-way after {len(done)} of {len(plan)} steps ({reason}): {self._seq_detail(done)}",
+                "stopped",
+                None,
+            )
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": reason})
+            raise ControlRefused(f"stopped part-way because {reason}") from None
+        except ControlRefused as exc:
+            # A refusal mid-batch (a denied "Are you sure?", a password field, a terminal, the rate limit):
+            # the earlier sub-steps already ran, so the action log still gets one combined entry - no silent gap.
+            self._log(
+                g,
+                "sequence",
+                f"refused after {len(done)} of {len(plan)} steps ({exc}): {self._seq_detail(done)}",
+                "refused",
+                None,
+            )
+            self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": str(exc)})
+            raise
+        detail = self._seq_detail(done)
+        undos = [r["undo"] for r in done if r.get("undo")]
+        undo: dict[str, Any] | None = {"sequence": undos} if undos else None
+        entry = self._log(g, "sequence", detail, "done", undo)
+        self._emit("control.action", {"agent": g.agent_name, "action": "sequence", "detail": detail, "id": entry.id})
+        return {"ok": True, "action": "sequence", "detail": detail, "log_id": entry.id, "steps": done}
+
+    @staticmethod
+    def _seq_detail(done: list[dict[str, Any]]) -> str:
+        """One line per completed sub-step, shared by the done / stopped / refused sequence log entries."""
+        return "; ".join(f"{n}. {r['action']}: {r['detail']}" for n, r in enumerate(done, 1))
 
     def _window_title(self) -> str:
         try:
@@ -703,6 +1076,16 @@ class ComputerControl:
         except Exception:
             fg = {}
         return str(fg.get("title", ""))
+
+    def _foreground_state(self) -> dict[str, str]:
+        """Best-effort post-action foreground window (title + process name). Never raises: if the hook
+        fails, the action already succeeded and the agent still gets its result, just without the
+        observed window state."""
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
     def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
@@ -722,9 +1105,27 @@ class ComputerControl:
         self.note_own_keys()
         step().key("enter")
 
+    def _open_system_tool(self, target: str) -> None:
+        """Launch an allowlisted ``SAFE_SYSTEM_TOOLS`` target through the shell: no synthetic keystrokes,
+        no command line is ever built (``target`` is hardcoded, never from agent input). Windows only."""
+        if self.platform != "win32":
+            raise ControlRefused("system tools are only available on Windows")
+        launcher = self.hooks.system_launcher
+        if launcher is not None:
+            launcher(target)
+            return
+        startfile = getattr(os, "startfile", None)
+        if startfile is None:  # not Windows (platform check above already covers this)
+            raise ControlRefused("system tools are only available on Windows")
+        startfile(target)
+
+    def _audit(self, g: Grant, action: str, detail: str, result: str) -> None:
+        """The engine's audit trail: one entry per action (or per sub-step of a sequence), never batched."""
+        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+
     def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
         e = LogEntry(uuid.uuid4().hex[:10], time.time(), g.agent_name, action, detail, result, "", undo, g.agent_id)
-        self.engine.audit(AGENT, g.agent_name, action, detail, result)
+        self._audit(g, action, detail, result)
         if self.log_folder is not None:
             try:
                 img = self.hooks.grab()
@@ -784,26 +1185,33 @@ class ComputerControl:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
         b = self.hooks.backend
         u = e.undo or {}
-        if "keys" in u:
+        sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
+        if any("keys" in s for s in sub):
             self.note_own_keys()
         else:
             self.note_own_mouse()
         source = USER if agent_id is None else AGENT
         try:
             with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
-                if "move" in u:
-                    a.step().move(int(u["move"][0]), int(u["move"][1]))
-                elif "scroll" in u:
-                    dy, dx = u["scroll"]
-                    if dy:
-                        a.step().scroll(dy)
-                    if dx and hasattr(b, "hscroll"):
-                        a.step().hscroll(dx)
-                elif "keys" in u and hasattr(b, "hotkey"):
-                    a.step().hotkey(list(u["keys"]))
+                for s in sub:
+                    self._apply_undo_step(a, b, s)
                 a.ok = True
         except ActionCancelled as exc:
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         e.result = "undone"
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}
+
+    @staticmethod
+    def _apply_undo_step(a: Action, b: Any, u: dict[str, Any]) -> None:
+        """Undo one undoable step (a single action's undo record, or one element of a sequence's)."""
+        if "move" in u:
+            a.step().move(int(u["move"][0]), int(u["move"][1]))
+        elif "scroll" in u:
+            dy, dx = u["scroll"]
+            if dy:
+                a.step().scroll(dy)
+            if dx and hasattr(b, "hscroll"):
+                a.step().hscroll(dx)
+        elif "keys" in u and hasattr(b, "hotkey"):
+            a.step().hotkey(list(u["keys"]))

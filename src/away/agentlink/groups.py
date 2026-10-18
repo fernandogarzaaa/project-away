@@ -1,5 +1,7 @@
 """Grouped tools (v0.1.21): the MCP tool list went from 37 tools to 15, which an agent can reason over.
 
+v0.1.28: 17 tools (``shell`` added).
+
 Related tools became one tool with an ``action`` argument (``settings(action="change", ...)``,
 ``pointer(action="click", ...)``). Each group action maps to an existing service method, so nothing below the MCP
 layer changed: every REST route (``/v1/settings/change``...) and every ``/v1/rpc/<method>`` name still works, and
@@ -21,7 +23,8 @@ class GroupAction:
     fixed: Mapping[str, Any] = field(default_factory=dict)  # always passed (e.g. act's action)
 
 
-POINT = ("x", "y", "element", "from_image")
+# v0.1.28 proposal #24: pointer and keyboard also accept element_id (a ui_query id) alongside coordinates.
+POINT = ("x", "y", "element", "element_id", "from_image")
 
 GROUPS: dict[str, dict[str, GroupAction]] = {
     "events": {
@@ -41,7 +44,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "remove": GroupAction("remove_preference", ("number",)),
     },
     "diagnostics": {
-        "run": GroupAction("run_diagnose", ("kind", "device", "seconds")),
+        "run": GroupAction("run_diagnose", ("kind", "device", "seconds", "quick")),
         "job": GroupAction("get_job", ("job_id",)),
         "record": GroupAction("record_session", ("seconds", "note")),
         "bundle": GroupAction("get_bundle", ("note",)),
@@ -57,18 +60,21 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "stop": GroupAction("stop_control"),
         "undo": GroupAction("undo_last_action"),
         "log": GroupAction("action_log", ("limit",)),
+        "sequence": GroupAction("act_sequence", ("steps",)),
     },
     "pointer": {
         "move": GroupAction("act", POINT, fixed={"action": "move"}),
         "click": GroupAction("act", POINT, fixed={"action": "click"}),
         "double_click": GroupAction("act", POINT, fixed={"action": "double_click"}),
         "right_click": GroupAction("act", POINT, fixed={"action": "right_click"}),
-        "drag": GroupAction("act", (*POINT, "x2", "y2", "to_element"), fixed={"action": "drag"}),
-        "scroll": GroupAction("act", ("dy", "dx", "x", "y", "element", "from_image"), fixed={"action": "scroll"}),
+        "drag": GroupAction("act", (*POINT, "x2", "y2", "to_element", "to_element_id"), fixed={"action": "drag"}),
+        "scroll": GroupAction(
+            "act", ("dy", "dx", "x", "y", "element", "element_id", "from_image"), fixed={"action": "scroll"}
+        ),
     },
     "keyboard": {
-        "type": GroupAction("act", ("text",), fixed={"action": "type_text"}),
-        "press": GroupAction("act", ("keys",), fixed={"action": "press_keys"}),
+        "type": GroupAction("act", ("text", "element_id"), fixed={"action": "type_text"}),
+        "press": GroupAction("act", ("keys", "element_id"), fixed={"action": "press_keys"}),
     },
     "inbox": {  # v0.1.22 "Talk to your agent"
         "list": GroupAction("inbox_list", ("unread_only",)),
@@ -78,6 +84,12 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
     "open": {
         "app": GroupAction("act", ("name",), fixed={"action": "open_app"}),
         "url": GroupAction("act", ("url",), fixed={"action": "open_url"}),
+        "system": GroupAction("act", ("name",), fixed={"action": "open_app", "system": True}),
+    },
+    "shell": {  # v0.1.28: staged shell (proposal #26)
+        "list": GroupAction("run_shell", (), fixed={"action": "list"}),
+        "run": GroupAction("run_shell", ("command", "argv", "why")),
+        "log": GroupAction("run_shell", ("limit",), fixed={"action": "log"}),
     },
 }
 
