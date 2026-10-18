@@ -72,8 +72,22 @@ def test_system_open_normalizes_the_name() -> None:
 
 def test_system_open_settings_page_uses_ms_settings_uri() -> None:
     ctl, _backend, launched = _control(Clock())
-    ctl.act("a1", "open_app", name="task-manager", system=True)
-    assert launched == [r"C:\Windows\System32\Taskmgr.exe"]
+    ctl.act("a1", "open_app", name="windows-update", system=True)
+    assert launched == ["ms-settings:windowsupdate"]
+
+
+def test_task_manager_is_not_allowlisted() -> None:
+    # Regression: Task Manager must stay out of the allowlist because its
+    # File > Run new task dialog executes arbitrary commands, which would
+    # bypass the terminal block through an allowlisted tool.
+    assert "task-manager" not in SAFE_SYSTEM_TOOLS
+    ctl, backend, launched = _control(Clock())
+    with pytest.raises(ControlRefused, match="unknown system tool"):
+        ctl.act("a1", "open_app", name="task-manager", system=True)
+    with pytest.raises(ControlRefused, match="unknown system tool"):
+        ctl.act("a1", "open_app", name="Task Manager", system=True)
+    assert launched == []
+    assert backend.calls == []
 
 
 def test_system_open_rejects_unknown_tools() -> None:
@@ -122,7 +136,6 @@ def test_plain_open_app_still_works_for_normal_apps() -> None:
 def test_allowlist_targets_are_hardcoded_and_shell_safe() -> None:
     assert set(SAFE_SYSTEM_TOOLS) == {
         "device-manager",
-        "task-manager",
         "windows-update",
         "network",
         "bluetooth",

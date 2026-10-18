@@ -88,9 +88,10 @@ BLOCKED_APPS = desktop.TERMINAL_PROCESSES
 # smuggle one in. Opening one is navigation only: anything consequential done inside it still goes through
 # the normal ask-first rules. Terminals, PowerShell, regedit and mmc-for-other-snapins stay BLOCKED:
 # devmgmt.msc runs under mmc.exe, so it is launched by its .msc file path explicitly, not by unblocking mmc.
+# Task Manager is deliberately NOT allowlisted: its File > Run new task dialog executes arbitrary commands,
+# which would bypass the terminal block through an allowlisted tool.
 SAFE_SYSTEM_TOOLS: dict[str, str] = {
     "device-manager": r"C:\Windows\System32\devmgmt.msc",
-    "task-manager": r"C:\Windows\System32\Taskmgr.exe",
     "windows-update": "ms-settings:windowsupdate",
     "network": "ms-settings:network",
     "bluetooth": "ms-settings:bluetooth",
