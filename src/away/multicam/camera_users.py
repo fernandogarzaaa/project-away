@@ -228,12 +228,19 @@ def holders(
         entries = read()
     except Exception:
         entries = []
-    now: list[dict[str, Any]] = [{"name": u.name, "path": u.path, "source": "registry"} for u in parse(entries)]
+    try:
+        now: list[dict[str, Any]] = [{"name": u.name, "path": u.path, "source": "registry"} for u in parse(entries)]
+    except Exception:
+        now = []
     have = {n["name"].lower() for n in now}
     for app in running_camera_apps(psutil_mod):
         if app["name"].lower() not in have:
             now.append({**app, "source": "process"})
-    return {"now": now, "last_used": last_used(entries)}
+    try:
+        last = last_used(entries)
+    except Exception:
+        last = []
+    return {"now": now, "last_used": last}
 
 
 def broadcast_settings_paths(environ: dict[str, str] | None = None) -> list[Path]:

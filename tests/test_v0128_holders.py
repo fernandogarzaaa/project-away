@@ -273,7 +273,8 @@ def test_holders_result_carries_registry_shape(tmp_path: Path, monkeypatch: pyte
     done = _wait_done(r, job.id)
     res = done.public()["result"]
     assert res["now"] == [{"name": "Zoom", "path": r"C:\Z", "source": "process"}]
-    assert done.public()["output"][0] == "holding a camera now: Zoom"
+    # a process hint must never be worded as a confirmed holder
+    assert done.public()["output"][0] == "may be holding a camera (running now, not confirmed): Zoom"
 
 
 def test_holders_output_lines_in_plain_words() -> None:
@@ -282,6 +283,27 @@ def test_holders_output_lines_in_plain_words() -> None:
     assert lines[1] == "used a camera before: Zoom (last ended 2026-10-16 12:00)"
 
 
+def test_holders_lines_distinguish_registry_from_process_hint() -> None:
+    # Windows-confirmed holders are stated as fact; a running app is a hint only
+    lines = jobs._holders_lines(
+        {
+            "now": [
+                {"name": "OBS Studio", "path": r"C:\obs", "source": "registry"},
+                {"name": "Zoom", "path": r"C:\Z", "source": "process"},
+            ],
+            "last_used": [],
+        }
+    )
+    assert lines[0] == "holding a camera now (Windows reports): OBS Studio"
+    assert lines[1] == "may be holding a camera (running now, not confirmed): Zoom"
+
+
 def test_now_timestamp_is_utc_iso() -> None:
     dt = datetime.fromisoformat(CU.filetime_to_iso(FT_2026_10_16_NOON))
     assert dt.tzinfo is not None and dt.utcoffset() == timezone.utc.utcoffset(None)
+
+
+def test_holders_survives_malformed_registry_data() -> None:
+    # junk timestamps must not crash the holders job; they degrade to empty
+    bad = [("WeirdApp", True, {"LastUsedTimeStart": "not-a-number", "LastUsedTimeStop": 0})]
+    assert CU.holders(read=lambda: bad) == {"now": [], "last_used": []}

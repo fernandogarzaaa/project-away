@@ -135,11 +135,22 @@ def benchmark(iterations: int = 30) -> dict[str, Any]:
 
 
 def _holders_lines(rep: dict[str, Any]) -> list[str]:
-    """Plain words for a holders report (v0.1.28)."""
+    """Plain words for a holders report (v0.1.28).
+
+    Windows-confirmed holders (source "registry") are stated as fact; running
+    camera apps (source "process") are a hint only and must never be reported
+    as holding the camera."""
     out: list[str] = []
-    if rep.get("now"):
-        out.append("holding a camera now: " + ", ".join(str(u.get("name")) for u in rep["now"]))
-    else:
+    now = rep.get("now") or []
+    confirmed = [u for u in now if u.get("source") == "registry"]
+    hinted = [u for u in now if u.get("source") != "registry"]
+    if confirmed:
+        out.append("holding a camera now (Windows reports): " + ", ".join(str(u.get("name")) for u in confirmed))
+    if hinted:
+        out.append(
+            "may be holding a camera (running now, not confirmed): " + ", ".join(str(u.get("name")) for u in hinted)
+        )
+    if not now:
         out.append("no app is holding a camera now")
     for e in rep.get("last_used") or []:
         at = str(e.get("at") or "")[:16].replace("T", " ")
