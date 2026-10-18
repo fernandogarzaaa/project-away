@@ -152,6 +152,7 @@ class _ElementQuery:
 
     window: tuple[str, str, str, tuple[int, ...] | None] | None  # (title, process, class, rect)
     elements: dict[str, desktop.Element]
+    generation: int = 0  # increments per agent per query; binds an id to one specific query attempt
 
 
 @dataclass
@@ -217,6 +218,7 @@ class ComputerControl:
         # instead of coordinates; it resolves here, then acts as usual. Ids are per-agent: one agent's
         # query never replaces another's, and an id stops resolving when the foreground window changes.
         self._element_queries: dict[str, _ElementQuery] = {}
+        self._query_generations: dict[str, int] = {}  # agent -> last query generation number
 
     @property
     def bucket(self) -> Any:
@@ -333,6 +335,8 @@ class ComputerControl:
             if g is not None:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
+                # The grant is over: its agent's element ids must not outlive the session.
+                self._element_queries.pop(g.agent_id, None)
         if g is not None:
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
@@ -351,6 +355,9 @@ class ComputerControl:
             self._end(reason)
         self.views.pop(agent_id, None)
         self.scales.pop(agent_id, None)
+        # Revocation invalidates the agent's element ids too: they must not survive disconnect.
+        with self._lock:
+            self._element_queries.pop(str(agent_id), None)
 
     # -------------------------------------------------------------- takeover
     def note_own_mouse(self, seconds: float = MOUSE_ECHO_S) -> None:
@@ -539,6 +546,11 @@ class ComputerControl:
         """The foreground window's interactable elements: ``[{id, name, role, bounds}]`` with screen-pixel
         bounds. Ids belong to the querying agent only and stay valid until that agent's next query; an id
         stops resolving when the foreground window changes, so a stale id can never click into a new window."""
+        aid = str(agent_id)
+        # Invalidate the prior registry at the START: a failed or incomplete query must not leave the old
+        # ids usable. The new registry is installed only on success below.
+        with self._lock:
+            self._element_queries.pop(aid, None)
         uia = self.hooks.uia
         if not getattr(uia, "available", False):
             return {
@@ -565,7 +577,9 @@ class ComputerControl:
             registry[eid] = el
             items.append({"id": eid, "name": el.name, "role": el.control_type, "bounds": list(rect)})
         with self._lock:
-            self._element_queries[str(agent_id)] = _ElementQuery(self._window_fingerprint(), registry)
+            gen = self._query_generations.get(aid, 0) + 1
+            self._query_generations[aid] = gen
+            self._element_queries[aid] = _ElementQuery(self._window_fingerprint(), registry, gen)
         window: dict[str, str] | None = None
         try:
             fg = self.hooks.foreground()
@@ -584,7 +598,12 @@ class ComputerControl:
             query = self._element_queries.get(str(agent_id))
         if query is None:
             raise ControlRefused(f"unknown element id {element_id!r}; call ui_query first and use one of its ids")
-        if query.window != self._window_fingerprint():
+        current = self._window_fingerprint()
+        # A missing fingerprint must never compare equal to another missing fingerprint: without a valid
+        # foreground identity on both sides, the id cannot be trusted.
+        if query.window is None or current is None:
+            raise ControlRefused("could not verify the foreground window; run ui_query again and use a fresh id")
+        if query.window != current:
             raise ControlRefused(
                 "the foreground window changed since your ui_query; run ui_query again and use a fresh id"
             )
@@ -595,17 +614,19 @@ class ComputerControl:
         return el
 
     def _revalidate_element(self, el: desktop.Element) -> None:
-        """Refuse when the live UI no longer shows this element where the snapshot recorded it. A missing or
-        inconclusive live lookup does not refuse: only a positive mismatch does."""
+        """Refuse when the live UI no longer shows this element where the snapshot recorded it. Fail closed:
+        a missing, failed, or inconclusive live lookup refuses rather than falling back to the cached element."""
         center = el.center
         if center is None:
             return
         try:
             live = self.hooks.uia.element_at(center[0], center[1])
-        except Exception:
-            return  # cannot confirm; the foreground-window check above already passed
+        except Exception as exc:
+            raise ControlRefused(
+                f"could not revalidate the element before acting ({exc}); run ui_query again and use a fresh id"
+            ) from exc
         if live is None:
-            return  # cannot confirm
+            raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
         if el.automation_id and live.automation_id:
             if live.automation_id != el.automation_id:
                 raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")

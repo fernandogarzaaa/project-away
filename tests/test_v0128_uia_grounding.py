@@ -56,7 +56,19 @@ class FakeUIA:
         return None
 
     def element_at(self, x: int, y: int) -> Element | None:
-        return None
+        # Return the deepest element containing (x, y), so revalidation can confirm it is still there.
+        def find(el: Element) -> Element | None:
+            for child in el.children or []:
+                found = find(child)
+                if found is not None:
+                    return found
+            if el.rect is not None:
+                left, top, right, bottom = el.rect
+                if left <= x <= right and top <= y <= bottom:
+                    return el
+            return None
+
+        return find(self._root) if self._root is not None else None
 
     def focused(self) -> Element | None:
         return self._focused
@@ -76,6 +88,10 @@ def _control(
         asked.append({"question": question, "options": options, **kw})
         return {"answer": queue.pop(0) if queue else None, "method": "click"}
 
+    # Element-id resolution requires a verifiable foreground window; default to one so tests exercise
+    # the real path instead of the missing-fingerprint refusal.
+    if fg is None:
+        fg = {"title": "Mail", "process": "mail.exe", "class": "Window", "rect": (0, 0, 800, 600)}
     hooks = ControlHooks(
         backend=backend,
         platform="linux",
@@ -329,9 +345,11 @@ def test_element_ids_are_isolated_per_agent() -> None:
     fg = {"title": "Mail", "process": "mail.exe"}
     ctl, backend, _ = _control(clock, ["Allow", "Allow"], uia=uia, fg=fg)
     ctl.ui_query("a1")  # a1 sees Mail: e2 = Send at (120, 110)
+    mail_root = uia._root
     cancel = Element("Cancel", "ButtonControl", rect=(0, 0, 10, 10))
     uia._root = Element("Dialog", "WindowControl", rect=(0, 0, 40, 40), children=[cancel])
     ctl.ui_query("a2")  # a2 sees Dialog: e2 = Cancel at (5, 5)
+    uia._root = mail_root  # restore: a1's revalidation sees the Mail tree again
     ctl.request("a1", "Claude")
     ctl.act("a1", "click", element_id="e2")  # a1's e2 is still Send, not a2's Cancel
     assert backend.calls[-2:] == [("move", (120, 110)), ("click", (1,))]
@@ -364,3 +382,149 @@ def test_element_id_still_works_when_window_unchanged() -> None:
     ctl.ui_query("a1")
     ctl.act("a1", "click", element_id="e3")  # Subject: same window, still there
     assert backend.calls[-2:] == [("move", (25, 10)), ("click", (1,))]
+
+
+# ------------------------------------------------- re-audit regression tests (2026-10-18)
+# These cover the stale-element safety risks: failed queries must invalidate, missing fingerprints must
+# not compare equal, and inconclusive revalidation must fail closed.
+
+
+def test_failed_query_invalidates_prior_registry() -> None:
+    """A ui_query that fails (UIA unavailable) must not leave the old ids usable."""
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.act("a1", "click", element_id="e3")  # works before the failure
+    # UIA becomes unavailable: the next query fails.
+    from away.agentlink import desktop
+
+    ctl.hooks.uia = desktop.NullUIA()
+    res = ctl.ui_query("a1")
+    assert res["available"] is False
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e3")  # the old id is gone
+
+
+def test_query_failure_on_tree_walk_invalidates() -> None:
+    """An exception during the tree walk invalidates the prior registry."""
+
+    class BrokenUIA(FakeUIA):
+        def tree(self, max_depth: int = 3, max_nodes: int = 200):  # type: ignore[override]
+            raise RuntimeError("tree walk exploded")
+
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.hooks.uia = BrokenUIA()
+    res = ctl.ui_query("a1")
+    assert res["available"] is False and "could not read the UI tree" in res["reason"]
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e2")
+
+
+def test_missing_fingerprint_refuses() -> None:
+    """A missing foreground fingerprint must not compare equal to another missing one."""
+    clock = Clock()
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=None)
+    # Override the default fg with None to simulate an untellable foreground.
+    ctl.hooks.foreground = lambda: None
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")  # query succeeds but the window fingerprint is None
+    with pytest.raises(ControlRefused, match="could not verify the foreground window"):
+        ctl.act("a1", "click", element_id="e1")
+
+
+def test_fingerprint_change_between_query_and_action_refuses() -> None:
+    """The foreground window changing after the query invalidates the ids."""
+    clock = Clock()
+    fg_mail = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    fg_calc = {"title": "Calc", "process": "calc.exe", "class": "W", "rect": (0, 0, 400, 300)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg_mail)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.hooks.foreground = lambda: fg_calc  # user alt-tabbed
+    with pytest.raises(ControlRefused, match="foreground window changed"):
+        ctl.act("a1", "click", element_id="e2")
+
+
+def test_inconclusive_revalidation_fails_closed() -> None:
+    """element_at returning None (cannot confirm) refuses instead of using the cached element."""
+
+    class NoHitUIA(FakeUIA):
+        def element_at(self, x: int, y: int):  # type: ignore[override]
+            return None  # UIA cannot tell what is at that point
+
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=NoHitUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    with pytest.raises(ControlRefused, match="gone or has moved"):
+        ctl.act("a1", "click", element_id="e3")
+
+
+def test_revalidation_exception_fails_closed() -> None:
+    """element_at raising refuses instead of falling back to the cached element."""
+
+    class ExplodingUIA(FakeUIA):
+        def element_at(self, x: int, y: int):  # type: ignore[override]
+            raise RuntimeError("UIA disconnected")
+
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=ExplodingUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    with pytest.raises(ControlRefused, match="could not revalidate"):
+        ctl.act("a1", "click", element_id="e2")
+
+
+def test_revoke_clears_element_ids() -> None:
+    """Revoking the agent invalidates its element ids."""
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow", "Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.revoke_agent("a1")
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e1")
+
+
+def test_grant_end_clears_element_ids() -> None:
+    """Ending the grant (session termination) invalidates the agent's element ids."""
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow", "Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.stop("test ended the session")
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e1")
+
+
+def test_empty_tree_clears_prior_ids() -> None:
+    """A successful query returning no elements clears the old registry."""
+
+    class EmptyUIA(FakeUIA):
+        def tree(self, max_depth: int = 3, max_nodes: int = 200):  # type: ignore[override]
+            from away.agentlink.desktop import Element
+
+            return Element("Empty", "WindowControl", rect=(0, 0, 10, 10), enabled=False)
+
+    clock = Clock()
+    fg = {"title": "Mail", "process": "mail.exe", "class": "W", "rect": (0, 0, 800, 600)}
+    ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=fg)
+    ctl.request("a1", "Claude")
+    ctl.ui_query("a1")
+    ctl.hooks.uia = EmptyUIA()
+    res = ctl.ui_query("a1")
+    assert res["available"] is True and res["count"] == 0
+    with pytest.raises(ControlRefused, match="unknown element id"):
+        ctl.act("a1", "click", element_id="e1")
