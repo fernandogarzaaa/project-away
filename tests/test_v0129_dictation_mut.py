@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
-from test_voice import FakeASR, ListSink, RuleCleaner, make_session, utterance
-
 from away.voice.dictation import DictationResult, DictationSession
+from test_voice import FakeASR, ListSink, RuleCleaner, make_session, utterance
 
 
 def test_cancel_discards_without_transcribing() -> None:
@@ -22,7 +21,7 @@ def test_cancel_discards_without_transcribing() -> None:
 
 
 def test_command_handler_intercepts() -> None:
-    from test_voice import Clock, EnergyVAD, EventBus, SR
+    from test_voice import SR, Clock, EnergyVAD, EventBus
 
     handled = []
 
@@ -44,7 +43,7 @@ def test_command_handler_intercepts() -> None:
 
 
 def test_command_handler_declines() -> None:
-    from test_voice import Clock, EnergyVAD, EventBus, SR
+    from test_voice import SR, Clock, EnergyVAD, EventBus
 
     def handler(text: str) -> bool:
         return False
@@ -61,7 +60,7 @@ def test_command_handler_declines() -> None:
 
 
 def test_command_handler_empty_raw_not_called() -> None:
-    from test_voice import Clock, EnergyVAD, EventBus, SR
+    from test_voice import SR, Clock, EnergyVAD, EventBus
 
     called = []
 
@@ -119,9 +118,8 @@ def test_cleaner_empty_returns_empty_status() -> None:
         def clean(self, text: str, context: str | None = None) -> str:
             return ""
 
-    from test_voice import SR, EnergyVAD, FakeASR, ListSink
-
     from away.voice.dictation import DictationSession
+    from test_voice import SR, EnergyVAD, FakeASR, ListSink
 
     s = DictationSession(FakeASR(["hello world"]), EmptyCleaner(), ListSink(), EnergyVAD(SR))
     s.start()
@@ -146,7 +144,7 @@ def test_feed_2d_chunk_flattened() -> None:
 def test_seconds_calculation_affects_silence_phrase() -> None:
     # Tests len(speech)/self.sr mutant (line 133): seconds must be divided, not multiplied
     # A very short utterance with a silence phrase should be filtered
-    from test_voice import Clock, EnergyVAD, EventBus, SR
+    from test_voice import SR, Clock, EnergyVAD, EventBus
 
     bus = EventBus()
     asr = FakeASR(["um"])  # "um" is a silence phrase
