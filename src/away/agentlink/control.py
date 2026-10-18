@@ -1010,13 +1010,22 @@ class ComputerControl:
         Clicks and key presses can't be put back."""
         ids = set(item_ids)
         undone: list[str] = []
+        failed: list[str] = []
         while True:
             try:
                 r = self._undo(None, only_ids=ids)
-            except ControlRefused:
+            except ControlRefused as exc:
+                # "nothing that can be undone" means we are done (all undoable items
+                # handled). Any other refusal is a real failure; report it.
+                if "nothing that can be undone" not in str(exc):
+                    failed.append(str(exc))
                 break
             undone.append(describe_action(r["undone"], r["detail"]))
-        return {"undone": undone, "count": len(undone)}
+        out: dict[str, Any] = {"undone": undone, "count": len(undone)}
+        if failed:
+            out["failed"] = failed
+            out["partial"] = True
+        return out
 
     def _undo(self, agent_id: str | None, only_ids: set[str] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -1031,6 +1040,12 @@ class ComputerControl:
                 ),
                 None,
             )
+            if e is not None:
+                # Claim it under the lock so a concurrent undo cannot select the same
+                # entry. The result is set to "undone" after the undo completes; if the
+                # undo fails part-way, the entry stays "undoing" and will not be
+                # retried (a partial undo is not safe to repeat).
+                e.result = "undoing"
         if e is None:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
         b = self.hooks.backend

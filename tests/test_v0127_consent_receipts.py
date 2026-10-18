@@ -300,3 +300,78 @@ def test_tray_recent_activity_opens_the_agent_link_tab(monkeypatch: pytest.Monke
     argv = seen[0]
     assert "--tab" in argv
     assert argv[argv.index("--tab") + 1] == "Agent Link"
+
+
+def test_undo_all_reports_partial_failure() -> None:
+    """Re-audit: if an undo is cancelled part-way, the response must say so.
+
+    The caller needs to know that not everything was put back, not just a
+    count of what succeeded.
+    """
+    from away.agentlink.service import ControlRefused
+
+    clock = Clock()
+    ctl, _, _, _ = _control(clock, answers=["Allow"])
+    ctl.hooks.cursor_pos = lambda: (50, 60)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "type_text", text="hello")
+    ctl.act("a1", "type_text", text="world")
+    g = ctl.grant
+    assert g is not None
+    ctl.stop("stopped")
+    # Simulate: grant already ended, get receipt
+    receipt = ctl.receipt(g)
+    ids = [i["id"] for i in receipt["items"]]
+
+    # Make the second undo raise ActionCancelled (simulating user takeover).
+    orig_undo = ctl._undo
+    calls = [0]
+
+    def flaky_undo(agent_id: str | None, only_ids: set[str] | None = None) -> dict[str, object]:
+        calls[0] += 1
+        if calls[0] == 2:
+            raise ControlRefused("stopped part-way because the person took over")
+        return orig_undo(agent_id, only_ids=only_ids)
+
+    ctl._undo = flaky_undo  # type: ignore[method-assign]
+    try:
+        res = ctl.undo_all_by_user(ids)
+    finally:
+        ctl._undo = orig_undo  # type: ignore[method-assign]
+
+    assert res["count"] == 1, "one undo succeeded before the failure"
+    assert res.get("partial") is True, "partial failure must be flagged"
+    assert "failed" in res, "the failure reason must be reported"
+    assert "took over" in res["failed"][0]
+
+
+def test_concurrent_undo_cannot_double_undo() -> None:
+    """Re-audit: two concurrent undo attempts must not undo the same action twice.
+
+    The entry is claimed (result="undoing") under the lock before the undo runs,
+    so a second selector cannot pick it.
+    """
+    clock = Clock()
+    ctl, _, _, _ = _control(clock, answers=["Allow"])
+    ctl.hooks.cursor_pos = lambda: (50, 60)
+    ctl.request("a1", "Claude")
+    ctl.act("a1", "type_text", text="hello")
+    g = ctl.grant
+    assert g is not None
+    ctl.stop("stopped")
+
+    # Manually mark the entry as "undoing" (simulating a concurrent undo in progress).
+    entry = next(e for e in ctl.log if e.undo is not None)
+    entry.result = "undoing"
+
+    # A second undo attempt must not select it.
+    from away.agentlink.service import ControlRefused
+
+    with __import__("pytest").raises(ControlRefused, match="nothing that can be undone"):
+        ctl._undo("a1")
+
+    # The receipt must not list it as undoable either.
+    receipt = ctl.receipt(g)
+    for item in receipt["items"]:
+        if item["id"] == entry.id:
+            assert item["undoable"] is False, "an entry being undone is not undoable"
