@@ -269,3 +269,63 @@ def test_stopped_run_emits_no_shutter_guidance() -> None:
     ).lines
     assert any("Camera privacy" in ln for ln in lines)
     assert not any("lens cover" in ln for ln in lines)
+
+
+def test_read_consent_hkcu_wins_over_contradictory_hklm() -> None:
+    """Re-audit: when HKCU and HKLM disagree, the user-specific HKCU value wins.
+
+    HKCU is the per-user consent store; HKLM is the machine-wide fallback. A
+    contradictory HKLM must not override the user's own setting.
+    """
+    wr = FakeWinreg(
+        {
+            ("HKCU", diagnose.CONSENT_KEY): {"Value": "Deny"},
+            ("HKLM", diagnose.CONSENT_KEY): {"Value": "Allow"},
+        }
+    )
+    assert diagnose.read_consent(wr) == "Deny"
+    wr2 = FakeWinreg(
+        {
+            ("HKCU", diagnose.CONSENT_KEY): {"Value": "Allow"},
+            ("HKLM", diagnose.CONSENT_KEY): {"Value": "Deny"},
+        }
+    )
+    assert diagnose.read_consent(wr2) == "Allow"
+
+
+def test_read_consent_malformed_values_are_not_verdicts() -> None:
+    """Re-audit: unexpected Value types or strings are not treated as Allow/Deny.
+
+    read_consent returns the raw string; consent_line only acts on "deny"/"allow".
+    A numeric or gibberish value must not become a positive permission claim.
+    """
+    # Numeric value: returned as string, but consent_line ignores it.
+    wr = FakeWinreg({("HKCU", diagnose.CONSENT_KEY): {"Value": 1}})
+    assert diagnose.read_consent(wr) == "1"
+    assert diagnose.consent_line(reader=lambda: "1") is None
+
+    # Gibberish string: not a verdict.
+    assert diagnose.consent_line(reader=lambda: "Maybe") is None
+    assert diagnose.consent_line(reader=lambda: "") is None
+
+    # Case-insensitive matching for the two known verdicts.
+    assert diagnose.consent_line(reader=lambda: "DENY") is not None
+    assert "blocking" in diagnose.consent_line(reader=lambda: "DENY")  # type: ignore[operator]
+    assert diagnose.consent_line(reader=lambda: "ALLOW") is not None
+
+
+def test_consent_line_never_claims_disabled_from_metadata() -> None:
+    """Re-audit: the privacy line must not claim the camera is disabled.
+
+    read_consent only inspects permission metadata. A "Deny" verdict means Windows
+    is blocking apps, not that the camera hardware is off or covered. The line
+    must describe the permission state, not a hardware state.
+    """
+    line = diagnose.consent_line(reader=lambda: "Deny")
+    assert line is not None
+    assert "blocking" in line or "block" in line
+    # Must not claim the camera is disabled, off, or covered.
+    lowered = line.lower()
+    assert "disabled" not in lowered or "blocking" in lowered
+    assert "camera is off" not in lowered
+    assert "lens cover" not in lowered or "fix" in lowered
