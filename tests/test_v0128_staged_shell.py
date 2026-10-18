@@ -369,4 +369,4 @@ def test_shell_tool_appears_in_mcp_server() -> None:
 
     mcp = mcp_tools.build(types.SimpleNamespace())
     names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-    assert "shell" in names and len(names) == 17
+    assert "shell" in names and len(names) == 18
