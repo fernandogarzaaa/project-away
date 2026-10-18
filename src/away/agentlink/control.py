@@ -503,7 +503,8 @@ class ComputerControl:
         gate for tools that ride the computer-control session, like the staged shell."""
         return self._require(agent_id)
 
-    def _require(self, agent_id: str) -> Grant:
+    def _require_grant(self, agent_id: str) -> Grant:
+        """The live, unpaused grant for this agent, without consuming a budget step."""
         g = self._check_expiry()
         if g is None:
             raise ControlRefused("not allowed to use the computer right now; call request_control first")
@@ -511,13 +512,21 @@ class ComputerControl:
             raise ControlRefused(f"{g.agent_name} is using the computer, not this agent")
         if g.paused:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
-        self._policy_check(agent_id)
+        return g
+
+    def _consume_step(self, g: Grant) -> None:
+        """Spend one step of the session's budget; refuses in plain words when the budget is exhausted."""
         # v0.1.28: the per-session step budget. Each action (and undo) counts one step; an exhausted session
         # refuses politely, in plain words, until the person approves again (a new grant = a fresh budget).
         with self._lock:
             if g.steps_used >= g.step_budget:
                 raise ControlRefused(BUDGET_EXHAUSTED.format(budget=g.step_budget))
             g.steps_used += 1
+
+    def _require(self, agent_id: str) -> Grant:
+        g = self._require_grant(agent_id)
+        self._policy_check(agent_id)
+        self._consume_step(g)
         return g
 
     def _policy_check(self, agent_id: str) -> None:
@@ -877,7 +886,17 @@ class ComputerControl:
             if action not in ACTIONS:
                 raise ControlRefused(f"step {i}: unknown action {action!r}; use {', '.join(ACTIONS)}")
             plan.append((str(action), {k: v for k, v in s.items() if k != "action"}))
-        g = self._require(agent_id)
+        g = self._require_grant(agent_id)
+        self._policy_check(agent_id)
+        # v0.1.28: a sequence spends one budget step per sub-step, like one per single action. It must fit
+        # in the remaining budget before it starts: a batch cannot spend steps it does not have.
+        with self._lock:
+            remaining = g.step_budget - g.steps_used
+        if len(plan) > remaining:
+            raise ControlRefused(
+                f"that sequence needs {len(plan)} steps but only {max(0, remaining)} are left in this "
+                "session; use a shorter sequence or ask the person to approve again for a fresh budget"
+            )
         b = self.hooks.backend
         done: list[dict[str, Any]] = []
         try:
@@ -889,6 +908,7 @@ class ComputerControl:
                     # one rate-limit token per sub-step, like one per single action: a batch must not spend
                     # the whole budget on the single grant-time check
                     self._policy_check(agent_id)
+                    self._consume_step(g)  # one budget step per executed sub-step
                     done.append(self._act(g, agent_id, action, kw, b, a, record=False))
         except ActionCancelled:
             reason = g.paused or g.ended or "it was stopped"

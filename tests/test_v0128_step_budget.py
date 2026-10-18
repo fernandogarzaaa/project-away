@@ -284,3 +284,44 @@ def test_gui_model_roundtrips_the_budget_and_the_trail_switch(tmp_path: Path) ->
     cfg, _ = cfgmod.load(cfg_path)
     assert cfg.agent_link.control_step_budget == 1000
     assert cfg.agent_link.control_audit_trail is False
+
+
+def test_a_sequence_consumes_one_step_per_sub_step(tmp_path: Path) -> None:
+    ctl = _control(Clock(), tmp_path, step_budget=10)
+    _session(ctl)
+    res = ctl.act_sequence(
+        "a1",
+        [
+            {"action": "move", "x": 1, "y": 1},
+            {"action": "move", "x": 2, "y": 2},
+            {"action": "move", "x": 3, "y": 3},
+        ],
+    )
+    assert res["ok"] is True and len(res["steps"]) == 3
+    assert ctl.grant is not None and ctl.grant.steps_used == 3  # not 1 for the outer call
+
+
+def test_a_sequence_cannot_exceed_the_remaining_budget(tmp_path: Path) -> None:
+    ctl = _control(Clock(), tmp_path, step_budget=3)
+    _session(ctl)
+    ctl.act("a1", "move", x=1, y=1)  # 2 steps left
+    with pytest.raises(ControlRefused, match="only 2 are left"):
+        ctl.act_sequence(
+            "a1",
+            [
+                {"action": "move", "x": 2, "y": 2},
+                {"action": "move", "x": 3, "y": 3},
+                {"action": "move", "x": 4, "y": 4},
+            ],
+        )
+    assert ctl.grant is not None and ctl.grant.steps_used == 1  # refused up front: nothing ran
+    ok = ctl.act_sequence("a1", [{"action": "move", "x": 2, "y": 2}, {"action": "move", "x": 3, "y": 3}])
+    assert ok["ok"] is True and ctl.grant.steps_used == 3
+
+
+def test_an_exhausted_budget_blocks_sequences_too(tmp_path: Path) -> None:
+    ctl = _control(Clock(), tmp_path, step_budget=1)
+    _session(ctl)
+    ctl.act("a1", "move", x=1, y=1)
+    with pytest.raises(ControlRefused, match="only 0 are left"):
+        ctl.act_sequence("a1", [{"action": "move", "x": 2, "y": 2}])
