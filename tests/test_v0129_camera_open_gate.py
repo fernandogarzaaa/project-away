@@ -471,3 +471,69 @@ def test_queued_open_fails_promptly_if_handover_finishes_while_waiting_for_gate(
     finally:
         capture._open_gate.release()
         t.join(timeout=5)
+
+
+def test_handover_does_not_report_free_while_native_open_holds_gate() -> None:
+    """wait_devices_free must not return True while a native open holds the gate.
+
+    Regression test for the hand-over/native-open race: the gate acquire inside
+    wait_devices_free is what stops it declaring the devices free mid-open.
+    """
+    with capture._lock:
+        capture._opening += 1
+    capture._open_gate.acquire()
+    try:
+        assert capture.wait_devices_free(timeout=0.5) is False
+    finally:
+        capture._open_gate.release()
+        with capture._lock:
+            capture._opening -= 1
+
+
+def test_handover_waits_for_gate_release_then_reports_free() -> None:
+    """A hand-over blocked on the gate proceeds once the native open finishes."""
+    with capture._lock:
+        capture._opening += 1
+    capture._open_gate.acquire()
+    outcome: dict[str, bool] = {}
+
+    def run() -> None:
+        outcome["result"] = capture.wait_devices_free(timeout=5.0)
+
+    t = threading.Thread(target=run, name="test-handover")
+    t.start()
+    try:
+        time.sleep(0.3)
+        assert t.is_alive(), "hand-over returned while the gate was still held"
+    finally:
+        capture._open_gate.release()
+        with capture._lock:
+            capture._opening -= 1
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert outcome.get("result") is True
+
+
+def test_handover_acquires_gate_before_reporting_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wait_devices_free must take _open_gate before it can declare devices free.
+
+    The gate is what makes the free declaration atomic with respect to a native
+    open in flight: without it, an open could enter _open_camera after the drain
+    check and the hand-over would report free mid-open.
+    """
+    acquired: list[bool] = []
+    real_gate = capture._open_gate
+
+    class RecordingGate:
+        def acquire(self, timeout: float = -1) -> bool:
+            acquired.append(True)
+            return real_gate.acquire(timeout=timeout)
+
+        def release(self) -> None:
+            real_gate.release()
+
+    monkeypatch.setattr(capture, "_open_gate", RecordingGate())
+    assert capture.wait_devices_free(timeout=1.0) is True
+    assert acquired, "hand-over declared free without taking the gate"
