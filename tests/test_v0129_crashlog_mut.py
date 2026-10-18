@@ -423,11 +423,12 @@ def test_summarize_native_counts_repeated_codes() -> None:
     assert "x2" in out  # count incremented (lines 241-242)
 
 
-def test_fold_native_folds_dead_process_file(tmp_path: Path) -> None:
+def test_fold_native_folds_dead_process_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     logs = tmp_path / "logs"
     logs.mkdir(parents=True)
-    # Create a native file for a dead PID
-    dead_pid = 2**30
+    # Mock _pid_alive: Windows PIDs wrap, 2**30 may appear alive
+    monkeypatch.setattr(crashlog, "_pid_alive", lambda pid: False)
+    dead_pid = 12345
     (logs / f"{crashlog.NATIVE_PREFIX}{dead_pid}.log").write_text("Fatal Python error: boom\n", encoding="utf-8")
     n = crashlog.fold_native(logs)
     assert n == 1
@@ -584,11 +585,12 @@ def test_install_enables_faulthandler(crash_env: Any) -> None:
     assert fh.enabled[0]["all_threads"] is True
 
 
-def test_install_folds_native_on_start(crash_env: Any) -> None:
+def test_install_folds_native_on_start(crash_env: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     folder, fh, sysm, thr = crash_env
     folder.mkdir(parents=True, exist_ok=True)
-    # Pre-create a native file for a dead PID
-    dead = 2**30
+    # Mock _pid_alive: Windows PIDs wrap, 2**30 may appear alive
+    monkeypatch.setattr(crashlog, "_pid_alive", lambda pid: False)
+    dead = 12345
     (folder / f"{crashlog.NATIVE_PREFIX}{dead}.log").write_text("Fatal Python error: x\n", encoding="utf-8")
     _install(crash_env)  # install calls fold_native (line 383 mutant)
     assert not (folder / f"{crashlog.NATIVE_PREFIX}{dead}.log").exists()
