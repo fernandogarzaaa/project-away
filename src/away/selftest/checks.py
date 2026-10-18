@@ -399,7 +399,7 @@ LINKS = (
 def check_link(env: Env) -> list[Result]:
     k = env.link()
     if not k.get("enabled", True):
-        return [_r("link", "Agent Link", SKIP, "Agent Link is turned off.")]
+        return [_r("link", "Agents", SKIP, "Agent Link is turned off.")]
     out = []
     srv = k.get("server") or {}
     if srv.get("running"):
@@ -410,7 +410,7 @@ def check_link(env: Env) -> list[Result]:
         out.append(
             _r(
                 "link",
-                "Agent Link",
+                "Agents",
                 PASS if ok else FAIL,
                 msg,
                 None if ok else Fix("restart_link", "Restart Agent Link"),
@@ -419,7 +419,7 @@ def check_link(env: Env) -> list[Result]:
             )
         )
     else:
-        out.append(_r("link", "Agent Link", PASS, "Ready (it starts when an agent connects)."))
+        out.append(_r("link", "Agents", PASS, "Ready (it starts when an agent connects)."))
     for key, title, fix in LINKS:
         t = k.get(key)
         if not t:
@@ -590,7 +590,7 @@ CHECKS: tuple[tuple[str, str, Callable[[Env], list[Result]]], ...] = (
     ("stt", "Speech to text", check_stt),
     ("tts", "Speaking voices", check_tts),
     ("notify", "Pop-up messages", check_notification),
-    ("link", "Agent Link", check_link),
+    ("link", "Agents", check_link),
     ("load", "PC load", check_load),
     ("models", "Models", check_models),
     ("winkey", "Windows Start key", check_winkey),
