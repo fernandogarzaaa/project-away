@@ -1243,7 +1243,7 @@ class ComputerControl:
         """An agent undoes its own newest undoable action (cursor move, scroll, typed text). It needs the same live,
         unexpired, unpaused grant as :meth:`act`: undo is input too. Clicks and keys cannot be undone.
         Undo never spends budget: putting back is not acting."""
-        g = self._require_grant(agent_id)
+        self._require_grant(agent_id)  # validates the grant; undo itself does not consume budget
         self._policy_check(agent_id)
         return self._undo(agent_id)
 

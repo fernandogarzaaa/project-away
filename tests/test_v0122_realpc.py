@@ -746,7 +746,7 @@ def test_mcp_has_the_inbox_tool_and_resource(cfg_core) -> None:
     core, *_ = cfg_core
     mcp = mcp_tools.build(api.LocalBackend(core.service))
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert "inbox" in names and "shell" in names and len(names) == 17
+    assert "inbox" in names and "shell" in names and len(names) == 18
     uris = {str(r.uri) for r in asyncio.run(mcp.list_resources())}
     assert "away://inbox" in uris
     assert "inbox(action=list|read|reply)" in INSTRUCTIONS and "user.message" in INSTRUCTIONS
