@@ -41,7 +41,11 @@ def pycaw_reader() -> Callable[[], list[tuple[int, str, float]]] | None:  # prag
 
     def read() -> list[tuple[int, str, float]]:
         out: list[tuple[int, str, float]] = []
-        for s in AudioUtilities.GetAllSessions():
+        try:
+            sessions = AudioUtilities.GetAllSessions()
+        except Exception:
+            return []  # the session list itself is gone (COM disconnect): no data this poll
+        for s in sessions:
             try:
                 meter = s._ctl.QueryInterface(IAudioMeterInformation)
                 peak = float(meter.GetPeakValue())
