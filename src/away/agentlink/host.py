@@ -566,7 +566,7 @@ class AgentLinkHost:
                     ans = ui.receipt_answer(rid)
                     if ans == "undo_all":
                         try:
-                            item_ids = [i["id"] for i in spec.get("items", [])]
+                            item_ids = [str(i["id"]) for i in items if "id" in i]
                             res = self.core.control.undo_all_by_user(item_ids)
                             n = int(res.get("count") or 0)
                             self._notice(
