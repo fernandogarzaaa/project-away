@@ -1,7 +1,9 @@
-"""Diagnose jobs an agent can run (one at a time): camera diagnosis, camera mode sweep, model benchmark.
+"""Diagnose jobs an agent can run (one at a time): camera diagnosis, camera mode sweep, model benchmark,
+camera holders.
 
 Camera checks run the existing CLI commands in their own process with fixed arguments (``away cameras diagnose``,
 ``away cameras test``): they already know how to borrow the cameras from the running app and give them back.
+"benchmark" and "holders" run in-process instead (``benchmark()``, ``away.multicam.camera_users.holders()``).
 The agent can only pick the job and, for the diagnosis, one camera name (passed as a single argument, never
 through a shell). Output is kept in ``<data>/diagnostics/cameras-<kind>-<time>.txt`` for the bundle.
 """
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-KINDS = ("cameras", "sweep", "benchmark")
+KINDS = ("cameras", "sweep", "benchmark", "holders")
 DEVICE_RE = re.compile(r"^[\w .:#()\-]{1,80}$", re.UNICODE)
 # v0.1.21: a finished check is kept this long (and at least until an agent has read its result once), so an agent
 # that polls a little late still gets it; then it is "expired" (not "unknown")
@@ -132,7 +134,37 @@ def benchmark(iterations: int = 30) -> dict[str, Any]:
     return out
 
 
+def _holders_lines(rep: dict[str, Any]) -> list[str]:
+    """Plain words for a holders report (v0.1.28).
+
+    Windows-confirmed holders (source "registry") are stated as fact; running
+    camera apps (source "process") are a hint only and must never be reported
+    as holding the camera."""
+    out: list[str] = []
+    now = rep.get("now") or []
+    confirmed = [u for u in now if u.get("source") == "registry"]
+    hinted = [u for u in now if u.get("source") != "registry"]
+    if confirmed:
+        out.append("holding a camera now (Windows reports): " + ", ".join(str(u.get("name")) for u in confirmed))
+    if hinted:
+        out.append(
+            "may be holding a camera (running now, not confirmed): " + ", ".join(str(u.get("name")) for u in hinted)
+        )
+    if not now:
+        out.append("no app is holding a camera now")
+    for e in rep.get("last_used") or []:
+        at = str(e.get("at") or "")[:16].replace("T", " ")
+        out.append(f"used a camera before: {e.get('name')} (last ended {at or 'at an unknown time'})")
+    return out
+
+
 class JobRunner:
+    """Diagnose jobs an agent can run (one at a time).
+
+    "cameras"/"sweep" run the real CLI in a subprocess; "benchmark" and "holders" run in-process. "holders"
+    (v0.1.28): who holds a camera now (registry + a live scan of known camera apps) and who used one last
+    (:func:`away.multicam.camera_users.holders`)."""
+
     def __init__(
         self,
         out_dir: Path,
@@ -194,6 +226,12 @@ class JobRunner:
             if job.kind == "benchmark":
                 job.result = self.bench()
                 job.output = [f"{k}: {v}" for k, v in job.result.items()]
+            elif job.kind == "holders":
+                from away.multicam import camera_users as cu
+
+                rep = cu.holders()
+                job.result = rep
+                job.output = _holders_lines(rep)
             else:
                 kw: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
                 if sys.platform == "win32":  # pragma: no cover
