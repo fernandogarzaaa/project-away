@@ -844,7 +844,6 @@ class ComputerControl:
         step().click(1)
         return label
 
->>>>>>> refs/remotes/origin/main
     def _point(
         self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
     ) -> tuple[int, int, str]:
