@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import sys
 import threading
 from typing import Any
 
 from away.pointer.targets import MAX_TARGETS, NullBackend, Target, TargetBackend
+
+log = logging.getLogger("away.pointer")
 
 # UIA property ids
 UIA_BOUNDING_RECTANGLE = 30001
@@ -77,8 +80,25 @@ def targets_from_array(arr: Any, limit: int = MAX_TARGETS) -> list[Target]:
     return out
 
 
+def _com_error_types() -> tuple[type[BaseException], ...]:
+    """The exceptions a dead COM object raises: ``comtypes.COMError`` (e.g. RPC_E_DISCONNECTED
+    0x80010108, REGDB_E_IIDNOTREG 0x80040155) and OSError from the apartment itself."""
+    try:
+        import comtypes
+    except ImportError:
+        return (OSError,)
+    err = getattr(comtypes, "COMError", None)
+    if isinstance(err, type) and issubclass(err, BaseException):
+        return (err, OSError)
+    return (OSError,)
+
+
 class UIABackend:
-    """Real UI Automation. Tests drive it with a fake ``comtypes`` module; the real thing only runs on Windows."""
+    """Real UI Automation. Tests drive it with a fake ``comtypes`` module; the real thing only runs on Windows.
+
+    Every use of the shared COM objects (``_uia``/``_cond``/``_cache``) happens under ``_lock``:
+    the crash log showed fatal disconnects when a refresh raced creation on another thread.
+    """
 
     def __init__(self, limit: int = MAX_TARGETS, foreground: Any = None) -> None:
         self.limit = limit
@@ -93,7 +113,8 @@ class UIABackend:
         return availability() == "ok"
 
     def thread_init(self) -> None:
-        self._ensure()
+        with self._lock:
+            self._ensure()
 
     def _com_init(self) -> None:
         if getattr(self._local, "com", False):
@@ -106,23 +127,32 @@ class UIABackend:
         self._local.com = True
 
     def _ensure(self) -> Any:
+        """Create the shared UIA objects once. The caller must hold ``self._lock``."""
         self._com_init()
-        with self._lock:
-            if self._uia is None:
-                import comtypes.client
+        if self._uia is None:
+            import comtypes.client
 
-                mod = comtypes.client.GetModule("UIAutomationCore.dll")
-                uia = comtypes.client.CreateObject(mod.CUIAutomation, interface=mod.IUIAutomation)
-                types = [uia.CreatePropertyCondition(UIA_CONTROL_TYPE, ct) for ct in CONTROL_TYPES]
-                clickable = uia.CreateOrConditionFromArray(types)
-                onscreen = uia.CreatePropertyCondition(UIA_IS_OFFSCREEN, False)
-                self._cond = uia.CreateAndCondition(clickable, onscreen)
-                cache = uia.CreateCacheRequest()
-                for prop in (UIA_NAME, UIA_CONTROL_TYPE, UIA_BOUNDING_RECTANGLE):
-                    cache.AddProperty(prop)
-                self._cache = cache
-                self._uia = uia
-            return self._uia
+            mod = comtypes.client.GetModule("UIAutomationCore.dll")
+            uia = comtypes.client.CreateObject(mod.CUIAutomation, interface=mod.IUIAutomation)
+            types = [uia.CreatePropertyCondition(UIA_CONTROL_TYPE, ct) for ct in CONTROL_TYPES]
+            clickable = uia.CreateOrConditionFromArray(types)
+            onscreen = uia.CreatePropertyCondition(UIA_IS_OFFSCREEN, False)
+            self._cond = uia.CreateAndCondition(clickable, onscreen)
+            cache = uia.CreateCacheRequest()
+            for prop in (UIA_NAME, UIA_CONTROL_TYPE, UIA_BOUNDING_RECTANGLE):
+                cache.AddProperty(prop)
+            self._cache = cache
+            self._uia = uia
+        return self._uia
+
+    def _drop_com_objects(self, exc: BaseException) -> None:
+        """The COM object disconnected or its interface went away: forget the cached objects so
+        the next call re-creates them instead of staying wedged on a dead object."""
+        with self._lock:
+            self._uia = None
+            self._cond = None
+            self._cache = None
+        log.warning("UIA backend dropped its COM objects (%s); re-creating on next use", exc)
 
     def _foreground_hwnd(self) -> int:
         if self._foreground is not None:
@@ -132,23 +162,33 @@ class UIABackend:
         return int(ctypes.windll.user32.GetForegroundWindow() or 0)  # type: ignore[attr-defined]
 
     def foreground_targets(self) -> list[Target]:
-        uia = self._ensure()
-        hwnd = self._foreground_hwnd()
-        if not hwnd:
+        try:
+            with self._lock:
+                uia = self._ensure()
+                hwnd = self._foreground_hwnd()
+                if not hwnd:
+                    return []
+                root = uia.ElementFromHandle(hwnd)
+                if root is None:
+                    return []
+                arr = root.FindAllBuildCache(TREE_SCOPE_DESCENDANTS, self._cond, self._cache)
+                if arr is None:
+                    return []
+                return targets_from_array(arr, self.limit)
+        except _com_error_types() as exc:
+            self._drop_com_objects(exc)
             return []
-        root = uia.ElementFromHandle(hwnd)
-        if root is None:
-            return []
-        arr = root.FindAllBuildCache(TREE_SCOPE_DESCENDANTS, self._cond, self._cache)
-        if arr is None:
-            return []
-        return targets_from_array(arr, self.limit)
 
     def focus(self, target: Target) -> bool:
         if target.ref is None:
             return False
-        self._com_init()
-        target.ref.SetFocus()
+        try:
+            with self._lock:
+                self._ensure()
+                target.ref.SetFocus()
+        except _com_error_types() as exc:
+            self._drop_com_objects(exc)
+            return False
         return True
 
 

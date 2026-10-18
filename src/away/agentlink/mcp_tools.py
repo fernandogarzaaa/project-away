@@ -62,7 +62,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 17 (shell). Related tools are one tool with an `action`
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 18 (shell, ui_query). Related tools are one
+    # tool with an `action`
     # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
@@ -272,6 +273,15 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
+    async def ui_query(ctx: Context) -> dict:
+        """The foreground window's interactable UI elements with exact screen bounds (after control
+        action="request" was approved; Windows UI Automation, no screenshot taken): [{id, name, role,
+        bounds}]. Pass an `id` back as element_id= to pointer or keyboard actions to act on it exactly -
+        no pixel guessing. Ids are yours only, expire with your next ui_query call, and stop resolving
+        if the foreground window changes."""
+        return await call(ctx, "ui_query")
+
+    @mcp.tool()
     async def control(
         ctx: Context,
         action: str,
@@ -298,20 +308,23 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         x: float | None = None,
         y: float | None = None,
         element: str | None = None,
+        element_id: str | None = None,
         from_image: bool = False,
         x2: float | None = None,
         y2: float | None = None,
         to_element: str | None = None,
+        to_element_id: str | None = None,
         dy: float | None = None,
         dx: float | None = None,
     ) -> dict:
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
-        right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
-        screen x,y, an element name from get_screen(elements=true), or image x,y with from_image=true (your last
-        screenshot's origin and scale are applied). Risky buttons (send, pay, delete...) ask the person first.
-        The result reports the observed effect: `foreground` (the foreground window's title and process name
-        right after the action) and `focused` (the focused UI element's label, when UI Automation has one).
-        Check these: they tell you whether the click actually landed where you intended."""
+        right_click | drag (to x2,y2 or `to_element`/`to_element_id`) | scroll (dy > 0 up, dy < 0 down, dx
+        sideways). Target screen x,y, an element name from get_screen(elements=true), an element id from
+        ui_query (exact bounds, no guessing), or image x,y with from_image=true (your last screenshot's origin
+        and scale are applied). An id beats a name beats coordinates. Risky buttons (send, pay, delete...) ask
+        the person first. The result reports the observed effect: `foreground` (the foreground window's title
+        and process name right after the action) and `focused` (the focused UI element's label, when UI
+        Automation has one). Check these: they tell you whether the click actually landed where you intended."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -321,29 +334,38 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             x=x,
             y=y,
             element=element,
+            element_id=element_id,
             from_image=from_image or None,
             x2=x2,
             y2=y2,
             to_element=to_element,
+            to_element_id=to_element_id,
             dy=dy,
             dx=dx,
         )
 
     @mcp.tool()
-    async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
+    async def keyboard(
+        ctx: Context, action: str, text: str | None = None, keys: str | None = None, element_id: str | None = None
+    ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
         (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". The result reports the observed
-        effect: `foreground` (the foreground window's title and process name right after the action) and
-        `focused` (the focused UI element's label, when UI Automation has one)."""
-        return await group(ctx, "keyboard", action=action, text=text, keys=keys)
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". Pass element_id= (from ui_query) to
+        click that field first so the input lands there. The result reports the observed effect: `foreground`
+        (the foreground window's title and process name right after the action) and `focused` (the focused UI
+        element's label, when UI Automation has one)."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys, element_id=element_id)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
         / Spotlight (not terminals or system tools); after launching, the foreground window is checked for up
         to ~3 s and the result carries a `warning` when the app could not be confirmed open (the launcher
-        keystrokes may have done nothing). action="url" opens an http(s) `url` in the default browser.
+        keystrokes may have done nothing). action="system" opens an allowlisted Windows system tool by
+        `name` (device-manager or a Windows Settings page such as windows-update: use the name with
+        spaces or dashes, e.g. "Device Manager"): it is launched straight through the shell, with no keystrokes
+        and no command line, so opening it is navigation only and anything consequential inside it still asks
+        first; action="url" opens an http(s) `url` in the default browser.
         The result reports the observed effect: `foreground` (the foreground window's title and process name
         right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
