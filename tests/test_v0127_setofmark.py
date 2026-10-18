@@ -161,3 +161,44 @@ def test_revoke_clears_marks(core) -> None:
     assert core.service.control.marks.get(a.id)
     core.service.control.revoke_agent(a.id, "test")
     assert a.id not in core.service.control.marks
+
+
+def test_fresh_screenshot_clears_marks(core) -> None:
+    """Marks belong to the annotated screenshot: a newer deliberate screenshot retires them."""
+    core.service.screen_grab = lambda: _screen_with_boxes()
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    core.service.get_screen(a, annotate=True)
+    assert core.service.control.marks.get(a.id)
+    core.service.get_screen(a, annotate=False)  # the agent looks at a fresh screenshot
+    assert a.id not in core.service.control.marks
+    with pytest.raises(ControlRefused, match="no annotation 1"):
+        core.service.control._point(a.id, None, None, "mark:1", False)
+
+
+def test_quiet_live_view_keeps_marks(core) -> None:
+    """Background live-view frames (quiet) are not the agent's working screenshot: they keep marks."""
+    core.service.screen_grab = lambda: _screen_with_boxes()
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    _jpeg, meta = core.service.get_screen(a, annotate=True)
+    first = meta["annotations"][0]
+    core.service.get_screen(a, annotate=False, quiet=True)  # a live-view frame, not a new look
+    x, y, _label = core.service.control._point(a.id, None, None, "mark:1", False)
+    assert (x, y) == (first["center"]["x"], first["center"]["y"])
+
+
+def test_failed_annotation_clears_marks(core, monkeypatch) -> None:
+    """A failed annotation must not leave the previous screenshot's marks behind."""
+    from away.agentlink import setofmark as som
+
+    core.service.screen_grab = lambda: _screen_with_boxes()
+    a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
+    core.service.get_screen(a, annotate=True)
+    assert core.service.control.marks.get(a.id)
+
+    def _boom(_pil):
+        raise RuntimeError("detector blew up")
+
+    monkeypatch.setattr(som, "detect_regions", _boom)
+    with pytest.raises(RuntimeError, match="detector blew up"):
+        core.service.get_screen(a, annotate=True)
+    assert a.id not in core.service.control.marks
