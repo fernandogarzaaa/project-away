@@ -612,7 +612,13 @@ class _FirstRunAgentLinkHost:
             except Exception as exc:
                 res = exc
             if done is not None:
-                self.root.after(0, lambda: done(res))
+                try:
+                    # the window may have closed while the background work ran;
+                    # a dead widget must not crash the worker thread
+                    if self.root.winfo_exists():
+                        self.root.after(0, lambda: done(res))
+                except Exception:
+                    pass
 
         threading.Thread(target=run, daemon=True, name="first-run-agent-wizard").start()
 
