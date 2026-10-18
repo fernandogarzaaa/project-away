@@ -200,7 +200,6 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
             "ask_user",
             "notify_user",
             "control",
-            "ui_query",
             "pointer",
             "keyboard",
             "open",
