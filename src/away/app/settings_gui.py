@@ -1519,13 +1519,25 @@ TAB_ORDER = (
     "Gesture Studio",
     "Shortcuts",
     "Voice & input",
-    "Agent Link",
-    "Live agent",
+    "Agents",  # v0.1.29: the Live agent and Agent Link tabs merged into one
     "Cameras",
     "Tuning",
     "Performance",
     "Models",  # v0.1.23
 )
+
+
+# v0.1.29: the Live agent and Agent Link tabs merged into "Agents"; the old names still open it
+# (``away settings --tab "agent link"`` keeps working).
+TAB_ALIASES = {
+    "agent link": "Agents",
+    "live agent": "Agents",
+}
+
+
+def resolve_tab_alias(name: str) -> str:
+    """Map an old tab name to its current title; unknown names come back unchanged."""
+    return TAB_ALIASES.get(name.strip().lower(), name.strip())
 
 
 # v0.1.21: the camera previews in Settings, by the tab that shows them. A preview stops when you switch to another
@@ -1630,10 +1642,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_cameras(nb)
         self._build_performance(nb)
         self._build_studio(nb)  # v0.1.20: Gesture Studio replaces the old "Test gesture" tab
-        from away.agentlink import gui as agent_gui  # Agent Link (v0.1.20), isolated in its own module
+        from away.app import agents_tab  # v0.1.29: Agents (Live agent + Agent Link in one tab)
 
         with contextlib.suppress(Exception):
-            agent_gui.build_tab(self, nb)
+            agents_tab.build_tab(self, nb)
         try:  # v0.1.23 Settings > Models (model registry), isolated in its own module
             from away.app import models_tab
 
@@ -1643,10 +1655,6 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
-        from away.liveagent import gui as live_gui  # Live agent, isolated in its own package
-
-        with contextlib.suppress(Exception):
-            self.live_agent_panel = live_gui.build_tab(self, nb)
         order_tabs(nb, TAB_ORDER)
         nb.select(0)
         self.nb = nb
@@ -1701,7 +1709,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def select_tab(self, name: str) -> bool:
         """Show the first tab whose title contains ``name`` (case-insensitive). False when none does."""
-        want = name.strip().lower()
+        want = resolve_tab_alias(name).lower()
         for tab_id in self.nb.tabs():
             if want and want in str(self.nb.tab(tab_id, "text")).lower():
                 self.nb.select(tab_id)

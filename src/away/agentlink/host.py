@@ -219,6 +219,7 @@ def build_core(
         on_event=emit,
         always_allowed=always,
         allow_always=registry.allow_always,
+        notify=prompts.notify,  # v0.1.28: toast when a computer-control grant ends
     )
     jobs = shared_runner(Path(data_dir) / "diagnostics", command=job_command)
     from away.agentlink.inbox import Inbox
@@ -435,6 +436,7 @@ class AgentLinkHost:
             cursor_pos=pos,
             overlay_on=self._overlay_on,
             overlay_off=self._overlay_off,
+            overlay_paused=self._overlay_paused,
             engine=engine,
         )
 
@@ -452,6 +454,52 @@ class AgentLinkHost:
                 self._overlay_stop.write_text("stop", encoding="utf-8")
             self._overlay_stop = None
         self._stop_input_watch()
+
+    def _overlay_paused(self, name: str) -> None:
+        """The takeover banner (proposal #16): "Paused - you took over from <name>" with "Let <name> continue"
+        and "Stop" buttons whose click IS the answer. A watcher thread feeds the click straight to the grant,
+        so resuming needs no second approval round-trip through the agent."""
+        self._overlay_off()
+        if self.ui is None or not hasattr(self.ui, "paused_banner"):
+            return
+        stop = self.base / "ui" / f"paused-{uuid.uuid4().hex[:6]}.stop"
+        try:
+            _proc, answer_file = self.ui.paused_banner(name, stop)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self.errors.append(f"could not show the paused banner: {exc}")
+            return
+        self._overlay_stop = stop
+        self._start_input_watch()  # the grant is only paused: input after this still reports in
+        threading.Thread(
+            target=self._watch_paused_banner,
+            args=(answer_file, stop),
+            kwargs={"deadline": time.monotonic() + 4 * 3600},
+            daemon=True,
+            name="away-paused-banner",
+        ).start()
+
+    def _watch_paused_banner(self, answer_file: Path, stop: Path, deadline: float) -> None:
+        """Feed the paused banner's clicked button to the grant (runs in a thread; see _overlay_paused). The
+        banner writes ``<id>.answer.json`` next to its spec; it is consumed once and the banner then closes.
+        The watcher is bound to its own banner's stop path: a replaced ``_overlay_stop`` (a newer overlay)
+        ends it instead of leaving it polling."""
+        while time.monotonic() < deadline and self._overlay_stop == stop:
+            try:
+                raw = answer_file.read_text(encoding="utf-8")
+            except OSError:
+                raw = ""
+            if not raw.strip():
+                time.sleep(0.25)
+                continue
+            with contextlib.suppress(OSError):
+                answer_file.unlink()
+            try:
+                answer = str(json.loads(raw).get("answer"))
+            except ValueError:
+                answer = ""
+            with contextlib.suppress(Exception):
+                self.core.control.paused_banner_answer(answer)
+            return
 
     def _watching(self, name: str, on: bool) -> None:
         """The live view's permanent "watching your screen" badge. Raises when it cannot be shown (the service
@@ -1321,6 +1369,7 @@ class AgentLinkHost:
             "control": core.control.status(),
             "actions": core.control.actions(20),
             "changes": core.changes.history(20),
+            "captures": core.service.capture_feed(10),  # v0.1.28 "Recently" feed
             "access": list(self.gate.recent)[-20:] if self.gate else [],
             "results": self._results,
             "errors": self.errors[-5:],

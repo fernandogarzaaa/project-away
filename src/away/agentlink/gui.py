@@ -26,15 +26,16 @@ TILE_LETTER = {"claude_desktop": "C", "claude_ai": "C", "chatgpt": "G", "cursor"
 
 
 def build_tab(win: Any, nb: Any, model: AgentLinkModel | None = None) -> Any:  # pragma: no cover - widgets
-    return AgentLinkTab(win, nb, model or AgentLinkModel())
+    f = win._scroll_tab(nb, "Agent Link")
+    return AgentLinkTab(win, f, model or AgentLinkModel())
 
 
 class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
-    def __init__(self, win: Any, nb: Any, model: AgentLinkModel) -> None:
+    def __init__(self, win: Any, parent: Any, model: AgentLinkModel) -> None:
         self.win, self.m = win, model
         tk, ttk = win.tk, win.ttk
         self.tk, self.ttk = tk, ttk
-        f = win._scroll_tab(nb, "Agent Link")
+        f = parent  # the frame to fill; build_tab makes a tab, agents_tab embeds in the Agents tab
         self.frame = f
         ttk.Label(
             f,
@@ -140,6 +141,12 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.thumb.pack(anchor="w")
         self._thumb_img: Any = None
         self._action_rows: list[dict[str, Any]] = []
+
+        # v0.1.28 "Recently": who looked through your camera or at your screen (and what you sent)
+        rf = ttk.LabelFrame(f, text="Recently", padding=6)
+        rf.pack(fill="x", pady=6)
+        self.recently = tk.Listbox(rf, height=4)
+        self.recently.pack(fill="x")
 
         ch = ttk.LabelFrame(f, text="Changes your agents made", padding=6)
         ch.pack(fill="x", pady=6)
@@ -268,6 +275,7 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         if st.get("autofix") and self.autofix.get() != st["autofix"]:
             self.autofix.set(st["autofix"])
         self._fill(self.prefs, self._prefs_items())
+        self._fill(self.recently, self.m.capture_lines(st))
         self.m.want_health()
         self.health.set("\n".join(self.m.health_lines(st.get("health"))))
         if self.adv_open.get():
