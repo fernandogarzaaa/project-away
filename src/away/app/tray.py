@@ -466,6 +466,7 @@ class TrayMenuCallbacks:
     def on_run_installer(self, _icon: Any, _item: Any) -> None:
         self.updates.run_installer()
 
+    @menu_safe("face gate")
     def on_face_gate(self, icon: Any, _item: Any) -> None:
         try:
             on = self.ctl.set_face_gate(not self.ctl.face_gate_on())
@@ -474,6 +475,7 @@ class TrayMenuCallbacks:
             self.notify("Project Away", f"could not change the face gate: {exc}")
         self.safe_update_menu(icon)
 
+    @menu_safe("gpu pack install")
     def on_gpu_install(self, icon: Any, _item: Any) -> None:
         from away.app import gpupack
 

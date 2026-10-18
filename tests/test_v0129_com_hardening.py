@@ -1586,3 +1586,28 @@ def test_main_exiting_for_update_calls_os_exit(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setitem(sys.modules, "pystray", types.SimpleNamespace(Icon=ExitingIcon))
     assert stage.tray.main() == 0
     assert stage.exit_calls == [0]
+
+
+def test_all_pystray_menu_callbacks_are_menu_safe() -> None:
+    """Every on_* menu callback (icon, item) must be wrapped in menu_safe.
+
+    An unwrapped callback that raises on pystray's message thread breaks the
+    loop and takes the tray down. functools.wraps sets __wrapped__, so an
+    undecorated callback is detectable.
+    """
+    import inspect
+
+    from away.app import tray
+
+    unprotected = []
+    for name in dir(tray.TrayMenuCallbacks):
+        if not name.startswith("on_"):
+            continue
+        fn = getattr(tray.TrayMenuCallbacks, name)
+        sig = inspect.signature(fn)
+        params = list(sig.parameters)
+        # pystray menu callbacks take (icon, item); bus handlers take (event,) or (icon,)
+        is_menu_cb = params[1:] == ["icon", "_item"] or params[1:] == ["_icon", "_item"]
+        if is_menu_cb and not hasattr(fn, "__wrapped__"):
+            unprotected.append(name)
+    assert not unprotected, f"menu callbacks missing @menu_safe: {unprotected}"
