@@ -132,15 +132,15 @@ def test_pointer_accepts_mark_reference_without_uia(core) -> None:
     a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
     _jpeg, meta = core.service.get_screen(a, annotate=True)
     first = meta["annotations"][0]
-    x, y, label = core.service.control._point(a.id, None, None, "mark:1", False)
+    x, y, label = core.service.control._point(a.id, None, None, "mark:1", None, False)
     assert (x, y) == (first["center"]["x"], first["center"]["y"])
     assert label == "mark 1"
     # the other spellings work too
-    assert core.service.control._point(a.id, None, None, "#2", False)[:2] == (
+    assert core.service.control._point(a.id, None, None, "#2", None, False)[:2] == (
         meta["annotations"][1]["center"]["x"],
         meta["annotations"][1]["center"]["y"],
     )
-    assert core.service.control._point(a.id, None, None, "MARK 3", False)[2] == "mark 3"
+    assert core.service.control._point(a.id, None, None, "MARK 3", None, False)[2] == "mark 3"
 
 
 def test_pointer_rejects_unknown_mark(core) -> None:
@@ -148,10 +148,10 @@ def test_pointer_rejects_unknown_mark(core) -> None:
     a, _ = core.registry.issue("Agent", ["read", "screen"], 3600)
     core.service.get_screen(a, annotate=True)
     with pytest.raises(ControlRefused, match="no annotation 999"):
-        core.service.control._point(a.id, None, None, "mark:999", False)
+        core.service.control._point(a.id, None, None, "mark:999", None, False)
     b, _ = core.registry.issue("Other", ["read", "screen"], 3600)  # never annotated for this agent
     with pytest.raises(ControlRefused, match="annotate=true"):
-        core.service.control._point(b.id, None, None, "mark:1", False)
+        core.service.control._point(b.id, None, None, "mark:1", None, False)
 
 
 def test_revoke_clears_marks(core) -> None:
@@ -172,7 +172,7 @@ def test_fresh_screenshot_clears_marks(core) -> None:
     core.service.get_screen(a, annotate=False)  # the agent looks at a fresh screenshot
     assert a.id not in core.service.control.marks
     with pytest.raises(ControlRefused, match="no annotation 1"):
-        core.service.control._point(a.id, None, None, "mark:1", False)
+        core.service.control._point(a.id, None, None, "mark:1", None, False)
 
 
 def test_quiet_live_view_keeps_marks(core) -> None:
@@ -182,7 +182,7 @@ def test_quiet_live_view_keeps_marks(core) -> None:
     _jpeg, meta = core.service.get_screen(a, annotate=True)
     first = meta["annotations"][0]
     core.service.get_screen(a, annotate=False, quiet=True)  # a live-view frame, not a new look
-    x, y, _label = core.service.control._point(a.id, None, None, "mark:1", False)
+    x, y, _label = core.service.control._point(a.id, None, None, "mark:1", None, False)
     assert (x, y) == (first["center"]["x"], first["center"]["y"])
 
 

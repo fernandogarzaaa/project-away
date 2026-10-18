@@ -300,27 +300,39 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         return await group(ctx, "control", action=action, why=why, minutes=minutes, steps=steps)
 
     @mcp.tool()
+    async def ui_query(ctx: Context) -> dict:
+        """The foreground window's interactable UI elements with exact screen bounds (after control
+        action="request" was approved; Windows UI Automation, no screenshot taken): [{id, name, role,
+        bounds}]. Pass an `id` back as element_id= to pointer or keyboard actions to act on it exactly -
+        no pixel guessing. Ids are yours only, expire with your next ui_query call, and stop resolving
+        if the foreground window changes."""
+        return await call(ctx, "ui_query")
+
+    @mcp.tool()
     async def pointer(
         ctx: Context,
         action: str,
         x: float | None = None,
         y: float | None = None,
         element: str | None = None,
+        element_id: str | None = None,
         from_image: bool = False,
         x2: float | None = None,
         y2: float | None = None,
         to_element: str | None = None,
+        to_element_id: str | None = None,
         dy: float | None = None,
         dx: float | None = None,
     ) -> dict:
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
-        right_click | drag (to x2,y2 or `to_element`) | scroll (dy > 0 up, dy < 0 down, dx sideways). Target
-        screen x,y, an element name from get_screen(elements=true), a numbered box from get_screen(annotate=true)
-        as element="mark:14" (or "#14"), or image x,y with from_image=true (your last screenshot's origin and
-        scale are applied). Risky buttons (send, pay, delete...) ask the person first. The result reports the
-        observed effect: `foreground` (the foreground window's title and process name right after the action)
-        and `focused` (the focused UI element's label, when UI Automation has one). Check these: they tell you
-        whether the click actually landed where you intended."""
+        right_click | drag (to x2,y2 or `to_element`/`to_element_id`) | scroll (dy > 0 up, dy < 0 down, dx
+        sideways). Target screen x,y, an element name from get_screen(elements=true), a numbered box from
+        get_screen(annotate=true) as element="mark:14" (or "#14"), an element id from ui_query (exact bounds,
+        no guessing), or image x,y with from_image=true (your last screenshot's origin and scale are applied).
+        An id beats a mark beats a name beats coordinates. Risky buttons (send, pay, delete...) ask the person
+        first. The result reports the observed effect: `foreground` (the foreground window's title and process
+        name right after the action) and `focused` (the focused UI element's label, when UI Automation has
+        one). Check these: they tell you whether the click actually landed where you intended."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -330,22 +342,27 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
             x=x,
             y=y,
             element=element,
+            element_id=element_id,
             from_image=from_image or None,
             x2=x2,
             y2=y2,
             to_element=to_element,
+            to_element_id=to_element_id,
             dy=dy,
             dx=dx,
         )
 
     @mcp.tool()
-    async def keyboard(ctx: Context, action: str, text: str | None = None, keys: str | None = None) -> dict:
+    async def keyboard(
+        ctx: Context, action: str, text: str | None = None, keys: str | None = None, element_id: str | None = None
+    ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
         (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". The result reports the observed
-        effect: `foreground` (the foreground window's title and process name right after the action) and
-        `focused` (the focused UI element's label, when UI Automation has one)."""
-        return await group(ctx, "keyboard", action=action, text=text, keys=keys)
+        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". Pass element_id= (from ui_query) to
+        click that field first so the input lands there. The result reports the observed effect: `foreground`
+        (the foreground window's title and process name right after the action) and `focused` (the focused UI
+        element's label, when UI Automation has one)."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys, element_id=element_id)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
