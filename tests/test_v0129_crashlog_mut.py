@@ -185,7 +185,7 @@ def test_tail_respects_max_lines(tmp_path: Path) -> None:
 def test_new_entries_returns_new_text(tmp_path: Path) -> None:
     path = tmp_path / "crash.log"
     seen = tmp_path / "seen.json"
-    path.write_text("old\nnew\n", encoding="utf-8")
+    path.write_bytes(b"old\nnew\n")  # binary: no CRLF translation on Windows
     seen.write_text(json.dumps({"offset": 4}), encoding="utf-8")  # after "old\n"
     assert crashlog.new_entries(path, seen) == "new\n"
 
@@ -234,9 +234,14 @@ def test_pid_alive_self() -> None:
     assert crashlog._pid_alive(os.getpid()) is True
 
 
-def test_pid_alive_nonexistent() -> None:
-    # PID 2**30 almost certainly does not exist
-    assert crashlog._pid_alive(2**30) is False
+def test_pid_alive_nonexistent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mock psutil to guarantee False (Windows PIDs wrap, 2**30 may exist)
+    import sys
+
+    fake_psutil = types.SimpleNamespace(pid_exists=lambda pid: False)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    # Use a PID that is not our own; psutil mock says it does not exist
+    assert crashlog._pid_alive(999999999) is False
 
 
 # summarize_native (lines 219-254 mutants)
