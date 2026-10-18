@@ -609,10 +609,10 @@ def test_settings_live_agent_tab_renders(tmp_path: Path, monkeypatch: pytest.Mon
     try:
         w = G.SettingsWindow(root, G.SettingsModel(path=tmp_path / "config.yaml"))
         root.update()
-        assert "Live agent" in [w.nb.tab(t, "text") for t in w.nb.tabs()]
+        assert "Agents" in [w.nb.tab(t, "text") for t in w.nb.tabs()]
         panel = getattr(w, "live_agent_panel", None)
         assert panel is not None and not panel.s.enabled  # off by default
-        w.select_tab("Live agent")
+        w.select_tab("Live agent")  # the old tab name still opens the merged tab
         root.update()
         assert "Use free models" in panel.status_line()
     finally:
