@@ -169,7 +169,10 @@ jobs:
           Write-Host "MSIX install/remove OK"
 
   mutation:
-    name: mutation ${{ matrix.group }} (testteeth, non-blocking)
+    # Blocking check: a failed group fails the workflow, and the summary fails
+    # on any missing report or any group below --fail-under. This is intentional:
+    # a cancelled or silently skipped mutation run is not an acceptable signal.
+    name: mutation ${{ matrix.group }} (testteeth)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -209,7 +212,7 @@ jobs:
           if-no-files-found: warn
 
   mutation-summary:
-    name: mutation score (testteeth, non-blocking)
+    name: mutation score (testteeth)
     needs: mutation
     if: always()
     runs-on: ubuntu-latest
@@ -221,12 +224,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p .testteeth-reports
-          for g in filters landmarks gestures cursor cleanup vad dictation wifi_features wifi_classifier face fusion_events autoscroll crashlog tunables autotune; do
-            gh run download ${{ github.run_id }} -n "mutation-$g" -D .testteeth-reports
+          # Group list comes from scripts/mutation.py itself, so adding a group
+          # there can never silently drop out of the aggregate.
+          groups=$(python3 scripts/mutation.py --list-groups | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))")
+          missing=""
+          for g in $groups; do
+            if ! gh run download ${{ github.run_id }} -n "mutation-$g" -D .testteeth-reports; then
+              echo "::warning::no mutation artifact for group $g"
+              missing="$missing $g"
+            fi
           done
           ls .testteeth-reports/
-          test "$(ls .testteeth-reports/*.json | wc -l)" -eq 15
-      - run: python3 scripts/mutation.py --summary
+          if [ -n "$missing" ]; then
+            echo "missing mutation reports for groups:$missing"
+            exit 1
+          fi
+      - run: python3 scripts/mutation.py --summary --fail-under 80
       - uses: actions/upload-artifact@v4
         if: always()
         with:

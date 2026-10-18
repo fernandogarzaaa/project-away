@@ -3,6 +3,7 @@
     python scripts/mutation.py                 # all groups
     python scripts/mutation.py filters cursor  # selected groups
     python scripts/mutation.py --summary       # just aggregate existing reports
+    python scripts/mutation.py --summary --fail-under 80  # fail if any report is missing or below 80
     python scripts/mutation.py --list-groups   # print the group list as JSON (for CI matrix)
 
 Reports land in .testteeth-reports/<group>.json (git-ignored).
@@ -63,7 +64,7 @@ def run(group: str, workers: int = 2) -> None:
     subprocess.run(cmd, cwd=ROOT, check=False)
 
 
-def summary() -> int:
+def summary(fail_under: float = 0.0) -> int:
     total = killed = 0
     rows = []
     for g in GROUPS:
@@ -71,9 +72,14 @@ def summary() -> int:
         if not p.exists():
             rows.append((g, None, 0, 0))
             continue
-        d = json.loads(p.read_text())
-        scored = d["killed"] + d["survived"] + d["timeouts"]
-        k = d["killed"] + d["timeouts"]
+        try:
+            d = json.loads(p.read_text())
+            scored = d["killed"] + d["survived"] + d["timeouts"]
+            k = d["killed"] + d["timeouts"]
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            print(f"warning: unreadable mutation report for {g}: {e}")
+            rows.append((g, None, 0, 0))
+            continue
         total += scored
         killed += k
         rows.append((g, d["score"], k, scored))
@@ -81,6 +87,16 @@ def summary() -> int:
         print(f"{g:<16} {'n/a' if s is None else f'{s:5.1f}%'}  {k}/{n}")
     overall = 100.0 * killed / total if total else 0.0
     print(f"{'OVERALL':<16} {overall:5.1f}%  {killed}/{total}")
+    if fail_under > 0:
+        missing = [g for g, s, _, _ in rows if s is None]
+        if missing:
+            print(f"missing mutation reports: {', '.join(missing)}")
+            return 1
+        weak = [(g, s) for g, s, _, _ in rows if s is not None and s < fail_under]
+        if weak:
+            details = ", ".join(f"{g} {s:.1f}%" for g, s in weak)
+            print(f"below --fail-under {fail_under:.1f}%: {details}")
+            return 1
     return 0
 
 
@@ -89,9 +105,17 @@ if __name__ == "__main__":
     if "--list-groups" in args:
         print(json.dumps(list(GROUPS)))
         raise SystemExit(0)
+    fail_under = 0.0
+    if "--fail-under" in args:
+        i = args.index("--fail-under")
+        try:
+            fail_under = float(args[i + 1])
+        except (IndexError, ValueError):
+            raise SystemExit("--fail-under requires a numeric threshold") from None
+        del args[i : i + 2]
     if "--summary" not in args:
         for grp in args or list(GROUPS):
             if grp not in GROUPS:
                 raise SystemExit(f"unknown mutation group: {grp}")
             run(grp)
-    raise SystemExit(summary())
+    raise SystemExit(summary(fail_under))
