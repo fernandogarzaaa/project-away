@@ -47,7 +47,7 @@ EVENT_TOPICS = (
     "notify",
     "user.message",  # v0.1.22: the person spoke to you (only the agents it was sent to see it)
     "inbox",
-    "selftest",  # v0.1.24: selftest.completed (the report reached every connected agent)
+    "selftest",  # v0.1.27: selftest.completed (report delivery; the app's share_logs audience skips the stream)
     "link",  # v0.1.24: link.moved (the public address changed)
 )
 MAX_RECORD_S = 120.0
@@ -387,9 +387,9 @@ class Service:
         return self.jobs.lookup(key).public()
 
     def run_selftest(self, agent: Agent, wait: bool = False, only: Any = None) -> dict[str, Any]:
-        """v0.1.24: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
-        The report goes to *every* connected agent (inbox, wake-up address, event selftest.completed) and is
-        readable as away://selftest/latest. ``wait``: block until it is done (at most 3 minutes) and return it."""
+        """v0.1.27: run the PC self-test (cameras, tracking, pointer, microphone, voices, link, load, models).
+        The report is pushed to the agents the person let "Share my logs and recordings" (inbox, wake-up address)
+        and is readable as away://selftest/latest. ``wait``: block until it is done (3 minutes at most)."""
         self.require(agent, perms.DIAGNOSE)
         st = self.selftest
         if st is None:
@@ -397,17 +397,41 @@ class Service:
         checks = [str(c) for c in only] if isinstance(only, (list, tuple)) else None
         from away.selftest.run import Busy
 
+        joined_existing = False
         try:
             started = st.start(trigger=agent.name, only=checks)
         except Busy:
-            started = {"state": "running", "note": "a self-test was already running; its report will reach you too"}
+            joined_existing = True
+            started = {
+                "state": "running",
+                "note": "a self-test was already running; its report goes to the agents allowed to see it",
+            }
         if not wait:
             return started
         st.wait(180.0)
-        return {"state": "done", "report": st.latest()}
+        rep = st.latest()
+        out: dict[str, Any] = {"state": "done", "report": rep}
+        if joined_existing and rep is not None:
+            # The caller waited for a run it did not start. Say whose report this is so
+            # the caller does not mistake another agent's (or the person's) report for
+            # the result of a run it triggered.
+            out["joined"] = True
+            out["trigger"] = rep.get("trigger")
+            out["note"] = (
+                "this is the report from the already-running self-test "
+                f"(triggered by {rep.get('trigger')!r}); it is not a run you started"
+            )
+        return out
 
     def selftest_latest(self, agent: Agent) -> dict[str, Any]:
-        """v0.1.24: the newest self-test report (redacted), or a hint to run one."""
+        """v0.1.24: the newest self-test report (redacted), or a hint to run one.
+
+        v0.1.27: reading a report needs the diagnose permission ("Run camera and speed checks", which covers
+        running checks and reading their results) or the share_logs permission (the push audience). A report
+        from another agent's or the person's run is not readable with the bare read scope: the audience
+        policy applies to the pull path too."""
+        if not agent.has(perms.DIAGNOSE) and not agent.has(perms.SHARE_LOGS):
+            self.require(agent, perms.DIAGNOSE)  # raises Forbidden naming the diagnose permission
         st = self.selftest
         rep = st.latest() if st is not None else None
         if rep is None:

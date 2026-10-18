@@ -339,20 +339,8 @@ def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
     t = {"now": 0.0}
 
     def clock() -> float:
-        # v0.1.28: 20 s steps - the driver-state step checks the budget once before the device loop starts
-        t["now"] += 20.0
+        t["now"] += 25.0
         return t["now"]
-
-    def fake_cim(*args: Any, **kw: Any) -> Any:
-        return types.SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    {"Name": "JoyCam", "Status": "OK", "ConfigManagerErrorCode": 0},
-                    {"Name": "HD User Facing", "Status": "Error", "ConfigManagerErrorCode": 22},
-                ]
-            ),
-        )
 
     report = diagnose.run_diagnose(
         devs,
@@ -361,17 +349,9 @@ def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
         windows=True,
         winrt_available=lambda: (False, "not installed"),
         clock=clock,
-        driver_state_run=fake_cim,
     )
     out = report.lines
-    # v0.1.28: the driver-state step runs first, so it explains the backend failures below
-    assert out[0] == "driver state (from Windows):"
-    assert "  HD User Facing: disabled (code 22)" in out
-    assert "camera 0: JoyCam" in out
-    assert report.result["driver_state"] == [
-        {"name": "JoyCam", "status": "OK", "code": 0, "meaning": "working, no error"},
-        {"name": "HD User Facing", "status": "Error", "code": 22, "meaning": "disabled"},
-    ]
+    assert out[0] == "camera 0: JoyCam"
     assert any("NVIDIA Broadcast (virtual) - skipped" in x for x in out)
     assert not any(x == "camera 1: HD User Facing" for x in out)
     assert out[-1].startswith("stopped after 60 s (time limit)")

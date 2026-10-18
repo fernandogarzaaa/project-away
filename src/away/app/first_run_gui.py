@@ -62,6 +62,7 @@ class FirstRunWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.coach = fr.TutorialCoach()
         self.framing = fr.FramingCheck()
         self._photo: Any = None
+        self._agent_wizard: Any = None  # kept alive while the Agent Link wizard window is open
         self._step_ok = False
         root.title("Project Away - getting started")
         root.configure(bg=BG)
@@ -149,6 +150,7 @@ class FirstRunWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self.main_btn.configure(text=step.button)
         self.back_btn.configure(state="normal" if self.flow.index > 0 else "disabled")
         self.skip_btn.configure(state="disabled" if step.key in ("welcome", "done") else "normal")
+        self.skip_btn.configure(text="Later" if step.key == "agent" else "Skip this step")
         if step.key in LIVE_STEPS:
             self._start_camera()
         else:
@@ -442,6 +444,21 @@ class FirstRunWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb
         else:
             self._error(msg or "eye setup did not finish", self._main_gaze)
 
+    def _step_agent(self) -> None:
+        self._label(
+            self.content,
+            "You can connect, change or remove agents any time from the tray menu.",
+            self.f_small,
+            fg=SOFT,
+        ).pack(fill="x", pady=(12, 0))
+
+    def _main_agent(self) -> bool:
+        """The page's one button: open the existing 3-step Agent Link wizard; the guide stays behind it."""
+        from away.agentlink import gui as agent_gui
+
+        self._agent_wizard = agent_gui.Wizard(_FirstRunAgentLinkHost(self.root))
+        return True
+
     def _step_done(self) -> None:
         self._label(self.content, self.flow.summary() + ".", self.f_big, fg=GREEN).pack(fill="x", pady=8)
 
@@ -564,6 +581,59 @@ class FirstRunWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb
         if hand:
             for x, y in hand:
                 c.create_oval(x * 320 - 3, y * 240 - 3, x * 320 + 3, y * 240 + 3, fill="#76FF03", outline="")
+
+
+class _FirstRunAgentLinkHost:
+    """Enough of the Agent Link tab's shape to host its 3-step connect wizard in the first-run window
+    (see :class:`away.agentlink.gui.WizardHost`)."""
+
+    tk: Any
+    ttk: Any
+    root: Any
+    frame: Any
+    m: Any
+
+    def __init__(self, root: Any) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        from away.agentlink import gui_model
+
+        self.tk = tk
+        self.ttk = ttk
+        self.root = root
+        self.frame = root  # the wizard window opens on top of the guide
+        self.m = gui_model.AgentLinkModel()
+
+    def _bg(self, fn: Any, done: Any = None) -> None:
+        def run() -> None:
+            try:
+                res = fn()
+            except Exception as exc:
+                res = exc
+            if done is not None:
+                try:
+                    # the window may have closed while the background work ran;
+                    # a dead widget must not crash the worker thread
+                    if self.root.winfo_exists():
+                        self.root.after(0, lambda: done(res))
+                except Exception:
+                    pass
+
+        threading.Thread(target=run, daemon=True, name="first-run-agent-wizard").start()
+
+    def _fix(self, p: Any) -> None:
+        if p.fix.startswith("url:"):
+            import webbrowser
+
+            webbrowser.open(p.fix[4:])
+        elif p.fix == "start_app":
+            import subprocess
+
+            from away.app.frozen import away_command
+
+            with contextlib.suppress(Exception):
+                subprocess.Popen(away_command(["tray"]))
 
 
 class _Dropping:
