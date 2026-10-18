@@ -338,3 +338,74 @@ def test_play_interrupting_play_blocking_does_not_double_close(
     player.join(timeout=15)
     assert not player.is_alive()
     assert old_stream.close_calls == 1, f"old stream closed {old_stream.close_calls} times"
+
+
+def test_stop_after_play_does_not_overwrite_closed_stream_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a stop() after play() must not overwrite the closed-stream record.
+
+    Sequence: play_blocking() starts (stream1); play() stops stream1 (recorded);
+    stop() stops stream2 (must NOT overwrite stream1's record). The play_blocking
+    teardown must skip closing stream1 exactly once, not double-close it.
+    Fails on the old single-slot _closed_by_stop implementation.
+    """
+    fake = _FakeSD(play_s=30.0)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(16, dtype=np.float32)
+    player = threading.Thread(target=audio_out.play_blocking, args=(samples, 24000))
+    player.start()
+    deadline = time.perf_counter() + 15
+    while not fake.play_calls and time.perf_counter() < deadline:
+        time.sleep(0.01)
+    assert fake.play_calls, "playback never started"
+    time.sleep(0.05)
+    stream1 = fake.get_stream()
+    # play() stops stream1 (recorded in _closed_by_stop)
+    audio_out.play(samples, 24000)
+    assert stream1.close_calls == 1, "sd.play() should have closed stream1 once"
+    stream2 = fake.get_stream()
+    assert stream2 is not stream1
+    # stop() stops stream2; must not overwrite stream1's record
+    audio_out.stop()
+    assert stream2.close_calls == 1, "sd.stop() should have closed stream2 once"
+    # play_blocking teardown: stream1 was already closed, skip it (no double close)
+    player.join(timeout=15)
+    assert not player.is_alive()
+    assert stream1.close_calls == 1, (
+        f"stream1 closed {stream1.close_calls} times (double close from overwritten record)"
+    )
+
+
+def test_two_overlapping_play_blocking_no_double_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two play_blocking() calls with interleaved stop()s: each stream closed once."""
+    fake = _FakeSD(play_s=30.0)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    from away.voice import audio_out
+
+    samples = np.zeros(16, dtype=np.float32)
+    started = threading.Event()
+
+    def player() -> None:
+        started.wait(timeout=15)
+        audio_out.play_blocking(samples, 24000)
+
+    t1 = threading.Thread(target=player)
+    t2 = threading.Thread(target=player)
+    t1.start()
+    t2.start()
+    time.sleep(0.1)
+    started.set()  # release both players at once
+    time.sleep(0.3)  # let both enter play_blocking
+    # Interrupt with stop(); each stream must be closed exactly once total
+    audio_out.stop()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+    assert not t1.is_alive() and not t2.is_alive()
+    # No leaked entries: all waiters tore down
+    assert not audio_out._play_blocking_streams, "waiter set leaked entries"
+    assert not audio_out._closed_by_stop, "closed-stream set leaked entries"

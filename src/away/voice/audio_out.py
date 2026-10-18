@@ -17,19 +17,27 @@ import time
 from typing import Any
 
 _sd_lock = threading.Lock()
-# Streams that sd.stop() already closed. play_blocking's teardown must skip
-# its close() for these: Stream.close() has no double-close guard and
-# sd.stop() closes the stream itself, so closing again would re-enter
-# Pa_CloseStream on a dead handle. At most one entry: sounddevice keeps a
-# single current output stream (play() stops the previous one first).
-_closed_by_stop: list[Any] = []
+# Streams that sd.stop() (or sd.play() stopping its predecessor) already
+# closed. play_blocking's teardown must skip its close() for these:
+# Stream.close() has no double-close guard and sd.stop() closes the stream
+# itself, so closing again would re-enter Pa_CloseStream on a dead handle.
+# A set, not a single slot: several play_blocking() calls can be unwinding
+# at once, and a later stop() must not overwrite an earlier entry.
+# Only streams with an active play_blocking() waiter are tracked; otherwise
+# the set would leak entries for fire-and-forget play() calls.
+_closed_by_stop: set[Any] = set()
+# Streams currently waited on by a play_blocking() call (under _sd_lock).
+_play_blocking_streams: set[Any] = set()
 
 
 def _note_stopped(stream: Any) -> None:
-    """Remember that the stream was closed via sd.stop(); caller holds _sd_lock."""
-    _closed_by_stop.clear()
-    if stream is not None:
-        _closed_by_stop.append(stream)
+    """Remember that the stream was closed via sd.stop(); caller holds _sd_lock.
+
+    Only tracks streams with an active play_blocking() waiter; others have no
+    teardown that would double-close.
+    """
+    if stream is not None and stream in _play_blocking_streams:
+        _closed_by_stop.add(stream)
 
 
 def _current_stream(sd: Any) -> Any | None:
@@ -76,13 +84,15 @@ def play_blocking(samples: Any, sr: int) -> None:
         sd.play(samples, int(sr))
         _note_stopped(prev)
         stream = sd.get_stream()
+        _play_blocking_streams.add(stream)
     try:
         while stream.active:
             time.sleep(0.005)
     finally:
         with _sd_lock:
-            if _closed_by_stop and _closed_by_stop[0] is stream:
-                _closed_by_stop.clear()
+            _play_blocking_streams.discard(stream)
+            if stream in _closed_by_stop:
+                _closed_by_stop.discard(stream)
             else:
                 stream.close()
 
