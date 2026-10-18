@@ -119,7 +119,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
         "json",
         "POST",
         "/v1/selftest",
-        "Run the PC self-test {wait, only}; the report goes to every connected agent (diagnose)",
+        "Run the PC self-test {wait, only}; the report is pushed to the share_logs audience (diagnose)",
     ),
     "selftest_latest": ("json", "GET", "/v1/selftest/latest", "The newest self-test report (redacted)"),
     "get_bundle": ("json", "POST", "/v1/bundle", "Build a diagnostics bundle (share_logs)"),
@@ -316,7 +316,15 @@ class Gate:
                 raise Forbidden("this pairing link was already used by another agent")
             pin = f"{p.pin[:3]} {p.pin[3:]}"
             options = ["Allow", "Deny"]
-            details = [*(f"Can: {d}" for d in perms.describe(p.scopes)), f"Matching code: {pin}"]
+            # proposal #18: the prompt says what each permission means, in plain words, not just labels
+            details = list(perms.describe(p.scopes, verbose=True))
+            if perms.CONTROL in p.scopes:
+                minutes = int(getattr(getattr(self.service, "control", None), "ttl_s", 1800.0) // 60)
+                details.append(
+                    f"Computer use: you approve it each time, up to {minutes} minutes, "
+                    "and you can take over by moving the mouse."
+                )
+            details.append(f"Matching code: {pin}")
             choice = DEFAULT_TOKEN_EXPIRY
             if offer_keep:
                 choice = expiry_choice(expiry if expiry not in (None, "") else self.token_expiry())

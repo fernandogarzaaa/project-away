@@ -1398,7 +1398,14 @@ def camera_diagnose_worker(
         fps = spec.fps if spec is not None else 30
         devs = (lister or (lambda: diagnose.diagnose_devices(None)))()
         out.put("diagnosing every camera on every backend (this takes a while)...")
-        (runner or diagnose.run_diagnose)(devs, width=width, height=height, fps=fps, out=lambda m: out.put(str(m)))
+        (runner or diagnose.run_diagnose)(
+            devs,
+            width=width,
+            height=height,
+            fps=fps,
+            out=lambda m: out.put(str(m)),
+            consent=diagnose.read_consent,
+        )
         out.put({"done": True})
     except Exception as exc:
         out.put({"error": f"camera diagnosis failed: {exc}"})
@@ -1519,13 +1526,25 @@ TAB_ORDER = (
     "Gesture Studio",
     "Shortcuts",
     "Voice & input",
-    "Agent Link",
-    "Live agent",
+    "Agents",  # v0.1.29: the Live agent and Agent Link tabs merged into one
     "Cameras",
     "Tuning",
     "Performance",
     "Models",  # v0.1.23
 )
+
+
+# v0.1.29: the Live agent and Agent Link tabs merged into "Agents"; the old names still open it
+# (``away settings --tab "agent link"`` keeps working).
+TAB_ALIASES = {
+    "agent link": "Agents",
+    "live agent": "Agents",
+}
+
+
+def resolve_tab_alias(name: str) -> str:
+    """Map an old tab name to its current title; unknown names come back unchanged."""
+    return TAB_ALIASES.get(name.strip().lower(), name.strip())
 
 
 # v0.1.21: the camera previews in Settings, by the tab that shows them. A preview stops when you switch to another
@@ -1630,10 +1649,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._build_cameras(nb)
         self._build_performance(nb)
         self._build_studio(nb)  # v0.1.20: Gesture Studio replaces the old "Test gesture" tab
-        from away.agentlink import gui as agent_gui  # Agent Link (v0.1.20), isolated in its own module
+        from away.app import agents_tab  # v0.1.29: Agents (Live agent + Agent Link in one tab)
 
         with contextlib.suppress(Exception):
-            agent_gui.build_tab(self, nb)
+            agents_tab.build_tab(self, nb)
         try:  # v0.1.23 Settings > Models (model registry), isolated in its own module
             from away.app import models_tab
 
@@ -1643,10 +1662,6 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         from away.comfort.settings_tab import build_tab
 
         build_tab(self, nb)  # v0.1.20 "Getting started": guided first run + comfort switches
-        from away.liveagent import gui as live_gui  # Live agent, isolated in its own package
-
-        with contextlib.suppress(Exception):
-            self.live_agent_panel = live_gui.build_tab(self, nb)
         order_tabs(nb, TAB_ORDER)
         nb.select(0)
         self.nb = nb
@@ -1701,7 +1716,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
 
     def select_tab(self, name: str) -> bool:
         """Show the first tab whose title contains ``name`` (case-insensitive). False when none does."""
-        want = name.strip().lower()
+        want = resolve_tab_alias(name).lower()
         for tab_id in self.nb.tabs():
             if want and want in str(self.nb.tab(tab_id, "text")).lower():
                 self.nb.select(tab_id)
@@ -2579,6 +2594,10 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         tools.grid(row=11, column=0, columnspan=6, sticky="w", pady=(4, 0))
         self.cam_diag_btn = ttk.Button(tools, text="Diagnose", command=self._cam_diagnose)
         self.cam_diag_btn.pack(side="left", padx=2)
+        # v0.1.28: a fix button the diagnose output can ask for, e.g. "[fix:open:camera_privacy]" ->
+        # "Open camera privacy settings". It is packed only while a diagnosis offers it.
+        self.cam_fix_action: str | None = None
+        self.cam_fix_btn = ttk.Button(tools, text="", command=self._cam_fix)
         ttk.Button(tools, text="Retry cameras", command=self._cam_retry).pack(side="left", padx=2)
         # v0.1.23: stop using a camera that keeps failing (it is kept, with its settings, to turn back on)
         ttk.Button(tools, text="Turn off failing camera", command=self._cam_turn_off).pack(side="left", padx=2)
@@ -2592,6 +2611,8 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.cam_out.pack(side="left", fill="both", expand=True)
         self._cam_diag_q: queue.Queue[Any] = queue.Queue()
         self._cam_diag_thread: threading.Thread | None = None
+        self._cam_fix_q: queue.Queue[Any] = queue.Queue()
+        self._cam_fix_thread: threading.Thread | None = None
         self._cam_q: queue.Queue[Any] = queue.Queue()
         self._cam_stop = threading.Event()
         self._cam_thread: threading.Thread | None = None
@@ -2650,6 +2671,7 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
             self._report(err)
             return
         self._cam_out_set("diagnosing: every camera on every backend; this takes a while...")
+        self._cam_hide_fix()
         self.cam_diag_btn.configure(state="disabled")
         self._cam_diag_thread = threading.Thread(
             target=camera_diagnose_worker,
@@ -2662,11 +2684,16 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.root.after(200, self._cam_diag_poll)
 
     def _cam_diag_poll(self) -> None:
+        from away.multicam import diagnose
+
         running = self._cam_diag_thread is not None and self._cam_diag_thread.is_alive()
         while not self._cam_diag_q.empty():
             msg = self._cam_diag_q.get_nowait()
             if isinstance(msg, str):
-                self._cam_out_add(msg)
+                action, text = diagnose.split_fix_marker(msg)  # v0.1.28: fix markers become a button
+                self._cam_out_add(text)
+                if action:
+                    self._cam_show_fix(action)
             elif isinstance(msg, dict) and "error" in msg:
                 self._cam_out_add(f"error: {msg['error']}")
         if running:
@@ -2675,6 +2702,57 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self._cam_tools.end("test")
         self.cam_diag_btn.configure(state="normal")
         self._cam_refresh()
+
+    # v0.1.28: the diagnose's fix markers, e.g. "[fix:open:camera_privacy]", surface as a button next to
+    # Diagnose. The label matches the self-test's fix buttons.
+    CAM_DIAGNOSE_FIX_LABELS: ClassVar[dict[str, str]] = {"open:camera_privacy": "Open camera privacy settings"}
+
+    def _cam_show_fix(self, action: str) -> None:
+        label = self.CAM_DIAGNOSE_FIX_LABELS.get(action)
+        if not label:
+            return
+        self.cam_fix_action = action
+        self.cam_fix_btn.configure(text=label)
+        self.cam_fix_btn.pack(side="left", padx=2)
+
+    def _cam_hide_fix(self) -> None:
+        self.cam_fix_action = None
+        self.cam_fix_btn.pack_forget()
+
+    def _cam_fix(self) -> None:
+        # v0.1.28: worker threads never touch Tk here (see test_no_worker_thread_touches_tk_directly):
+        # the fix runs in a thread, its result rides the queue, and the main thread polls it.
+        from away.selftest import fixes
+
+        action = self.cam_fix_action
+        if not action:
+            return
+        self.cam_fix_btn.configure(state="disabled")
+        while not self._cam_fix_q.empty():  # a stale result from an earlier press is never shown
+            self._cam_fix_q.get_nowait()
+        self._cam_fix_thread = threading.Thread(
+            target=lambda: self._cam_fix_q.put(fixes.apply(action)),
+            daemon=True,
+            name="camera-diagnose-fix",
+        )
+        self._cam_fix_thread.start()
+        self.root.after(200, self._cam_fix_poll)
+
+    def _cam_fix_poll(self) -> None:
+        running = self._cam_fix_thread is not None and self._cam_fix_thread.is_alive()
+        res: dict[str, Any] | None = None
+        while not self._cam_fix_q.empty():
+            res = self._cam_fix_q.get_nowait()
+        if res is not None:
+            ok = bool(res.get("ok"))
+            message = str(res.get("message") or "Done.")
+            self._report(None if ok else message, message if ok else None)
+            self.cam_fix_btn.configure(state="normal")
+            return
+        if running:
+            self.root.after(200, self._cam_fix_poll)
+        else:
+            self.cam_fix_btn.configure(state="normal")
 
     def _cam_selected(self) -> int | None:
         sel = self.cam_tree.selection()

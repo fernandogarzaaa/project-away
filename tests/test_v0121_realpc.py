@@ -54,6 +54,7 @@ GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17), + ui_qu
     "diagnostics",
     "look",
     "get_screen",
+    "ui_query",
     "ask_user",
     "notify_user",
     "control",

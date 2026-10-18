@@ -185,7 +185,7 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
         assert "bridge" in (init.instructions or "")
         names = {t.name for t in (await s.list_tools()).tools}
         # v0.1.21: 15 grouped tools (was 37); the old names still work on REST and /v1/rpc. v0.1.22: + inbox;
-        # v0.1.28: + shell, + ui_query
+        # v0.1.28: + ui_query, + shell (18)
         assert names == {
             "inbox",
             "get_status",
@@ -196,6 +196,7 @@ def test_mcp_over_http_with_bearer_token(live) -> None:
             "diagnostics",
             "look",
             "get_screen",
+            "ui_query",
             "ask_user",
             "notify_user",
             "control",

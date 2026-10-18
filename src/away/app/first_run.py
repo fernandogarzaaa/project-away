@@ -86,6 +86,14 @@ def default_steps() -> list[Step]:
             "Start eye setup",
         ),
         Step(
+            "agent",
+            "Want to connect an AI agent?",
+            "Project Away is the bridge between you and your AI agents. Connect one now and it can see your "
+            "screen, answer questions and run errands for you.\n\nOnly when you allow it: nothing is shared "
+            "until you press Allow. You can always do this later from the tray menu.",
+            "Connect one now",
+        ),
+        Step(
             "done",
             "You're all set!",
             "Project Away lives in the tray, next to the clock.\n\n"

@@ -103,9 +103,11 @@ class LiveSpeech:
 def _stop_sounddevice() -> None:  # pragma: no cover - audio device
     import sys
 
-    sd = sys.modules.get("sounddevice")  # only when a natural voice already loaded it
-    if sd is not None:
-        sd.stop()
+    if sys.modules.get("sounddevice") is None:  # only when a natural voice already loaded it
+        return
+    from away.voice import audio_out
+
+    audio_out.stop()
 
 
 class BargeIn:

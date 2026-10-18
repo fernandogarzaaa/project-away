@@ -62,7 +62,8 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         method, args = resolve(_group, kw)
         return await call(ctx, method, **args)
 
-    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 17 (shell). Related tools are one tool with an `action`
+    # v0.1.21: 15 tools (was 37), v0.1.22: 16 (inbox), v0.1.28: 18 (shell, ui_query). Related tools are one
+    # tool with an `action`
     # (away.agentlink.groups); every old name still works on the REST API and /v1/rpc/<name>.
     # ------------------------------------------------------------------ read
     @mcp.tool()
@@ -149,7 +150,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         and logs need "Share my logs and recordings" (off unless the person turns it on; secrets are hidden).
         - action="run": start a check, `kind` = "cameras" (every camera/backend/mode with measured fps; optional
           `device`; `quick`=true opens each camera on its remembered backend only and skips the mode sweep, a
-          fast triage answer), "sweep" (the configured cameras together) or "benchmark" (model speeds). Returns
+          fast triage answer), "sweep" (the configured cameras together), "benchmark" (model speeds), or
+          "holders" (who is holding a camera: what Windows says holds one now, a live scan of known camera
+          apps running now, and who used one last with timestamps; `now`/`last_used` in the result). Returns
           a job id. Every check's result carries `elapsed_s` and `budget_hit` (whether a time limit stopped it).
         - action="job": that check's state and output (`job_id`); results are kept 10 min after it finished.
           A finished "cameras" check also carries `result.cameras`, one structured dict per camera: `id`
@@ -168,9 +171,11 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         - action="files": downloadable bundles, recordings and logs. action="download": one of them by `path`
           (base64). action="logs": the app log tail (`lines`).
         - action="selftest": run the one-click PC self-test (cameras, hand tracking, pointer, microphone, speech,
-          voices, pop-ups, link, PC load, models); `wait`=true returns the report, otherwise it arrives as the event
-          selftest.completed, in your inbox and as away://selftest/latest. action="selftest_latest": the newest
-          report. Every result is pass/warn/fail in plain words with the fix the person can press."""
+          voices, pop-ups, link, PC load, models); `wait`=true returns the report, otherwise it is pushed to the
+          agents the person let "Share my logs and recordings" (their inbox and wake-up address).
+          action="selftest_latest": the newest report (needs "Run camera and speed checks" or "Share my
+          logs and recordings"). Every result is pass/warn/fail in plain words with the fix the person can
+          press."""
         if action == "download":
             data = await group(ctx, "diagnostics", action="download", path=path)
             raw = data if isinstance(data, bytes) else base64.b64decode(data["b64"])
@@ -280,6 +285,15 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     # ---------------------------------------------------------------- control
     @mcp.tool()
+    async def ui_query(ctx: Context) -> dict:
+        """The foreground window's interactable UI elements with exact screen bounds (after control
+        action="request" was approved; Windows UI Automation, no screenshot taken): [{id, name, role,
+        bounds}]. Pass an `id` back as element_id= to pointer or keyboard actions to act on it exactly -
+        no pixel guessing. Ids are yours only, expire with your next ui_query call, and stop resolving
+        if the foreground window changes."""
+        return await call(ctx, "ui_query")
+
+    @mcp.tool()
     async def control(
         ctx: Context,
         action: str,
@@ -367,7 +381,11 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="url" opens an http(s) `url` in the default browser.
+        / Spotlight (not terminals or system tools); action="system" opens an allowlisted Windows system tool by
+        `name` (device-manager or a Windows Settings page such as windows-update: use the name with
+        spaces or dashes, e.g. "Device Manager"): it is launched straight through the shell, with no keystrokes
+        and no command line, so opening it is navigation only and anything consequential inside it still asks
+        first; action="url" opens an http(s) `url` in the default browser.
         The result reports the observed effect: `foreground` (the foreground window's title and process name
         right after the action) and `focused` (the focused UI element's label, when UI Automation has one)."""
         return await group(ctx, "open", action=action, name=name, url=url)
