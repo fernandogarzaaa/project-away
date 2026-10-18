@@ -44,7 +44,7 @@ from away.app import selftest
 from away.voice import speech, weak_speech
 from away.voice.weak_speech import confidence_of, is_filler, should_drop, weak_evidence
 
-GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17 tools)
+GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + ui_query, + shell (18 tools)
     "inbox",
     "get_status",
     "get_context",
@@ -54,6 +54,7 @@ GROUPED_TOOLS = {  # v0.1.22: + inbox (16 tools); v0.1.28: + shell (17 tools)
     "diagnostics",
     "look",
     "get_screen",
+    "ui_query",
     "ask_user",
     "notify_user",
     "control",
@@ -1008,7 +1009,7 @@ def test_old_names_and_groups_both_dispatch(core) -> None:
     assert "diagnostics" in enum and "change_settings" in enum
 
 
-def test_mcp_lists_exactly_15_grouped_tools(core) -> None:
+def test_mcp_lists_exactly_17_tools(core) -> None:
     pytest.importorskip("mcp")
     from away.agentlink import api, mcp_tools
 
@@ -1020,7 +1021,7 @@ def test_mcp_lists_exactly_15_grouped_tools(core) -> None:
 def test_about_explains_wide_shot_then_zoom_and_the_grouped_tools(core) -> None:
     for name in GROUPED_TOOLS:
         assert name in INSTRUCTIONS
-    assert "Tools (17)" in INSTRUCTIONS and "action" in INSTRUCTIONS
+    assert "Tools (18)" in INSTRUCTIONS and "action" in INSTRUCTIONS
     assert "wide shot first" in INSTRUCTIONS.lower() and "monitor=N" in INSTRUCTIONS and "region=" in INSTRUCTIONS
     a, _ = core.registry.issue("Agent", ["read"], 3600)
     text = briefing(a, core.service.get_context(a), {"active": False}, "ask")

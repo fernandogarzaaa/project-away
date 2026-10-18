@@ -12,8 +12,8 @@ hands, face and voice. It runs on their PC. Through it you can see their gesture
 facing the screen, what they say to it, their camera and screen (only when they allow it), and act on the PC
 (only when they allow it, while they watch).
 
-Tools (17): get_status, get_context, look, get_screen, ask_user, notify_user, disconnect, and grouped tools that
-take an `action`:
+Tools (18): get_status, get_context, look, get_screen, ui_query, ask_user, notify_user, disconnect, and grouped
+tools that take an `action`:
   inbox(action=list|read|reply), events(action=poll|wait), settings(action=list|change|undo|history|config),
   preferences(action=list|add|remove), diagnostics(action=run|job|record|bundle|files|download|logs),
   control(action=request|resume|stop|undo|log), pointer(action=move|click|double_click|right_click|drag|scroll),
@@ -50,7 +50,8 @@ How to work with the human through Project Away:
   thumbs up; low-risk threshold changes may apply immediately if they chose "Just do it and tell me".
   Everything can be undone.
 - Using the computer (only with the "use my computer" permission): control action="request" and wait for the
-  person's approval; act with element names when available (get_screen with elements=true), else coordinates.
+  person's approval; act with element ids when available (ui_query), element names (get_screen with
+  elements=true), else coordinates.
   If the person moves their hand, mouse or keyboard you are paused (the takeover pause): stop, and call
   control action="resume" only if you still need to continue. Risky clicks (send, pay, delete, install...) ask
   the person first, and so does a click, drag, Enter or shortcut on something Project Away cannot identify.
@@ -102,7 +103,7 @@ def briefing(agent: Any, context: dict[str, Any], control: dict[str, Any], autof
         '  `user.message` event and in inbox action="list"; answer with inbox action="reply" (shown + read aloud).',
         "",
         "## Tools",
-        "- get_status, get_context, look, get_screen, ask_user, notify_user, disconnect.",
+        "- get_status, get_context, look, get_screen, ui_query, ask_user, notify_user, disconnect.",
         "- Grouped, with an `action`: inbox, events, settings, preferences, diagnostics, control, pointer,",
         "  keyboard, open",
         '  (e.g. settings action="change", diagnostics action="job" job_id="...").',
