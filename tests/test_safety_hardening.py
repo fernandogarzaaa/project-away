@@ -308,6 +308,20 @@ def test_open_app_warns_when_the_app_never_appears() -> None:
     ]  # the launcher keystrokes still run; only the blind ok is gone
 
 
+def test_open_app_short_names_need_exact_match() -> None:
+    """Short app names (< 3 chars) must not substring-match: "a" must not match
+    "Calculator", avoiding a false-positive verification."""
+    from away.agentlink.control import ComputerControl
+    # "a" in "Calculator" is a substring, but not a word and not the process
+    assert ComputerControl._name_matches("a", "Calculator", "ApplicationFrameHost.exe") is False
+    # exact process stem still matches
+    assert ComputerControl._name_matches("a", "A", "a.exe") is True
+    # whole word in title matches
+    assert ComputerControl._name_matches("it", "IT Support", "explorer.exe") is True
+    # but substring of a longer word does not
+    assert ComputerControl._name_matches("it", "Settings", "SystemSettings.exe") is False
+
+
 def test_open_app_is_quiet_when_the_app_appears() -> None:
     """No warning when the foreground window matches the app's title or process within the poll budget."""
     clock = Clock()

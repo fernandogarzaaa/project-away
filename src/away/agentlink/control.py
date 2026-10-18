@@ -871,7 +871,12 @@ class ComputerControl:
     @staticmethod
     def _name_matches(want: str, title: str, process: str) -> bool:
         """The requested app name against a foreground window's title and process name (case-insensitive,
-        punctuation-insensitive: "Notepad" matches "Untitled - Notepad" and "notepad.exe")."""
+        punctuation-insensitive: "Notepad" matches "Untitled - Notepad" and "notepad.exe").
+
+        Short names (under 3 alphanumeric characters) use stricter matching: they must equal the
+        process stem or appear as a whole word in the title. This avoids "a" matching "Calculator"
+        or "it" matching "Settings".
+        """
 
         def norm(s: str) -> str:
             return re.sub(r"[^a-z0-9]", "", s.lower())
@@ -880,7 +885,14 @@ class ComputerControl:
         if not want:
             return False
         proc = norm(process[:-4]) if process.lower().endswith(".exe") else norm(process)
-        return want in norm(title) or (bool(proc) and want in proc)
+        title_n = norm(title)
+        if len(want) < 3:
+            # strict mode for short names: exact process stem, or whole-word in title
+            if proc and want == proc:
+                return True
+            words = re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
+            return want in [re.sub(r"[^a-z0-9]", "", w) for w in words]
+        return want in title_n or (bool(proc) and want in proc)
 
     def _app_visible(self, name: str, wait: Callable[[float], None]) -> bool:
         """Poll the foreground window until its title or process matches ``name`` (or the ~3 s budget runs out).
