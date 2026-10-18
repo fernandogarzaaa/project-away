@@ -234,10 +234,11 @@ def plain_error(exc: BaseException) -> str:
 
 
 # ------------------------------------------------------------------------------------------------ Tk
-def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; smoke-tested under Xvfb
+def build_panel(win: Any, parent: Any) -> LivePanel:
+    """The Live agent panel content inside ``parent`` (a tab frame or a section of the Agents tab)."""
     tk, ttk = win.tk, win.ttk
     panel = LivePanel()
-    f = win._scroll_tab(nb, "Live agent")
+    f = parent
     root = win.root
     status = tk.StringVar(value=panel.status_line())
 
@@ -561,3 +562,9 @@ def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; sm
     bg(panel.model_choices, lambda _r: refresh_models())  # the free list may need the network: off the UI thread
     refresh_turns()
     return panel
+
+
+def build_tab(win: Any, nb: Any) -> LivePanel:  # pragma: no cover - widgets; smoke-tested under Xvfb
+    """The Live agent as its own Settings tab (kept for compatibility; the Agents tab embeds build_panel)."""
+    f = win._scroll_tab(nb, "Live agent")
+    return build_panel(win, f)

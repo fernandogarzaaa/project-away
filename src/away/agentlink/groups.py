@@ -81,6 +81,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
     "open": {
         "app": GroupAction("act", ("name",), fixed={"action": "open_app"}),
         "url": GroupAction("act", ("url",), fixed={"action": "open_url"}),
+        "system": GroupAction("act", ("name",), fixed={"action": "open_app", "system": True}),
     },
     "shell": {  # v0.1.28: staged shell (proposal #26)
         "list": GroupAction("run_shell", (), fixed={"action": "list"}),
