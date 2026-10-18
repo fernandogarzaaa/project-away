@@ -88,6 +88,11 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         "run": GroupAction("run_shell", ("command", "argv", "why")),
         "log": GroupAction("run_shell", ("limit",), fixed={"action": "log"}),
     },
+    "shell": {  # v0.1.28: staged shell (proposal #26)
+        "list": GroupAction("run_shell", (), fixed={"action": "list"}),
+        "run": GroupAction("run_shell", ("command", "argv", "why")),
+        "log": GroupAction("run_shell", ("limit",), fixed={"action": "log"}),
+    },
 }
 
 
