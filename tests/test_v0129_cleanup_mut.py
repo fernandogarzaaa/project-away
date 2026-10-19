@@ -128,6 +128,7 @@ def test_ensure_terminal_existing_punct() -> None:
     assert ensure_terminal("hello world foo?") == "hello world foo?"
     assert ensure_terminal("hello world foo!") == "hello world foo!"
 
+
 def test_same_class_weekday_month_and_time_boundaries() -> None:
     from away.voice.cleanup import _same_class
 
@@ -158,4 +159,3 @@ def test_rule_cleaner_code_context_skips_sentence_casing_and_period() -> None:
 
     cleaner = RuleCleaner()
     assert cleaner.clean("echo hello world", context="PowerShell") == "echo hello world"
-
