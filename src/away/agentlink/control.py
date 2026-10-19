@@ -726,14 +726,9 @@ class ComputerControl:
     def _point(
         self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
     ) -> tuple[int, int, str]:
-        if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
-            el = self._resolve_element_id(agent_id, element_id)
-            center = el.center
-            assert center is not None  # _resolve_element_id refuses bound-less elements
-            return int(center[0]), int(center[1]), el.name
         if element:
             mark = self.MARK_REF.match(str(element).strip())
-            if mark is not None:  # a set-of-mark reference: needs no UI Automation
+            if mark is not None:  # a set-of-mark reference: needs no UI Automation; wins over element_id
                 mid = int(mark.group(1))
                 pt = self.marks.get(agent_id, {}).get(mid)
                 if pt is None:
@@ -741,6 +736,12 @@ class ComputerControl:
                         f"no annotation {mid} on your last screenshot; call get_screen(annotate=true) first"
                     )
                 return int(pt[0]), int(pt[1]), f"mark {mid}"
+        if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
+            el = self._resolve_element_id(agent_id, element_id)
+            center = el.center
+            assert center is not None  # _resolve_element_id refuses bound-less elements
+            return int(center[0]), int(center[1]), el.name
+        if element:
             if not getattr(self.hooks.uia, "available", False):
                 raise ControlRefused("acting by element name needs UI Automation (Windows); use coordinates")
             el = self.hooks.uia.find(str(element))
