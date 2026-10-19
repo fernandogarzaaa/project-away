@@ -71,3 +71,49 @@ def test_frame_rms_silence() -> None:
 def test_frame_rms_tone() -> None:
     rms = frame_rms(_tone(0.1), frame=160)
     assert np.all(rms > 0.1)
+
+def test_frame_rms_drops_partial_tail_and_rejects_bad_frame() -> None:
+    import pytest
+
+    audio = np.array([1.0, 1.0, 1.0, 1.0, 100.0], dtype=np.float32)
+    rms = frame_rms(audio, frame=2)
+    assert len(rms) == 2
+    assert np.allclose(rms, [1.0, 1.0])  # the one-sample tail is intentionally dropped
+    with pytest.raises(ValueError, match="frame must be positive"):
+        frame_rms(audio, frame=0)
+
+
+def test_frame_flags_applies_hangover_after_speech() -> None:
+    class FixedVAD(EnergyVAD):
+        def __init__(self) -> None:
+            super().__init__(sample_rate=1000, frame_ms=10, min_rms=0.1, ratio=1.0, hangover_frames=2)
+
+        def frame_flags(self, audio: np.ndarray) -> np.ndarray:
+            return super().frame_flags(audio)
+
+    vad = FixedVAD()
+    # Five 10ms frames: speech in the first frame, then silence. Hangover extends two frames.
+    audio = np.concatenate([np.ones(10, dtype=np.float32), np.zeros(40, dtype=np.float32)])
+    flags = vad.frame_flags(audio)
+    assert flags[0]
+    assert flags[1] and flags[2]
+    assert not flags[3]
+
+
+def test_trim_padding_is_bounded_to_input() -> None:
+    vad = EnergyVAD(SR, frame_ms=10, min_rms=0.01, ratio=1.0, hangover_frames=0, min_speech_frames=1)
+    audio = np.concatenate([_tone(0.2), _silence(0.1)])
+    trimmed = vad.trim(audio, pad_ms=1000)
+    assert 0 < len(trimmed) <= len(audio)
+
+
+def test_make_vad_silero_falls_back_when_backend_unavailable(monkeypatch) -> None:
+    from away.voice import vad
+
+    class BrokenSilero:
+        def __init__(self, sample_rate: int) -> None:
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(vad, "SileroVAD", BrokenSilero)
+    assert isinstance(vad.make_vad("silero", SR), EnergyVAD)
+
