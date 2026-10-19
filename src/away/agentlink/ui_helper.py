@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 COLORS = {"info": "#1f6feb", "success": "#1a7f37", "warning": "#bf8700", "error": "#cf222e", "camera": "#cf222e"}
+_RECEIPT_IMAGES: dict[str, list[Any]] = {}
 BORDER = "#ff2d55"
 
 
@@ -348,7 +349,7 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
 
     # Keep a window-local reference to Pillow images so Tk does not collect them.
     images: list[Any] = []
-    win._receipt_images = images
+    _RECEIPT_IMAGES[rid] = images
 
     tk.Label(
         win,
@@ -430,6 +431,7 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
             tmp.replace(answer_file)
         except OSError:
             pass
+        _RECEIPT_IMAGES.pop(rid, None)
         root.after(100, root.destroy)
 
     if t["undoable"]:
@@ -464,9 +466,11 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
     def poll() -> None:
         if done_file.exists():
             done_file.unlink(missing_ok=True)
+            _RECEIPT_IMAGES.pop(rid, None)
             root.destroy()
             return
         if time.monotonic() >= deadline:
+            _RECEIPT_IMAGES.pop(rid, None)
             root.destroy()
             return
         root.after(200, poll)
