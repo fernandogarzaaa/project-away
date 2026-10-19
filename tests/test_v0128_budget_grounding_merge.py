@@ -53,6 +53,19 @@ class FakeUIA:
         return None
 
     def element_at(self, x: int, y: int) -> Element | None:
+        # Model the live UIA lookup at the center of the Send button. The production code
+        # deliberately refuses cached elements when this live lookup is absent or inconclusive.
+        root = self._root
+        if root is None:
+            return None
+        stack = [root]
+        while stack:
+            el = stack.pop()
+            if el.rect is not None:
+                left, top, right, bottom = el.rect
+                if left <= x <= right and top <= y <= bottom:
+                    return el
+            stack.extend(el.children)
         return None
 
     def focused(self) -> Element | None:
@@ -131,13 +144,13 @@ def test_stale_element_id_in_sequence_is_refused(tmp_path: Path) -> None:
 # ------------------------------------------------- undo scoping and budget
 
 
-def test_undo_does_not_consume_budget(tmp_path: Path) -> None:
+def test_undo_consumes_budget(tmp_path: Path) -> None:
     ctl = _control(tmp_path, step_budget=3)
     _session(ctl)
     ctl.act("a1", "move", x=10, y=10)
     assert ctl.grant is not None and ctl.grant.steps_used == 1
     ctl.undo_last("a1")
-    assert ctl.grant.steps_used == 1  # undo is free: putting input back is not spending
+    assert ctl.grant.steps_used == 2  # undo is a state-changing agent action
 
 
 def test_undo_only_ids_filters_to_listed_entries(tmp_path: Path) -> None:
