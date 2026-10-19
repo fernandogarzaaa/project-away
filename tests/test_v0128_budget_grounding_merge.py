@@ -3,8 +3,8 @@ undo scoping (#64).
 
 - act_sequence passes element_id through each sub-step to _point, which resolves it via the
   agent's ui_query with staleness revalidation.
-- _undo accepts the only_ids filter (from #64's consent-receipt scoping) and never consumes
-  budget: undoing is not spending the session's allowance.
+- _undo accepts the only_ids filter (from #64's consent-receipt scoping).
+- Agent-triggered undo consumes one step; user-triggered receipt Undo All is not charged to an agent.
 """
 
 from __future__ import annotations
