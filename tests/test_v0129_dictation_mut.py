@@ -159,3 +159,36 @@ def test_seconds_calculation_affects_silence_phrase() -> None:
     # With correct seconds (0.1), "um" might be kept or filtered based on threshold
     # The key is that seconds is calculated correctly (not huge)
     assert r.seconds < 1.0  # Would be huge if multiplied (0.1 * 16000 = 1600)
+
+def test_disabled_while_recording_discards_buffer_and_publishes() -> None:
+    s, _, sink, bus = make_session(["hello"])
+    s.start()
+    s.feed(utterance())
+    s.set_enabled(False)
+    assert s.recording is False
+    assert s._chunks == []
+    assert bus.history("dictation.enabled")[-1].data == {"enabled": False}
+    assert s.stop().status == "disabled"
+    assert sink.items == []
+
+
+def test_toggle_starts_then_stops_recording() -> None:
+    s, asr, sink, _ = make_session(["hello world"])
+    assert s.toggle() is None
+    assert s.recording is True
+    s.feed(utterance())
+    result = s.toggle()
+    assert result is not None and result.status == "ok"
+    assert asr.calls
+    assert sink.items == ["Hello world "]
+
+
+def test_probe_microphone_reports_dependency_error(monkeypatch) -> None:
+    import sys
+    from away.voice.dictation import probe_microphone
+
+    monkeypatch.setitem(sys.modules, "sounddevice", None)
+    ok, message = probe_microphone()
+    assert ok is False
+    assert "sounddevice unavailable" in message
+
