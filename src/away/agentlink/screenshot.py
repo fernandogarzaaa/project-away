@@ -205,8 +205,20 @@ def jpeg_quality(out: tuple[int, int], zoomed: bool) -> int:
     return 70 if px <= 1_500_000 else 60
 
 
-def to_image(self, sx: float, sy: float) -> tuple[float, float]:
-        return (sx - self.origin[0]) * self.scale, (sy - self.origin[1]) * self.scale
+def to_image(img: Any, p: Plan) -> Any:
+    """Crop + resize a PIL image (or an RGB numpy array) per ``p`` as a PIL RGB image: exactly the picture the
+    agent sees. ``render`` is this plus :func:`to_jpeg`."""
+    from PIL import Image
+
+    if not hasattr(img, "getbbox"):
+        img = Image.fromarray(img)
+    part = img.crop(p.crop)
+    if part.size != p.out:
+        part = part.resize(p.out, Image.Resampling.LANCZOS if p.scale < 1.0 else Image.Resampling.BICUBIC)
+    if part.mode != "RGB":
+        part = part.convert("RGB")
+    return part
+
 
 def to_jpeg(pil: Any, p: Plan, quality: int | None = None) -> bytes:
     """Encode an already cropped/resized PIL image as JPEG (used after set-of-mark annotation is drawn on it)."""
@@ -216,6 +228,7 @@ def to_jpeg(pil: Any, p: Plan, quality: int | None = None) -> bytes:
     q = quality if quality is not None else jpeg_quality(p.out, p.what != "desktop")
     pil.save(buf, format="JPEG", quality=int(q), optimize=True)
     return buf.getvalue()
+
 
 def render(img: Any, p: Plan, quality: int | None = None) -> bytes:
     """Crop + resize a PIL image (or an RGB numpy array) per ``p`` and encode it as JPEG."""
