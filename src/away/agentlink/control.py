@@ -1426,6 +1426,9 @@ class ComputerControl:
             raise
         with self._lock:
             e.result = "undone"
+        if budget_grant is not None:
+            # The undo is a distinct agent action in the session's visual audit trail as well as the budget.
+            self._log(budget_grant, "undo", f"Undid {e.action}", "done", None)
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}
 
