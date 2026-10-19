@@ -205,6 +205,18 @@ def jpeg_quality(out: tuple[int, int], zoomed: bool) -> int:
     return 70 if px <= 1_500_000 else 60
 
 
+def to_image(self, sx: float, sy: float) -> tuple[float, float]:
+        return (sx - self.origin[0]) * self.scale, (sy - self.origin[1]) * self.scale
+
+def to_jpeg(pil: Any, p: Plan, quality: int | None = None) -> bytes:
+    """Encode an already cropped/resized PIL image as JPEG (used after set-of-mark annotation is drawn on it)."""
+    import io
+
+    buf = io.BytesIO()
+    q = quality if quality is not None else jpeg_quality(p.out, p.what != "desktop")
+    pil.save(buf, format="JPEG", quality=int(q), optimize=True)
+    return buf.getvalue()
+
 def render(img: Any, p: Plan, quality: int | None = None) -> bytes:
     """Crop + resize a PIL image (or an RGB numpy array) per ``p`` and encode it as JPEG."""
     import io
