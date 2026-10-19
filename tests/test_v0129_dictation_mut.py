@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+
 from away.voice.dictation import DictationResult, DictationSession
 from test_voice import FakeASR, ListSink, RuleCleaner, make_session, utterance
 
