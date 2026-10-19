@@ -130,7 +130,7 @@ def test_silero_vad_segments_trim_and_is_speech_without_loading_model() -> None:
     segments = vad.segments(audio)
     assert [(s.start, s.end) for s in segments] == [(100, 300), (500, 700)]
     trimmed = vad.trim(audio, pad_ms=10)
-    assert len(trimmed) == 920  # 100 samples of padding on either side of [100, 700]
+    assert len(trimmed) == 860  # 160 samples of padding, clipped at the start of the input
     assert vad.is_speech(audio) is True
 
 
