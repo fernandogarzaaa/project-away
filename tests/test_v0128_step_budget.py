@@ -143,6 +143,8 @@ def test_undo_counts_as_a_step(tmp_path: Path) -> None:
     _session(ctl)
     ctl.act("a1", "move", x=50, y=50)  # undoable: moving back is one step
     ctl.undo_last("a1")
+    assert ctl.grant is not None and ctl.grant.steps_used == 2
+    assert [entry["action"] for entry in ctl.session_trail()] == ["move", "undo"]
     with pytest.raises(ControlRefused):
         ctl.act("a1", "move", x=60, y=60)
 
