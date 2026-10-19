@@ -53,20 +53,20 @@ class FakeUIA:
         return None
 
     def element_at(self, x: int, y: int) -> Element | None:
-        # Model the live UIA lookup at the center of the Send button. The production code
-        # deliberately refuses cached elements when this live lookup is absent or inconclusive.
-        root = self._root
-        if root is None:
-            return None
-        stack = [root]
-        while stack:
-            el = stack.pop()
+        # Model the live UIA lookup at the center of the Send button. Prefer the deepest
+        # matching child, as a real hit-test should return the control rather than its window.
+        def visit(el: Element) -> Element | None:
+            for child in el.children:
+                found = visit(child)
+                if found is not None:
+                    return found
             if el.rect is not None:
                 left, top, right, bottom = el.rect
                 if left <= x <= right and top <= y <= bottom:
                     return el
-            stack.extend(el.children)
-        return None
+            return None
+
+        return visit(self._root) if self._root is not None else None
 
     def focused(self) -> Element | None:
         return None
