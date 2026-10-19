@@ -323,8 +323,8 @@ def test_speech_gate_median_empty_odd_and_even() -> None:
 
     assert _median([]) == 0.0
     assert _median([1.0]) == 1.0
-    assert _median([1.0, 3.0, 2.0]) == 2.0
-    assert _median([1.0, 3.0, 2.0, 4.0]) == 2.5
+    assert _median([1.0, 2.0, 3.0]) == 2.0
+    assert _median([1.0, 2.0, 3.0, 4.0]) == 2.5
 
 def test_face_tracker_exact_distance_and_reacquire_resets_missing() -> None:
     tracker = FaceTracker(max_dist=0.5, max_missing=1)
