@@ -127,3 +127,35 @@ def test_ensure_terminal_short_no_period() -> None:
 def test_ensure_terminal_existing_punct() -> None:
     assert ensure_terminal("hello world foo?") == "hello world foo?"
     assert ensure_terminal("hello world foo!") == "hello world foo!"
+
+def test_same_class_weekday_month_and_time_boundaries() -> None:
+    from away.voice.cleanup import _same_class
+
+    assert _same_class("monday", "tuesday") is True
+    assert _same_class("january", "december") is True
+    assert _same_class("3pm", "4:30") is True
+    assert _same_class("3", "4") is False
+    assert _same_class("3", "4pm", clock=True) is True
+    assert _same_class("monday", "march") is False
+
+
+def test_llm_cleaner_rejects_empty_or_extreme_output(monkeypatch) -> None:
+    from away.voice.cleanup import LLMCleaner, RuleCleaner
+
+    cleaner = LLMCleaner(RuleCleaner(), base_url="http://localhost/v1")
+    monkeypatch.setattr(cleaner, "_request", lambda *_: "")
+    base = cleaner.clean("hello there friend")
+    assert base == "Hello there friend."
+    assert cleaner.last_error == "rejected LLM output (empty or length changed too much)"
+
+    monkeypatch.setattr(cleaner, "_request", lambda *_: "x" * 100)
+    assert cleaner.clean("hello there friend") == "Hello there friend."
+    assert cleaner.last_error == "rejected LLM output (empty or length changed too much)"
+
+
+def test_rule_cleaner_code_context_skips_sentence_casing_and_period() -> None:
+    from away.voice.cleanup import RuleCleaner
+
+    cleaner = RuleCleaner()
+    assert cleaner.clean("echo hello world", context="PowerShell") == "echo hello world"
+
