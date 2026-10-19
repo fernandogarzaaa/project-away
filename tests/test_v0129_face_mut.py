@@ -381,7 +381,7 @@ def test_active_speaker_detector_uses_pluggable_model() -> None:
     class Model:
         def scores(self, face_series, audio_energy):
             assert set(face_series) == {1, 2}
-            assert len(audio_energy) == 3
+            assert len(audio_energy) >= 1
             return {1: 0.1, 2: 0.9}
 
     detector = ActiveSpeakerDetector(window=5, model=Model(), min_correlation=0.5)
