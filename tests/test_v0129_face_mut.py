@@ -326,3 +326,112 @@ def test_speech_gate_median_empty_odd_and_even() -> None:
     assert _median([1.0, 3.0, 2.0]) == 2.0
     assert _median([1.0, 3.0, 2.0, 4.0]) == 2.5
 
+def test_face_tracker_exact_distance_and_reacquire_resets_missing() -> None:
+    tracker = FaceTracker(max_dist=0.5, max_missing=1)
+    assert tracker.update([(0.0, 0.0, 0.2)]) == [0]
+    tracker.update([])
+    assert tracker.tracks[0].missing == 1
+    assert tracker.update([(0.5, 0.0, 0.2)]) == [0]  # max_dist is inclusive
+    assert tracker.tracks[0].missing == 0
+
+
+def test_face_tracker_expires_only_after_max_missing() -> None:
+    tracker = FaceTracker(max_missing=2)
+    tracker.update([(0.5, 0.5, 0.2)])
+    tracker.update([])
+    tracker.update([])
+    assert 0 in tracker.tracks
+    tracker.update([])
+    assert 0 not in tracker.tracks
+
+
+def test_face_tracker_preserves_input_order_for_new_boxes() -> None:
+    tracker = FaceTracker()
+    assert tracker.update([(0.9, 0.9, 0.1), (0.1, 0.1, 0.2)]) == [0, 1]
+    assert tracker.tracks[0].cx == 0.9
+    assert tracker.tracks[1].cx == 0.1
+
+
+def test_speaking_scorer_clips_score_and_bounds_history() -> None:
+    scorer = SpeakingScorer(window=3, var_gain=100.0)
+    for value in (0.0, 1.0, 0.0, 1.0, 0.0):
+        score = scorer.update(7, {"jawOpen": value})
+    assert 0.0 <= score <= 1.0
+    assert len(scorer._hist[7]) == 3
+    scorer.forget(7)
+    assert 7 not in scorer._hist
+
+
+def test_active_speaker_detector_empty_and_single_face_threshold() -> None:
+    from away.face.speaker import ActiveSpeakerDetector
+
+    detector = ActiveSpeakerDetector(window=5, speaking_threshold=0.25)
+    assert detector.active() is None
+    detector.update({4: 0.1}, 0.1)
+    assert detector.active() is None
+    detector.update({4: 0.25}, 0.1)
+    assert detector.active() == 4
+    detector.update({}, 0.1)
+    assert detector.active() is None
+
+
+def test_active_speaker_detector_uses_pluggable_model() -> None:
+    from away.face.speaker import ActiveSpeakerDetector
+
+    class Model:
+        def scores(self, face_series, audio_energy):
+            assert set(face_series) == {1, 2}
+            assert len(audio_energy) == 3
+            return {1: 0.1, 2: 0.9}
+
+    detector = ActiveSpeakerDetector(window=5, model=Model(), min_correlation=0.5)
+    detector.update({1: 0.2, 2: 0.3}, 0.1)
+    detector.update({1: 0.1, 2: 0.9}, 0.9)
+    detector.update({1: 0.2, 2: 0.8}, 0.8)
+    assert detector.active() == 2
+    assert detector.correlations() == {1: 0.1, 2: 0.9}
+
+
+def test_active_speaker_detector_drops_missing_face_series() -> None:
+    from away.face.speaker import ActiveSpeakerDetector
+
+    detector = ActiveSpeakerDetector()
+    detector.update({1: 0.2, 2: 0.3}, 0.1)
+    detector.update({1: 0.3}, 0.2)
+    assert set(detector._faces) == {1}
+
+
+def test_brow_toggle_exact_hold_and_cooldown_boundaries() -> None:
+    toggle = BrowRaiseToggle(threshold=0.5, hold=0.2, cooldown=0.5)
+    raised = {"browInnerUp": 0.5}
+    assert toggle.update(1.0, raised) is False
+    assert toggle.update(1.199, raised) is False
+    assert toggle.update(1.2, raised) is True
+    toggle.update(1.3, {"browInnerUp": 0.0})  # re-arm
+    assert toggle.update(1.4, raised) is False  # cooldown has not elapsed
+    assert toggle.update(1.7, raised) is True
+
+
+def test_brow_toggle_midrange_resets_hold_without_rearming() -> None:
+    toggle = BrowRaiseToggle(threshold=0.5, hold=0.2, cooldown=0.0)
+    assert toggle.update(0.0, {"browInnerUp": 0.8}) is False
+    assert toggle.update(0.1, {"browInnerUp": 0.4}) is False  # between release and threshold
+    assert toggle.update(0.25, {"browInnerUp": 0.8}) is False
+    assert toggle.update(0.46, {"browInnerUp": 0.8}) is True
+
+
+def test_wink_threshold_and_open_max_are_inclusive() -> None:
+    trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
+    assert trigger.update(0.0, {"eyeBlinkLeft": 0.7, "eyeBlinkRight": 0.2}) is None
+    assert trigger.update(0.1, {"eyeBlinkLeft": 0.7, "eyeBlinkRight": 0.2}) == "wink_left"
+
+
+def test_wink_requires_one_eye_open_and_rearms_after_release() -> None:
+    trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
+    assert trigger.update(0.0, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.9}) is None
+    assert trigger.update(0.2, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+    assert trigger.update(0.3, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    trigger.update(0.4, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})
+    assert trigger.update(0.5, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    assert trigger.update(0.61, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+
