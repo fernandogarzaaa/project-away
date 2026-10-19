@@ -76,10 +76,7 @@ def paused_banner_texts(spec: dict[str, Any]) -> dict[str, Any]:
 
 def receipt_texts(spec: dict[str, Any]) -> dict[str, Any]:
     """Normalize a consent receipt into the exact plain-language fields shown by its window."""
-    items = [
-        str(item.get("text") or "") if isinstance(item, dict) else str(item)
-        for item in (spec.get("items") or [])
-    ]
+    items = [str(item.get("text") or "") if isinstance(item, dict) else str(item) for item in (spec.get("items") or [])]
     return {
         "title": str(spec.get("title") or "Your AI agent finished using your computer"),
         "headline": str(spec.get("headline") or ""),
@@ -354,18 +351,33 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
     win._receipt_images = images
 
     tk.Label(
-        win, text=t["title"], bg="white", fg="#24292f",
-        font=("Segoe UI", 14, "bold"), wraplength=560, justify="left",
+        win,
+        text=t["title"],
+        bg="white",
+        fg="#24292f",
+        font=("Segoe UI", 14, "bold"),
+        wraplength=560,
+        justify="left",
     ).pack(anchor="w", padx=18, pady=(16, 4))
     if t["headline"]:
         tk.Label(
-            win, text=t["headline"], bg="white", fg="#1f6feb",
-            font=("Segoe UI", 11, "bold"), wraplength=560, justify="left",
+            win,
+            text=t["headline"],
+            bg="white",
+            fg="#1f6feb",
+            font=("Segoe UI", 11, "bold"),
+            wraplength=560,
+            justify="left",
         ).pack(anchor="w", padx=18, pady=(0, 6))
     if t["ended"]:
         tk.Label(
-            win, text=f"Why it ended: {t['ended']}", bg="white", fg="#57606a",
-            font=("Segoe UI", 9), wraplength=560, justify="left",
+            win,
+            text=f"Why it ended: {t['ended']}",
+            bg="white",
+            fg="#57606a",
+            font=("Segoe UI", 9),
+            wraplength=560,
+            justify="left",
         ).pack(anchor="w", padx=18, pady=(0, 8))
 
     panel = tk.Frame(win, bg="white")
@@ -379,7 +391,7 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
     canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
 
-    for item in (spec.get("items") or []):
+    for item in spec.get("items") or []:
         if not isinstance(item, dict):
             item = {"text": str(item)}
         row = tk.Frame(rows, bg="#f6f8fa", padx=8, pady=8)
@@ -399,8 +411,13 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
             except (OSError, ValueError, ImportError):
                 pass
         tk.Label(
-            row, text=str(item.get("text") or "Agent action"), bg="#f6f8fa", fg="#24292f",
-            wraplength=400, justify="left", anchor="w",
+            row,
+            text=str(item.get("text") or "Agent action"),
+            bg="#f6f8fa",
+            fg="#24292f",
+            wraplength=400,
+            justify="left",
+            anchor="w",
         ).pack(side="left", fill="x", expand=True)
 
     buttons = tk.Frame(win, bg="white")
@@ -417,13 +434,26 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
 
     if t["undoable"]:
         tk.Button(
-            buttons, text="Undo all", command=functools.partial(answer, "undo_all"),
-            bg="#cf222e", fg="white", activebackground="#a40e26", activeforeground="white",
-            font=("Segoe UI", 10, "bold"), padx=12, pady=5,
+            buttons,
+            text="Undo all",
+            command=functools.partial(answer, "undo_all"),
+            bg="#cf222e",
+            fg="white",
+            activebackground="#a40e26",
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            padx=12,
+            pady=5,
         ).pack(side="left")
     tk.Button(
-        buttons, text="Close", command=functools.partial(answer, "close"),
-        bg="#f6f8fa", fg="#24292f", font=("Segoe UI", 10), padx=12, pady=5,
+        buttons,
+        text="Close",
+        command=functools.partial(answer, "close"),
+        bg="#f6f8fa",
+        fg="#24292f",
+        font=("Segoe UI", 10),
+        padx=12,
+        pady=5,
     ).pack(side="right")
 
     win.update_idletasks()
