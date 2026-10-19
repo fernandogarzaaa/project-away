@@ -140,6 +140,25 @@ def test_same_class_weekday_month_and_time_boundaries() -> None:
     assert _same_class("monday", "march") is False
 
 
+def test_same_class_time_vs_nontime_is_false() -> None:
+    # Kills L91 mutant: `not (A and B)` -> `not (A or B)` in _same_class.
+    # With `or`, a time vs non-time pair would wrongly return True.
+    from away.voice.cleanup import _same_class
+
+    assert _same_class("3pm", "hello") is False
+    assert _same_class("hello", "3pm") is False
+
+
+def test_same_class_bare_digit_needs_clock_flag() -> None:
+    # Kills L93 mutant: `a.isdigit() or b.isdigit()` -> `... and ...`.
+    # With `and`, a digit vs non-digit time pair would wrongly return True
+    # when clock=False.
+    from away.voice.cleanup import _same_class
+
+    assert _same_class("3", "4pm", clock=False) is False
+    assert _same_class("3", "4pm", clock=True) is True
+
+
 def test_llm_cleaner_rejects_empty_or_extreme_output(monkeypatch) -> None:
     from away.voice.cleanup import LLMCleaner, RuleCleaner
 

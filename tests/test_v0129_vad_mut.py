@@ -160,3 +160,34 @@ def test_make_vad_silero_success_and_silero6_dispatch(monkeypatch) -> None:
     sentinel = object()
     monkeypatch.setattr(vad_next, "make_silero6", lambda sample_rate, fallback: sentinel)
     assert vad.make_vad("silero6", SR) is sentinel
+
+
+def test_segments_detects_speech_at_end_of_input() -> None:
+    # Kills L76 mutant: sentinel `False` -> `True` in segments().
+    # With `True`, a trailing speech segment is never flushed and is lost.
+    vad = EnergyVAD(SR, frame_ms=10, min_rms=0.01, ratio=1.0, hangover_frames=0, min_speech_frames=1)
+    # Tone at the very end with no trailing silence
+    audio = np.concatenate([_silence(0.3), _tone(0.3)])
+    segs = vad.segments(audio)
+    assert len(segs) == 1
+
+
+def test_threshold_multiplies_noise_by_ratio() -> None:
+    # Kills L60 mutant: `noise * self.ratio` -> `noise / self.ratio`.
+    # With multiplication (ratio=3), the threshold is 9x higher than with
+    # division. A quiet tone below noise*3 but above noise/3 distinguishes.
+    vad = EnergyVAD(SR, frame_ms=10, min_rms=0.001, ratio=3.0, hangover_frames=0, min_speech_frames=1)
+    audio = _tone(0.3, amp=0.05)
+    flags = vad.frame_flags(audio)
+    # Correct: threshold = noise*3 ≈ 0.10 > tone RMS (0.035) -> no speech.
+    # Mutant: threshold = noise/3 ≈ 0.011 < tone RMS -> falsely detected.
+    assert not flags.any()
+
+
+def test_trim_silence_returns_truly_empty() -> None:
+    # Kills L91 mutant: `audio[:0]` -> `audio[:1]` in trim().
+    # With the mutant, trimming silence returns 1 sample instead of 0.
+    vad = EnergyVAD(SR)
+    out = vad.trim(_silence(1.0))
+    assert len(out) == 0
+    assert out.size == 0

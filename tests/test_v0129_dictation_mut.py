@@ -193,3 +193,91 @@ def test_probe_microphone_reports_dependency_error(monkeypatch) -> None:
     ok, message = probe_microphone()
     assert ok is False
     assert "sounddevice unavailable" in message
+
+
+def test_set_enabled_true_while_recording_keeps_recording() -> None:
+    # Kills L78 mutant: `and` -> `or` in set_enabled.
+    # With `or`, set_enabled(True) while recording would wrongly stop recording.
+    s, _, _, _ = make_session(["hello"])
+    s.start()
+    assert s.recording is True
+    s.set_enabled(True)
+    assert s.recording is True
+
+
+def test_set_enabled_false_while_recording_stops_and_clears() -> None:
+    # Companion: set_enabled(False) while recording must stop and clear.
+    s, _, _, _ = make_session(["hello"])
+    s.start()
+    s.feed(utterance())
+    assert len(s._chunks) > 0
+    s.set_enabled(False)
+    assert s.recording is False
+    assert s._chunks == []
+
+
+def test_stop_with_no_chunks_reports_zero_seconds() -> None:
+    # Kills L104 mutant: np.zeros(0) -> np.zeros(1).
+    # With the mutant, seconds would be 1/16000 instead of 0.0.
+    from test_voice import SR, Clock, EnergyVAD, EventBus
+
+    bus = EventBus()
+    s = DictationSession(FakeASR(["x"]), RuleCleaner(), ListSink(), EnergyVAD(SR), bus, SR, clock=Clock())
+    s.start()
+    # Feed nothing, stop immediately -> empty chunks -> zeros(0)
+    r = s.stop()
+    assert r.seconds == 0.0
+
+
+def test_process_seconds_divides_by_sample_rate() -> None:
+    # Kills L133 mutant: len(speech)/self.sr -> len(speech)*self.sr.
+    # Feed a known utterance; seconds must be ~1.6s of audio, not billions.
+    from test_voice import SR, Clock, EnergyVAD, EventBus, utterance
+
+    bus = EventBus()
+    asr = FakeASR(["hello world"])
+    sink = ListSink()
+    s = DictationSession(asr, RuleCleaner(), sink, EnergyVAD(SR), bus, SR, clock=Clock())
+    s.start()
+    s.feed(utterance())
+    r = s.stop()
+    assert r.status == "ok"
+    # utterance() is 1.6s total; VAD trims silence so speech < 1.6s
+    assert 0.1 < r.seconds < 2.0
+
+
+def test_default_sample_rate_is_16000() -> None:
+    # Kills L50 mutant: default sample_rate 16000 -> 16001.
+    from test_voice import EnergyVAD, FakeASR, ListSink
+
+    s = DictationSession(FakeASR(["x"]), RuleCleaner(), ListSink(), EnergyVAD(16000))
+    assert s.sr == 16000
+
+
+def test_initial_t_start_is_zero() -> None:
+    # Kills L69 mutant: self._t_start = 0.0 -> 1.0.
+    s, _, _, _ = make_session(["x"])
+    assert s._t_start == 0.0
+
+
+def test_short_silence_phrase_filtered_via_seconds_division() -> None:
+    # Kills L133 mutant: len(speech)/self.sr -> len(speech)*self.sr in _process.
+    # "thank you" is a silence phrase; with correct seconds (< 2.0s) it is
+    # filtered as a silence hallucination. With the mutant, seconds is
+    # astronomically large, so the phrase passes through as real text.
+    # Also kills L135 mutant: `why or "empty transcript"` -> `why and ...`.
+    # With `and`, a truthy why would wrongly become "empty transcript".
+    from test_voice import SR, Clock, EnergyVAD, EventBus, utterance
+
+    bus = EventBus()
+    asr = FakeASR(["thank you"])
+    sink = ListSink()
+    s = DictationSession(asr, RuleCleaner(), sink, EnergyVAD(SR), bus, SR, clock=Clock())
+    s.start()
+    s.feed(utterance())
+    r = s.stop()
+    # "thank you" with short audio (< 2.0s) -> silence hallucination -> empty
+    assert r.status == "empty"
+    assert sink.items == []
+    # The reason must be the actual why, not the fallback
+    assert r.meta["reason"] == "silence hallucination"
