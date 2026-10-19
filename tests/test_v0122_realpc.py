@@ -351,7 +351,8 @@ def test_diagnose_skips_virtual_cameras_and_stops_at_the_budget() -> None:
         clock=clock,
     )
     out = report.lines
-    assert out[0] == "camera 0: JoyCam"
+    # v0.1.28: driver-state check runs first (may fail on non-Windows CI)
+    assert any(x == "camera 0: JoyCam" for x in out)
     assert any("NVIDIA Broadcast (virtual) - skipped" in x for x in out)
     assert not any(x == "camera 1: HD User Facing" for x in out)
     assert out[-1].startswith("stopped after 60 s (time limit)")
