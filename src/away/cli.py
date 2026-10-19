@@ -709,17 +709,28 @@ def cmd_cameras_diagnose(
         else:
             print("diagnosing (each backend and mode is opened and measured; this takes a while)...", flush=True)
         budget = getattr(args, "budget", None)
+        seen_fixes: list[str] = []
+
+        def show(line: str) -> None:
+            action, text = diagnose.split_fix_marker(str(line))  # v0.1.28: markers become plain words here
+            if action and action not in seen_fixes:
+                seen_fixes.append(action)
+            print(text, flush=True)
+
         report = (runner or diagnose.run_diagnose)(
             devs,
             width=width,
             height=height,
             fps=fps,
             measure_s=seconds,
-            out=lambda m: print(m, flush=True),
+            out=show,
             budget_s=diagnose.BUDGET_S if budget is None else float(budget),
             include_virtual=bool(getattr(args, "include_virtual", False) or device not in (None, "")),
+            consent=diagnose.read_consent,
             quick=quick,
         )
+        if "open:camera_privacy" in seen_fixes:
+            print("fix: open Settings > Privacy > Camera and allow camera access, then diagnose again.", flush=True)
         # (proposal #10): one machine-readable line carrying the structured per-camera results, so an
         # Agent Link check can lift it out of this subprocess's output into the job's ``result`` dict.
         structured = getattr(report, "result", None)

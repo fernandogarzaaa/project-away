@@ -3,8 +3,9 @@ button next to anything that is not right.
 
 Opened by the tray ("Run self-test"), Settings ("Run self-test") and ``away selftest --window``. While the checks
 run it shows which one is going; then one row per result (a coloured mark, the title, one sentence, the fix
-button). At the bottom: who the report was sent to (every connected agent), or, when no agent is connected,
-"Copy report" and "Save as file" so the person can share it themselves. Both copies are redacted.
+button). At the bottom: who the report was sent to (agents allowed to "Share my logs and recordings"), or, when
+no agent may receive it, "Copy report" and "Save as file" so the person can share it themselves. Both copies are
+redacted.
 """
 
 from __future__ import annotations

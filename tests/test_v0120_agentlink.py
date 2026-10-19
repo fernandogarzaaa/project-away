@@ -549,14 +549,97 @@ def test_takeover_pauses_and_resume_needs_approval() -> None:
         ctl.act("a1", "click", x=5, y=5)
     assert ctl.user_input("hand") is False  # already paused
     ctl.resume("a1")
-    assert asked[-1]["question"].startswith("Let Claude continue")
+    assert asked[-1]["question"] == "Claude stopped because you moved the mouse. Let it keep going?"
+    assert asked[-1]["options"] == ["Continue", "Yes, for the rest of this session", "Stop"]
     ctl.act("a1", "click", x=5, y=5)
     clock.advance(2.5)
     assert ctl.user_input("hand")  # a hand gesture also takes over
     assert ctl.stop("you said stop") and ctl.status()["active"] is False
 
 
-def test_password_fields_terminals_and_secure_desktop_are_blocked() -> None:
+# ------------------------------------------------------- proposal #21: friendly resume wording
+
+
+def _takeover_and_prompt(clock: Clock, source: str) -> tuple:
+    """Request a grant, let the person take over with `source`, return (ctl, asked)."""
+    ctl, backend, asked = _control(clock, ["Allow"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input(source)  # the takeover pauses at once
+    return ctl, asked
+
+
+def test_resume_prompt_names_each_takeover_source_in_plain_words() -> None:
+    expected = {
+        "mouse": "Claude stopped because you moved the mouse. Let it keep going?",
+        "keyboard": "Claude stopped because you used the keyboard. Let it keep going?",
+        "hand": "Claude stopped because you moved your hand. Let it keep going?",
+        "voice": "Claude stopped because you spoke. Let it keep going?",
+        "shortcut": "Claude stopped because you used a shortcut. Let it keep going?",
+    }
+    for source, question in expected.items():
+        clock = Clock()
+        ctl, asked = _takeover_and_prompt(clock, source)
+        with pytest.raises(ControlRefused, match="did not let it continue"):
+            ctl.resume("a1")  # the queued answers ran out: no answer ends the grant
+        assert asked[-1]["question"] == question
+        assert asked[-1]["options"] == ["Continue", "Yes, for the rest of this session", "Stop"]
+
+
+def test_resume_until_takeover_suppresses_reprompts_but_takeover_still_pauses() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Yes, for the rest of this session"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    prompts = len(asked)
+    ctl.resume("a1")  # the person picks "Yes, for the rest of this session"
+    assert len(asked) == prompts + 1
+    assert ctl.grant is not None and ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")  # a takeover still pauses at once
+    with pytest.raises(ControlRefused, match="paused"):
+        ctl.act("a1", "move", x=5, y=5)  # nothing runs while it is paused
+    n_before = len(asked)
+    ctl.resume("a1")  # no re-prompt this session: the agent just resumes
+    assert len(asked) == n_before
+    ctl.act("a1", "move", x=5, y=5)
+    assert ("move", (5, 5)) in backend.calls
+
+
+def test_resume_continue_still_prompts_next_time() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(clock, ["Allow", "Continue", "Continue"], uia=FakeUIA())
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")
+    assert ctl.grant is not None and not ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")  # "Continue" is one-time: it prompts again
+    assert asked[-1]["question"] == "Claude stopped because you moved the mouse. Let it keep going?"
+
+
+def test_resume_until_takeover_is_per_session() -> None:
+    clock = Clock()
+    ctl, backend, asked = _control(
+        clock, ["Allow", "Yes, for the rest of this session", "Allow", "Continue"], uia=FakeUIA()
+    )
+    ctl.request("a1", "Claude")
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    ctl.resume("a1")
+    clock.advance(1.0)
+    ctl.stop("the person ended it")
+    ctl.request("a1", "Claude")  # a new grant: the opt-in does not carry over
+    assert ctl.grant is not None and not ctl.grant.no_reprompt
+    clock.advance(1.0)
+    assert ctl.user_input("mouse")
+    prompts = len(asked)
+    ctl.resume("a1")
+    assert len(asked) == prompts + 1  # it prompts again on the new grant
+
     clock = Clock()
     pwd = FakeUIA(focused=Element("Password", "EditControl", is_password=True, rect=(0, 0, 10, 10)))
     ctl, backend, _ = _control(clock, uia=pwd)
@@ -781,6 +864,80 @@ def test_from_image_coordinates_use_the_last_screenshot_scale() -> None:
     ctl.scales["a1"] = 0.5
     ctl.act("a1", "move", x=100, y=50, from_image=True)
     assert backend.calls[-1] == ("move", (200, 100))
+
+
+def test_click_result_carries_the_resolved_pre_click_label() -> None:
+    """Proposal #6: `_point` resolves the UIA element at the click point, and the label now reaches the
+    agent in the result (it used to die inside the `detail` string), so the agent can see what it
+    actually clicked instead of taking another screenshot."""
+    clock = Clock()
+    uia = FakeUIA(at=Element("Desktop", "PaneControl", rect=(0, 0, 99, 99)))
+    ctl, _, _ = _control(clock, uia=uia, fg={"title": "Program Manager", "process": "explorer.exe"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert res["ok"] is True and res["action"] == "click"
+    assert res["target_label"] == "Desktop"
+    assert res["detail"] == "(10, 20) 'Desktop'"
+
+
+def test_click_by_element_name_reports_the_resolved_label() -> None:
+    """The element-name path also reports what `_point` resolved, not just what the agent asked for."""
+    clock = Clock()
+    uia = FakeUIA(elements=[Element("Start", "ButtonControl", rect=(0, 0, 50, 20))])
+    ctl, backend, _ = _control(clock, uia=uia)
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", element="Start")
+    assert res["target_label"] == "Start"
+    assert backend.calls == [("move", (25, 10)), ("click", (1,))]
+
+
+def test_click_result_names_post_click_foreground_and_focus() -> None:
+    """Proposal #6 pairs with the richer action results: the click result also carries the post-click
+    foreground window and focused element, so the agent sees "clicked 'Desktop', not 'Start'"."""
+    clock = Clock()
+    uia = FakeUIA(
+        at=Element("Desktop", "PaneControl", rect=(0, 0, 99, 99)),
+        focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)),
+    )
+    ctl, _, _ = _control(clock, uia=uia, fg={"title": "Untitled - Notepad", "process": "notepad.exe"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert res["target_label"] == "Desktop"  # what was under the cursor before the click
+    assert res["foreground"] == {"title": "Untitled - Notepad", "process": "notepad.exe"}
+    assert res["focused"] == "OK"  # where the desktop is after the click landed
+    assert "log_id" in res and "detail" in res
+
+
+def test_target_label_empty_when_nothing_resolves() -> None:
+    """No UIA element at the point (coordinates only): the result still carries the field, empty."""
+    clock = Clock()
+    ctl, _, asked = _control(clock, ["Allow", "Allow"], uia=FakeUIA(at=None))
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "click", x=10, y=20)
+    assert asked[-1]["kind"] == "confirm"  # the unknown target still asks the person first
+    assert res["target_label"] == ""
+    assert res["detail"] == "(10, 20)"
+
+
+def test_click_result_survives_a_broken_foreground_hook() -> None:
+    """Post-click state is best effort: a failing foreground hook must not fail a click that landed."""
+    clock = Clock()
+    uia = FakeUIA(
+        at=Element("Canvas", "PaneControl", rect=(0, 0, 99, 99)),
+        focused=Element("OK", "ButtonControl", rect=(0, 0, 10, 10)),
+    )
+    ctl, backend, _ = _control(clock, uia=uia)
+    ctl.request("a1", "Claude")
+
+    def boom() -> None:
+        raise RuntimeError("no window info")
+
+    ctl.hooks.foreground = boom  # type: ignore[method-assign]
+    res = ctl.act("a1", "click", x=10, y=10)
+    assert res["ok"] is True
+    assert backend.calls == [("move", (10, 10)), ("click", (1,))]
+    assert res["foreground"] == {"title": "", "process": ""}
+    assert res["focused"] == "OK"
 
 
 def test_act_result_reports_the_observed_effect() -> None:
