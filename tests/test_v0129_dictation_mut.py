@@ -160,6 +160,7 @@ def test_seconds_calculation_affects_silence_phrase() -> None:
     # The key is that seconds is calculated correctly (not huge)
     assert r.seconds < 1.0  # Would be huge if multiplied (0.1 * 16000 = 1600)
 
+
 def test_disabled_while_recording_discards_buffer_and_publishes() -> None:
     s, _, sink, bus = make_session(["hello"])
     s.start()
@@ -192,4 +193,3 @@ def test_probe_microphone_reports_dependency_error(monkeypatch) -> None:
     ok, message = probe_microphone()
     assert ok is False
     assert "sounddevice unavailable" in message
-
