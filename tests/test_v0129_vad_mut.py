@@ -117,3 +117,47 @@ def test_make_vad_silero_falls_back_when_backend_unavailable(monkeypatch) -> Non
     monkeypatch.setattr(vad, "SileroVAD", BrokenSilero)
     assert isinstance(vad.make_vad("silero", SR), EnergyVAD)
 
+
+
+def test_silero_vad_segments_trim_and_is_speech_without_loading_model() -> None:
+    from away.voice.vad import SileroVAD
+
+    vad = object.__new__(SileroVAD)
+    vad.sr = SR
+    vad.threshold = 0.5
+    vad._fn = lambda _audio: [{"start": 100, "end": 300}, {"start": 500, "end": 700}]
+    audio = np.arange(1000, dtype=np.float32)
+    segments = vad.segments(audio)
+    assert [(s.start, s.end) for s in segments] == [(100, 300), (500, 700)]
+    trimmed = vad.trim(audio, pad_ms=10)
+    assert len(trimmed) == 920  # 100 samples of padding on either side of [100, 700]
+    assert vad.is_speech(audio) is True
+
+
+def test_silero_vad_empty_segments_return_empty_audio() -> None:
+    from away.voice.vad import SileroVAD
+
+    vad = object.__new__(SileroVAD)
+    vad.sr = SR
+    vad.threshold = 0.5
+    vad._fn = lambda _audio: []
+    audio = np.arange(100, dtype=np.float32)
+    assert vad.trim(audio).size == 0
+    assert vad.is_speech(audio) is False
+
+
+def test_make_vad_silero_success_and_silero6_dispatch(monkeypatch) -> None:
+    from away.voice import vad, vad_next
+
+    class FakeSilero:
+        def __init__(self, sample_rate: int) -> None:
+            self.sample_rate = sample_rate
+
+    monkeypatch.setattr(vad, "SileroVAD", FakeSilero)
+    made = vad.make_vad("silero", SR)
+    assert isinstance(made, FakeSilero) and made.sample_rate == SR
+
+    sentinel = object()
+    monkeypatch.setattr(vad_next, "make_silero6", lambda sample_rate, fallback: sentinel)
+    assert vad.make_vad("silero6", SR) is sentinel
+
