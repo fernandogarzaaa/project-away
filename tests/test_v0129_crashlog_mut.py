@@ -693,5 +693,6 @@ def test_pid_alive_unknown_os_error_is_conservative(monkeypatch: pytest.MonkeyPa
 
     fake_psutil = types.SimpleNamespace(pid_exists=lambda _pid: (_ for _ in ()).throw(OSError("unknown")))
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(crashlog.os, "kill", lambda *_: (_ for _ in ()).throw(OSError("unknown")))
     assert crashlog._pid_alive(987654321) is True
 
