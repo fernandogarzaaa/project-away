@@ -41,7 +41,9 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(SCREEN, "See my screen when I allow", "\u25a3", False, help="Screenshots, never sound."),
     Permission(TUNE, "Change my settings", "\u2699", False, help="Every change can be undone."),
     Permission(CONTROL, "Let it use my computer", "\u2328", False, help="You approve it each time. Move to stop."),
-    Permission(DIAGNOSE, "Run camera and speed checks", "\u2695", True, advanced=True),
+    Permission(
+        DIAGNOSE, "Run camera and speed checks", "\u2695", True, advanced=True, help="Shows the results right here."
+    ),
     Permission(
         SHARE_LOGS,
         "Share my logs and recordings",
@@ -65,10 +67,17 @@ def normalize(scopes: Iterable[str] | str | None) -> frozenset[str]:
     return frozenset({READ, *items})
 
 
-def describe(scopes: Iterable[str]) -> list[str]:
-    """Plain-language lines for an approval prompt, in UI order."""
+def describe(scopes: Iterable[str], verbose: bool = False) -> list[str]:
+    """Plain-language lines for an approval prompt, in UI order.
+
+    ``verbose=True`` appends each permission's plain-language ``help`` text
+    (proposal #18: the Allow/Deny pairing prompt says what each permission
+    means, in words a non-technical person understands).
+    """
     have = set(scopes)
-    return [p.label for p in PERMISSIONS if p.scope in have]
+    if not verbose:
+        return [p.label for p in PERMISSIONS if p.scope in have]
+    return [f"{p.label}: {p.help}" if p.help else p.label for p in PERMISSIONS if p.scope in have]
 
 
 def to_list(scopes: Iterable[str]) -> list[str]:

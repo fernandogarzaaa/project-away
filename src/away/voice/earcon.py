@@ -31,9 +31,9 @@ def tone(kind: str = "listen", sr: int = SR, volume: float = VOLUME) -> np.ndarr
 
 
 def _sd_play(samples: Any, sr: int) -> None:  # pragma: no cover - audio device
-    import sounddevice as sd
+    from away.voice import audio_out
 
-    sd.play(samples, sr)  # returns at once
+    audio_out.play(samples, sr)  # returns at once; serialized with every sd output call
 
 
 class Earcon:

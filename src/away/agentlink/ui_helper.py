@@ -53,19 +53,6 @@ def toast_texts(spec: dict[str, Any]) -> dict[str, str]:
     return {"title": title[:80], "text": str(spec.get("text") or "")[:300], "hint": "click to close"}
 
 
-def receipt_texts(spec: dict[str, Any]) -> dict[str, Any]:
-    """What the consent-receipt window shows (pure, for tests): "{name} did N things" with one plain line per
-    action and whether "Undo all" is offered."""
-    items = [i for i in spec.get("items") or [] if isinstance(i, dict)]
-    return {
-        "title": str(spec.get("title") or "What your AI agent did")[:80],
-        "headline": str(spec.get("headline") or "")[:200],
-        "ended": str(spec.get("ended") or "")[:120],
-        "items": [str(i.get("text") or "")[:200] for i in items],
-        "undoable": bool(spec.get("undoable")),
-    }
-
-
 def toast_geometry(work: tuple[int, int, int, int], w: int, h: int, margin: int = TOAST_MARGIN) -> tuple[int, int]:
     """Top-left corner for a ``w`` x ``h`` window in the bottom-right corner of ``work`` (left, top, right, bottom:
     the monitor's area without the taskbar), kept inside it."""
@@ -99,7 +86,7 @@ def write_ack(path: Path | None, data: dict[str, Any]) -> None:
         pass
 
 
-KINDS = ("prompt", "toast", "flash", "control", "receipt")
+KINDS = ("prompt", "toast", "flash", "control")
 
 
 def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-tested under Xvfb
@@ -139,8 +126,6 @@ def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-te
     root.attributes("-topmost", True)
     if kind == "prompt":
         _prompt(root, spec, Path(spec_path))
-    elif kind == "receipt":
-        _receipt(root, spec, Path(spec_path))
     elif kind in ("toast", "flash"):
         _toast(root, spec, flash=kind == "flash")
     elif kind == "control":
@@ -463,130 +448,5 @@ def _control(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
             return
         banner.lift()
         root.after(300, poll)
-
-    poll()
-
-
-def _receipt(root: Any, spec: dict[str, Any], path: Path) -> None:  # pragma: no cover - GUI; smoke-tested under Xvfb
-    """The consent receipt (proposal #17): one window that says what the agent just did, with the action
-    thumbnails and an "Undo all" button. Clicking it writes ``<id>.answer.json``; the app writes ``<id>.done``
-    once it has put everything back (or when the window should close)."""
-    import tkinter as tk
-
-    t = receipt_texts(spec)
-    raw_items = [i for i in spec.get("items") or [] if isinstance(i, dict)]
-    win = tk.Toplevel(root)
-    win.title(t["title"])
-    win.attributes("-topmost", True)
-    win.configure(bg="white", highlightthickness=3, highlightbackground="#1f6feb")
-    win.overrideredirect(True)
-    tk.Label(win, text=t["title"], bg="white", fg="#555", font=("Segoe UI", 10)).pack(anchor="w", padx=16, pady=(12, 0))
-    tk.Label(win, text=t["headline"], bg="white", font=("Segoe UI", 14, "bold"), wraplength=480, justify="left").pack(
-        anchor="w", padx=16, pady=(4, 2)
-    )
-    if t["ended"]:
-        tk.Label(win, text=f"Why it ended: {t['ended']}", bg="white", fg="#555", font=("Segoe UI", 10)).pack(
-            anchor="w", padx=16, pady=(0, 6)
-        )
-    frame = tk.Frame(win, bg="white")
-    frame.pack(fill="both", expand=True, padx=16, pady=(0, 6))
-    canvas = tk.Canvas(frame, bg="white", highlightthickness=0)
-    scrollbar = tk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-    rows = tk.Frame(canvas, bg="white")
-    canvas.configure(yscrollcommand=scrollbar.set)
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
-    canvas.create_window((0, 0), window=rows, anchor="nw")
-    thumbs: list[Any] = []
-    if not t["items"]:
-        tk.Label(rows, text="It did not do anything this time.", bg="white", fg="#555", font=("Segoe UI", 11)).pack(
-            anchor="w", pady=8
-        )
-    for i, (line, raw) in enumerate(zip(t["items"], raw_items)):
-        row = tk.Frame(rows, bg="white")
-        row.pack(fill="x", pady=4, anchor="w")
-        p = str(raw.get("thumb_path") or "")
-        if p:
-            try:
-                img = tk.PhotoImage(file=p)
-                if img.width() > 200:
-                    f = max(1, round(img.width() / 200))
-                    img = img.subsample(f, f)
-                thumbs.append(img)
-                tk.Label(row, image=img, bg="white", relief="solid", bd=1).pack(side="left", padx=(0, 10))
-            except Exception:
-                pass
-        tk.Label(
-            row,
-            text=f"{i + 1}. {line}",
-            bg="white",
-            font=("Segoe UI", 11),
-            wraplength=400,
-            justify="left",
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-
-    def _sync() -> None:
-        rows.update_idletasks()
-        box = canvas.bbox("all")
-        canvas.configure(scrollregion=box, width=540, height=min(340, max(70, (box[3] - box[1]) if box else 70)))
-
-    root.after(50, _sync)
-    brow = tk.Frame(win, bg="white")
-    brow.pack(fill="x", padx=16, pady=(0, 12))
-    answer_file = path.with_name(f"{spec['id']}.answer.json")
-    done_file = path.with_name(f"{spec['id']}.done")
-
-    def pick(opt: str) -> None:
-        answer_file.write_text(json.dumps({"answer": opt}), encoding="utf-8")
-        if opt == "undo_all":
-            undo_btn.configure(state="disabled", text="Putting everything back...")
-            status_var.set("Putting everything back...")
-        else:
-            root.destroy()
-
-    undo_btn = tk.Button(
-        brow,
-        text="Undo all",
-        font=("Segoe UI", 11, "bold"),
-        command=functools.partial(pick, "undo_all"),
-        relief="groove",
-        bg="#f6f8fa",
-    )
-    status_var = tk.StringVar(value="")
-    if t["undoable"]:
-        undo_btn.pack(side="left", padx=(0, 8))
-    else:
-        tk.Label(
-            brow,
-            text="There is nothing that can be put back (clicks and key presses can't be).",
-            bg="white",
-            fg="#777",
-            font=("Segoe UI", 9),
-            wraplength=480,
-            justify="left",
-        ).pack(side="left", padx=(0, 8))
-    tk.Button(
-        brow,
-        text="Close",
-        font=("Segoe UI", 11),
-        command=functools.partial(pick, "close"),
-        relief="groove",
-        bg="#f6f8fa",
-    ).pack(side="left")
-    tk.Label(brow, textvariable=status_var, bg="white", fg="#555", font=("Segoe UI", 9)).pack(side="left", padx=8)
-    win.update_idletasks()
-    _place(win, 580, min(560, win.winfo_reqheight() + 40), "center")
-    deadline = time.monotonic() + float(spec.get("timeout_s") or 180) + 5
-
-    def poll() -> None:
-        if done_file.exists():
-            done_file.unlink(missing_ok=True)
-            root.destroy()
-            return
-        if time.monotonic() > deadline:
-            root.destroy()
-            return
-        root.after(200, poll)
 
     poll()

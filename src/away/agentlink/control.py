@@ -184,6 +184,16 @@ class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
 
 
+# v0.1.28: grant ends now tell the user in plain words ("time ran out", "you stopped it") so a silently
+# expired grant is not a mystery. Maps the internal end reasons to non-technical phrasing.
+END_CAUSE = {
+    "expired": "time ran out",
+    "stopped": "you stopped it",
+    "the user chose to stop": "you stopped it",
+    "the agent was disconnected": "it was disconnected",
+}
+
+
 @dataclass
 class Grant:
     agent_id: str
@@ -198,12 +208,32 @@ class Grant:
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
     # proposal #17: id of the newest log entry when the grant started; the receipt lists what came after it
     last_log_id: str = ""
+    # proposal #21: the person picked "Yes, for the rest of this session". resume() then skips the prompt for the rest
+    # of the session. A takeover still pauses at once; nothing auto-resumes.
+    no_reprompt: bool = False
 
 
 # The grant was paused or ended while an action was running (the engine's cancellation).
 _Interrupted = ActionCancelled
 # how a user source names itself in "paused because you used the ..."
 _TAKEOVER_NAMES = {"gesture": "hand", "voice": "voice", "dictation": "keyboard", "macro": "shortcut", "user": "mouse"}
+
+# proposal #21: the same takeover sources in plain words for the resume prompt.
+_RESUME_REASON_WORDS = {
+    "mouse": "you moved the mouse",
+    "keyboard": "you used the keyboard",
+    "hand": "you moved your hand",
+    "voice": "you spoke",
+    "shortcut": "you used a shortcut",
+}
+
+
+def _pause_in_plain_words(paused: str) -> str:
+    """Turn the grant's "you used the {source}" pause reason into plain words (proposal #21)."""
+    if paused.startswith("you used the "):
+        src = paused[len("you used the ") :]
+        return _RESUME_REASON_WORDS.get(src, paused)
+    return paused
 
 
 @dataclass
@@ -264,11 +294,13 @@ class ComputerControl:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         always_allowed: Callable[[str, str], bool] = lambda _agent_id, _cat: False,
         allow_always: Callable[[str, str], None] = lambda _agent_id, _cat: None,
+        notify: Callable[..., Any] | None = None,
     ) -> None:
         import sys
 
         self.hooks = hooks
         self.ask = ask
+        self.notify = notify  # plain-words toast when a grant ends; None = silent (tests, headless)
         self.ttl_s = float(ttl_s)
         self.clock = clock
         self.on_event = on_event
@@ -383,17 +415,27 @@ class ComputerControl:
             raise ControlRefused("this agent is not allowed to use the computer right now; ask with request_control")
         if not g.paused:
             return self.status()
-        res = self.ask(
-            f"Let {g.agent_name} continue using your computer?",
-            ["Continue", "Stop"],
-            title="Resume?",
-            agent=g.agent_name,
-            details=[f"It was paused because {g.paused}."],
-            timeout_s=60.0,
-            urgency="high",
-            kind="approve",
-        )
-        if res.get("answer") != "Continue":
+        answer = "Continue"
+        if not g.no_reprompt:  # the person picked "Yes, for the rest of this session" earlier this session
+            reason = _pause_in_plain_words(g.paused)
+            res = self.ask(
+                f"{g.agent_name} stopped because {reason}. Let it keep going?",
+                ["Continue", "Yes, for the rest of this session", "Stop"],
+                title="Resume?",
+                agent=g.agent_name,
+                details=[
+                    "It still stops the moment you take over again.",
+                    "'Yes, for the rest of this session' skips this question until the grant ends.",
+                ],
+                timeout_s=60.0,
+                urgency="high",
+                kind="approve",
+            )
+            answer = res.get("answer") or ""
+            if answer == "Yes, for the rest of this session":
+                with self._lock:
+                    g.no_reprompt = True
+        if answer != "Continue" and answer != "Yes, for the rest of this session":
             self._end("the user chose to stop")
             raise ControlRefused("the user did not let it continue")
         with self._lock:
@@ -403,7 +445,7 @@ class ComputerControl:
                 self._grace_until = self.clock() + GRACE_S
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(g.agent_name)
-        self._emit("control.resumed", {"agent": g.agent_name})
+        self._emit("control.resumed", {"agent": g.agent_name, "no_reprompt": g.no_reprompt})
         return self.status()
 
     def _end(self, reason: str) -> None:
@@ -422,6 +464,16 @@ class ComputerControl:
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
             if receipt is not None:  # proposal #17: "what did the agent just do"
                 self._emit("control.receipt", receipt)
+
+            if self.notify is not None:
+                cause = END_CAUSE.get(reason, reason)
+                with contextlib.suppress(Exception):
+                    # a toast failure must never break grant teardown
+                    self.notify(
+                        f"{g.agent_name}'s turn with your computer just ended ({cause}).",
+                        level="info",
+                        agent=g.agent_name,
+                    )
 
     def receipt(self, g: Grant) -> dict[str, Any]:
         """Build the "what did the agent just do" receipt for a grant that just ended: one plain-language line
@@ -868,6 +920,7 @@ class ComputerControl:
         """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
+        extra: dict[str, Any] = {}  # per-action result fields beyond ok/action/detail/log_id
         before = None
         try:
             before = self.hooks.cursor_pos()
@@ -894,6 +947,9 @@ class ComputerControl:
             elif action == "right_click":
                 step().click_button("right", 1)
             detail = f"({x}, {y})" + (f" '{label}'" if label else "")
+            # proposal #6: the resolved pre-click label reaches the agent in the result, so it can see
+            # e.g. "clicked 'Desktop', not 'Start'" and self-correct instead of taking another screenshot
+            extra["target_label"] = label
             if action == "move" and before is not None:
                 undo = {"move": list(before)}
         elif action == "drag":
@@ -1026,6 +1082,8 @@ class ComputerControl:
                 self._open_app(name, step, wait)
                 detail = name
         a.ok = True
+        # the feature's click-verification extras (e.g. target_label) ride along in `extra`; the
+        # observed effect fields stay explicit for a stable result shape.
         foreground = self._foreground_state()
         focused = self._focused_label()
         if not record:
@@ -1040,6 +1098,7 @@ class ComputerControl:
                 # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
                 "foreground": foreground,
                 "focused": focused,
+                **extra,
             }
         entry = self._log(g, action, detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
@@ -1053,6 +1112,7 @@ class ComputerControl:
             # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
             "foreground": foreground,
             "focused": focused,
+            **extra,
         }
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:

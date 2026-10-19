@@ -192,11 +192,6 @@ class TrayController:
         if al is not None:
             al.disconnect_all()
 
-    def open_recent_activity(self) -> None:  # pragma: no cover - launches a GUI process
-        """Tray "Recent agent activity..." (proposal #17): the Settings window on the Agent Link tab, whose
-        "Using your computer" box lists the recent agent actions with their thumbnails."""
-        _open_settings_tab(self, "Agent Link")
-
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
 
@@ -705,10 +700,6 @@ def build_tray_menu(
             lambda _i: f"Disconnect AI agents ({ctl.agent_badge()})",
             callbacks.on_disconnect_agents,
             visible=lambda _i: bool(ctl.agent_badge()),
-        ),
-        pystray.MenuItem(
-            "Recent agent activity...",  # proposal #17: review what an agent did, any time
-            lambda _icon, _item: ctl.open_recent_activity(),
         ),
         *live_menu_items(pystray, app, open_settings_tab),  # "Live agent: on (Big Pickle)"
         pystray.MenuItem(  # v0.1.23
