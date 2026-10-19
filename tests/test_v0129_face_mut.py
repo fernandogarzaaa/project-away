@@ -326,6 +326,7 @@ def test_speech_gate_median_empty_odd_and_even() -> None:
     assert _median([1.0, 2.0, 3.0]) == 2.0
     assert _median([1.0, 2.0, 3.0, 4.0]) == 2.5
 
+
 def test_face_tracker_exact_distance_and_reacquire_resets_missing() -> None:
     tracker = FaceTracker(max_dist=0.5, max_missing=1)
     assert tracker.update([(0.0, 0.0, 0.2)]) == [0]
@@ -434,4 +435,3 @@ def test_wink_requires_one_eye_open_and_rearms_after_release() -> None:
     trigger.update(0.4, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})
     assert trigger.update(0.5, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
     assert trigger.update(0.61, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
-
