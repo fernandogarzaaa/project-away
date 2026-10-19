@@ -185,6 +185,7 @@ def test_toggle_starts_then_stops_recording() -> None:
 
 def test_probe_microphone_reports_dependency_error(monkeypatch) -> None:
     import sys
+
     from away.voice.dictation import probe_microphone
 
     monkeypatch.setitem(sys.modules, "sounddevice", None)
