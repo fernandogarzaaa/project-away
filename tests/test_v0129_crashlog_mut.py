@@ -671,6 +671,7 @@ def test_uiqueue_pump_default_interval() -> None:
     q.pump(FakeWidget())  # default every_ms=50 (tests 50 -> 51 at line 45)
     assert scheduled == [50]
 
+
 def test_write_flushes_data_and_at_exit_folds_native_file(crash_env: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     folder, fh, sysm, thr = crash_env
     _install(crash_env)
@@ -695,4 +696,3 @@ def test_pid_alive_unknown_os_error_is_conservative(monkeypatch: pytest.MonkeyPa
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(crashlog.os, "kill", lambda *_: (_ for _ in ()).throw(OSError("unknown")))
     assert crashlog._pid_alive(987654321) is True
-
