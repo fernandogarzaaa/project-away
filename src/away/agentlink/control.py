@@ -1393,30 +1393,39 @@ class ComputerControl:
                 ),
                 None,
             )
-        if e is None:
-            raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
-        if budget_grant is not None:
-            # Reserve a budget step before the undo starts so concurrent requests cannot bypass the limit.
-            with self._lock:
+            if e is None:
+                raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
+            # Select the entry, mark it in-flight, and reserve budget atomically. Concurrent undo calls
+            # cannot select the same action or race past the session's limit.
+            if budget_grant is not None:
                 if budget_grant.steps_used >= budget_grant.step_budget:
                     raise ControlRefused(BUDGET_EXHAUSTED.format(budget=budget_grant.step_budget))
                 budget_grant.steps_used += 1
+            e.result = "undoing"
+
         b = self.hooks.backend
         u = e.undo or {}
         sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
-        if any("keys" in s for s in sub):
-            self.note_own_keys()
-        else:
-            self.note_own_mouse()
         source = USER if agent_id is None else AGENT
         try:
+            if any("keys" in s for s in sub):
+                self.note_own_keys()
+            else:
+                self.note_own_mouse()
             with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
                 for s in sub:
                     self._apply_undo_step(a, b, s)
                 a.ok = True
         except ActionCancelled as exc:
+            with self._lock:
+                e.result = "done"
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
-        e.result = "undone"
+        except Exception:
+            with self._lock:
+                e.result = "done"
+            raise
+        with self._lock:
+            e.result = "undone"
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}
 
