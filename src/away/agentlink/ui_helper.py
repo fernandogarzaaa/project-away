@@ -351,7 +351,7 @@ def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragm
 
     # Keep a window-local reference to Pillow images so Tk does not collect them.
     images: list[Any] = []
-    setattr(win, "_receipt_images", images)
+    win._receipt_images = images
 
     tk.Label(
         win, text=t["title"], bg="white", fg="#24292f",
