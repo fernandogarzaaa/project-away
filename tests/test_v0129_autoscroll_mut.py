@@ -95,7 +95,9 @@ def test_axis_speed_exact_dead_zone_and_curve_exponent() -> None:
     from away.hands.autoscroll import CURVE_EXPONENT
 
     assert axis_speed(0.1, dead_zone=0.1, gain=10.0, max_speed=5.0) == 0.0
-    assert axis_speed(0.3, dead_zone=0.1, gain=10.0, max_speed=5.0) == 10.0 * (0.2**CURVE_EXPONENT)
+    actual = axis_speed(0.3, dead_zone=0.1, gain=10.0, max_speed=5.0)
+    expected = 10.0 * (0.2**CURVE_EXPONENT)
+    assert abs(actual - expected) < 1e-9
 
 
 def test_direction_tie_prefers_vertical_and_zero_speed_is_none() -> None:
