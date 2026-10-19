@@ -611,9 +611,8 @@ class ComputerControl:
 
     def _consume_step(self, g: Grant) -> None:
         """Spend one step of the session's budget; refuses in plain words when the budget is exhausted."""
-        # v0.1.28: the per-session step budget. Each action counts one step; an exhausted session
+        # Each attempted agent action, including undo, consumes one step. An exhausted session
         # refuses politely, in plain words, until the person approves again (a new grant = a fresh budget).
-        # Undo never consumes budget: putting the person's own input back is not spending their allowance.
         with self._lock:
             if g.steps_used >= g.step_budget:
                 raise ControlRefused(BUDGET_EXHAUSTED.format(budget=g.step_budget))
@@ -1370,18 +1369,18 @@ class ComputerControl:
         return out
 
     def undo_last(self, agent_id: str) -> dict[str, Any]:
-        """An agent undoes its own newest undoable action (cursor move, scroll, typed text). It needs the same live,
-        unexpired, unpaused grant as :meth:`act`: undo is input too. Clicks and keys cannot be undone.
-        Undo never spends budget: putting back is not acting."""
-        self._require_grant(agent_id)  # validates the grant; undo itself does not consume budget
+        """Undo the agent's newest undoable action. Undo is state-changing and spends one budget step."""
+        g = self._require_grant(agent_id)
         self._policy_check(agent_id)
-        return self._undo(agent_id)
+        return self._undo(agent_id, budget_grant=g)
 
     def undo_last_by_user(self) -> dict[str, Any]:
         """The person pressed Undo in Agent Link (no grant needed: it is their own input)."""
         return self._undo(None)
 
-    def _undo(self, agent_id: str | None, only_ids: set[str] | None = None) -> dict[str, Any]:
+    def _undo(
+        self, agent_id: str | None, only_ids: set[str] | None = None, budget_grant: Grant | None = None
+    ) -> dict[str, Any]:
         with self._lock:
             e = next(
                 (
@@ -1396,6 +1395,12 @@ class ComputerControl:
             )
         if e is None:
             raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
+        if budget_grant is not None:
+            # Reserve a budget step before the undo starts so concurrent requests cannot bypass the limit.
+            with self._lock:
+                if budget_grant.steps_used >= budget_grant.step_budget:
+                    raise ControlRefused(BUDGET_EXHAUSTED.format(budget=budget_grant.step_budget))
+                budget_grant.steps_used += 1
         b = self.hooks.backend
         u = e.undo or {}
         sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
