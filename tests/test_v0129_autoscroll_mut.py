@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from away.hands.autoscroll import AutoScroller, axis_speed, direction
 
 
@@ -124,4 +126,4 @@ def test_start_hold_anchor_averages_recent_positions() -> None:
     sc.update(0.1, "four", (0.2, 0.2), 1.0)
     ev = sc.update(0.2, "four", (0.4, 0.4), 1.0)
     assert ev is not None and ev[0] == "autoscroll_start"
-    assert sc.anchor == (0.2, 0.2)
+    assert sc.anchor == pytest.approx((0.2, 0.2))
