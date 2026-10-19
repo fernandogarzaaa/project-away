@@ -678,7 +678,7 @@ def test_write_flushes_data_and_at_exit_folds_native_file(crash_env: Any, monkey
     f = crashlog._state["file"]
     assert f is not None
     assert f.closed is False
-    f.flush()
+    # A separate reader must see the line immediately: this kills removal of the production flush.
     assert "flush sentinel" in (folder / "crash.log").read_text(encoding="utf-8")
 
     native_path = folder / f"{crashlog.NATIVE_PREFIX}{os.getpid()}.log"
