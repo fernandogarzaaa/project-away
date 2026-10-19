@@ -91,6 +91,7 @@ def test_scroller_lost_stops_after_timeout() -> None:
     assert result == {"reason": "hand_lost"}
     assert not sc.active
 
+
 def test_axis_speed_exact_dead_zone_and_curve_exponent() -> None:
     from away.hands.autoscroll import CURVE_EXPONENT
 
@@ -109,13 +110,18 @@ def test_direction_tie_prefers_vertical_and_zero_speed_is_none() -> None:
 def test_start_hold_anchor_averages_recent_positions() -> None:
     from types import SimpleNamespace
 
-    cfg = SimpleNamespace(autoscroll_enabled=True, autoscroll_hold=0.2, autoscroll_dead_zone=0.1,
-                          autoscroll_gain=1.0, autoscroll_max_speed=5.0, autoscroll_horizontal=True,
-                          autoscroll_stop_hold=0.3)
+    cfg = SimpleNamespace(
+        autoscroll_enabled=True,
+        autoscroll_hold=0.2,
+        autoscroll_dead_zone=0.1,
+        autoscroll_gain=1.0,
+        autoscroll_max_speed=5.0,
+        autoscroll_horizontal=True,
+        autoscroll_stop_hold=0.3,
+    )
     sc = AutoScroller(cfg)
     sc.update(0.0, "four", (0.0, 0.0), 1.0)
     sc.update(0.1, "four", (0.2, 0.2), 1.0)
     ev = sc.update(0.2, "four", (0.4, 0.4), 1.0)
     assert ev is not None and ev[0] == "autoscroll_start"
     assert sc.anchor == (0.2, 0.2)
-
