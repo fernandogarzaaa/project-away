@@ -72,6 +72,7 @@ def test_frame_rms_tone() -> None:
     rms = frame_rms(_tone(0.1), frame=160)
     assert np.all(rms > 0.1)
 
+
 def test_frame_rms_drops_partial_tail_and_rejects_bad_frame() -> None:
     import pytest
 
@@ -118,7 +119,6 @@ def test_make_vad_silero_falls_back_when_backend_unavailable(monkeypatch) -> Non
     assert isinstance(vad.make_vad("silero", SR), EnergyVAD)
 
 
-
 def test_silero_vad_segments_trim_and_is_speech_without_loading_model() -> None:
     from away.voice.vad import SileroVAD
 
@@ -160,4 +160,3 @@ def test_make_vad_silero_success_and_silero6_dispatch(monkeypatch) -> None:
     sentinel = object()
     monkeypatch.setattr(vad_next, "make_silero6", lambda sample_rate, fallback: sentinel)
     assert vad.make_vad("silero6", SR) is sentinel
-
