@@ -670,3 +670,28 @@ def test_uiqueue_pump_default_interval() -> None:
 
     q.pump(FakeWidget())  # default every_ms=50 (tests 50 -> 51 at line 45)
     assert scheduled == [50]
+
+def test_write_flushes_data_and_at_exit_folds_native_file(crash_env: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder, fh, sysm, thr = crash_env
+    _install(crash_env)
+    crashlog.write("flush sentinel")
+    f = crashlog._state["file"]
+    assert f is not None
+    assert f.closed is False
+    f.flush()
+    assert "flush sentinel" in (folder / "crash.log").read_text(encoding="utf-8")
+
+    native_path = folder / f"{crashlog.NATIVE_PREFIX}{os.getpid()}.log"
+    native_path.write_text("Fatal Python error: at exit flush sentinel\n", encoding="utf-8")
+    crashlog._at_exit()
+    assert not native_path.exists()
+    assert crashlog._state["native"] is None
+
+
+def test_pid_alive_unknown_os_error_is_conservative(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    fake_psutil = types.SimpleNamespace(pid_exists=lambda _pid: (_ for _ in ()).throw(OSError("unknown")))
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    assert crashlog._pid_alive(987654321) is True
+
