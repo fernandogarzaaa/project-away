@@ -228,3 +228,101 @@ def test_gate_defaults() -> None:
     assert sig.parameters["min_loose"].default == 0.03
     assert sig.parameters["baseline_frames"].default == 300
     assert sig.parameters["baseline_min_frames"].default == 15
+
+
+def test_speech_gate_observe_respects_explicit_user_presence() -> None:
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=0, n_faces=1, score=0.8, frontal=True, user_present=False)
+    assert gate._pose[-1] == (False, None)
+    assert gate._scores[-1] == (1.0, 0.8)
+
+
+def test_speech_gate_camera_frame_only_moves_forward() -> None:
+    gate = SpeechGate()
+    gate.note_camera_frame(10.0)
+    gate.note_camera_frame(9.0)
+    assert gate.last_camera_frame == 10.0
+    gate.note_camera_frame(11.0)
+    assert gate.last_camera_frame == 11.0
+
+
+def test_speech_gate_holder_exception_and_truthy_value() -> None:
+    gate = SpeechGate()
+    gate.camera_holder = lambda: (_ for _ in ()).throw(RuntimeError("camera query failed"))
+    assert gate._holder() is None
+    gate.camera_holder = lambda: 123
+    assert gate._holder() == "123"
+
+
+def test_speech_gate_mouth_threshold_uses_only_preceding_known_scores() -> None:
+    gate = SpeechGate(baseline_min_frames=3, baseline_frames=3, loose_score=0.8, min_loose=0.03)
+    for t, score in [(1.0, 0.1), (2.0, 0.1), (3.0, 0.1), (4.0, 0.9)]:
+        gate.observe(t, active_speaker=None, n_faces=1, score=score)
+    threshold, baseline = gate.mouth_threshold(4.0)
+    assert baseline == pytest.approx(0.1)
+    assert threshold == pytest.approx(0.115)  # baseline margin dominates zero MAD
+
+
+def test_speech_gate_mouth_threshold_falls_back_without_enough_history() -> None:
+    gate = SpeechGate(baseline_min_frames=3, loose_score=0.08)
+    gate.observe(1.0, active_speaker=None, n_faces=1, score=0.4)
+    threshold, baseline = gate.mouth_threshold(2.0)
+    assert threshold == 0.08
+    assert baseline is None
+
+
+def test_speech_gate_explain_blocks_when_camera_is_busy_by_default() -> None:
+    gate = SpeechGate()
+    gate.camera_holder = lambda: "Settings camera check"
+    result = gate.explain(1.0, 2.0)
+    assert result["allowed"] is False
+    assert result["camera_busy"] == "Settings camera check"
+    assert "not typed" in result["reason"]
+
+
+def test_speech_gate_explain_honors_allow_when_camera_is_busy() -> None:
+    gate = SpeechGate()
+    gate.camera_holder = lambda: "Settings camera check"
+    gate.when_camera_busy = "allow"
+    result = gate.explain(1.0, 2.0)
+    assert result["allowed"] is True
+    assert "typing anyway" in result["reason"]
+
+
+def test_speech_gate_explain_rejects_other_speaker() -> None:
+    gate = SpeechGate(ambient_fraction=0.9, min_fraction=0.9)
+    gate.enroll({1: 0.5})
+    gate.observe(1.0, active_speaker=2, n_faces=1, score=0.0, frontal=False)
+    result = gate.explain(1.0, 1.0)
+    assert result["allowed"] is False
+    assert result["reason"] == "someone else was speaking"
+
+
+def test_speech_gate_explain_allows_frontal_enrolled_face_with_weak_mouth_motion() -> None:
+    gate = SpeechGate(presence_fraction=0.6)
+    gate.enroll({1: 0.5})
+    for t in (1.0, 1.1, 1.2):
+        gate.observe(t, active_speaker=None, n_faces=1, score=0.0, frontal=True, user_present=True)
+    result = gate.explain(1.0, 1.2)
+    assert result["allowed"] is True
+    assert "facing it" in result["reason"]
+
+
+def test_speech_gate_allow_without_face_and_enrollment_rules() -> None:
+    gate = SpeechGate(allow_without_face=False)
+    assert gate.allow(1.0, 2.0) is False
+    gate.observe(1.5, active_speaker=None, n_faces=0)
+    assert gate.allow(1.0, 2.0) is False
+    gate.enroll({1: 0.5})
+    gate.observe(2.0, active_speaker=1, n_faces=1)
+    assert gate.allow(2.0, 2.0) is True
+
+
+def test_speech_gate_median_empty_odd_and_even() -> None:
+    from away.face.gate import _median
+
+    assert _median([]) == 0.0
+    assert _median([1.0]) == 1.0
+    assert _median([1.0, 3.0, 2.0]) == 2.0
+    assert _median([1.0, 3.0, 2.0, 4.0]) == 2.5
+
