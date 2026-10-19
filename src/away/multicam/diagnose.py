@@ -419,6 +419,11 @@ def run_diagnose(
         if dev.virtual and not include_virtual and len(devices) > 1:
             emit(f"camera {where}: {dev.name} (virtual) - skipped; name it to check it anyway")
             continue
+        # v0.1.28: virtual-skip lines emit even when the budget is spent; the budget
+        # limits probing, not the courtesy announcement. Check stopped after the
+        # virtual branch so remaining virtual devices still get their skip line.
+        if stopped:
+            break
         if over():
             stopped = True
             break
@@ -534,8 +539,6 @@ def run_diagnose(
             b, m = modes
             fps_txt = f" ({saved['fps']:.1f} fps measured)" if saved and saved.get("fps") is not None else ""
             emit(f"  remembered for this camera: {b} {m.describe()}{fps_txt}")
-        if stopped:
-            break
     if stopped:
         emit(
             f"stopped after {budget:g} s (time limit) - the cameras checked so far are above; "
