@@ -223,15 +223,6 @@ class _ElementQuery:
 
     window: tuple[str, str, str, tuple[int, ...] | None] | None  # (title, process, class, rect)
     elements: dict[str, desktop.Element]
-
-
-@dataclass
-class _ElementQuery:
-    """One agent's last ui_query: the foreground window fingerprint at query time plus the id -> Element
-    snapshot. An element id resolves only while the same window is still in the foreground."""
-
-    window: tuple[str, str, str, tuple[int, ...] | None] | None  # (title, process, class, rect)
-    elements: dict[str, desktop.Element]
     generation: int = 0  # increments per agent per query; binds an id to one specific query attempt
 
 
@@ -879,15 +870,6 @@ class ComputerControl:
         except Exception:
             label = ""
         return xi, yi, label
-
-    def _focus_element_id(self, g: Grant, agent_id: str, step: Callable[[], Any], element_id: str) -> str:
-        """Click the center of a ui_query element so keyboard input lands in it; returns the element's name."""
-        x, y, label = self._point(agent_id, None, None, None, element_id, False)
-        self._confirm_targets(g, f"click {self._where(label, x, y)}", [label])
-        self.note_own_mouse()
-        step().move(x, y)
-        step().click(1)
-        return label
 
     def _typing_target_ok(self) -> None:
         fg = None
