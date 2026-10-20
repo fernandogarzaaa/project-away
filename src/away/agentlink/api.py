@@ -232,6 +232,7 @@ class Gate:
         access_log: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         tunnel_hosts: Callable[[], Any] = lambda: (),
+        cf_trusted: Callable[[], bool] = lambda: False,
         link_info: Callable[[], dict[str, Any]] = lambda: {},
         token_expiry: Callable[[], Any] = lambda: DEFAULT_TOKEN_EXPIRY,
     ) -> None:
@@ -239,6 +240,9 @@ class Gate:
         self.link_info = link_info  # v0.1.24: the current public addresses (GET /v1/link, refresh replies)
         self.service = service
         self.tunnel_hosts = tunnel_hosts  # v0.1.23: hostnames of the active secure / backup link (Host check)
+        # Whether a Cloudflare tunnel is up right now. Only then was a request's cf-connecting-ip header set
+        # by Cloudflare's edge; otherwise it is the caller's own claim and is never trusted (see source_ip).
+        self.cf_trusted = cf_trusted
         self.registry = registry
         self.local_key = local_key
         self.remote_ttl_s = remote_ttl_s
@@ -256,6 +260,26 @@ class Gate:
         self._waiting: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self.stopped = threading.Event()
+
+    # ---------------------------------------------------------------- sources
+    def source_ip(self, headers: dict[str, str], scope: dict[str, Any]) -> str:
+        """Who a request counts as coming from: the identity the rate-limit bucket, the per-source
+        token backoff, the access log and a token's recorded ``last_source`` all key on.
+
+        Normally the socket peer. ``cf-connecting-ip`` is honored only while a Cloudflare tunnel
+        is up (:attr:`cf_trusted`): there Cloudflare's edge set the header, and the socket peer is
+        the local cloudflared process for every remote agent, so the header is the only per-source
+        signal. With no tunnel running the header is whatever the caller claims, so trusting it
+        would hand any local process, or any peer arriving over the SSH backup relay (which
+        forwards raw TCP), a fresh rate-limit bucket, a reset token backoff and a forged
+        access-log address on every request. An unknown tunnel state ignores the header."""
+        peer = str((scope.get("client") or ("?", 0))[0])
+        claimed = str(headers.get("cf-connecting-ip") or "").strip()
+        if claimed:
+            with contextlib.suppress(Exception):
+                if self.cf_trusted():
+                    return claimed
+        return peer
 
     # ---------------------------------------------------------------- logging
     def log(self, ip: str, agent: str, method: str, path: str, status: int, ms: float) -> None:
@@ -538,7 +562,7 @@ class AuthMiddleware:
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        ip = headers.get("cf-connecting-ip") or (scope.get("client") or ("?", 0))[0]
+        ip = g.source_ip(headers, scope)
         status_box = {"status": 0}
         agent_name = {"name": ""}
         started = {"start": False, "end": False}

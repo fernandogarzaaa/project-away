@@ -462,6 +462,10 @@ def test_wrong_tokens_are_rate_limited_per_source_with_backoff(tmp_path: Path) -
     try:
         tok = pair_keep(h, base)["persistent_token"]
         bad = PERSIST_PREFIX + "x" * 43
+        # this scenario is agents arriving through the Cloudflare tunnel from different addresses:
+        # only while the tunnel is up is cf-connecting-ip the source (with no tunnel it is ignored,
+        # see tests/test_v0129_source_identity.py), so say the tunnel is up for this gate
+        h.gate.cf_trusted = lambda: True
         attacker = {"cf-connecting-ip": "198.51.100.7"}
         codes = [http(base, "GET", "/v1/status", token=bad, headers=attacker)[0] for _ in range(6)]
         assert codes == [401] * 6

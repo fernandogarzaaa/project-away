@@ -973,6 +973,18 @@ class AgentLinkHost:
                 out.append(h)
         return out
 
+    def cf_tunnel_up(self) -> bool:
+        """Whether a Cloudflare tunnel (the standard quick link, or your own named one) is alive
+        right now. Only then did Cloudflare's edge set a request's ``cf-connecting-ip`` header, so
+        only then may the Gate trust it as the request's source. The SSH backup relay forwards raw
+        TCP, so a header arriving through it is the caller's own claim and never counts."""
+        for t in (getattr(self, "tunnel", None), getattr(self, "named", None)):
+            if t is not None and getattr(t, "url", None):
+                with contextlib.suppress(Exception):
+                    if t.alive():
+                        return True
+        return False
+
     def ensure_server(self) -> int:
         with self._lock:
             if self.server is not None and self.server.running:
@@ -990,6 +1002,7 @@ class AgentLinkHost:
                 rate=(float(s.rate_per_s), int(s.rate_burst)),
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
+                cf_trusted=self.cf_tunnel_up,
                 link_info=self.link_info,
                 token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "90d") or "90d"),
             )
