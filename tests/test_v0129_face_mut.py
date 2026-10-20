@@ -403,14 +403,16 @@ def test_active_speaker_detector_drops_missing_face_series() -> None:
 
 
 def test_brow_toggle_exact_hold_and_cooldown_boundaries() -> None:
-    toggle = BrowRaiseToggle(threshold=0.5, hold=0.2, cooldown=0.5)
+    # hold/cooldown use float-exact boundaries: 1.2 - 1.0 is 0.19999... in binary
+    # floating point, so a 0.2s hold at t=1.0 can never read as fully elapsed.
+    toggle = BrowRaiseToggle(threshold=0.5, hold=0.25, cooldown=0.5)
     raised = {"browInnerUp": 0.5}
     assert toggle.update(1.0, raised) is False
-    assert toggle.update(1.199, raised) is False
-    assert toggle.update(1.2, raised) is True
+    assert toggle.update(1.249, raised) is False
+    assert toggle.update(1.25, raised) is True
     toggle.update(1.3, {"browInnerUp": 0.0})  # re-arm
     assert toggle.update(1.4, raised) is False  # cooldown has not elapsed
-    assert toggle.update(1.7, raised) is True
+    assert toggle.update(1.75, raised) is True
 
 
 def test_brow_toggle_midrange_resets_hold_without_rearming() -> None:
@@ -430,8 +432,9 @@ def test_wink_threshold_and_open_max_are_inclusive() -> None:
 def test_wink_requires_one_eye_open_and_rearms_after_release() -> None:
     trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
     assert trigger.update(0.0, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.9}) is None
-    assert trigger.update(0.2, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
-    assert trigger.update(0.3, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
-    trigger.update(0.4, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})
-    assert trigger.update(0.5, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
-    assert trigger.update(0.61, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+    assert trigger.update(0.2, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None  # hold starts
+    assert trigger.update(0.31, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+    assert trigger.update(0.4, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None  # disarmed
+    trigger.update(0.5, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})  # release re-arms
+    assert trigger.update(0.6, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None  # hold restarts
+    assert trigger.update(0.71, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
