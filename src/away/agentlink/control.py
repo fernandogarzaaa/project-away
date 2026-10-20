@@ -274,6 +274,9 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+        # v0.1.27: agent -> {mark id: (screen x, screen y)} of the numbered boxes from its last
+        # get_screen(annotate=true) (set-of-mark prompting for empty UIA trees)
+        self.marks: dict[str, dict[int, tuple[int, int]]] = {}
         # v0.1.28 proposal #24 (hybrid grounding): each agent's last ui_query result: the foreground
         # window fingerprint plus id -> Element. A pointer or keyboard action may pass element_id=...
         # instead of coordinates; it resolves here, then acts as usual. Ids are per-agent: one agent's
@@ -435,6 +438,7 @@ class ComputerControl:
             self._end(reason)
         self.views.pop(agent_id, None)
         self.scales.pop(agent_id, None)
+        self.marks.pop(agent_id, None)
         # Revocation invalidates the agent's element ids too: they must not survive disconnect.
         with self._lock:
             self._element_queries.pop(str(agent_id), None)
@@ -602,6 +606,8 @@ class ComputerControl:
     # v0.1.28 proposal #24 (hybrid grounding): UI Automation gives exact element bounds for free; raw pixel
     # grounding is the weakest link. ui_query lists the foreground window's interactable elements with short
     # ids; pointer and keyboard accept an element_id and resolve it to bounds, then act as with coordinates.
+    # v0.1.27: a numbered box from get_screen(annotate=true): "mark:14", "mark 14", "#14"
+    MARK_REF = re.compile(r"(?i)^(?:mark[:#]?\s*|#)(\d{1,4})$")
     UI_QUERY_DEPTH = 4
     UI_QUERY_NODES = 400
     UI_QUERY_LIMIT = 200
@@ -726,6 +732,16 @@ class ComputerControl:
     def _point(
         self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
     ) -> tuple[int, int, str]:
+        if element:
+            mark = self.MARK_REF.match(str(element).strip())
+            if mark is not None:  # a set-of-mark reference: needs no UI Automation; wins over element_id
+                mid = int(mark.group(1))
+                pt = self.marks.get(agent_id, {}).get(mid)
+                if pt is None:
+                    raise ControlRefused(
+                        f"no annotation {mid} on your last screenshot; call get_screen(annotate=true) first"
+                    )
+                return int(pt[0]), int(pt[1]), f"mark {mid}"
         if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
             el = self._resolve_element_id(agent_id, element_id)
             center = el.center

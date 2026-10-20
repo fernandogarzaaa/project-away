@@ -130,7 +130,7 @@ TOOLS: dict[str, tuple[str, str, str, str]] = {
         "image",
         "GET",
         "/v1/screen",
-        "Screenshot ?scale=0.1-1&monitor=N&region=x,y,w,h&elements= (screen); X-Away-Meta lists the monitors",
+        "Screenshot ?scale=0.1-1&monitor=N&region=x,y,w,h&elements=&annotate= (screen); X-Away-Meta lists the monitors",
     ),
     "screen_watch": ("json", "POST", "/v1/screen/watch", "Live view {on, scale, monitor, region} (screen)"),
     "last_capture": ("image", "GET", "/v1/capture/latest", "The picture the person sent you"),
