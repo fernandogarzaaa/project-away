@@ -438,3 +438,199 @@ def test_wink_requires_one_eye_open_and_rearms_after_release() -> None:
     trigger.update(0.5, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})  # release re-arms
     assert trigger.update(0.6, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None  # hold restarts
     assert trigger.update(0.71, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+
+
+# Round 2: constructor defaults (signature-value mutants)
+
+
+def test_gate_remaining_defaults() -> None:
+    sig = inspect.signature(SpeechGate.__init__)
+    assert sig.parameters["baseline_mads"].default == 3.0
+    assert sig.parameters["baseline_margin"].default == 0.015
+    gate = SpeechGate()
+    assert gate.last_camera_frame == -1e9
+    assert gate.camera_recent_s == 2.0
+    assert gate.when_camera_busy == "block"
+
+
+def test_wink_trigger_defaults() -> None:
+    sig = inspect.signature(WinkTrigger.__init__)
+    assert sig.parameters["threshold"].default == 0.5
+    assert sig.parameters["open_max"].default == 0.3
+    assert sig.parameters["hold"].default == 0.25
+    assert sig.parameters["cooldown"].default == 0.8
+    trigger = WinkTrigger()
+    assert trigger._armed == {"left": True, "right": True}
+    assert trigger._last == -1e9
+    assert trigger._t0 == {"left": None, "right": None}
+
+
+def test_mouth_open_trigger_defaults() -> None:
+    sig = inspect.signature(MouthOpenTrigger.__init__)
+    assert sig.parameters["threshold"].default == 0.5
+    assert sig.parameters["hold"].default == 0.8
+    assert sig.parameters["cooldown"].default == 1.0
+
+
+# Round 2: pearson tiny-variance boundary
+
+
+def test_pearson_tiny_but_nonzero_variance() -> None:
+    # den = 6.67e-7: above 1e-12 but far below 1.000000000001.
+    # Kills the 1e-12 -> 1.000000000001 mutant (which would return 0.0 here).
+    a = np.array([0.0, 0.001, 0.0])
+    assert pearson(a, a) == pytest.approx(1.0)
+
+
+# Round 2: observe() presence boundaries
+
+
+def test_observe_n_faces_zero_is_not_present() -> None:
+    # Kills n_faces > 0 -> n_faces >= 0 (both occurrences): a frame with no
+    # faces is not "present", even though 0 >= 0.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=0, frontal=True)
+    assert gate._pose[-1] == (False, None)
+
+
+def test_observe_single_face_is_present() -> None:
+    # Kills n_faces > 0 -> n_faces > 1: exactly one face counts as present.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=1, frontal=True)
+    assert gate._pose[-1] == (True, True)
+
+
+# Round 2: mouth_threshold() frame selection
+
+
+def test_mouth_threshold_excludes_the_boundary_frame() -> None:
+    # Kills t < before -> t <= before: a score at exactly `before` is history
+    # for later calls, not for this one (2 known < baseline_min_frames=3).
+    gate = SpeechGate()
+    for t, score in [(1.0, 0.1), (2.0, 0.1), (3.0, 0.1)]:
+        gate.observe(t, active_speaker=None, n_faces=1, score=score)
+    threshold, baseline = gate.mouth_threshold(3.0)
+    assert (threshold, baseline) == (0.08, None)
+
+
+# Round 2: WinkTrigger.update() edge semantics
+
+
+def test_wink_missing_key_defaults_to_open() -> None:
+    # Kills the 0.0 -> 1.0 default mutants on both blendshape lookups:
+    # a missing key means "open" (0.0), never "closed" (1.0).
+    trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
+    # eyeBlinkLeft missing -> open: right eye closed alone is a wink_right
+    assert trigger.update(0.0, {"eyeBlinkRight": 0.9}) is None
+    assert trigger.update(0.2, {"eyeBlinkRight": 0.9}) == "wink_right"
+    trigger2 = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
+    # eyeBlinkRight missing -> open: left eye closed alone is a wink_left
+    assert trigger2.update(0.0, {"eyeBlinkLeft": 0.9}) is None
+    assert trigger2.update(0.2, {"eyeBlinkLeft": 0.9}) == "wink_left"
+
+
+def test_wink_rearm_needs_strictly_below_release() -> None:
+    # Kills closed < threshold*0.6 -> closed <= threshold*0.6: exactly at
+    # 0.42 the eye is not "open", so the trigger must not re-arm.
+    trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.0)
+    assert trigger.update(0.0, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    assert trigger.update(0.2, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+    trigger.update(0.3, {"eyeBlinkLeft": 0.42, "eyeBlinkRight": 0.42})  # exactly at release
+    # Still disarmed: the next wink pose cannot fire
+    assert trigger.update(0.4, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    assert trigger.update(0.6, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+
+
+def test_wink_cooldown_boundary_is_inclusive() -> None:
+    # Kills t - _last >= cooldown -> t - _last > cooldown: exactly at the
+    # cooldown boundary the trigger may fire again.
+    trigger = WinkTrigger(threshold=0.7, open_max=0.2, hold=0.1, cooldown=0.5)
+    assert trigger.update(1.0, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    assert trigger.update(1.25, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+    trigger.update(1.3, {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0})  # re-arm
+    assert trigger.update(1.4, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) is None
+    assert trigger.update(1.75, {"eyeBlinkLeft": 0.9, "eyeBlinkRight": 0.1}) == "wink_left"
+
+
+# Round 2: explain() window statistics
+
+
+def test_explain_reports_exact_window_statistics() -> None:
+    gate = SpeechGate()
+    gate.enroll({1: 0.5, 2: 0.3})
+    # Window for explain(1.0, 1.0) is [0.7, 1.3]: boundary frames included.
+    gate.observe(0.7, active_speaker=1, n_faces=1, score=0.5, frontal=True)
+    gate.observe(1.0, active_speaker=2, n_faces=1, score=0.9, frontal=True)
+    gate.observe(1.1, active_speaker=None, n_faces=1, score=0.08, frontal=False)
+    gate.observe(1.2, active_speaker=1, n_faces=1, score=0.9, frontal=True)
+    gate.observe(1.25, active_speaker=None, n_faces=1, score=None, frontal=False)
+    gate.observe(1.3, active_speaker=None, n_faces=0, score=None, frontal=None)
+    info = gate.explain(1.0, 1.0)
+    assert info["frames"] == 6
+    assert info["enrolled"] is True
+    assert info["face_fraction"] == 0.83  # 5/6
+    assert info["max_score"] == 0.9
+    assert info["speaker_frames"] == 2
+    assert info["other_speaker_frames"] == 1
+    assert info["mouth_moving_frames"] == 1
+    assert info["frontal_fraction"] == 0.5
+    assert info["speaking_fraction"] == 0.5
+    assert info["allowed"] is True
+    assert info["reason"] == "facing the screen and speaking"
+
+
+def test_explain_rounding_precision() -> None:
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=1, score=0.126)
+    gate.observe(1.1, active_speaker=None, n_faces=0, score=None)
+    gate.observe(1.2, active_speaker=None, n_faces=0, score=None)
+    info = gate.explain(1.0, 1.2)
+    assert info["face_fraction"] == 0.33  # round(1/3, 2), not 0.333
+    assert info["max_score"] == 0.13  # round(0.126, 2), not 0.126
+
+
+def test_explain_identity_check_blocks_non_user() -> None:
+    import types
+
+    gate = SpeechGate()
+    gate.enroll({1: 0.5})
+    gate.identity = types.SimpleNamespace(is_user=lambda fid: False)
+    gate.observe(1.0, active_speaker=1, n_faces=1, score=0.9)
+    info = gate.explain(1.0, 1.0)
+    assert info["allowed"] is False
+    assert info["reason"] == "identity check: not the enrolled user"
+
+
+def test_explain_identity_check_passes_for_user() -> None:
+    import types
+
+    gate = SpeechGate()
+    gate.enroll({1: 0.5})
+    gate.identity = types.SimpleNamespace(is_user=lambda fid: True)
+    gate.observe(1.0, active_speaker=1, n_faces=1, score=0.9, frontal=True)
+    info = gate.explain(1.0, 1.0)
+    assert info["allowed"] is True
+
+
+def test_explain_speaking_fraction_boundary_is_inclusive() -> None:
+    # frac exactly == min(ambient_fraction, min_fraction) must allow.
+    gate = SpeechGate(ambient_fraction=0.5, min_fraction=0.5)
+    gate.enroll({1: 0.5})
+    gate.observe(1.0, active_speaker=1, n_faces=1, score=0.9)
+    gate.observe(1.1, active_speaker=1, n_faces=1, score=0.9)
+    gate.observe(1.2, active_speaker=None, n_faces=1, score=0.0)
+    gate.observe(1.3, active_speaker=None, n_faces=1, score=0.0)
+    info = gate.explain(1.0, 1.3)
+    assert info["speaking_fraction"] == 0.5  # (2 + 0) / 4
+    assert info["allowed"] is True
+
+
+def test_explain_presence_boundary_is_inclusive() -> None:
+    # presence exactly == presence_fraction must allow (mouth motion weak).
+    gate = SpeechGate(presence_fraction=0.6)
+    for i, t in enumerate([1.0, 1.1, 1.2, 1.3, 1.4]):
+        gate.observe(t, active_speaker=None, n_faces=1, score=0.0, frontal=(i < 3))
+    info = gate.explain(1.0, 1.4)
+    assert info["frontal_fraction"] == 0.6  # 3/5
+    assert info["allowed"] is True
+    assert info["reason"] == "enrolled face at the screen, facing it (mouth motion weak)"
