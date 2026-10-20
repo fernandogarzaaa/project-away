@@ -635,3 +635,67 @@ def test_explain_presence_boundary_is_inclusive() -> None:
     assert info["frontal_fraction"] == 0.6  # 3/5
     assert info["allowed"] is True
     assert info["reason"] == "enrolled face at the screen, facing it (mouth motion weak)"
+
+
+# Round 3: remaining reachable survivors
+
+
+def test_observe_user_present_with_no_faces_is_not_present() -> None:
+    # Kills the second n_faces > 0 -> n_faces >= 0 (the user_present branch):
+    # an explicit user_present=True still needs n_faces > 0.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=0, frontal=True, user_present=True)
+    assert gate._pose[-1] == (False, None)
+
+
+def test_explain_unenrolled_speaker_frames_count_each_frame_once() -> None:
+    # Kills the sum(1 ...) -> sum(2 ...) in the not-enrolled branch of explain.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=1, n_faces=1, score=0.9)
+    gate.observe(1.1, active_speaker=2, n_faces=1, score=0.9)
+    info = gate.explain(1.0, 1.1)
+    assert info["enrolled"] is False
+    assert info["speaker_frames"] == 2
+    assert info["other_speaker_frames"] == 0
+
+
+def test_explain_loose_ignores_frames_without_faces() -> None:
+    # Kills n > 0 -> n >= 0 in the loose counter: a mouth score on a frame
+    # with no face must not count as mouth movement.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=0, score=0.9)
+    gate.observe(1.1, active_speaker=1, n_faces=1, score=0.9)
+    gate.enroll({1: 0.5})
+    info = gate.explain(1.0, 1.1)
+    assert info["mouth_moving_frames"] == 0
+
+
+def test_explain_others_compared_against_hits_plus_loose() -> None:
+    # Kills others > hits + loose -> others > hits - loose:
+    # hits=2, loose=2, others=3: 3 > 4 is False (allowed path),
+    # but 3 > 0 is True (mutant would claim someone else was speaking).
+    gate = SpeechGate()
+    gate.enroll({1: 0.5, 2: 0.3})
+    gate.observe(1.0, active_speaker=1, n_faces=1, score=0.9)
+    gate.observe(1.1, active_speaker=1, n_faces=1, score=0.9)
+    gate.observe(1.2, active_speaker=None, n_faces=1, score=0.9)
+    gate.observe(1.3, active_speaker=None, n_faces=1, score=0.9)
+    gate.observe(1.4, active_speaker=2, n_faces=1, score=0.9)
+    gate.observe(1.5, active_speaker=2, n_faces=1, score=0.9)
+    gate.observe(1.6, active_speaker=2, n_faces=1, score=0.9)
+    info = gate.explain(1.0, 1.6)
+    assert info["speaker_frames"] == 2
+    assert info["mouth_moving_frames"] == 2
+    assert info["other_speaker_frames"] == 3
+    assert info["allowed"] is True
+
+
+def test_explain_fraction_rounding_precision() -> None:
+    # Kills round(x, 2) -> round(x, 3) on speaking_fraction and frontal_fraction.
+    gate = SpeechGate()
+    gate.observe(1.0, active_speaker=None, n_faces=1, score=0.5, frontal=True)
+    gate.observe(1.1, active_speaker=None, n_faces=1, score=0.0, frontal=False)
+    gate.observe(1.2, active_speaker=None, n_faces=1, score=0.0, frontal=False)
+    info = gate.explain(1.0, 1.2)
+    assert info["speaking_fraction"] == 0.33  # round(1/3, 2)
+    assert info["frontal_fraction"] == 0.33  # round(1/3, 2)
