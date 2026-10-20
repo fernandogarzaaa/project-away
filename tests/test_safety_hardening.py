@@ -343,7 +343,9 @@ def test_open_app_is_quiet_when_the_app_appears() -> None:
 
     def fg() -> dict[str, Any]:
         n["i"] += 1
-        if n["i"] < 3:
+        # the launcher is in front for the open_app launcher checks (poll, pre-type, pre-Enter);
+        # the app itself is the first foreground the post-Enter verification poll sees
+        if n["i"] < 4:
             return {"title": "Search", "process": "SearchHost.exe"}
         return {"title": "Untitled - Notepad", "process": "notepad.exe"}
 

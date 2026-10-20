@@ -126,6 +126,10 @@ TYPE_CHUNK = 8  # characters typed at a time (each chunk can be interrupted)
 # carries a warning instead of a silent ok.
 OPEN_APP_VERIFY_S = 3.0
 OPEN_APP_POLL_S = 0.25
+# open_app safety (audit Phase 4 lane B item 1.6): before the app name is typed, the launcher itself (Start
+# menu/search, Spotlight) must be seen in the foreground for up to this long. Typing first and verifying
+# later delivered the name and Enter into whatever window had focus when the launcher never opened.
+OPEN_APP_LAUNCHER_S = 3.0
 ACTIONS = (
     "move",
     "click",
@@ -1395,23 +1399,80 @@ class ComputerControl:
             fg = {}
         return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
+    @staticmethod
+    def _launcher_matches(fg: dict[str, Any], platform: str) -> bool:
+        """True when a foreground-window report is the OS launcher itself: the only state in which typing an
+        app name is safe. Windows: the Start menu host or the search UI (on Windows 10 both live inside
+        explorer.exe and are told apart from the taskbar by the window class and title, the same evidence
+        the self-test's Win-key check uses). macOS: the Spotlight process."""
+        proc = str(fg.get("process", "")).strip().lower()
+        title = str(fg.get("title", "")).strip().lower()
+        cls = str(fg.get("class", "")).strip()
+        if platform == "darwin":
+            return proc in ("spotlight", "spotlight.app")
+        if proc in ("startmenuexperiencehost.exe", "searchhost.exe", "searchui.exe"):
+            return True
+        return proc == "explorer.exe" and cls == "Windows.UI.Core.CoreWindow" and title in ("start", "search")
+
+    def _launcher_up(self) -> bool:
+        """Whether the launcher is the foreground window right now. Never raises: an unreadable foreground
+        is not the launcher, so the caller refuses instead of typing blind."""
+        try:
+            fg = self.hooks.foreground() or {}
+        except Exception:
+            fg = {}
+        return self._launcher_matches(fg, self.platform)
+
+    def _wait_for_launcher(self, wait: Callable[[float], None]) -> bool:
+        """Poll the foreground for the launcher UI for up to ``OPEN_APP_LAUNCHER_S``. ``wait`` still checks
+        for a stop/takeover between polls, so the person can interrupt the wait."""
+        deadline = self.clock() + OPEN_APP_LAUNCHER_S
+        for _ in range(int(OPEN_APP_LAUNCHER_S / OPEN_APP_POLL_S) + 1):
+            if self._launcher_up():
+                return True
+            if self.clock() >= deadline:
+                return False
+            wait(OPEN_APP_POLL_S)
+        return False
+
     def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> bool:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
-        that the person has not stopped or taken over. After Enter, the foreground window is polled for up to
+        that the person has not stopped or taken over. The launcher key is pressed first, then the launcher
+        itself must be seen in the foreground before the app name is typed: if Start/Spotlight never opened,
+        the name and Enter would land in whatever window has focus (a chat, a document, a terminal), so an
+        unverifiable launcher refuses without typing a single character. Focus is re-checked immediately
+        before typing and again before Enter. After Enter, the foreground window is polled for up to
         ``OPEN_APP_VERIFY_S`` for a title/process match against ``name``; returns True when the app visibly
-        opened. The fixed 0.6/0.8 s sleeps stay as the base timing; the poll is the verification."""
+        opened. The fixed 0.6/0.8 s sleeps stay as the base timing; the polls are the verification."""
         b = self.hooks.backend
         if not (self.platform == "win32" or (self.platform == "darwin" and hasattr(b, "hotkey"))):
             raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
+        launcher = "Start menu" if self.platform == "win32" else "Spotlight"
         self.note_own_keys()
         if self.platform == "win32":
             step().key("cmd")
         else:
             step().hotkey(["cmd", "space"])
         wait(0.6)
+        if not self._wait_for_launcher(wait):
+            raise ControlRefused(
+                f"the launcher did not open: the {launcher} never came to the front, so nothing was typed "
+                f"(typing '{name}' would have gone into the window that has focus instead). Ask the person "
+                f"to open the {launcher} once, then try again."
+            )
+        if not self._launcher_up():
+            raise ControlRefused(
+                "the launcher was open but another window took focus before the app name was typed, so "
+                "nothing was typed. Ask the person not to switch windows while open_app runs, then try again."
+            )
         self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(name))
         step().type_text(name)
         wait(0.8)
+        if not self._launcher_up():
+            raise ControlRefused(
+                "the launcher lost focus after the app name was typed, so Enter was not pressed (it would "
+                "have gone to the window that has focus instead). Try again without switching windows."
+            )
         self.note_own_keys()
         step().key("enter")
         return self._app_visible(name, wait)
