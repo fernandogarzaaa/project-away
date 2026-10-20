@@ -18,6 +18,11 @@ What it owns:
   every sub-step (:meth:`Action.step`) and during waits (:meth:`Action.wait`). Buttons and keys an action holds
   are released in ``finally``. :meth:`ActionEngine.stop_all` ("Stop everything": hotkey, open palm, voice, tray)
   cancels every source's in-flight action at once and lets go of everything still held.
+* **Whole-operation serialization for agents.** Single calls are atomic (``_io``), and on top of that an
+  agent operation holds the operation lock across :meth:`ActionEngine.begin`, so its steps (a drag's press,
+  moves, release) are never interleaved with another operation's. Waiting for the lock re-checks the
+  cancellation token, the engine state and the stop-all generation, so a queued operation is still cancelled
+  at once and a stop or shutdown can never deadlock behind the operation in progress.
 * **One state machine**: ``running`` -> ``paused`` -> ``running`` and, at exit, ``shutdown`` (terminal).
 * **The audit log**: every discrete action (not each pointer move) with its source, actor and result. Typed
   text is never logged, only its length.
@@ -92,10 +97,11 @@ class Policy:
     rate_limited: bool = False  # per-actor token bucket
     risk_prompts: bool = False  # risky / unknown targets ask the user first (done by the agent control layer)
     takeover: bool = False  # paused/cancelled when the user acts at the same time
+    serialize_ops: bool = False  # one whole operation at a time: its steps never interleave with another's
 
 
 USER_POLICY = Policy()
-AGENT_POLICY = Policy(secure_desktop=True, rate_limited=True, risk_prompts=True, takeover=True)
+AGENT_POLICY = Policy(secure_desktop=True, rate_limited=True, risk_prompts=True, takeover=True, serialize_ops=True)
 POLICIES: dict[str, Policy] = {s: USER_POLICY for s in USER_SOURCES} | {s: AGENT_POLICY for s in AGENT_SOURCES}
 
 
@@ -475,6 +481,10 @@ class ActionEngine:
         self._exempt_from_pause: frozenset[str] = frozenset()
         self._lock = threading.RLock()
         self._io = threading.RLock()  # one OS call at a time (a chord is never interleaved with another source)
+        # one whole agent operation at a time (see Policy.serialize_ops): held across begin(), so a drag's
+        # press, moves and release can never be split by another operation's steps. Only agent operations
+        # take it; user sources preempt by cancellation instead of ever waiting behind an agent.
+        self._op_lock = threading.RLock()
         self._inflight: set[Action] = set()
         self._tokens: dict[threading.Event, tuple[str, str]] = {}  # tracked tokens (macro replays) -> source
         # client holds: (backend id, "source|kind", name) -> (backend, the press arguments)
@@ -650,7 +660,15 @@ class ActionEngine:
         a = Action(self, source, actor, name, token or threading.Event(), backend or self.backend, sleep)
         if not self.accepting(source):
             a.cancel(self.state_reason or f"input is {self.state}")
+        generation = self.generation
         self._user_acts(source)
+        # Whole-operation serialization (agent sources): hold the operation lock for the whole begin()
+        # block. The wait happens before the action joins _inflight and is cancellation-aware, so a stop,
+        # takeover, pause or shutdown reaches a queued operation at once instead of deadlocking behind
+        # the operation in progress. User sources never take this lock: they preempt by cancellation.
+        serialize = policy_for(source).serialize_ops
+        if serialize:
+            self._acquire_op(a, generation)
         with self._lock:
             self._inflight.add(a)
         result = "done"
@@ -673,6 +691,19 @@ class ActionEngine:
                 a.release_all(modifiers=False)
             if audit:
                 self.audit(source, actor, name, "", result)
+            if serialize:
+                self._op_lock.release()
+
+    def _acquire_op(self, a: Action, generation: int) -> None:
+        """Take the operation lock for ``a``, waiting without ever deadlocking a stop: while it waits, the
+        action's cancel token and engine state are re-checked (:meth:`Action.check`) and a
+        :meth:`stop_all` (which bumps the generation) aborts the wait, so a queued operation is cancelled
+        promptly even though the running operation still holds the lock."""
+        while not self._op_lock.acquire(timeout=0.02):
+            if self.generation != generation:
+                raise ActionCancelled("everything was stopped while this action waited its turn")
+            a.check()
+        a.check()
 
     @contextlib.contextmanager
     def track(self, source: str, token: threading.Event, name: str = "") -> Iterator[threading.Event]:
