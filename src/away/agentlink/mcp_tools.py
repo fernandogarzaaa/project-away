@@ -359,15 +359,22 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     @mcp.tool()
     async def keyboard(
-        ctx: Context, action: str, text: str | None = None, keys: str | None = None, element_id: str | None = None
+        ctx: Context,
+        action: str,
+        text: str | None = None,
+        keys: str | None = None,
+        expect: str | None = None,
+        element_id: str | None = None,
     ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
-        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". Pass element_id= (from ui_query) to
-        click that field first so the input lands there. The result reports the observed effect: `foreground`
-        (the foreground window's title and process name right after the action) and `focused` (the focused UI
-        element's label, when UI Automation has one)."""
-        return await group(ctx, "keyboard", action=action, text=text, keys=keys, element_id=element_id)
+        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts).
+        Pass `expect` to type only when the focused window's title contains that text (case-insensitive): a
+        mismatch refuses before anything is typed, so text never lands in the wrong window. Pass element_id=
+        (from ui_query) to click that field first so the input lands there. The result reports the observed
+        effect: `foreground` (the foreground window's title and process name right after the action) and
+        `focused` (the focused UI element's label, when UI Automation has one). action="press" presses `keys`,
+        e.g. "enter", "ctrl+s", "alt+tab"."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys, expect=expect, element_id=element_id)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:

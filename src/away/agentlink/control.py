@@ -926,16 +926,52 @@ class ComputerControl:
                 tlabel = self._focus_element_id(g, agent_id, step, str(kw["element_id"]))
                 detail = f"{len(text)} characters into '{tlabel}'" if tlabel.strip() else detail
             self._typing_target_ok()
+            label = self._focused_label()
+            title = self._window_title()
+            extra["target"] = {"window": title, "element": label}
+            expect = str(kw.get("expect") or "").strip()
+            if expect and expect.lower() not in title.lower():
+                if title.strip():
+                    raise ControlRefused(
+                        f"the focused window ({title!r}) does not contain {expect!r}: "
+                        "refusing to type into the wrong window"
+                    )
+                raise ControlRefused(
+                    f"I cannot see a focused window title to check {expect!r} against: "
+                    "refusing to type into the wrong window"
+                )
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
+                # Re-validate after the user prompt: the focused window may have
+                # changed while the prompt was up. Fail closed if it did.
+                if expect:
+                    title = self._window_title()
+                    if expect.lower() not in title.lower():
+                        raise ControlRefused(
+                            f"the focused window changed while confirming ({title!r} does not contain "
+                            f"{expect!r}): refusing to type into the wrong window"
+                        )
             if not hasattr(b, "type_text"):
                 raise ControlRefused("typing is not supported on this system")
             with self._lock:
                 self._own_mouse_until = 0.0  # while it types, any real mouse movement is the person
+            typed = 0
             for i in range(0, len(text), TYPE_CHUNK):
+                # Re-verify the target window before each chunk: focus may have changed
+                # during the previous chunk. Abort before typing into the wrong app.
+                if expect:
+                    title = self._window_title()
+                    if expect.lower() not in title.lower():
+                        # partial completion is reported honestly via the exception message
+                        raise ControlRefused(
+                            f"the focused window changed while typing ({title!r} does not contain "
+                            f"{expect!r}): stopped after {typed} of {len(text)} characters"
+                        )
                 chunk = text[i : i + TYPE_CHUNK]
                 self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
                 step().type_text(chunk)
+                typed += len(chunk)
+            detail = f"{len(text)} characters"
             undo = {"keys": ["cmd" if self.platform == "darwin" else "ctrl", "z"]}
         elif action == "press_keys":
             from away.control.keys import parse_combo
