@@ -6,8 +6,11 @@ newer app; missing keys fall back to defaults.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import secrets
+import threading
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -1259,14 +1262,46 @@ def to_dict(cfg: AppConfig) -> dict[str, Any]:
     return result
 
 
-def load(path: Path | None = None) -> tuple[AppConfig, list[str]]:
-    p = path or Path(os.environ.get("AWAY_CONFIG") or paths.config_file())
-    if not p.exists():
-        return from_dict(None)
+def _backup_path(p: Path) -> Path:
+    """The last-good copy kept next to the config file (``config.yaml.bak``)."""
+    return p.with_name(p.name + ".bak")
+
+
+def _read_yaml_mapping(p: Path) -> dict[str, Any]:
     with p.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{p}: top level must be a mapping")
+    return data
+
+
+def _load_backup(bak: Path) -> tuple[AppConfig, list[str]] | None:
+    """The backup's config, or None when the backup is missing or unusable too."""
+    if not bak.exists():
+        return None
+    try:
+        return from_dict(_read_yaml_mapping(bak))
+    except (OSError, yaml.YAMLError, ValueError):
+        return None
+
+
+def load(path: Path | None = None) -> tuple[AppConfig, list[str]]:
+    p = path or Path(os.environ.get("AWAY_CONFIG") or paths.config_file())
+    bak = _backup_path(p)
+    if not p.exists():
+        restored = _load_backup(bak)
+        if restored is not None:
+            cfg, notes = restored
+            return cfg, [*notes, f"{p} is missing; loaded the last good backup {bak}."]
+        return from_dict(None)
+    try:
+        data = _read_yaml_mapping(p)
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        restored = _load_backup(bak)
+        if restored is None:
+            raise
+        cfg, notes = restored
+        return cfg, [*notes, f"{p} could not be read ({exc}); loaded the last good backup {bak}."]
     return from_dict(data)
 
 
@@ -1275,10 +1310,42 @@ def config_path() -> Path:
     return Path(os.environ.get("AWAY_CONFIG") or paths.config_file())
 
 
+def _atomic_write(p: Path, text: str) -> None:
+    """Write ``text`` to ``p`` atomically: a temp file in the same directory,
+    flushed to disk, then ``os.replace`` over the target. This is the repo's
+    pattern for durable files (control/macros.py, agentlink/host.py's
+    write_private); the unique temp name keeps two threads saving at once
+    from taking each other's temp file. A crash mid-write leaves the old
+    file untouched and at worst one stray temp file behind."""
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def save(cfg: AppConfig, path: Path | None = None) -> Path:
     validate(cfg)
     p = path or config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(to_dict(cfg), fh, sort_keys=False)
+    if p.exists():
+        # Keep the previous valid file as the last-good backup before
+        # replacing it, so load() has something to fall back to if the main
+        # file is ever damaged. A main file that no longer parses is not
+        # worth backing up: the existing backup stays the last good copy.
+        previous: str | None = None
+        try:
+            _read_yaml_mapping(p)
+            previous = p.read_text(encoding="utf-8")
+        except (OSError, yaml.YAMLError, ValueError):
+            previous = None
+        if previous is not None:
+            _atomic_write(_backup_path(p), previous)
+    _atomic_write(p, yaml.safe_dump(to_dict(cfg), sort_keys=False))
     return p
