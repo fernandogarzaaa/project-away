@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import numpy as np
 
 from away.voice.dictation import DictationResult, DictationSession
@@ -281,3 +283,294 @@ def test_short_silence_phrase_filtered_via_seconds_division() -> None:
     assert sink.items == []
     # The reason must be the actual why, not the fallback
     assert r.meta["reason"] == "silence hallucination"
+
+
+# ---------------------------------------------------------------------------
+# Round 2: MicStream / probe_microphone / hotkey_listener with faked hardware.
+# These functions carry "# pragma: no cover" but testteeth still mutates them;
+# every mutant there was "no_coverage". The fakes below capture the exact
+# arguments and call sequence so behaviour changes are observable.
+# ---------------------------------------------------------------------------
+
+
+class _FakeInputStream:
+    instances: ClassVar[list] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        self.stopped = False
+        self.closed = False
+        _FakeInputStream.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _fake_sounddevice(monkeypatch, stream_cls=_FakeInputStream):
+    import sys
+    import types
+
+    sd = types.SimpleNamespace(InputStream=stream_cls)
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    return sd
+
+
+def test_micstream_stream_parameters(monkeypatch) -> None:
+    # Kills L159 (channels 1->2) and L161 mutants (blocksize arithmetic:
+    # Div->Mult, Mult->Div, 1000->1001). int(16000*30/1000) == 480; the
+    # mutants give 480000000, 0 and 479 respectively.
+    from away.voice.dictation import MicStream
+
+    _FakeInputStream.instances = []
+    _fake_sounddevice(monkeypatch)
+    MicStream(lambda chunk: None, sample_rate=16000, block_ms=30)
+    (stream,) = _FakeInputStream.instances
+    assert stream.kwargs["samplerate"] == 16000
+    assert stream.kwargs["channels"] == 1
+    assert stream.kwargs["dtype"] == "float32"
+    assert stream.kwargs["blocksize"] == 480
+
+
+def test_micstream_callback_forwards_first_channel(monkeypatch) -> None:
+    # Kills L155 mutants: removed on_chunk call, and indata[:, 0] -> [:, 1].
+    from away.voice.dictation import MicStream
+
+    _FakeInputStream.instances = []
+    _fake_sounddevice(monkeypatch)
+    received = []
+    MicStream(received.append, sample_rate=16000, block_ms=30)
+    (stream,) = _FakeInputStream.instances
+    indata = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]], dtype=np.float32)
+    stream.kwargs["callback"](indata, 3, None, None)
+    assert len(received) == 1
+    assert received[0].tolist() == [1.0, 2.0, 3.0]
+
+
+def test_micstream_context_manager_starts_stops_closes(monkeypatch) -> None:
+    # Kills L166 (removed stream.start), L167 (__enter__ returns None),
+    # L170 (removed stream.stop), L171 (removed stream.close).
+    from away.voice.dictation import MicStream
+
+    _FakeInputStream.instances = []
+    _fake_sounddevice(monkeypatch)
+    ms = MicStream(lambda chunk: None)
+    with ms as entered:
+        assert entered is ms
+        (stream,) = _FakeInputStream.instances
+        assert stream.started is True
+    assert stream.stopped is True
+    assert stream.closed is True
+
+
+def test_probe_microphone_success_path(monkeypatch) -> None:
+    # Kills L180 (seconds*sample_rate -> /, channels 1->2), L181 (removed
+    # sd.wait), L182 (rec**2 -> rec*2 and -> rec**3), L183 (True->False,
+    # return None). rec is all 0.5, so RMS is exactly 0.5; the arithmetic
+    # mutants give 1.0 and ~0.3536.
+    import sys
+    import types
+
+    from away.voice.dictation import probe_microphone
+
+    calls = {}
+
+    def rec(n, samplerate=None, channels=None, dtype=None):
+        calls.update(n=n, samplerate=samplerate, channels=channels, dtype=dtype)
+        return np.full((n, channels), 0.5, dtype=np.float32)
+
+    def wait():
+        calls["waited"] = True
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(rec=rec, wait=wait))
+    ok, message = probe_microphone(0.5, 16000)
+    assert ok is True
+    assert calls["n"] == 8000
+    assert calls["samplerate"] == 16000
+    assert calls["channels"] == 1
+    assert calls["dtype"] == "float32"
+    assert calls["waited"] is True
+    assert "microphone OK (rms 0.5000" in message
+
+
+def test_probe_microphone_rec_error_is_reported(monkeypatch) -> None:
+    # Kills L185 mutants: swallowed exception (handler body -> pass, so the
+    # function would return None), return None, and False->True.
+    import sys
+    import types
+
+    from away.voice.dictation import probe_microphone
+
+    def rec(*a, **k):
+        raise RuntimeError("device busy")
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(rec=rec, wait=lambda: None))
+    result = probe_microphone(0.5, 16000)
+    assert result is not None
+    ok, message = result
+    assert ok is False
+    assert message == "microphone error: device busy"
+
+
+class _FakeThread:
+    instances: ClassVar[list] = []
+
+    def __init__(self, target=None, daemon=None, **kwargs) -> None:
+        self.target = target
+        self.daemon = daemon
+        self.started = False
+        _FakeThread.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+        if self.target is not None:
+            self.target()
+
+
+class _FakeSession:
+    def __init__(self, recording: bool = False) -> None:
+        self.recording = recording
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.toggle_calls = 0
+
+    def start(self) -> bool:
+        self.start_calls += 1
+        self.recording = True
+        return True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self.recording = False
+
+    def toggle(self) -> None:
+        self.toggle_calls += 1
+        self.recording = not self.recording
+
+
+def _fake_pynput(monkeypatch):
+    import sys
+    import types
+
+    class KeyCode:
+        def __init__(self, ch) -> None:
+            self.ch = ch
+
+        @classmethod
+        def from_char(cls, ch):
+            return cls(ch)
+
+    class Key:
+        space = KeyCode("<space-key>")
+
+    class GlobalHotKeys:
+        instances: ClassVar[list] = []
+
+        def __init__(self, mapping) -> None:
+            self.mapping = mapping
+            self.started = False
+            GlobalHotKeys.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+    class Listener:
+        instances: ClassVar[list] = []
+
+        def __init__(self, on_press=None, on_release=None) -> None:
+            self.on_press = on_press
+            self.on_release = on_release
+            self.started = False
+            Listener.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+    keyboard = types.SimpleNamespace(Key=Key, KeyCode=KeyCode, GlobalHotKeys=GlobalHotKeys, Listener=Listener)
+    pynput = types.SimpleNamespace(keyboard=keyboard)
+    monkeypatch.setitem(sys.modules, "pynput", pynput)
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard)
+    GlobalHotKeys.instances = []
+    Listener.instances = []
+    return keyboard
+
+
+def test_hotkey_listener_toggle_mode(monkeypatch) -> None:
+    # Kills L192 (mode == "toggle" -> !=), L194 (Thread daemon True->False),
+    # L208 (removed listener.start), L209 (return None instead of listener).
+    import threading
+
+    from away.voice.dictation import hotkey_listener
+
+    keyboard = _fake_pynput(monkeypatch)
+    _FakeThread.instances = []
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+    session = _FakeSession()
+    listener = hotkey_listener("toggle", "<ctrl>+q", "ctrl", session)
+    (ghk,) = keyboard.GlobalHotKeys.instances
+    assert keyboard.Listener.instances == []
+    assert listener is ghk
+    assert ghk.started is True
+    assert set(ghk.mapping) == {"<ctrl>+q"}
+    ghk.mapping["<ctrl>+q"]()
+    (thread,) = _FakeThread.instances
+    assert thread.target == session.toggle
+    assert thread.daemon is True
+    assert thread.started is True
+    assert session.toggle_calls == 1
+
+
+def test_hotkey_listener_hold_press_starts_once(monkeypatch) -> None:
+    # Kills L197 (getattr(...) or KeyCode.from_char -> and), L200 mutants
+    # (and->or, ==->!=, dropped `not`), L201 (removed session.start call).
+    from away.voice.dictation import hotkey_listener
+
+    keyboard = _fake_pynput(monkeypatch)
+    session = _FakeSession()
+    hotkey_listener("hold", "<ctrl>", "space", session)
+    (listener,) = keyboard.Listener.instances
+    target = keyboard.Key.space
+    # Pressing an unrelated key must not start.
+    listener.on_press(keyboard.KeyCode.from_char("x"))
+    assert session.start_calls == 0
+    # Pressing the hold key starts exactly once.
+    listener.on_press(target)
+    assert session.start_calls == 1
+    # Pressing again while already recording must not re-start.
+    listener.on_press(target)
+    assert session.start_calls == 1
+
+
+def test_hotkey_listener_hold_release_stops_via_thread(monkeypatch) -> None:
+    # Kills L204 mutants (and->or, ==->!= on the release guard), L205
+    # (removed Thread.start, daemon True->False).
+    import threading
+
+    from away.voice.dictation import hotkey_listener
+
+    keyboard = _fake_pynput(monkeypatch)
+    _FakeThread.instances = []
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+    session = _FakeSession(recording=True)
+    hotkey_listener("hold", "<ctrl>", "space", session)
+    (listener,) = keyboard.Listener.instances
+    # Releasing an unrelated key while recording must not stop.
+    listener.on_release(keyboard.KeyCode.from_char("x"))
+    assert session.stop_calls == 0
+    assert _FakeThread.instances == []
+    # Releasing the hold key stops via a started daemon thread.
+    listener.on_release(keyboard.Key.space)
+    (thread,) = _FakeThread.instances
+    assert thread.target == session.stop
+    assert thread.daemon is True
+    assert thread.started is True
+    assert session.stop_calls == 1
+    # Releasing again while not recording must not stop again.
+    listener.on_release(keyboard.Key.space)
+    assert session.stop_calls == 1
