@@ -504,9 +504,10 @@ def test_observe_single_face_is_present() -> None:
 
 
 def test_mouth_threshold_excludes_the_boundary_frame() -> None:
-    # Kills t < before -> t <= before: a score at exactly `before` is history
-    # for later calls, not for this one (2 known < baseline_min_frames=3).
-    gate = SpeechGate()
+    # Kills t < before -> t <= before (and the `and` -> `or` mutant on the
+    # same comprehension): a score at exactly `before` is history for later
+    # calls, not for this one (2 known < baseline_min_frames=3).
+    gate = SpeechGate(baseline_min_frames=3, baseline_frames=3)
     for t, score in [(1.0, 0.1), (2.0, 0.1), (3.0, 0.1)]:
         gate.observe(t, active_speaker=None, n_faces=1, score=score)
     threshold, baseline = gate.mouth_threshold(3.0)
