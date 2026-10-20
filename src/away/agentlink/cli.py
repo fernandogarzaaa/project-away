@@ -497,6 +497,6 @@ def add_parsers(sub: Any) -> None:
     dg.set_defaults(fn=cmd_diagnose)
 
     ui = sub.add_parser("agent-ui")  # hidden: started by the app
-    ui.add_argument("kind", choices=["prompt", "toast", "flash", "control"])
+    ui.add_argument("kind", choices=["prompt", "toast", "flash", "control", "receipt"])
     ui.add_argument("spec")
     ui.set_defaults(fn=cmd_agent_ui)

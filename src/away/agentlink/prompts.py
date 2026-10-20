@@ -508,6 +508,40 @@ class SubprocessUI:  # pragma: no cover - starts GUI processes; smoke-tested und
         if self._spawn(["agent-ui", "flash", str(spec)]) is None:  # v0.1.24: the capture is refused, not silent
             raise RuntimeError(f"could not open the notice window: {self.last_spawn_error}")
 
+    def receipt(self, spec: dict[str, Any]) -> Any:
+        """Open the post-session consent receipt and return its process, or None on spawn failure."""
+        rid = str(spec.get("id") or uuid.uuid4().hex[:8])
+        payload = {**spec, "id": rid}
+        path = self.folder / f"{rid}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        proc = self._spawn(["agent-ui", "receipt", str(path)])
+        if proc is None:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+            return None
+        return proc
+
+    def receipt_answer(self, rid: str) -> str | None:
+        """Return a receipt answer once available, consuming the answer file."""
+        path = self.folder / f"{rid}.answer.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        answer = data.get("answer") if isinstance(data, dict) else None
+        return str(answer) if answer is not None else None
+
+    def receipt_close(self, rid: str) -> None:
+        """Tell a running receipt window to close and remove its transient files."""
+        (self.folder / f"{rid}.done").write_text("close", encoding="utf-8")
+        for suffix in (".json", ".answer.json"):
+            with contextlib.suppress(OSError):
+                (self.folder / f"{rid}{suffix}").unlink(missing_ok=True)
+
     def overlay(self, name: str, stop_file: Path, mode: str = "control") -> Any:
         spec = self.folder / f"overlay-{uuid.uuid4().hex[:8]}.json"
         spec.write_text(

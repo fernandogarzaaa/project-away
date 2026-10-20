@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -39,6 +40,8 @@ from away.agentlink.prompts import NullUI, PromptManager, normalize
 from away.agentlink.recording import RingRecorder
 from away.agentlink.service import EventHub, Service
 from away.agentlink.telemetry import Telemetry
+
+log = logging.getLogger("away.agentlink")
 
 STOP_WORDS = ("stop", "stop it", "stop now", "agent stop", "stop agent")
 STATE_EVERY_S = 1.0
@@ -521,6 +524,71 @@ class AgentLinkHost:
         with contextlib.suppress(Exception):
             self._flash(text)
 
+    def _show_receipt(self, data: dict[str, Any]) -> None:  # pragma: no cover - spawns GUI windows
+        """The agent's control grant ended: a toast plus one receipt dialog ("{name} did N things") with the
+        action thumbnails and an "Undo all" button (proposal #17). "Undo all" puts back every action that can be
+        put back; the dialog closes by itself when it is done or after a few minutes."""
+        agent = str(data.get("agent") or "Your AI agent")
+        headline = str(data.get("headline") or f"{agent} finished using your computer.")
+        items = [i for i in data.get("items") or [] if isinstance(i, dict)]
+        log.info("control receipt: %s (%d actions, ended: %s)", agent, len(items), data.get("ended"))
+        toast_text = headline + (" See the window for what it did." if items else "")
+        try:
+            self.core.prompts.notify(toast_text, level="info", agent=agent)
+        except Exception:
+            self._notice("Project Away", toast_text)
+        ui = getattr(self, "ui", None)
+        if ui is None or not hasattr(ui, "receipt"):
+            return
+        rid = f"receipt-{uuid.uuid4().hex[:8]}"
+        log_folder = Path(str(data.get("log_folder") or ""))
+        spec_items = []
+        for it in items:
+            thumb = str(it.get("thumb") or "")
+            p = log_folder / thumb if thumb else None
+            spec_items.append(
+                {"text": str(it.get("text") or ""), "thumb_path": str(p) if p is not None and p.exists() else ""}
+            )
+        spec = {
+            "id": rid,
+            "title": str(data.get("title") or f"{agent} finished using your computer"),
+            "headline": headline,
+            "ended": str(data.get("ended") or ""),
+            "items": spec_items,
+            "undoable": bool(data.get("undoable")),
+            "timeout_s": 180.0,
+        }
+
+        def run() -> None:
+            try:
+                if ui.receipt(spec) is None:
+                    return
+                deadline = time.monotonic() + 200.0
+                while time.monotonic() < deadline:
+                    ans = ui.receipt_answer(rid)
+                    if ans == "undo_all":
+                        try:
+                            item_ids = [str(i["id"]) for i in items if "id" in i]
+                            res = self.core.control.undo_all_by_user(item_ids)
+                            n = int(res.get("count") or 0)
+                            self._notice(
+                                "Project Away",
+                                "Put everything back." if n else "There was nothing left to put back.",
+                            )
+                        except Exception as exc:
+                            self._notice("Project Away", f"Could not put it back: {exc}")
+                        break
+                    if ans is not None:  # "close" or anything else: the window closes itself
+                        break
+                    time.sleep(0.4)
+            except Exception:
+                log.warning("receipt window failed", exc_info=True)
+            finally:
+                with contextlib.suppress(Exception):
+                    ui.receipt_close(rid)
+
+        threading.Thread(target=run, name="away-receipt", daemon=True).start()
+
     def _flash(self, text: str) -> None:
         """The notice every camera still / screenshot shows. Raises when nothing visible could be shown (the
         flash window, or else the tray's notification), so the capture is refused."""
@@ -848,6 +916,8 @@ class AgentLinkHost:
                 self.app.bus.publish("agentlink.changed", {"topic": ev["topic"]})  # the tray refreshes its badge
         if ev["topic"] == "control.paused":
             self._notice("Project Away", f"{ev['data'].get('agent')} paused: you took over.")
+        if ev["topic"] == "control.receipt":
+            self._show_receipt(ev["data"])
 
     def _on_trip(self, name: str, detail: dict[str, Any]) -> None:
         from away.agentlink import bundle

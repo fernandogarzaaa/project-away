@@ -268,6 +268,10 @@ class TrayController:
         if al is not None:
             al.disconnect_all()
 
+    def open_recent_activity(self) -> None:  # pragma: no cover - launches a GUI process
+        """Open Settings directly on the Agent Link tab for the recent activity and consent receipts."""
+        _open_settings_tab(self, "Agent Link")
+
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
 
@@ -815,6 +819,7 @@ def build_tray_menu(
             visible=lambda _i: bool(ctl.agent_badge()),
         ),
         *live_menu_items(pystray, app, open_settings_tab),  # "Live agent: on (Big Pickle)"
+        pystray.MenuItem("Recent activity...", lambda _i, _item: ctl.open_recent_activity()),
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", callbacks.on_reset_cursor
         ),
