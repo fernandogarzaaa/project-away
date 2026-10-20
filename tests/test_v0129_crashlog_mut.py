@@ -696,3 +696,47 @@ def test_pid_alive_unknown_os_error_is_conservative(monkeypatch: pytest.MonkeyPa
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(crashlog.os, "kill", lambda *_: (_ for _ in ()).throw(OSError("unknown")))
     assert crashlog._pid_alive(987654321) is True
+
+
+# Round 5: recent_note boundary precision
+
+
+def test_recent_note_age_zero_is_fresh(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    now = time.time()
+    # age exactly 0 (noted_at == now): 0 <= age must hold (kills LtE -> Lt on the lower bound)
+    (logs / crashlog.SEEN_FILE).write_text(
+        json.dumps({"offset": 1, "note": "just now", "noted_at": now}), encoding="utf-8"
+    )
+    assert crashlog.recent_note(logs, clock=lambda: now) == "just now"
+
+
+def test_recent_note_non_dict_json_returns_none(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    # JSON list, not a dict: the isinstance guard must short-circuit via `or`
+    # (with `and` the mutant would call .get on a list and raise AttributeError)
+    (logs / crashlog.SEEN_FILE).write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert crashlog.recent_note(logs) is None
+    (logs / crashlog.SEEN_FILE).write_text(json.dumps("a string"), encoding="utf-8")
+    assert crashlog.recent_note(logs) is None
+
+
+def test_recent_note_missing_noted_at_uses_zero_epoch(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    # noted_at missing: default epoch 0, so with a small clock the age is the clock
+    # itself (kills the 0 -> 1 default mutant, which would make the age negative)
+    (logs / crashlog.SEEN_FILE).write_text(json.dumps({"offset": 1, "note": "epoch"}), encoding="utf-8")
+    assert crashlog.recent_note(logs, clock=lambda: 0.5) == "epoch"
+
+
+def test_max_bytes_threshold_is_one_megabyte(crash_env: Any) -> None:
+    # The rotation threshold is the literal 1_000_000 bytes (kills 1000000 -> 1000001):
+    # a file of exactly 1_000_001 bytes rotates, one of 1_000_000 does not.
+    folder = crash_env[0]
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "crash.log").write_text("x" * 1_000_001, encoding="utf-8")
+    _install(crash_env)
+    assert (folder / "crash.log.1").exists()
