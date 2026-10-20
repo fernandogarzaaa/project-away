@@ -595,21 +595,33 @@ class AuthMiddleware:
             auth = headers.get("authorization", "")
             bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             persistent = bearer.startswith(PERSIST_PREFIX)
-            # v0.1.24: an agent token is limited per source (with backoff) instead of by the global lockout, so a
-            # stranger guessing tokens cannot lock the person's own agents out
-            if g.lockout.locked() and not persistent:
-                await reply(429, "too many failed attempts; wait a minute")
+            # v0.1.29 (audit fix): the failed sign-in lockout is per source and refuses only attempts that
+            # carry no credentials. A caller presenting credentials (a bearer token, a pairing link's MCP
+            # call, or one of the credential-in-body endpoints) is judged on them below: a success clears
+            # the source's failure count, a failure adds to it. Public pages carry no credentials, so a
+            # locked source still gets a 429 there, but no other source is ever affected. (An agent token
+            # is additionally limited per source with backoff instead, since v0.1.24.)
+            src = str(ip)
+            m = CODE_PATH.match(path)
+            wants_mcp = bool(m) and (method in ("POST", "DELETE") or "text/event-stream" in headers.get("accept", ""))
+            credentialed = (
+                bool(bearer)
+                or wants_mcp
+                or (method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh"))
+            )
+            public_get = method == "GET" and path in ("/", "/openapi.json", "/favicon.ico", "/v1/ping")
+            if g.lockout.locked(src) and (public_get or not credentialed):
+                await reply(429, "too many failed attempts from this address; wait a minute")
                 return
+            state = dict(scope.get("state") or {})  # handlers key the lockout by this same source string
+            state["source"] = src
+            scope = dict(scope, state=state)
             if not g.bucket.allow(ip):
                 await reply(429, "too many requests; slow down")
                 return
-            public = (method == "GET" and path in ("/", "/openapi.json", "/favicon.ico", "/v1/ping")) or (
-                method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh")
-            )
-            m = CODE_PATH.match(path)
+            public = public_get or (method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh"))
             agent: Agent | None = None
             if m:
-                wants_mcp = method in ("POST", "DELETE") or "text/event-stream" in headers.get("accept", "")
                 if not wants_mcp:
                     public = True  # the landing page; it reveals nothing about the code's state
                 else:
@@ -619,7 +631,10 @@ class AuthMiddleware:
                     if agent is None:
                         p = g.registry.find_pairing(code=code)
                         if p is None:
-                            g.lockout.fail()
+                            if g.lockout.locked(src):
+                                await reply(429, "too many failed attempts from this address; wait a minute")
+                                return
+                            g.lockout.fail(src)
                             await reply(404, "this link has expired or was already used; make a new one in Agent Link")
                             return
                         body = await _read_body(receive, MAX_MCP_BODY)
@@ -634,6 +649,7 @@ class AuthMiddleware:
                         except Forbidden as exc:
                             await reply(403, str(exc))
                             return
+                    g.lockout.ok(src)  # signed in through the link: the source's failures are forgiven
                     scope = dict(scope, path="/mcp", raw_path=b"/mcp")
                     if body is not None:
                         receive = _replay_body(body, receive)
@@ -656,8 +672,11 @@ class AuthMiddleware:
                 if agent is None:
                     if persistent:
                         g.token_backoff.fail(str(ip))
+                    elif g.lockout.locked(src):
+                        await reply(429, "too many failed attempts from this address; wait a minute")
+                        return
                     else:
-                        g.lockout.fail()  # unchanged since v0.1.20 for access tokens
+                        g.lockout.fail(src)
                     await reply(
                         401,
                         "this agent token was revoked, expired or replaced; pair again in Project Away > Agent Link"
@@ -667,6 +686,7 @@ class AuthMiddleware:
                     return
                 if persistent:
                     g.token_backoff.ok(str(ip))
+                g.lockout.ok(src)  # a successful sign-in clears the source's failure count
             if agent is not None:
                 agent_name["name"] = agent.name
                 agent_id_box["id"] = agent.id
@@ -916,6 +936,17 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             raise Forbidden("not signed in")
         return a  # type: ignore[no-any-return]
 
+    def request_source(request: Request) -> str:
+        """The source identity the middleware computed for this request (the rate limits key by it).
+
+        The middleware stores it in the scope state; the fallback recomputes it the same way, so a
+        handler always keys the lockout by exactly the string the middleware used.
+        """
+        src = request.scope.get("state", {}).get("source")
+        if src:
+            return str(src)
+        return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+
     async def run(request: Request, tool: str, kwargs: dict[str, Any]) -> Any:
         try:
             agent = agent_of(request)
@@ -1001,7 +1032,10 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             return _json({"error": str(exc)}, 400)
         p = gate.registry.find_pairing(code=data.get("code"), pin=str(data["pin"]) if data.get("pin") else None)
         if p is None:
-            gate.lockout.fail()
+            src = request_source(request)
+            if gate.lockout.locked(src):
+                return _json({"error": "too many failed attempts from this address; wait a minute"}, 429)
+            gate.lockout.fail(src)
             return _json({"error": "unknown or expired code"}, 404)
         name = friendly_name(data.get("name") or "AI agent")
         try:
@@ -1012,6 +1046,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             )
         except Forbidden as exc:
             return _json({"error": str(exc)}, 403)
+        gate.lockout.ok(request_source(request))  # paired: the source's failures are forgiven
         out: dict[str, Any] = {"token": token, "agent": agent.public(), "mcp_path": "/mcp"}
         out.update(gate.take_kept(p.code))  # v0.1.24: the persistent agent token, this one time only
         try:  # v0.1.24: a refresh token so the agent survives restarts without pairing again
@@ -1035,8 +1070,12 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
                 lambda a: gate.local_ttl_s() if a.kind == "local" else gate.remote_ttl_s(),
             )
         except RefreshError as exc:
-            gate.lockout.fail()
+            src = request_source(request)
+            if gate.lockout.locked(src):
+                return _json({"error": "too many failed attempts from this address; wait a minute"}, 429)
+            gate.lockout.fail(src)
             return _json({"error": str(exc)}, 401)
+        gate.lockout.ok(request_source(request))  # refreshed: the source's failures are forgiven
         service.events.publish("agent.reconnected", {"agent": agent.name})
         return _json({"token": token, "agent": agent.public(), **gate.reconnect_info(agent, fresh)})
 
@@ -1089,10 +1128,14 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
                 )
             )
         except Forbidden as exc:
-            gate.lockout.fail()
+            src = request_source(request)
+            if gate.lockout.locked(src):
+                return _json({"error": "too many failed attempts from this address; wait a minute"}, 429)
+            gate.lockout.fail(src)
             return _json({"error": str(exc)}, 403)
         except ValueError as exc:
             return _json({"error": str(exc)}, 400)
+        gate.lockout.ok(request_source(request))  # paired locally: the source's failures are forgiven
         return _json({"token": token, "agent": agent.public(), **kept})
 
     async def stream(request: Request) -> Any:
