@@ -34,7 +34,10 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    all refuses new actions in plain words until the person approves again.
 8. **Visual audit trail.** Every control step is kept per session (``agent_link.control_audit_trail``, on by
    default): timestamp, action, screenshot thumbnail and result, persisted to ``actions/session-<id>.jsonl`` and
-   replayable step by step in the app (Settings > Agent Link).
+   replayable step by step in the app (Settings > Agent Link). A sequence persists one event per executed
+   sub-step, and an undo appends a status transition linked to the action it put back. On startup the
+   persisted sessions are reloaded (bounded, tolerant of damaged lines and missing thumbnails), so the replay
+   survives restarts; with the trail off, nothing is persisted and nothing is reloaded.
 
 Since audit Phase 1b every input goes through the one action engine (:mod:`away.actions_engine`): it owns the
 cancel tokens, the secure desktop check, the rate limit, the risk classification, held-input cleanup, "Stop
@@ -260,6 +263,15 @@ def _pause_in_plain_words(paused: str) -> str:
     return paused
 
 
+def _clamp_limit(limit: Any) -> int:
+    """How many entries a log/trail query may return at most. Zero or negative means none, never "all":
+    Python's ``[-0:]`` slice is the whole list, so an unvalidated limit used to hand back everything."""
+    try:
+        return max(0, int(limit))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class LogEntry:
     id: str
@@ -273,6 +285,7 @@ class LogEntry:
     agent_id: str = ""  # who did it (undo and the action log are per agent)
     source: str = AGENT  # the action engine source it ran as
     session: str = ""  # v0.1.28: the control session (grant id) this step belongs to
+    parent: str = ""  # for a sequence sub-step: the id of the sequence's log entry that groups it
 
 
 @dataclass
@@ -367,6 +380,8 @@ class ComputerControl:
         # query never replaces another's, and an id stops resolving when the foreground window changes.
         self._element_queries: dict[str, _ElementQuery] = {}
         self._query_generations: dict[str, int] = {}  # agent -> last query generation number
+        # The persisted session trails come back on startup, so the Settings replay survives a restart.
+        self._restore_sessions()
 
     def _budget(self) -> int:
         """The configured step budget (live when the app's settings are wired in)."""
@@ -565,6 +580,83 @@ class ComputerControl:
                 with contextlib.suppress(Exception):
                     (self.log_folder / f"session-{old}.jsonl").unlink(missing_ok=True)
 
+    def _restore_sessions(self) -> None:
+        """Reload the persisted session trails on startup, so the Settings replay survives a restart.
+
+        Bounded like the live trail (the newest ``MAX_SESSIONS`` session files, the newest ``TRAIL_CAP``
+        steps per session). A truncated or malformed line is skipped without losing the valid records
+        around it, a step whose thumbnail file is gone keeps its record with no picture, and "status"
+        events (an undo and its outcome) are applied to the step they name. With the trail off, nothing
+        was persisted and nothing is reloaded."""
+        if self.log_folder is None or not self._trail_on():
+            return
+        import json
+
+        try:
+            files = sorted(
+                self.log_folder.glob("session-*.jsonl"),
+                key=lambda p: (p.stat().st_mtime, p.name),
+            )
+        except Exception:
+            return
+        for path in files[-MAX_SESSIONS:]:
+            sid = path.name[len("session-") : -len(".jsonl")]
+            if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
+                continue  # a file name is never a path: only plain session ids are restored
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+            agent = ""
+            entries: list[LogEntry] = []
+            by_id: dict[str, LogEntry] = {}
+            seen = False
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if not isinstance(ev, dict):
+                        continue
+                    kind = ev.get("event")
+                    if kind == "started":
+                        seen = True
+                        agent = str(ev.get("agent") or agent)
+                    elif kind == "step":
+                        seen = True
+                        thumb = str(ev.get("thumb") or "")
+                        if thumb and not (self.log_folder / thumb).exists():
+                            thumb = ""  # the picture is gone; the record still counts
+                        e = LogEntry(
+                            id=str(ev.get("id") or uuid.uuid4().hex[:10]),
+                            ts=float(ev.get("ts") or 0.0),
+                            agent=str(ev.get("agent") or agent),
+                            action=str(ev.get("action") or ""),
+                            detail=str(ev.get("detail") or ""),
+                            result=str(ev.get("result") or ""),
+                            thumb=thumb,
+                            agent_id=str(ev.get("agent_id") or ""),
+                            session=sid,
+                            parent=str(ev.get("parent") or ""),
+                        )
+                        entries.append(e)
+                        by_id[e.id] = e
+                    elif kind == "status":
+                        target = by_id.get(str(ev.get("id") or ""))
+                        status = str(ev.get("status") or "")
+                        if target is not None and status in ("undone", "partially undone"):
+                            target.result = status  # the durable record now agrees with what happened
+                except Exception:
+                    continue  # one damaged line never costs the rest of the session
+            if not seen:
+                continue
+            with self._lock:
+                self.sessions[sid] = entries[-TRAIL_CAP:]
+                self._session_agents[sid] = agent
+                if sid not in self._session_order:
+                    self._session_order.append(sid)
+
     def _session_file(self, session_id: str) -> Path | None:
         if self.log_folder is None:
             return None
@@ -572,9 +664,12 @@ class ComputerControl:
 
     def _trail_event(self, g: Grant, event: dict[str, Any]) -> None:
         """One line in the session's persisted trail (the audit trail switch gates this)."""
+        self._append_trail_line(g.id, event)
+
+    def _append_trail_line(self, session_id: str, event: dict[str, Any]) -> None:
         if not self._trail_on():
             return
-        path = self._session_file(g.id)
+        path = self._session_file(session_id)
         if path is None:
             return
         try:
@@ -582,9 +677,20 @@ class ComputerControl:
 
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"ts": time.time(), "session": g.id, **event}, default=str) + "\n")
+                fh.write(json.dumps({"ts": time.time(), "session": session_id, **event}, default=str) + "\n")
         except Exception:
             pass
+
+    def _trail_status(self, e: LogEntry, status: str, applied: int, total: int) -> None:
+        """Persist an undo outcome as a status transition linked to the action it belongs to, so the
+        durable trail stops claiming "done" for an action that was put back (fully, partly, or not at
+        all). The entry itself is not rewritten: the trail is append-only, the transition is the record."""
+        if not e.session:
+            return
+        self._append_trail_line(
+            e.session,
+            {"event": "status", "id": e.id, "status": status, "applied": applied, "of": total},
+        )
 
     def receipt(self, g: Grant) -> dict[str, Any]:
         """Build the "what did the agent just do" receipt for a grant that just ended: one plain-language line
@@ -1054,8 +1160,8 @@ class ComputerControl:
         every input (stops at once on a pause, takeover or stop), held buttons released if it does not finish.
 
         ``record=False`` is for :meth:`act_sequence`: the sub-step still gets its engine audit entry and all the
-        safety checks, but it does not append its own :class:`LogEntry` - the sequence records one entry with all
-        the sub-step detail.
+        safety checks, but it does not append its own :class:`LogEntry` here - the sequence files one trail
+        entry per executed sub-step (see :meth:`_log_substep`) plus one combined entry for the batch.
         """
         step, wait = a.step, a.wait
         undo: dict[str, Any] | None = None
@@ -1302,7 +1408,8 @@ class ComputerControl:
         return out
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
-        """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
+        """Run several actions in one call: one grant check, one combined log entry (plus one trail entry
+        per executed sub-step), one engine Action. Every sub-step
         still runs through :meth:`_act`, so the risky/unknown "Are you sure?" prompts, the password and terminal
         refusals, the per-step engine audit and the per-step rate limit apply exactly as they do for single
         actions - a batch is not a rubber stamp. Stops at the first refusal, cancel or takeover and reports how
@@ -1332,6 +1439,8 @@ class ComputerControl:
             )
         b = self.hooks.backend
         done: list[dict[str, Any]] = []
+        sub_ids: list[str] = []
+        parent_id = uuid.uuid4().hex[:10]  # the grouping entry's id, fixed before the first sub-step runs
         try:
             with self.engine.begin(
                 AGENT, "sequence", actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
@@ -1342,34 +1451,34 @@ class ComputerControl:
                     # the whole budget on the single grant-time check
                     self._policy_check(agent_id)
                     self._consume_step(g)  # one budget step per executed sub-step
-                    done.append(self._act(g, agent_id, action, kw, b, a, record=False))
+                    r = self._act(g, agent_id, action, kw, b, a, record=False)
+                    # The budget was spent on this sub-step, so the trail files its own event for it:
+                    # one combined row used to leave the session's step count short by every sub-step.
+                    sub = self._log_substep(g, parent_id, r)
+                    r["log_id"] = sub.id
+                    sub_ids.append(sub.id)
+                    done.append(r)
         except ActionCancelled:
             reason = g.paused or g.ended or "it was stopped"
-            self._log(
-                g,
-                "sequence",
-                f"stopped part-way after {len(done)} of {len(plan)} steps ({reason}): {self._seq_detail(done)}",
-                "stopped",
-                None,
-            )
+            detail = f"stopped part-way after {len(done)} of {len(plan)} steps ({reason}): {self._seq_detail(done)}"
+            self._log(g, "sequence", detail, "stopped", None, entry_id=parent_id, group=True)
+            self._trail_sequence(g, parent_id, "stopped", detail, sub_ids)
             self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": reason})
             raise ControlRefused(f"stopped part-way because {reason}") from None
         except ControlRefused as exc:
             # A refusal mid-batch (a denied "Are you sure?", a password field, a terminal, the rate limit):
-            # the earlier sub-steps already ran, so the action log still gets one combined entry - no silent gap.
-            self._log(
-                g,
-                "sequence",
-                f"refused after {len(done)} of {len(plan)} steps ({exc}): {self._seq_detail(done)}",
-                "refused",
-                None,
-            )
+            # the earlier sub-steps already ran and are already filed, and the action log still gets one
+            # combined entry - no silent gap.
+            detail = f"refused after {len(done)} of {len(plan)} steps ({exc}): {self._seq_detail(done)}"
+            self._log(g, "sequence", detail, "refused", None, entry_id=parent_id, group=True)
+            self._trail_sequence(g, parent_id, "refused", detail, sub_ids)
             self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": str(exc)})
             raise
         detail = self._seq_detail(done)
         undos = [r["undo"] for r in done if r.get("undo")]
         undo: dict[str, Any] | None = {"sequence": undos} if undos else None
-        entry = self._log(g, "sequence", detail, "done", undo)
+        entry = self._log(g, "sequence", detail, "done", undo, entry_id=parent_id, group=True)
+        self._trail_sequence(g, parent_id, "done", detail, sub_ids)
         self._emit("control.action", {"agent": g.agent_name, "action": "sequence", "detail": detail, "id": entry.id})
         return {"ok": True, "action": "sequence", "detail": detail, "log_id": entry.id, "steps": done}
 
@@ -1476,9 +1585,59 @@ class ComputerControl:
         """The engine's audit trail: one entry per action (or per sub-step of a sequence), never batched."""
         self.engine.audit(AGENT, g.agent_name, action, detail, result)
 
-    def _log(self, g: Grant, action: str, detail: str, result: str, undo: dict[str, Any] | None) -> LogEntry:
+    def _grab_thumb(self, e: LogEntry) -> None:
+        """One screenshot thumbnail for a trail entry, kept in the action log folder (best effort)."""
+        if self.log_folder is None or not self._trail_on():
+            return
+        try:
+            img = self.hooks.grab()
+            if img is not None:
+                self.log_folder.mkdir(parents=True, exist_ok=True)
+                (self.log_folder / f"{e.id}.png").write_bytes(desktop.thumbnail_png(img))
+                e.thumb = f"{e.id}.png"
+                keep = sorted(self.log_folder.glob("*.png"), key=lambda p: p.stat().st_mtime)
+                for old in keep[:-200]:
+                    old.unlink(missing_ok=True)
+        except Exception:
+            e.thumb = ""
+
+    def _append_trail(self, g: Grant, e: LogEntry) -> None:
+        """File one entry in its session's trail (bounded) and persist it as a "step" event with the
+        session's budget accounting at that moment."""
+        with self._lock:
+            trail = self.sessions.setdefault(g.id, [])
+            if len(trail) >= TRAIL_CAP:
+                trail.pop(0)
+            trail.append(e)
+        self._trail_event(
+            g,
+            {
+                "event": "step",
+                "id": e.id,
+                "agent": e.agent,
+                "agent_id": e.agent_id,
+                "action": e.action,
+                "detail": e.detail,
+                "result": e.result,
+                "thumb": e.thumb,
+                "parent": e.parent,
+                "steps_used": g.steps_used,
+            },
+        )
+
+    def _log(
+        self,
+        g: Grant,
+        action: str,
+        detail: str,
+        result: str,
+        undo: dict[str, Any] | None,
+        *,
+        entry_id: str | None = None,
+        group: bool = False,
+    ) -> LogEntry:
         e = LogEntry(
-            uuid.uuid4().hex[:10],
+            entry_id or uuid.uuid4().hex[:10],
             time.time(),
             g.agent_name,
             action,
@@ -1493,52 +1652,67 @@ class ComputerControl:
         # v0.1.28: the visual audit trail (on by default): a screenshot thumbnail per step, persisted with the
         # session's trail. Off: the step is still in the in-memory action log (undo, the safety log), but no
         # picture is kept and nothing is written to the session file.
-        if self.log_folder is not None and self._trail_on():
-            try:
-                img = self.hooks.grab()
-                if img is not None:
-                    self.log_folder.mkdir(parents=True, exist_ok=True)
-                    (self.log_folder / f"{e.id}.png").write_bytes(desktop.thumbnail_png(img))
-                    e.thumb = f"{e.id}.png"
-                    keep = sorted(self.log_folder.glob("*.png"), key=lambda p: p.stat().st_mtime)
-                    for old in keep[:-200]:
-                        old.unlink(missing_ok=True)
-            except Exception:
-                e.thumb = ""
+        self._grab_thumb(e)
         with self._lock:
             self.log.append(e)
-            if self._trail_on():  # off: no per-session trail at all (the safety action log above still runs)
-                trail = self.sessions.setdefault(g.id, [])
-                if len(trail) >= TRAIL_CAP:
-                    trail.pop(0)
-                trail.append(e)
-        if self._trail_on():
-            self._trail_event(
-                g,
-                {
-                    "event": "step",
-                    "id": e.id,
-                    "agent": e.agent,
-                    "agent_id": e.agent_id,
-                    "action": e.action,
-                    "detail": e.detail,
-                    "result": e.result,
-                    "thumb": e.thumb,
-                },
-            )
+        # A sequence's grouping entry (group=True) lives in the action log (the receipt, undo) but is not
+        # itself a budget step: its sub-steps are filed individually (see _log_substep), so the session's
+        # step count agrees with the budget the agent actually spent.
+        if self._trail_on() and not group:  # off: no per-session trail at all (the safety log above still runs)
+            self._append_trail(g, e)
         return e
+
+    def _log_substep(self, g: Grant, parent_id: str, res: dict[str, Any]) -> LogEntry:
+        """File one executed sequence sub-step in the session trail: its own timestamp, result and
+        thumbnail, linked to the sequence entry that groups it. The sub-step already wrote its engine
+        audit entry inside :meth:`_act`; this is the per-step evidence the budget count promises."""
+        e = LogEntry(
+            uuid.uuid4().hex[:10],
+            time.time(),
+            g.agent_name,
+            str(res.get("action") or ""),
+            str(res.get("detail") or ""),
+            "done",
+            "",
+            None,
+            g.agent_id,
+            session=g.id,
+            parent=parent_id,
+        )
+        self._grab_thumb(e)
+        if self._trail_on():
+            self._append_trail(g, e)
+        return e
+
+    def _trail_sequence(self, g: Grant, parent_id: str, result: str, detail: str, sub_ids: list[str]) -> None:
+        """Persist a sequence's grouping record: its outcome and the sub-steps it ran, under the id of
+        the log entry that groups them."""
+        self._trail_event(
+            g,
+            {
+                "event": "sequence",
+                "id": parent_id,
+                "result": result,
+                "detail": detail,
+                "steps": list(sub_ids),
+                "steps_used": g.steps_used,
+            },
+        )
 
     def actions(
         self, limit: int = 50, agent_id: str | None = None, session_id: str | None = None
     ) -> list[dict[str, Any]]:
         """The newest actions; only ``agent_id``'s own when given (an agent's view of the log), and only one
-        session's when ``session_id`` is given (the visual audit trail)."""
+        session's when ``session_id`` is given (the visual audit trail). ``limit`` caps how many come back:
+        zero or negative returns none, never the whole log."""
+        n = _clamp_limit(limit)
         with self._lock:
             items = [
                 e
                 for e in self.log
                 if (agent_id is None or e.agent_id == agent_id) and (session_id is None or e.session == session_id)
-            ][-limit:]
+            ]
+            items = items[-n:] if n else []
         return [self._entry_dict(e) for e in reversed(items)]
 
     @staticmethod
@@ -1554,30 +1728,38 @@ class ComputerControl:
             "undoable": e.undo is not None,
             "source": e.source,
             "session": e.session,
+            "parent": e.parent,
         }
 
     def session_trail(self, session_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """v0.1.28: one control session's audit trail, oldest first (the live session when ``session_id`` is not
-        given): timestamp, action, detail, result and screenshot thumbnail per step - the replay view."""
+        given): timestamp, action, detail, result and screenshot thumbnail per step - the replay view.
+        ``limit`` caps how many come back: zero or negative returns none, never the whole trail."""
+        n = _clamp_limit(limit)
         with self._lock:
             sid = session_id or (self.grant.id if self.grant is not None else None)
             if sid is None and self._session_order:
                 sid = self._session_order[-1]
-            entries = list(self.sessions.get(sid, []) if sid else [])[-limit:]
+            entries = list(self.sessions.get(sid, []) if sid else [])
+            entries = entries[-n:] if n else []
         return [self._entry_dict(e) for e in entries]
 
     def sessions_summary(self) -> list[dict[str, Any]]:
-        """v0.1.28: the recent control sessions (newest last): who, how many steps, the budget, still active."""
+        """v0.1.28: the recent control sessions (newest last): who, how many steps, the budget, still active.
+        ``steps`` counts budget steps, so a sequence's sub-steps count individually and the figure agrees
+        with the session's ``steps_used``; ``calls`` counts the grouped tool calls those steps came from."""
         with self._lock:
             active = self.grant.id if self.grant is not None else None
             out = []
             for sid in self._session_order:
-                steps = len(self.sessions.get(sid, []))
+                entries = self.sessions.get(sid, [])
+                calls = sum(1 for e in entries if not e.parent) + len({e.parent for e in entries if e.parent})
                 out.append(
                     {
                         "session": sid,
                         "agent": self._session_agents.get(sid, ""),
-                        "steps": steps,
+                        "steps": len(entries),
+                        "calls": calls,
                         "active": sid == active,
                     }
                 )
@@ -1645,6 +1827,7 @@ class ComputerControl:
         u = e.undo or {}
         sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
         source = USER if agent_id is None else AGENT
+        applied = 0  # inverse steps that actually ran: an interrupted undo is reported honestly
         try:
             if any("keys" in s for s in sub):
                 self.note_own_keys()
@@ -1653,22 +1836,31 @@ class ComputerControl:
             with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
                 for s in sub:
                     self._apply_undo_step(a, b, s)
+                    applied += 1
                 a.ok = True
         except ActionCancelled as exc:
-            with self._lock:
-                e.result = "done"
+            self._undo_interrupted(e, applied, len(sub))
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         except Exception:
-            with self._lock:
-                e.result = "done"
+            self._undo_interrupted(e, applied, len(sub))
             raise
         with self._lock:
             e.result = "undone"
+        self._trail_status(e, "undone", applied, len(sub))
         if budget_grant is not None:
             # The undo is a distinct agent action in the session's visual audit trail as well as the budget.
             self._log(budget_grant, "undo", f"Undid {e.action}", "done", None)
         self._emit("control.undo", {"id": e.id, "action": e.action})
         return {"undone": e.action, "detail": e.detail}
+
+    def _undo_interrupted(self, e: LogEntry, applied: int, total: int) -> None:
+        """An undo that did not finish. Nothing ran, so the action stays "done" and the undo may be
+        retried; some inverse steps ran, so the action is "partially undone" and is not offered for a
+        blind repeat. Either way the outcome is persisted as a status transition on the original
+        action, where before it vanished without a trace."""
+        with self._lock:
+            e.result = "partially undone" if applied else "done"
+        self._trail_status(e, "partially undone" if applied else "undo failed", applied, total)
 
     @staticmethod
     def _apply_undo_step(a: Action, b: Any, u: dict[str, Any]) -> None:
