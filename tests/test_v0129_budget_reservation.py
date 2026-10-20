@@ -357,3 +357,49 @@ def test_engine_stop_all_reaches_an_operation_waiting_for_its_turn() -> None:
     ta.join(5)
     assert not ta.is_alive()
     assert out_a.get("cancelled") is True, f"the running operation was not cancelled: {out_a}"
+
+
+def test_op_lock_is_released_when_the_post_acquire_check_raises() -> None:
+    """Regression (CodeRabbit review on PR #75): ``_acquire_op`` runs one final ``a.check()``
+    AFTER the operation lock is acquired. If that check raises (the action was cancelled in
+    the window between acquiring and checking), the lock must be released exactly once, or
+    every later serialized operation waits forever on a lock owned by a thread that left."""
+    backend = RecordingBackend()
+    eng = ActionEngine(backend=backend)
+    token = threading.Event()
+    token.set()  # already cancelled: the wait loop is skipped, the post-acquire check raises
+    first: dict[str, Any] = {}
+
+    def cancelled_first() -> None:
+        try:
+            with eng.begin(ENGINE_AGENT, "click", actor="a1", token=token, backend=backend):
+                first["entered"] = True
+        except ActionCancelled:
+            first["cancelled"] = True
+
+    t1 = threading.Thread(target=cancelled_first, daemon=True)
+    t1.start()
+    t1.join(5)
+    assert not t1.is_alive(), "the cancelled operation hung instead of raising"
+    assert first.get("cancelled") is True and "entered" not in first, f"unexpected outcome: {first}"
+    # The lock must be free again (probe with a timeout so a leak fails fast, never hangs).
+    assert eng._op_lock.acquire(timeout=2), "the operation lock leaked: still held after the exception"
+    eng._op_lock.release()
+    # Behaviorally: a later operation acquires the lock and runs to completion.
+    second: dict[str, Any] = {}
+
+    def second_op() -> None:
+        try:
+            with eng.begin(ENGINE_AGENT, "click", actor="a1", backend=backend) as a:
+                a.step().click(1)
+                a.ok = True
+            second["completed"] = True
+        except ActionCancelled:
+            second["cancelled"] = True
+
+    t2 = threading.Thread(target=second_op, daemon=True)
+    t2.start()
+    t2.join(5)
+    assert not t2.is_alive(), "a later operation deadlocked behind the leaked operation lock"
+    assert second.get("completed") is True, f"the later operation did not run: {second}"
+    assert ("click", (1,)) in backend.calls

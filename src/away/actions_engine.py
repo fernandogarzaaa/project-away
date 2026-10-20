@@ -703,7 +703,14 @@ class ActionEngine:
             if self.generation != generation:
                 raise ActionCancelled("everything was stopped while this action waited its turn")
             a.check()
-        a.check()
+        try:
+            a.check()
+        except BaseException:
+            # The lock is already ours at this point, and begin()'s releasing finally has not
+            # started yet: never let a failed final check leak the lock, or every later
+            # serialized operation waits forever on a lock its owner thread has abandoned.
+            self._op_lock.release()
+            raise
 
     @contextlib.contextmanager
     def track(self, source: str, token: threading.Event, name: str = "") -> Iterator[threading.Event]:
