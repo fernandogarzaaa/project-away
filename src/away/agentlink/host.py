@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1496,3 +1496,89 @@ def badge(h: AgentLinkHost | None, now: float | None = None) -> str:
 
 def mask(text: str) -> str:
     return re.sub(r"pa_[A-Za-z0-9_-]{8,}", "pa_***", text)
+
+
+#: scopes that let an agent watch the person: the tray shows a state dot and the "who can see what" popup
+WATCH_SCOPES = (perms.SNAPSHOTS, perms.SCREEN, perms.CONTROL)
+#: an agent counts as recently active (the tray dot, "connected") this long after its last request
+WATCHER_ACTIVE_S = 90.0
+
+#: plain words for what each scope lets an agent do (the tray popup shows these, never the scope names)
+WATCHER_WORDS = {
+    perms.SNAPSHOTS: "can take camera photos",
+    perms.SCREEN: "can see your screen",
+    perms.CONTROL: "can use your computer",
+    perms.TUNE: "can change your settings",
+    perms.SHARE_LOGS: "can read your logs and recordings",
+    perms.DIAGNOSE: "can run camera and speed checks",
+    perms.READ: "can see your hand and face movements",
+}
+
+
+def _watcher_words(scopes: Iterable[str]) -> list[str]:
+    order = (
+        perms.SNAPSHOTS,
+        perms.SCREEN,
+        perms.CONTROL,
+        perms.TUNE,
+        perms.SHARE_LOGS,
+        perms.DIAGNOSE,
+        perms.READ,
+    )
+    have = set(scopes)
+    return [WATCHER_WORDS[s] for s in order if s in have]
+
+
+def relative_time_ago(secs: float) -> str:
+    """'just now', '2 min ago', '3 hours ago', 'yesterday', '4 days ago'."""
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        m = int(secs // 60)
+        return "1 min ago" if m == 1 else f"{m} min ago"
+    if secs < 86400:
+        h = int(secs // 3600)
+        return "1 hour ago" if h == 1 else f"{h} hours ago"
+    d = int(secs // 86400)
+    return "yesterday" if d == 1 else f"{d} days ago"
+
+
+def watchers(h: AgentLinkHost | None, now: float | None = None) -> list[dict[str, Any]]:
+    """One dict per agent that has access right now (for the tray "who can see what" popup): its name, what it
+    can do in plain words, when it was last active, and whether it is using the computer right now."""
+    if h is None:
+        return []
+    try:
+        t = time.time() if now is None else now
+        ctl = h.core.control.status()
+        out: list[dict[str, Any]] = []
+        for a in h.core.registry.list():
+            out.append(
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "capabilities": _watcher_words(a.scopes),
+                    "last_seen": a.last_seen,
+                    "active": relative_time_ago(max(0.0, t - a.last_seen)),
+                    "connected": t - a.last_seen < WATCHER_ACTIVE_S,
+                    "controlling": bool(ctl.get("active")) and ctl.get("agent_id") == a.id,
+                }
+            )
+        out.sort(key=lambda w: (not w["controlling"], not w["connected"], -w["last_seen"]))
+        return out
+    except Exception:
+        return []
+
+
+def watcher_dot(h: AgentLinkHost | None, now: float | None = None) -> bool:
+    """The tray icon's state dot: any agent holds snapshots/screen/control and was recently active."""
+    if h is None:
+        return False
+    try:
+        t = time.time() if now is None else now
+        return any(
+            t - a.last_seen < WATCHER_ACTIVE_S and any(s in WATCH_SCOPES for s in a.scopes)
+            for a in h.core.registry.list()
+        )
+    except Exception:
+        return False
