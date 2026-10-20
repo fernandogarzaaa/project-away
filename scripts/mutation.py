@@ -80,34 +80,58 @@ def run(group: str, workers: int = 2) -> None:
 
 
 def summary(fail_under: float = 0.0) -> int:
-    total = killed = 0
+    # One denominator definition, matching testteeth's Report.score: every
+    # mutant in the report counts, no_coverage included. The numerator is the
+    # detected mutants (killed + timeouts). Percentage, ratio and gate all
+    # derive from these same counts, so they can never describe different
+    # fractions of the same report.
+    total = detected = 0
+    sums = {"killed": 0, "survived": 0, "no_coverage": 0, "timeouts": 0}
     rows = []
     for g in GROUPS:
         p = OUT / f"{g}.json"
-        if not p.exists():
-            rows.append((g, None, 0, 0))
+        counts = None
+        if p.exists():
+            try:
+                d = json.loads(p.read_text())
+                counts = {
+                    "killed": d["killed"],
+                    "survived": d["survived"],
+                    "no_coverage": d.get("no_coverage", 0),
+                    "timeouts": d["timeouts"],
+                }
+                n = sum(counts.values())
+                k = counts["killed"] + counts["timeouts"]
+                pct = round(100.0 * k / n, 1) if n else None
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                print(f"warning: unreadable mutation report for {g}: {e}")
+                counts = None
+        if counts is None:
+            rows.append((g, None, 0, 0, dict.fromkeys(sums, 0)))
             continue
-        try:
-            d = json.loads(p.read_text())
-            scored = d["killed"] + d["survived"] + d["timeouts"]
-            k = d["killed"] + d["timeouts"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            print(f"warning: unreadable mutation report for {g}: {e}")
-            rows.append((g, None, 0, 0))
-            continue
-        total += scored
-        killed += k
-        rows.append((g, d["score"], k, scored))
-    for g, s, k, n in rows:
-        print(f"{g:<16} {'n/a' if s is None else f'{s:5.1f}%'}  {k}/{n}")
-    overall = 100.0 * killed / total if total else 0.0
-    print(f"{'OVERALL':<16} {overall:5.1f}%  {killed}/{total}")
+        total += n
+        detected += k
+        for key in sums:
+            sums[key] += counts[key]
+        rows.append((g, pct, k, n, counts))
+    for g, s, k, n, c in rows:
+        print(
+            f"{g:<16} {'n/a' if s is None else f'{s:5.1f}%'}  {k}/{n}"
+            f"  killed={c['killed']} survived={c['survived']}"
+            f" no_coverage={c['no_coverage']} timeouts={c['timeouts']}"
+        )
+    overall = round(100.0 * detected / total, 1) if total else 0.0
+    print(
+        f"{'OVERALL':<16} {overall:5.1f}%  {detected}/{total}"
+        f"  killed={sums['killed']} survived={sums['survived']}"
+        f" no_coverage={sums['no_coverage']} timeouts={sums['timeouts']}"
+    )
     if fail_under > 0:
-        missing = [g for g, s, _, _ in rows if s is None]
+        missing = [g for g, s, *_ in rows if s is None]
         if missing:
             print(f"missing mutation reports: {', '.join(missing)}")
             return 1
-        weak = [(g, s) for g, s, _, _ in rows if s is not None and s < fail_under]
+        weak = [(g, s) for g, s, *_ in rows if s is not None and s < fail_under]
         if weak:
             details = ", ".join(f"{g} {s:.1f}%" for g, s in weak)
             print(f"below --fail-under {fail_under:.1f}%: {details}")
