@@ -169,10 +169,33 @@ jobs:
           Write-Host "MSIX install/remove OK"
 
   mutation:
-    name: mutation score (testteeth, non-blocking)
+    # Blocking check: a failed group fails the workflow, and the summary fails
+    # on any missing report or any group below --fail-under. This is intentional:
+    # a cancelled or silently skipped mutation run is not an acceptable signal.
+    name: mutation ${{ matrix.group }} (testteeth)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with GROUPS in scripts/mutation.py
+        # (verify with: python scripts/mutation.py --list-groups)
+        group:
+          - filters
+          - landmarks
+          - gestures
+          - cursor
+          - cleanup
+          - vad
+          - dictation
+          - wifi_features
+          - wifi_classifier
+          - face
+          - fusion_events
+          - autoscroll
+          - crashlog
+          - tunables
+          - autotune
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -180,9 +203,46 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev]" "testteeth>=0.2,<0.3"
-      - run: python scripts/mutation.py
+      - run: python scripts/mutation.py ${{ matrix.group }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-${{ matrix.group }}
+          path: .testteeth-reports/${{ matrix.group }}.json
+          if-no-files-found: warn
+
+  mutation-summary:
+    name: mutation score (testteeth)
+    needs: mutation
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: download mutation reports
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p .testteeth-reports
+          # Group list comes from scripts/mutation.py itself, so adding a group
+          # there can never silently drop out of the aggregate.
+          groups=$(python3 scripts/mutation.py --list-groups | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))")
+          missing=""
+          for g in $groups; do
+            if ! gh run download ${{ github.run_id }} -n "mutation-$g" -D .testteeth-reports; then
+              echo "::warning::no mutation artifact for group $g"
+              missing="$missing $g"
+            fi
+          done
+          ls .testteeth-reports/
+          if [ -n "$missing" ]; then
+            echo "missing mutation reports for groups:$missing"
+            exit 1
+          fi
+      - run: python3 scripts/mutation.py --summary --fail-under 80
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mutation-reports
           path: .testteeth-reports/
+          if-no-files-found: warn
