@@ -181,7 +181,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest tests/test_mutation_matrix_sync.py -q
+      # --noconftest: this job installs only pytest, but tests/conftest.py
+      # imports the full suite's deps (numpy). The sync test needs no fixtures.
+      - run: python -m pytest tests/test_mutation_matrix_sync.py -q --noconftest
 
   mutation:
     # Blocking check: a failed group fails the workflow, and the summary fails
