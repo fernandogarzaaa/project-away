@@ -396,6 +396,48 @@ class AgentLinkModel:
         cfg.agent_link.talk_enabled = bool(on)
         cfgmod.save(cfg, path)
 
+    def control_budget(self) -> int:
+        """v0.1.28: steps per approved "use my computer" session (agent_link.control_step_budget)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return max(1, int(cfg.agent_link.control_step_budget or 40))
+        except Exception:
+            return 40
+
+    def set_control_budget(self, steps: int) -> int:
+        """v0.1.28: change the step budget (1-1000); applies to the next approved session. Returns the saved value."""
+        from away import config as cfgmod
+
+        value = max(1, min(1000, int(steps)))
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.control_step_budget = value
+        cfgmod.save(cfg, path)
+        return value
+
+    def audit_trail_on(self) -> bool:
+        """v0.1.28: the per-session visual audit trail (agent_link.control_audit_trail), on by default."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        try:
+            cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+            return bool(cfg.agent_link.control_audit_trail)
+        except Exception:
+            return True
+
+    def set_audit_trail(self, on: bool) -> None:
+        """v0.1.28: turn the visual audit trail on or off (no pictures kept and no session files when off)."""
+        from away import config as cfgmod
+
+        path = self.config_path or cfgmod.config_path()
+        cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
+        cfg.agent_link.control_audit_trail = bool(on)
+        cfgmod.save(cfg, path)
+
     def talk_enabled(self) -> bool:
         from away import config as cfgmod
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import time
 import webbrowser
 from typing import Any, Protocol
 
@@ -23,6 +24,14 @@ TILE_COLORS = {
     "other": "#6e7781",
 }
 TILE_LETTER = {"claude_desktop": "C", "claude_ai": "C", "chatgpt": "G", "cursor": "\u25b2", "other": "\u2026"}
+
+
+def _hhmmss(ts: Any) -> str:
+    """v0.1.28: a short local timestamp for the action log rows."""
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(float(ts or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return "--:--:--"
 
 
 def build_tab(win: Any, nb: Any, model: AgentLinkModel | None = None) -> Any:  # pragma: no cover - widgets
@@ -134,13 +143,48 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         row.pack(fill="x")
         ttk.Button(row, text="Stop now", command=lambda: self.m.stop_control()).pack(side="left")
         ttk.Button(row, text="Undo last", command=lambda: self.m.undo_action()).pack(side="left", padx=4)
+        # v0.1.28: the step budget (fresh every approved session) and the visual audit trail switch
+        brow = ttk.Frame(self.control_box)
+        brow.pack(fill="x", pady=2)
+        ttk.Label(brow, text="Step budget per session:").pack(side="left")
+        self.budget_var = tk.IntVar(value=self.m.control_budget())
+        self.budget_spin = tk.Spinbox(
+            brow, from_=1, to=1000, width=6, textvariable=self.budget_var, command=self._set_budget
+        )
+        self.budget_spin.pack(side="left", padx=4)
+        self.budget_spin.bind("<Return>", lambda _e: self._set_budget())
+        self.budget_spin.bind("<FocusOut>", lambda _e: self._set_budget())
+        ttk.Label(brow, text="steps (next session)").pack(side="left")
+        self.trail_var = tk.BooleanVar(value=self.m.audit_trail_on())
+        ttk.Checkbutton(
+            brow,
+            text="Keep a step-by-step record",
+            variable=self.trail_var,
+            command=lambda: self.m.set_audit_trail(self.trail_var.get()),
+        ).pack(side="left", padx=8)
         self.actions = tk.Listbox(self.control_box, height=5)
         self.actions.pack(fill="x", pady=4)
         self.actions.bind("<<ListboxSelect>>", lambda _e: self._show_thumb())
+        # v0.1.28: replay the session's audit trail step by step (timestamp, action, result, picture)
+        rrow = ttk.Frame(self.control_box)
+        rrow.pack(fill="x")
+        ttk.Button(rrow, text="\u25c0", width=3, command=lambda: self._replay_step(-1)).pack(side="left")
+        ttk.Button(rrow, text="\u25b6", width=3, command=lambda: self._replay_step(1)).pack(side="left", padx=2)
+        self.replay_text = tk.StringVar(value="")
+        ttk.Label(rrow, textvariable=self.replay_text, foreground="#555").pack(side="left", padx=4)
         self.thumb = ttk.Label(self.control_box)
         self.thumb.pack(anchor="w")
         self._thumb_img: Any = None
         self._action_rows: list[dict[str, Any]] = []
+        self._trail_rows: list[dict[str, Any]] = []
+        self._replay_idx: int | None = None
+        self._replay_session: str = ""
+
+        # v0.1.28 "Recently": who looked through your camera or at your screen (and what you sent)
+        rf = ttk.LabelFrame(f, text="Recently", padding=6)
+        rf.pack(fill="x", pady=6)
+        self.recently = tk.Listbox(rf, height=4)
+        self.recently.pack(fill="x")
 
         # v0.1.28 "Recently": who looked through your camera or at your screen (and what you sent)
         rf = ttk.LabelFrame(f, text="Recently", padding=6)
@@ -248,9 +292,12 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         ctl = st.get("control") or {}
         if ctl.get("active"):
             mins = int(ctl.get("expires_in_s", 0)) // 60
+            # v0.1.28: the session's step budget, so the person sees how far the agent is through it
+            steps = f" \u2014 step {ctl.get('steps_used', 0)} of {ctl.get('step_budget', 40)}"
             self.control_text.set(
                 f"{ctl['agent']} is using your computer"
                 + (" (paused: you took over)" if ctl.get("paused") else f" for {mins} more min")
+                + steps
             )
         else:
             self.control_text.set("No agent is using your computer.")
@@ -258,10 +305,19 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         self._fill(
             self.actions,
             [
-                f"{a['agent']}: {a['action']} {a['detail']}" + ("  (undone)" if a["result"] == "undone" else "")
+                f"{_hhmmss(a.get('ts'))}  {a['agent']}: {a['action']} {a['detail']}"
+                + ("" if a["result"] == "done" else f"  ({a['result']})")
                 for a in self._action_rows
             ],
         )
+        # v0.1.28: the session's audit trail for replay; a new session resets the replay position
+        trail = list(st.get("control_trail") or [])
+        session = str(trail[-1].get("session", "")) if trail else ""
+        if session != self._replay_session:
+            self._replay_session = session
+            self._replay_idx = None
+            self.replay_text.set("")
+        self._trail_rows = trail
         self._change_rows = list(st.get("changes") or [])
         self._fill(
             self.changes,
@@ -596,7 +652,12 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         sel = self.actions.curselection()
         if not sel or int(sel[0]) >= len(self._action_rows):
             return
-        name = self._action_rows[int(sel[0])].get("thumb")
+        row = self._action_rows[int(sel[0])]
+        self._replay_idx = None  # picking a row leaves the replay walk
+        self.replay_text.set("")
+        self._show_thumb_file(row.get("thumb"))
+
+    def _show_thumb_file(self, name: Any) -> None:
         if not name:
             self.thumb.configure(image="", text="(no picture)")
             return
@@ -607,6 +668,31 @@ class AgentLinkTab:  # pragma: no cover - widgets; smoke-tested under Xvfb
         with contextlib.suppress(Exception):
             self._thumb_img = self.tk.PhotoImage(file=str(p))
             self.thumb.configure(image=self._thumb_img, text="")
+
+    def _set_budget(self) -> None:
+        """v0.1.28: the step budget (1-1000) is saved to the config and applies to the next approved session."""
+        try:
+            saved = self.m.set_control_budget(int(self.budget_var.get()))
+        except Exception:  # not a number: the spinbox raises TclError, int() raises ValueError
+            saved = self.m.control_budget()
+        self.budget_var.set(saved)
+
+    def _replay_step(self, direction: int) -> None:
+        """v0.1.28: walk the session's audit trail one step at a time (timestamp, action, result, picture)."""
+        rows = self._trail_rows
+        if not rows:
+            self.replay_text.set("No steps recorded in this session yet.")
+            return
+        if self._replay_idx is None:
+            self._replay_idx = len(rows) - 1 if direction < 0 else 0
+        else:
+            self._replay_idx = max(0, min(len(rows) - 1, self._replay_idx + direction))
+        row = rows[self._replay_idx]
+        self.replay_text.set(
+            f"Step {self._replay_idx + 1} of {len(rows)}: {row['action']} {row.get('detail', '')}"
+            f" \u2014 {row.get('result', '')} ({_hhmmss(row.get('ts'))})"
+        )
+        self._show_thumb_file(row.get("thumb"))
 
     def _disconnect_all(self) -> None:
         self._bg(self.m.disconnect_all, lambda msg: self.win._report(None, str(msg)))
