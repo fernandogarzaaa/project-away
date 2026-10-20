@@ -707,6 +707,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         self.pipeline.executor.hooks["macro_control"] = self.macros.hook_control
         self.camera_confidences: dict[int, float] = {}  # multi-camera: latest per-view confidence
         self.voice: Any = None  # VoiceController
+        self.mic_supervisor: Any = None  # MicSupervisor once voice starts (owns the mic stream)
         self.editor: Any = None  # SelectionEditor (voice.edit_hotkey)
         self.threads: list[threading.Thread] = []
         self._listeners: list[Any] = []
@@ -1083,7 +1084,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         from away.voice.asr import make_asr
         from away.voice.cleanup import RuleCleaner, Vocabulary
         from away.voice.context import active_app
-        from away.voice.dictation import DictationSession, MicStream
+        from away.voice.dictation import DictationSession, MicSupervisor
         from away.voice.output import ListSink, make_sink
         from away.voice.speech import ECHO
         from away.voice.vad import make_vad
@@ -1316,11 +1317,24 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 with contextlib.suppress(Exception):
                     tap(chunk)
 
-        def mic_loop() -> None:
-            with MicStream(on_chunk, v.sample_rate):
-                self.stop_event.wait()
+        def mic_error(error: str | None) -> None:
+            if self.voice is not None:
+                self.voice.set_mic_error(error)
+            if error:
+                self.notice(
+                    "Project Away: microphone not working",
+                    f"Dictation is unavailable because the microphone could not be opened ({error}). "
+                    "Away keeps retrying; check the device and the microphone privacy settings.",
+                    key="mic-error",
+                )
 
-        self.threads.append(threading.Thread(target=mic_loop, daemon=True, name="mic"))
+        # The supervisor owns the stream: a failed open is recorded on the
+        # voice state surface and retried with backoff, instead of the mic
+        # thread dying silently and dictation staying dead until a restart.
+        self.mic_supervisor = MicSupervisor(
+            on_chunk, v.sample_rate, stop_event=self.stop_event, bus=self.bus, on_error=mic_error
+        )
+        self.threads.append(threading.Thread(target=self.mic_supervisor.run, daemon=True, name="mic"))
         self.threads.append(threading.Thread(target=worker, daemon=True, name="asr"))
 
     # hotkeys -----------------------------------------------------------------
