@@ -127,3 +127,87 @@ def test_start_hold_anchor_averages_recent_positions() -> None:
     ev = sc.update(0.2, "four", (0.4, 0.4), 1.0)
     assert ev is not None and ev[0] == "autoscroll_start"
     assert sc.anchor == pytest.approx((0.2, 0.2))
+
+
+# Round 2: precise survivor targeting
+
+
+def _active_scroller() -> AutoScroller:
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(
+        autoscroll_enabled=True,
+        autoscroll_hold=0.2,
+        autoscroll_dead_zone=0.1,
+        autoscroll_gain=1.0,
+        autoscroll_max_speed=5.0,
+        autoscroll_horizontal=True,
+        autoscroll_stop_hold=0.3,
+    )
+    sc = AutoScroller(cfg)
+    sc.update(0.0, "four", (0.0, 0.0), 1.0)
+    sc.update(0.1, "four", (0.2, 0.2), 1.0)
+    ev = sc.update(0.2, "four", (0.4, 0.4), 1.0)
+    assert ev is not None and ev[0] == "autoscroll_start"
+    return sc
+
+
+def test_frame_dt_is_capped_at_max_frame_dt() -> None:
+    # Kills MAX_FRAME_DT 0.1 -> 1.1: a 1.0s gap must still only scroll for 0.1s.
+    sc = _active_scroller()
+    ev = sc.update(1.2, "four", (0.2, -0.4), 1.0)  # hand moved up: vy = 0.5 notches/s
+    assert ev is not None and ev[0] == "autoscroll"
+    assert ev[1]["vy"] == pytest.approx(0.5)
+    assert ev[1]["dy"] == pytest.approx(0.05)  # 0.5 * 0.1, not 0.5 * 1.0
+
+
+def test_lost_exact_timeout_boundary_does_not_stop() -> None:
+    # Kills `t - _lost_t0 > LOST_STOP_S` -> `>=`: at exactly 0.5s the hand is not lost yet.
+    from away.hands.autoscroll import LOST_STOP_S
+
+    sc = AutoScroller()
+    sc.active = True
+    assert sc.lost(0.0) is None
+    assert sc.lost(LOST_STOP_S) is None  # exactly at the boundary: still scrolling
+    assert sc.active is True
+
+
+def test_hold_anchor_averages_last_hold_samples() -> None:
+    # Kills HOLD_SAMPLES 8 -> 9 and HOLD_SAMPLES - 1 -> HOLD_SAMPLES + 1:
+    # the neutral point is the mean of the last 8 positions, not 9 or 10.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(
+        autoscroll_enabled=True,
+        autoscroll_hold=0.9,
+        autoscroll_dead_zone=0.1,
+        autoscroll_gain=1.0,
+        autoscroll_max_speed=5.0,
+        autoscroll_horizontal=True,
+        autoscroll_stop_hold=0.3,
+    )
+    sc = AutoScroller(cfg)
+    ev = None
+    for i in range(10):
+        ev = sc.update(i * 0.1, "four", (i * 0.1, i * 0.1), 1.0)
+    assert ev is not None and ev[0] == "autoscroll_start"
+    # mean of positions 2..9 (the last 8): (0.2 + ... + 0.9) / 8 = 0.55
+    assert sc.anchor == pytest.approx((0.55, 0.55))
+
+
+def test_other_pose_first_frame_does_not_stop_immediately() -> None:
+    # Kills `t - _other_t0` -> `t + _other_t0`: on the first other-pose frame the
+    # elapsed hold time is 0, so scrolling continues (mutant stops instantly at large t).
+    sc = _active_scroller()
+    ev = sc.update(1.0, "point", (0.2, 0.2), 1.0)
+    assert ev is not None and ev[0] == "autoscroll"  # not "autoscroll_stop"
+    assert sc.active is True
+
+
+def test_diagonal_tie_prefers_vertical() -> None:
+    # Kills `abs(vx) > abs(vy)` -> `>=`: on a tie the vertical axis wins (vx = 0).
+    sc = _active_scroller()
+    ev = sc.update(0.3, "four", (0.5, -0.1), 1.0)  # |ox| == |oy| == 0.3
+    assert ev is not None and ev[0] == "autoscroll"
+    assert ev[1]["vx"] == 0.0
+    assert ev[1]["vy"] == pytest.approx(0.2)
