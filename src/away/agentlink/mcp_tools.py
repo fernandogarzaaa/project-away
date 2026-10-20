@@ -365,7 +365,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="system" opens an allowlisted Windows system tool by
+        / Spotlight (not terminals or system tools); after launching, the foreground window is checked for up
+        to ~3 s and the result carries a `warning` when the app could not be confirmed open (the launcher
+        keystrokes may have done nothing). action="system" opens an allowlisted Windows system tool by
         `name` (device-manager or a Windows Settings page such as windows-update: use the name with
         spaces or dashes, e.g. "Device Manager"): it is launched straight through the shell, with no keystrokes
         and no command line, so opening it is navigation only and anything consequential inside it still asks
