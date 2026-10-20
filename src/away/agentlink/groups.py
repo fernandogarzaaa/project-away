@@ -75,7 +75,7 @@ GROUPS: dict[str, dict[str, GroupAction]] = {
         ),
     },
     "keyboard": {
-        "type": GroupAction("act", ("text", "element_id"), fixed={"action": "type_text"}),
+        "type": GroupAction("act", ("text", "expect", "element_id"), fixed={"action": "type_text"}),
         "press": GroupAction("act", ("keys", "element_id"), fixed={"action": "press_keys"}),
     },
     "inbox": {  # v0.1.22 "Talk to your agent"

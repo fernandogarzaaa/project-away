@@ -20,6 +20,10 @@ STATE_COLORS = {
     "paused": (140, 140, 140, 255),  # gestures paused
 }
 
+#: v0.1.28: "an AI agent may be watching" dot in the tray icon's corner (drawn with a white ring so it reads
+#: on every state colour)
+AGENT_DOT_COLOR = (33, 118, 214, 255)
+
 
 # Windows keeps the tray tooltip in a 128-character UTF-16 buffer (the terminating zero included); a longer one makes
 # pystray fail ("string too long (136, maximum length 128)"). Other systems take the same, shorter text.
@@ -51,7 +55,7 @@ def icon_state(paused: bool, voice_state: str) -> str:
     return "active"
 
 
-def make_icon_image(paused: bool = False, size: int = 64, state: str | None = None) -> Any:
+def make_icon_image(paused: bool = False, size: int = 64, state: str | None = None, agent_dot: bool = False) -> Any:
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -64,7 +68,25 @@ def make_icon_image(paused: bool = False, size: int = 64, state: str | None = No
         x = size // 4 + i * (w + 2)
         d.rounded_rectangle((x, size // 5, x + w, size // 2 + 4), radius=w // 2, fill="white")
     d.rounded_rectangle((size // 4 - 2, size // 2, size * 3 // 4 + 2, size * 4 // 5), radius=6, fill="white")
+    if agent_dot:  # v0.1.28: a dot in the corner while an agent holds snapshots/screen/control and was active
+        r = max(3, size // 8)
+        cx, cy = size - r - 2, r + 2
+        d.ellipse((cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2), fill="white")
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=AGENT_DOT_COLOR)
     return img
+
+
+def agent_popup_lines(host: Any, now: float | None = None) -> list[str]:
+    """One plain-words line per agent for the tray popup: "Claude — can see your screen · used your computer
+    2 min ago". Tk-free and pure so it is unit-testable; :meth:`TrayController.show_agent_popup` shows it."""
+    from away.agentlink.host import watchers
+
+    lines = []
+    for w in watchers(host, now=now):
+        caps = ", ".join(w["capabilities"]) or "connected"
+        tail = "using your computer right now" if w["controlling"] else f"used your computer {w['active']}"
+        lines.append(f"{w['name']} — {caps} · {tail}")
+    return lines
 
 
 def open_path(path: str) -> None:  # pragma: no cover - launches a GUI app
@@ -187,10 +209,68 @@ class TrayController:
 
         return badge(getattr(self.app, "agent_link", None))
 
+    def agent_dot(self) -> bool:
+        """v0.1.28: the tray icon's state dot (an agent holds snapshots/screen/control and was recently active)."""
+        from away.agentlink.host import watcher_dot
+
+        try:
+            return watcher_dot(getattr(self.app, "agent_link", None))
+        except Exception:
+            return False
+
+    def popup_lines(self) -> list[str]:
+        """v0.1.28: the "who can see what" lines (one per agent); [] when Agent Link is off."""
+        try:
+            return agent_popup_lines(getattr(self.app, "agent_link", None))
+        except Exception:
+            return []
+
+    @staticmethod
+    def agent_link_command() -> list[str]:
+        """argv that opens Settings on the Agent Link tab (the popup's "Open Agent Link" button)."""
+        from away.app.frozen import away_command
+
+        return away_command(["settings", "--tab", "Agent Link"])
+
+    def open_agent_link(self) -> None:  # pragma: no cover - launches a GUI process
+        import subprocess
+
+        try:
+            subprocess.Popen(self.agent_link_command())
+        except Exception:
+            import logging
+
+            logging.getLogger("away.tray").warning("could not open Agent Link settings", exc_info=True)
+
+    def show_agent_popup(self) -> None:  # pragma: no cover - Tk GUI
+        """v0.1.28: the "who can see what" popup: one line per agent, each with an Open Agent Link button."""
+        import tkinter as tk
+        from tkinter import ttk
+
+        lines = self.popup_lines()
+        root = tk.Tk()
+        root.title("Who can see what")
+        frm = ttk.Frame(root, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="These AI agents are connected to Project Away:", wraplength=400).pack(
+            anchor="w", pady=(0, 8)
+        )
+        for line in lines:
+            row = ttk.Frame(frm)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=line, wraplength=320).pack(side="left", fill="x", expand=True)
+            ttk.Button(row, text="Open Agent Link", command=self.open_agent_link).pack(side="right", padx=(8, 0))
+        ttk.Button(frm, text="Close", command=root.destroy).pack(pady=(10, 0))
+        root.mainloop()
+
     def disconnect_agents(self) -> None:
         al = getattr(self.app, "agent_link", None)
         if al is not None:
             al.disconnect_all()
+
+    def open_recent_activity(self) -> None:  # pragma: no cover - launches a GUI process
+        """Open Settings directly on the Agent Link tab for the recent activity and consent receipts."""
+        _open_settings_tab(self, "Agent Link")
 
     def icon_state(self) -> str:
         return icon_state(self.paused, self.voice_state())
@@ -571,6 +651,42 @@ def camera_menu_text(app: Any) -> str:
     return str(info.get("headline") or "") if isinstance(info, dict) else ""
 
 
+#: v0.1.28: the tray menu shows at most this many per-agent lines (pystray cannot add menu items after the menu
+#: is built, so the slots are fixed and the extras live in the popup)
+POPUP_MENU_LINES = 5
+
+
+def agent_popup_menu_items(pystray: Any, ctl: TrayController) -> list[Any]:
+    """v0.1.28: one disabled line per connected agent (what it can see, when it was last active), then
+    "Who can see what..." which opens the popup with an Open Agent Link button per agent. Clicking the tray
+    icon shows the menu, so the lines are right there; the popup has the buttons."""
+
+    def on_popup(_icon: Any, _item: Any) -> None:
+        ctl.show_agent_popup()
+
+    def line(i: int) -> str:
+        lines = ctl.popup_lines()
+        return lines[i] if i < len(lines) else ""
+
+    items: list[Any] = [
+        pystray.MenuItem(
+            lambda _i, i=i: line(i),
+            None,
+            enabled=False,
+            visible=lambda _i, i=i: i < len(ctl.popup_lines()),
+        )
+        for i in range(POPUP_MENU_LINES)
+    ]
+    items.append(
+        pystray.MenuItem(
+            lambda _i: f"Who can see what ({len(ctl.popup_lines())})...",
+            on_popup,
+            visible=lambda _i: bool(ctl.popup_lines()),
+        )
+    )
+    return items
+
+
 def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[Any]:
     """Tray menu (v0.1.20): "Only respond when I'm looking at the screen" (a check box) and "Guided first run"."""
     from away.comfort import actions
@@ -651,6 +767,7 @@ def build_tray_menu(
     gate_hint = callbacks.gate_hint
     return pystray.Menu(
         pystray.MenuItem(lambda _i: ctl.title(), None, enabled=False),
+        *agent_popup_menu_items(pystray, ctl),  # v0.1.28: one line per connected agent, then the popup
         pystray.MenuItem(lambda _i: "Resume" if ctl.paused else "Pause", callbacks.on_pause, default=True),
         pystray.MenuItem("Mic on", callbacks.on_mic, checked=lambda _i: ctl.mic_on()),
         pystray.MenuItem(
@@ -702,6 +819,7 @@ def build_tray_menu(
             visible=lambda _i: bool(ctl.agent_badge()),
         ),
         *live_menu_items(pystray, app, open_settings_tab),  # "Live agent: on (Big Pickle)"
+        pystray.MenuItem("Recent activity...", lambda _i, _item: ctl.open_recent_activity()),
         pystray.MenuItem(  # v0.1.23
             "Reset cursor size to normal", callbacks.on_reset_cursor
         ),

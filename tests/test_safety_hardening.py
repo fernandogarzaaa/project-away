@@ -127,7 +127,12 @@ def test_service_undo_passes_the_agent(tmp_path: Path) -> None:
     from away.agentlink.host import build_core
 
     cfg = C.AppConfig()
-    core = build_core(tmp_path, cfg=lambda: cfg, settings=lambda: cfg.agent_link, config_path=lambda: tmp_path / "c")
+    core = build_core(
+        tmp_path,
+        cfg=lambda: cfg,
+        settings=lambda: cfg.agent_link,
+        config_path=lambda: tmp_path / "c",
+    )
     seen: list[Any] = []
     core.control.undo_last = lambda *a, **k: seen.append((a, k)) or {}  # type: ignore[method-assign]
     a, _ = core.registry.issue("Claude", ["read", "control"], 3600)
@@ -286,7 +291,67 @@ def test_open_app_checks_for_a_stop_before_each_step() -> None:
     ctl.request("a1", "Claude")
     with pytest.raises(ControlRefused, match="stop"):
         ctl.act("a1", "open_app", name="Notepad")
-    assert backend.calls == [("key", ("cmd",)), ("release_modifiers", ())]  # never typed the name or pressed Enter
+    assert backend.calls == [
+        ("key", ("cmd",)),
+        ("release_modifiers", ()),
+    ]  # never typed the name or pressed Enter
+
+
+def test_open_app_warns_when_the_app_never_appears() -> None:
+    """Regression: _open_app pressed Win, typed and hit Enter on fixed sleeps, then reported ok blind. Now the
+    foreground window is polled for ~3 s for a title/process match, and a miss returns a warning."""
+    clock = Clock()
+    ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
+    ctl.hooks.sleep = lambda s: clock.advance(s)
+    ctl.hooks.foreground = lambda: {
+        "title": "Search",
+        "process": "SearchHost.exe",
+    }  # never the app
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "open_app", name="Notepad")
+    assert res["ok"] is True
+    assert "warning" in res and "Notepad" in res["warning"] and "3 s" in res["warning"]
+    assert ctl.log and ctl.log[-1].result == "warned"
+    assert backend.calls == [
+        ("key", ("cmd",)),
+        ("type_text", ("Notepad",)),
+        ("key", ("enter",)),
+    ]  # the launcher keystrokes still run; only the blind ok is gone
+
+
+def test_open_app_short_names_need_exact_match() -> None:
+    """Short app names (< 3 chars) must not substring-match: "a" must not match
+    "Calculator", avoiding a false-positive verification."""
+    from away.agentlink.control import ComputerControl
+
+    # "a" in "Calculator" is a substring, but not a word and not the process
+    assert ComputerControl._name_matches("a", "Calculator", "ApplicationFrameHost.exe") is False
+    # exact process stem still matches
+    assert ComputerControl._name_matches("a", "A", "a.exe") is True
+    # whole word in title matches
+    assert ComputerControl._name_matches("it", "IT Support", "explorer.exe") is True
+    # but substring of a longer word does not
+    assert ComputerControl._name_matches("it", "Settings", "SystemSettings.exe") is False
+
+
+def test_open_app_is_quiet_when_the_app_appears() -> None:
+    """No warning when the foreground window matches the app's title or process within the poll budget."""
+    clock = Clock()
+    ctl, backend, _ = _control(clock, platform="win32", uia=FakeUIA(focused=TEXT_BOX))
+    ctl.hooks.sleep = lambda s: clock.advance(s)
+    n = {"i": 0}
+
+    def fg() -> dict[str, Any]:
+        n["i"] += 1
+        if n["i"] < 3:
+            return {"title": "Search", "process": "SearchHost.exe"}
+        return {"title": "Untitled - Notepad", "process": "notepad.exe"}
+
+    ctl.hooks.foreground = fg
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "open_app", name="Notepad")
+    assert res["ok"] is True and "warning" not in res
+    assert ctl.log and ctl.log[-1].result == "done"
 
 
 # ------------------------------------------------------------- 4. clicks, drags and keys it cannot classify
@@ -393,7 +458,12 @@ def _core(tmp_path: Path, **kw: Any) -> Any:
     C.save(C.AppConfig(), cfgp)
     cfg = C.load(cfgp)[0]
     c = build_core(
-        tmp_path, cfg=lambda: cfg, settings=lambda: cfg.agent_link, config_path=lambda: cfgp, ui=NullUI(), **kw
+        tmp_path,
+        cfg=lambda: cfg,
+        settings=lambda: cfg.agent_link,
+        config_path=lambda: cfgp,
+        ui=NullUI(),
+        **kw,
     )
     c.prompts.polite = lambda: True
     c.cfg_obj = cfg  # type: ignore[attr-defined]
@@ -409,7 +479,11 @@ def test_no_camera_still_when_the_notice_cannot_be_shown(tmp_path: Path) -> None
 
     from away.agentlink.service import NotAvailable
 
-    core = _core(tmp_path, flash=_broken, camera_frame=lambda _c: np.zeros((480, 640, 3), dtype=np.uint8))
+    core = _core(
+        tmp_path,
+        flash=_broken,
+        camera_frame=lambda _c: np.zeros((480, 640, 3), dtype=np.uint8),
+    )
     a, _ = core.registry.issue("Agent", ["read", "snapshots"], 3600)
     seq = core.events.seq
     with pytest.raises(NotAvailable, match="notice"):
@@ -443,7 +517,9 @@ def test_quiet_screenshots_need_the_live_view_badge(tmp_path: Path) -> None:
     assert len(flashes) == 1  # the live view's permanent badge is the notice
 
 
-def test_live_view_is_refused_and_unregistered_when_its_badge_fails(tmp_path: Path) -> None:
+def test_live_view_is_refused_and_unregistered_when_its_badge_fails(
+    tmp_path: Path,
+) -> None:
     from away.agentlink.service import NotAvailable
 
     core = _core(tmp_path, watching=_broken)
@@ -548,7 +624,9 @@ def test_a_chunked_body_without_content_length_cannot_get_past_the_limit(tmp_pat
     assert r.status_code == 413 and calls == []
 
 
-def test_a_body_bigger_than_its_content_length_is_cut_off_at_the_asgi_level(tmp_path: Path) -> None:
+def test_a_body_bigger_than_its_content_length_is_cut_off_at_the_asgi_level(
+    tmp_path: Path,
+) -> None:
     import asyncio
 
     from away.agentlink import api
@@ -610,7 +688,9 @@ def test_sharing_logs_and_recordings_is_a_separate_permission_off_by_default() -
     assert perms.SHARE_LOGS in perms.normalize("read,share_logs")
 
 
-def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(tmp_path: Path) -> None:
+def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(
+    tmp_path: Path,
+) -> None:
     from away.agentlink.service import Forbidden
 
     core = _core(tmp_path)
@@ -631,7 +711,9 @@ def test_camera_checks_do_not_let_an_agent_take_logs_or_recordings(tmp_path: Pat
         svc.get_job(a)  # camera checks still work (here: a missing id, not a permission error)
 
 
-def test_existing_agents_are_not_silently_given_the_new_permission(tmp_path: Path) -> None:
+def test_existing_agents_are_not_silently_given_the_new_permission(
+    tmp_path: Path,
+) -> None:
     import json
 
     from away.agentlink import auth, perms
@@ -681,7 +763,9 @@ def _secret_log(home: str) -> str:
     )
 
 
-def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_folder(tmp_path: Path) -> None:
+def test_bundle_and_get_logs_hide_tokens_keys_passwords_emails_and_the_home_folder(
+    tmp_path: Path,
+) -> None:
     import zipfile
 
     from away.agentlink import bundle
@@ -761,7 +845,9 @@ def _host(tmp_path: Path) -> Any:
     return h, a, offs
 
 
-def test_removing_control_ends_the_session_and_turns_the_border_off(tmp_path: Path) -> None:
+def test_removing_control_ends_the_session_and_turns_the_border_off(
+    tmp_path: Path,
+) -> None:
     h, a, offs = _host(tmp_path)
     h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "screen"]})
     assert h.core.control.status() == {"active": False} and offs
@@ -770,7 +856,9 @@ def test_removing_control_ends_the_session_and_turns_the_border_off(tmp_path: Pa
     assert a.id in h.core.service._watchers  # the screen permission is still on: its live view stays
 
 
-def test_removing_screen_stops_the_live_view_and_forgets_the_view(tmp_path: Path) -> None:
+def test_removing_screen_stops_the_live_view_and_forgets_the_view(
+    tmp_path: Path,
+) -> None:
     h, a, _ = _host(tmp_path)
     h.handle({"action": "set_scopes", "agent_id": a.id, "scopes": ["read", "control"]})
     assert a.id not in h.core.service._watchers and a.id not in h.core.service._live_views
@@ -793,7 +881,9 @@ def test_revoke_and_disconnect_end_control_and_the_live_view(tmp_path: Path, how
     assert a.id not in h.core.control.views
 
 
-def test_removing_control_mid_typing_stops_and_lets_go_of_the_keys(tmp_path: Path) -> None:
+def test_removing_control_mid_typing_stops_and_lets_go_of_the_keys(
+    tmp_path: Path,
+) -> None:
     h, a, _ = _host(tmp_path)
     backend = BlockingBackend("type_text", 2)
     h.core.control.hooks.backend = backend
@@ -842,7 +932,9 @@ def test_other_systems_have_no_secure_desktop_to_check(platform: str) -> None:
     assert backend.calls == [("move", (1, 1))]
 
 
-def test_the_windows_detector_reports_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_windows_detector_reports_its_own_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import ctypes
 
     from away.agentlink import desktop
@@ -911,7 +1003,10 @@ def test_near_homophones_of_the_agents_name_wake_it(said: str, body: str) -> Non
 def test_a_misheard_longer_name_and_claude_as_cloud() -> None:
     from away.voice import talk
 
-    agents = [{"id": "c1", "name": "Claude", "wake_word": ""}, {"id": "g1", "name": "Gemini", "wake_word": ""}]
+    agents = [
+        {"id": "c1", "name": "Claude", "wake_word": ""},
+        {"id": "g1", "name": "Gemini", "wake_word": ""},
+    ]
     r = talk.match("hey cloud open my notes", agents)
     assert r is not None and r.target == "c1" and r.body == "open my notes"
     r = talk.match("hey jemini what time is it", agents)
@@ -939,13 +1034,18 @@ def test_unrelated_phrases_do_not_wake_hark(said: str) -> None:
 def test_a_sound_alike_that_fits_two_agents_goes_to_neither() -> None:
     from away.voice import talk
 
-    agents = [{"id": "h1", "name": "Hark", "wake_word": ""}, {"id": "h2", "name": "Hurt", "wake_word": ""}]
+    agents = [
+        {"id": "h1", "name": "Hark", "wake_word": ""},
+        {"id": "h2", "name": "Hurt", "wake_word": ""},
+    ]
     assert talk.match("hey heart are you there", agents) is None
     r = talk.match("hey hurt are you there", agents)  # an exact name always wins
     assert r is not None and r.target == "h2"
 
 
-def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(tmp_path: Path) -> None:
+def test_the_v0124_self_test_and_token_refresh_endpoints_use_the_body_cap(
+    tmp_path: Path,
+) -> None:
     from away.agentlink import api
 
     client, token, *_ = _api(tmp_path)

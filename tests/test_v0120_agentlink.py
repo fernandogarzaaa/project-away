@@ -668,6 +668,120 @@ def test_resume_until_takeover_is_per_session() -> None:
     assert b5.calls == []
 
 
+def test_type_text_returns_focused_window_and_element() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "type_text", text="hello")
+    assert res["ok"] is True
+    assert res["target"] == {"window": "Untitled - Notepad", "element": "Body"}
+    assert any(c[0] == "type_text" for c in backend.calls)
+
+
+def test_type_text_expect_match_types_case_insensitively() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    res = ctl.act("a1", "type_text", text="hello", expect="NOTEPAD")
+    assert res["ok"] is True
+    assert any(c[0] == "type_text" for c in backend.calls)
+
+
+def test_type_text_expect_mismatch_refuses_before_typing() -> None:
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(clock, uia=uia, fg={"process": "notepad.exe", "title": "Untitled - Notepad"})
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="refusing to type into the wrong window"):
+        ctl.act("a1", "type_text", text="hello", expect="chrome")
+    assert backend.calls == []  # refused before a single keystroke
+
+
+def test_type_text_expect_refuses_when_window_title_is_unknown() -> None:
+    clock = Clock()
+    ctl, backend, _ = _control(clock, uia=FakeUIA(focused=None), fg={})
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="refusing to type into the wrong window"):
+        ctl.act("a1", "type_text", text="hello", expect="notepad")
+    assert backend.calls == []
+
+
+def test_keyboard_group_passes_expect_through() -> None:
+    from away.agentlink import groups
+
+    method, args = groups.resolve("keyboard", {"action": "type", "text": "hi", "expect": "notes"})
+    assert method == "act"
+    assert args == {"action": "type_text", "text": "hi", "expect": "notes"}
+
+
+def test_type_text_expect_revalidates_after_user_prompt() -> None:
+    # Regression: if the focused window changes while a confirmation prompt
+    # is up (e.g. for a newline in the text), the expect check must run again
+    # before typing. Otherwise the text goes into the wrong window.
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(
+        clock,
+        uia=uia,
+        fg={"process": "notepad.exe", "title": "Untitled - Notepad"},
+        answers=["Allow", "Allow"],  # grant approval, then the Enter confirmation
+    )
+    # Simulate a window change during the user prompt: the first
+    # _window_title() call (initial validation) sees Notepad, the second
+    # (re-validation after the prompt) sees a different window.
+    titles = ["Untitled - Notepad", "Some Other Window"]
+    orig = ctl._window_title
+    calls = {"n": 0}
+
+    def shifting_title() -> str:
+        calls["n"] += 1
+        if calls["n"] <= len(titles):
+            return titles[calls["n"] - 1]
+        return orig()
+
+    ctl._window_title = shifting_title  # type: ignore[method-assign]
+    ctl.request("a1", "Claude")
+    with pytest.raises(ControlRefused, match="focused window changed while confirming"):
+        ctl.act("a1", "type_text", text="hello\nworld", expect="notepad")
+    assert backend.calls == []  # refused before a single keystroke
+
+
+def test_type_text_aborts_when_window_changes_mid_typing() -> None:
+    # Regression: focus can change between chunks of a multi-chunk type operation.
+    # The per-chunk expect check must abort before typing into the wrong window,
+    # and report how much was typed honestly.
+    clock = Clock()
+    uia = FakeUIA(focused=Element("Body", "EditControl", rect=(0, 0, 50, 20)))
+    ctl, backend, _ = _control(
+        clock,
+        uia=uia,
+        fg={"process": "notepad.exe", "title": "Untitled - Notepad"},
+        answers=["Allow"],
+    )
+    # First two _window_title() calls (initial check + first chunk) see Notepad;
+    # the third (second chunk) sees a different window.
+    titles = ["Untitled - Notepad", "Untitled - Notepad", "Some Other Window"]
+    orig = ctl._window_title
+    calls = {"n": 0}
+
+    def shifting_title() -> str:
+        calls["n"] += 1
+        if calls["n"] <= len(titles):
+            return titles[calls["n"] - 1]
+        return orig()
+
+    ctl._window_title = shifting_title  # type: ignore[method-assign]
+    ctl.request("a1", "Claude")
+    # 20 chars = 3 chunks (8+8+4); the change happens before chunk 2
+    with pytest.raises(ControlRefused, match=r"focused window changed while typing.*stopped after 8 of 20"):
+        ctl.act("a1", "type_text", text="12345678123456781234", expect="notepad")
+    # only the first chunk was typed
+    typed = [c for c in backend.calls if c[0] == "type_text"]
+    assert len(typed) == 1 and typed[0][1] == ("12345678",)
+
+
 def test_risky_click_asks_and_always_allow_sticks() -> None:
     clock = Clock()
     uia = FakeUIA(

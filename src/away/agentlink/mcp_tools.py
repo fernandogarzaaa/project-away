@@ -210,15 +210,23 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         monitor: int | None = None,
         region: dict | None = None,
         elements: bool = False,
+        annotate: bool = False,
     ) -> list:
         """A screenshot plus the focused window (needs "See my screen when I allow"; the person sees a flash).
         Orient, then zoom: first a wide shot (default: the whole desktop at scale 0.5; the metadata lists every
         monitor with index, x, y, w, h), then `monitor`=N for one display or `region`={x, y, width, height} in
         screen coordinates to read small text (scale up to 1.0). The longest side is capped at 2560 px.
         Screen point = origin + image point / scale (or pass from_image=true to pointer actions).
-        elements=true adds the UI element tree (names you can pass to pointer actions)."""
+        elements=true adds the UI element tree (names you can pass to pointer actions).
+        annotate=true draws numbered red boxes over detected interactable regions (set-of-mark prompting): use
+        this for canvas apps, games and remote desktops where the UI tree is empty. The picture comes back with
+        [1]..[N] boxes and the metadata lists each box id with its screen coordinates; click one with
+        pointer(action="click", element="mark:14") instead of estimating pixels. Edge-based detection, no AI:
+        a box may be a button, a panel or a scrollbar, so confirm visually before risky clicks."""
         raw, meta = _image(
-            await call(ctx, "get_screen", elements=elements, scale=scale, monitor=monitor, region=region)
+            await call(
+                ctx, "get_screen", elements=elements, scale=scale, monitor=monitor, region=region, annotate=annotate
+            )
         )
         return [Image(data=raw, format="jpeg"), json.dumps(meta, default=str)]
 
@@ -323,14 +331,13 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
     ) -> dict:
         """Mouse actions (after control action="request" was approved): action = move | click | double_click |
         right_click | drag (to x2,y2 or `to_element`/`to_element_id`) | scroll (dy > 0 up, dy < 0 down, dx
-        sideways). Target screen x,y, an element name from get_screen(elements=true), an element id from
-        ui_query (exact bounds, no guessing), or image x,y with from_image=true (your last screenshot's origin
-        and scale are applied). An id beats a name beats coordinates. Risky buttons (send, pay, delete...) ask
-        the person first. The result reports the observed effect: `target_label` (the UI element label resolved
-        at the click point before acting, so you can see e.g. "clicked 'Desktop', not 'Start'"), `foreground`
-        (the foreground window's title and process name right after the action) and `focused` (the focused UI
-        element's label, when UI Automation has one). Check these: they tell you whether the click actually
-        landed where you intended, so you can self-correct instead of taking another screenshot."""
+        sideways). Target screen x,y, an element name from get_screen(elements=true), a numbered box from
+        get_screen(annotate=true) as element="mark:14" (or "#14"), an element id from ui_query (exact bounds,
+        no guessing), or image x,y with from_image=true (your last screenshot's origin and scale are applied).
+        An id beats a mark beats a name beats coordinates. Risky buttons (send, pay, delete...) ask the person
+        first. The result reports the observed effect: `foreground` (the foreground window's title and process
+        name right after the action) and `focused` (the focused UI element's label, when UI Automation has
+        one). Check these: they tell you whether the click actually landed where you intended."""
         if action == "scroll" and dy is None and dx is None:
             dy = -3.0
         return await group(
@@ -352,20 +359,29 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
 
     @mcp.tool()
     async def keyboard(
-        ctx: Context, action: str, text: str | None = None, keys: str | None = None, element_id: str | None = None
+        ctx: Context,
+        action: str,
+        text: str | None = None,
+        keys: str | None = None,
+        expect: str | None = None,
+        element_id: str | None = None,
     ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
-        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts);
-        action="press" presses `keys`, e.g. "enter", "ctrl+s", "alt+tab". Pass element_id= (from ui_query) to
-        click that field first so the input lands there. The result reports the observed effect: `foreground`
-        (the foreground window's title and process name right after the action) and `focused` (the focused UI
-        element's label, when UI Automation has one)."""
-        return await group(ctx, "keyboard", action=action, text=text, keys=keys, element_id=element_id)
+        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts).
+        Pass `expect` to type only when the focused window's title contains that text (case-insensitive): a
+        mismatch refuses before anything is typed, so text never lands in the wrong window. Pass element_id=
+        (from ui_query) to click that field first so the input lands there. The result reports the observed
+        effect: `foreground` (the foreground window's title and process name right after the action) and
+        `focused` (the focused UI element's label, when UI Automation has one). action="press" presses `keys`,
+        e.g. "enter", "ctrl+s", "alt+tab"."""
+        return await group(ctx, "keyboard", action=action, text=text, keys=keys, expect=expect, element_id=element_id)
 
     @mcp.tool()
     async def open(ctx: Context, action: str, name: str | None = None, url: str | None = None) -> dict:
         """Open things (after control was approved): action="app" opens an app by `name` through the Start menu
-        / Spotlight (not terminals or system tools); action="system" opens an allowlisted Windows system tool by
+        / Spotlight (not terminals or system tools); after launching, the foreground window is checked for up
+        to ~3 s and the result carries a `warning` when the app could not be confirmed open (the launcher
+        keystrokes may have done nothing). action="system" opens an allowlisted Windows system tool by
         `name` (device-manager or a Windows Settings page such as windows-update: use the name with
         spaces or dashes, e.g. "Device Manager"): it is launched straight through the shell, with no keystrokes
         and no command line, so opening it is navigation only and anything consequential inside it still asks

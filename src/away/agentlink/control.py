@@ -81,6 +81,8 @@ __all__ = [
     "Grant",
     "LogEntry",
     "classify",
+    "describe_action",
+    "plain_end_reason",
 ]
 
 UNKNOWN_NOTE = "Project Away can't tell what is there, so it is asking first."
@@ -118,6 +120,12 @@ MOUSE_ECHO_S = 0.25
 KEY_ECHO_S = 0.3
 KEY_ECHO_PER_CHAR_S = 0.02
 TYPE_CHUNK = 8  # characters typed at a time (each chunk can be interrupted)
+# open_app verification: after the launcher keystrokes (fixed 0.6/0.8 s sleeps stay as the base timing), the
+# foreground window is polled for up to this long for a title/process match against the requested app name.
+# A poll miss does not mean the app failed to launch; it only means it could not be confirmed, so the result
+# carries a warning instead of a silent ok.
+OPEN_APP_VERIFY_S = 3.0
+OPEN_APP_POLL_S = 0.25
 ACTIONS = (
     "move",
     "click",
@@ -141,6 +149,55 @@ BUDGET_EXHAUSTED = (
 # An action sequence is one MCP call, not one grant: it is bounded so a single call cannot queue an unbounded
 # batch of input.
 SEQUENCE_MAX_STEPS = 25
+
+
+def _target_label(detail: str) -> str:
+    """The quoted element name in an action detail like "(120, 300) 'OK'", or "" when there was none."""
+    m = re.search(r"'([^']{1,60})'", detail or "")
+    return m.group(1) if m else ""
+
+
+def describe_action(action: str, detail: str) -> str:
+    """Plain words for what the agent did (no jargon): the "what did the agent just do" receipt lists one of
+    these per action. ``detail`` is the raw detail string stored on the :class:`LogEntry`."""
+    detail = str(detail or "")
+    label = _target_label(detail)
+    if action == "move":
+        return "Moved the mouse"
+    if action == "click":
+        return f"Clicked on '{label}'" if label else f"Clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "double_click":
+        return f"Double-clicked '{label}'" if label else f"Double-clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "right_click":
+        return f"Right-clicked '{label}'" if label else f"Right-clicked at {detail.strip() or 'a spot on the screen'}"
+    if action == "drag":
+        return "Dragged something across the screen"
+    if action == "scroll":
+        return "Scrolled"
+    if action == "type_text":
+        n = detail.split(" ")[0] if detail else "0"
+        return f"Typed {n} characters"
+    if action == "press_keys":
+        return f"Pressed {detail}" if detail else "Pressed some keys"
+    if action == "open_app":
+        return f"Opened {detail}" if detail else "Opened an app"
+    if action == "open_url":
+        return f"Opened {detail}" if detail else "Opened a link"
+    return detail or action
+
+
+PLAIN_END_REASONS = {
+    "expired": "its time ran out",
+    "stopped": "you stopped it",
+    "you pressed Stop": "you pressed Stop",
+    "the user chose to stop": "you chose to stop it",
+    "the agent was disconnected": "the agent disconnected",
+}
+
+
+def plain_end_reason(reason: str) -> str:
+    """Plain words for why a control grant ended (proposal #17 receipts)."""
+    return PLAIN_END_REASONS.get(reason, str(reason or ""))
 
 
 class ControlRefused(ActionRefused):
@@ -169,6 +226,8 @@ class Grant:
     cancel: threading.Event = field(default_factory=threading.Event)
     ended: str = ""  # why it ended ("" = still active)
     trust_unknown: bool = False  # the person chose "Allow for this session" for actions it cannot identify
+    # proposal #17: id of the newest log entry when the grant started; the receipt lists what came after it
+    last_log_id: str = ""
     # v0.1.28: the control session's id (its audit trail), step budget and steps used so far (budget resets per grant)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     step_budget: int = 40
@@ -299,6 +358,9 @@ class ComputerControl:
         self.scales: dict[str, float] = {}  # agent -> last screenshot scale (for from_image coordinates)
         # v0.1.21: agent -> (origin x, origin y, scale) of its last screenshot (a monitor or a zoomed region)
         self.views: dict[str, tuple[float, float, float]] = {}
+        # v0.1.27: agent -> {mark id: (screen x, screen y)} of the numbered boxes from its last
+        # get_screen(annotate=true) (set-of-mark prompting for empty UIA trees)
+        self.marks: dict[str, dict[int, tuple[int, int]]] = {}
         # v0.1.28 proposal #24 (hybrid grounding): each agent's last ui_query result: the foreground
         # window fingerprint plus id -> Element. A pointer or keyboard action may pass element_id=...
         # instead of coordinates; it resolves here, then acts as usual. Ids are per-agent: one agent's
@@ -399,6 +461,7 @@ class ComputerControl:
             now = self.clock()
             g = Grant(agent_id, agent_name, now, now + ttl)
             g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
+            g.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
             self.grant = g
             self._start_session(g)
             self._grace_until = now + GRACE_S
@@ -453,12 +516,17 @@ class ComputerControl:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
                 # The grant is over: its agent's element ids must not outlive the session.
-                self._element_queries.pop(g.agent_id, None)
+                if g is not None:
+                    self._element_queries.pop(g.agent_id, None)
+        receipt = self.receipt(g) if g is not None else None
         if g is not None:
             self._trail_event(g, {"event": "ended", "reason": reason, "steps_used": g.steps_used})
             with contextlib.suppress(Exception):
                 self.hooks.overlay_off()
             self._emit("control.ended", {"agent": g.agent_name, "reason": reason})
+            if receipt is not None:  # proposal #17: "what did the agent just do"
+                self._emit("control.receipt", receipt)
+
             if self.notify is not None:
                 cause = END_CAUSE.get(reason, reason)
                 with contextlib.suppress(Exception):
@@ -518,6 +586,50 @@ class ComputerControl:
         except Exception:
             pass
 
+    def receipt(self, g: Grant) -> dict[str, Any]:
+        """Build the "what did the agent just do" receipt for a grant that just ended: one plain-language line
+        per action this grant ran (the existing ``actions()`` log with the existing thumbnails), plus whether
+        anything can still be put back. The app shows it as a toast plus one dialog with an "Undo all" button."""
+        with self._lock:
+            rows = [e for e in self.log if e.agent_id == g.agent_id]
+        if g.last_log_id:  # only what this grant did (the log keeps the agent's older actions too)
+            idx = next((i + 1 for i, e in enumerate(rows) if e.id == g.last_log_id), 0)
+            rows = rows[idx:]
+        items = []
+        for e in rows:
+            text = describe_action(e.action, e.detail)
+            if e.result == "stopped":
+                text += " (stopped part-way)"
+            elif e.result == "undone":
+                text += " (you already put this back)"
+            items.append(
+                {
+                    "id": e.id,
+                    "ts": e.ts,
+                    "text": text,
+                    "thumb": e.thumb,  # file name in the action log folder (PNG)
+                    "undoable": e.undo is not None and e.result == "done",
+                }
+            )
+        n = len(items)
+        headline = (
+            f"{g.agent_name} did {n} thing{'s' if n != 1 else ''}."
+            if n
+            else (f"{g.agent_name} did not do anything this time.")
+        )
+        return {
+            "agent": g.agent_name,
+            "agent_id": g.agent_id,
+            "reason": g.ended,
+            "ended": plain_end_reason(g.ended),  # plain words for "why it ended"
+            "title": f"{g.agent_name} finished using your computer",
+            "headline": headline,
+            "count": n,
+            "items": items,
+            "undoable": any(i["undoable"] for i in items),
+            "log_folder": str(self.log_folder) if self.log_folder else "",
+        }
+
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
         had = self.grant is not None
@@ -531,6 +643,7 @@ class ComputerControl:
             self._end(reason)
         self.views.pop(agent_id, None)
         self.scales.pop(agent_id, None)
+        self.marks.pop(agent_id, None)
         # Revocation invalidates the agent's element ids too: they must not survive disconnect.
         with self._lock:
             self._element_queries.pop(str(agent_id), None)
@@ -713,6 +826,8 @@ class ComputerControl:
     # v0.1.28 proposal #24 (hybrid grounding): UI Automation gives exact element bounds for free; raw pixel
     # grounding is the weakest link. ui_query lists the foreground window's interactable elements with short
     # ids; pointer and keyboard accept an element_id and resolve it to bounds, then act as with coordinates.
+    # v0.1.27: a numbered box from get_screen(annotate=true): "mark:14", "mark 14", "#14"
+    MARK_REF = re.compile(r"(?i)^(?:mark[:#]?\s*|#)(\d{1,4})$")
     UI_QUERY_DEPTH = 4
     UI_QUERY_NODES = 400
     UI_QUERY_LIMIT = 200
@@ -837,6 +952,16 @@ class ComputerControl:
     def _point(
         self, agent_id: str, x: Any, y: Any, element: str | None, element_id: str | None, from_image: bool
     ) -> tuple[int, int, str]:
+        if element:
+            mark = self.MARK_REF.match(str(element).strip())
+            if mark is not None:  # a set-of-mark reference: needs no UI Automation; wins over element_id
+                mid = int(mark.group(1))
+                pt = self.marks.get(agent_id, {}).get(mid)
+                if pt is None:
+                    raise ControlRefused(
+                        f"no annotation {mid} on your last screenshot; call get_screen(annotate=true) first"
+                    )
+                return int(pt[0]), int(pt[1]), f"mark {mid}"
         if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
             el = self._resolve_element_id(agent_id, element_id)
             center = el.center
@@ -941,6 +1066,7 @@ class ComputerControl:
         except Exception:
             before = None
         detail = ""
+        warning: str | None = None  # set by actions that verify after the fact (open_app)
         if action in ("move", "click", "double_click", "right_click"):
             x, y, label = self._point(
                 agent_id, kw.get("x"), kw.get("y"), kw.get("element"), kw.get("element_id"), bool(kw.get("from_image"))
@@ -1020,16 +1146,52 @@ class ComputerControl:
                 tlabel = self._focus_element_id(g, agent_id, step, str(kw["element_id"]))
                 detail = f"{len(text)} characters into '{tlabel}'" if tlabel.strip() else detail
             self._typing_target_ok()
+            label = self._focused_label()
+            title = self._window_title()
+            extra["target"] = {"window": title, "element": label}
+            expect = str(kw.get("expect") or "").strip()
+            if expect and expect.lower() not in title.lower():
+                if title.strip():
+                    raise ControlRefused(
+                        f"the focused window ({title!r}) does not contain {expect!r}: "
+                        "refusing to type into the wrong window"
+                    )
+                raise ControlRefused(
+                    f"I cannot see a focused window title to check {expect!r} against: "
+                    "refusing to type into the wrong window"
+                )
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
+                # Re-validate after the user prompt: the focused window may have
+                # changed while the prompt was up. Fail closed if it did.
+                if expect:
+                    title = self._window_title()
+                    if expect.lower() not in title.lower():
+                        raise ControlRefused(
+                            f"the focused window changed while confirming ({title!r} does not contain "
+                            f"{expect!r}): refusing to type into the wrong window"
+                        )
             if not hasattr(b, "type_text"):
                 raise ControlRefused("typing is not supported on this system")
             with self._lock:
                 self._own_mouse_until = 0.0  # while it types, any real mouse movement is the person
+            typed = 0
             for i in range(0, len(text), TYPE_CHUNK):
+                # Re-verify the target window before each chunk: focus may have changed
+                # during the previous chunk. Abort before typing into the wrong app.
+                if expect:
+                    title = self._window_title()
+                    if expect.lower() not in title.lower():
+                        # partial completion is reported honestly via the exception message
+                        raise ControlRefused(
+                            f"the focused window changed while typing ({title!r} does not contain "
+                            f"{expect!r}): stopped after {typed} of {len(text)} characters"
+                        )
                 chunk = text[i : i + TYPE_CHUNK]
                 self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
                 step().type_text(chunk)
+                typed += len(chunk)
+            detail = f"{len(text)} characters"
             undo = {"keys": ["cmd" if self.platform == "darwin" else "ctrl", "z"]}
         elif action == "press_keys":
             from away.control.keys import parse_combo
@@ -1093,7 +1255,12 @@ class ComputerControl:
                     "registry editor",
                 ):
                     raise ControlRefused("agents cannot open terminals or system tools")
-                self._open_app(name, step, wait)
+                if not self._open_app(name, step, wait):
+                    warning = (
+                        f"could not confirm '{name}' opened within {OPEN_APP_VERIFY_S:g} s (the foreground "
+                        "window did not match its name); the launcher keystrokes may have done nothing. "
+                        "Ask the person whether it opened before typing into it."
+                    )
                 detail = name
         a.ok = True
         # the feature's click-verification extras (e.g. target_label) ride along in `extra`; the
@@ -1114,10 +1281,10 @@ class ComputerControl:
                 "focused": focused,
                 **extra,
             }
-        entry = self._log(g, action, detail, "done", undo)
+        entry = self._log(g, action, detail, "warned" if warning else "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": action, "detail": detail, "id": entry.id})
         # v0.1.28: the agent is told its remaining budget with every action result
-        return {
+        out: dict[str, Any] = {
             "ok": True,
             "action": action,
             "detail": detail,
@@ -1130,6 +1297,9 @@ class ComputerControl:
             "focused": focused,
             **extra,
         }
+        if warning:
+            out["warning"] = warning
+        return out
 
     def act_sequence(self, agent_id: str, steps: Any) -> dict[str, Any]:
         """Run several actions in one call: one grant check, one log entry, one engine Action. Every sub-step
@@ -1225,9 +1395,11 @@ class ComputerControl:
             fg = {}
         return {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
 
-    def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> None:
+    def _open_app(self, name: str, step: Callable[[], Any], wait: Callable[[float], None]) -> bool:
         """Through the OS launcher (Start menu search / Spotlight): no command line is ever built. Each step checks
-        that the person has not stopped or taken over."""
+        that the person has not stopped or taken over. After Enter, the foreground window is polled for up to
+        ``OPEN_APP_VERIFY_S`` for a title/process match against ``name``; returns True when the app visibly
+        opened. The fixed 0.6/0.8 s sleeps stay as the base timing; the poll is the verification."""
         b = self.hooks.backend
         if not (self.platform == "win32" or (self.platform == "darwin" and hasattr(b, "hotkey"))):
             raise ControlRefused("open_app works on Windows and macOS; on Linux, open it yourself or use open_url")
@@ -1242,6 +1414,49 @@ class ComputerControl:
         wait(0.8)
         self.note_own_keys()
         step().key("enter")
+        return self._app_visible(name, wait)
+
+    @staticmethod
+    def _name_matches(want: str, title: str, process: str) -> bool:
+        """The requested app name against a foreground window's title and process name (case-insensitive,
+        punctuation-insensitive: "Notepad" matches "Untitled - Notepad" and "notepad.exe").
+
+        Short names (under 3 alphanumeric characters) use stricter matching: they must equal the
+        process stem or appear as a whole word in the title. This avoids "a" matching "Calculator"
+        or "it" matching "Settings".
+        """
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", s.lower())
+
+        want = norm(want)
+        if not want:
+            return False
+        proc = norm(process[:-4]) if process.lower().endswith(".exe") else norm(process)
+        title_n = norm(title)
+        if len(want) < 3:
+            # strict mode for short names: exact process stem, or whole-word in title
+            if proc and want == proc:
+                return True
+            words = re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
+            return want in [re.sub(r"[^a-z0-9]", "", w) for w in words]
+        return want in title_n or (bool(proc) and want in proc)
+
+    def _app_visible(self, name: str, wait: Callable[[float], None]) -> bool:
+        """Poll the foreground window until its title or process matches ``name`` (or the ~3 s budget runs out).
+        ``wait`` still checks for a stop/takeover between polls, so the person can interrupt the verification."""
+        deadline = self.clock() + OPEN_APP_VERIFY_S
+        for _ in range(int(OPEN_APP_VERIFY_S / OPEN_APP_POLL_S) + 1):
+            try:
+                fg = self.hooks.foreground() or {}
+            except Exception:
+                fg = {}
+            if self._name_matches(name, str(fg.get("title", "")), str(fg.get("process", ""))):
+                return True
+            if self.clock() >= deadline:
+                return False
+            wait(OPEN_APP_POLL_S)
+        return False
 
     def _open_system_tool(self, target: str) -> None:
         """Launch an allowlisted ``SAFE_SYSTEM_TOOLS`` target through the shell: no synthetic keystrokes,
@@ -1378,6 +1593,30 @@ class ComputerControl:
         """The person pressed Undo in Agent Link (no grant needed: it is their own input)."""
         return self._undo(None)
 
+    def undo_all_by_user(self, item_ids: list[str]) -> dict[str, Any]:
+        """The person pressed "Undo all" on a consent receipt (proposal #17): put back every undoable action
+        listed on that receipt (cursor moves, scrolls, typed text). Only the receipt's own items are touched:
+        never another agent's actions, never an unrelated prior session. No grant needed: it is their own input.
+        Clicks and key presses can't be put back."""
+        ids = set(item_ids)
+        undone: list[str] = []
+        failed: list[str] = []
+        while True:
+            try:
+                r = self._undo(None, only_ids=ids)
+            except ControlRefused as exc:
+                # "nothing that can be undone" means we are done (all undoable items
+                # handled). Any other refusal is a real failure; report it.
+                if "nothing that can be undone" not in str(exc):
+                    failed.append(str(exc))
+                break
+            undone.append(describe_action(r["undone"], r["detail"]))
+        out: dict[str, Any] = {"undone": undone, "count": len(undone)}
+        if failed:
+            out["failed"] = failed
+            out["partial"] = True
+        return out
+
     def _undo(
         self, agent_id: str | None, only_ids: set[str] | None = None, budget_grant: Grant | None = None
     ) -> dict[str, Any]:
@@ -1402,7 +1641,6 @@ class ComputerControl:
                     raise ControlRefused(BUDGET_EXHAUSTED.format(budget=budget_grant.step_budget))
                 budget_grant.steps_used += 1
             e.result = "undoing"
-
         b = self.hooks.backend
         u = e.undo or {}
         sub = list(reversed(u["sequence"])) if "sequence" in u else [u]

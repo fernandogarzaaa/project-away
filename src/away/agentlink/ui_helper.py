@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 COLORS = {"info": "#1f6feb", "success": "#1a7f37", "warning": "#bf8700", "error": "#cf222e", "camera": "#cf222e"}
+_RECEIPT_IMAGES: dict[str, list[Any]] = {}
 BORDER = "#ff2d55"
 
 
@@ -74,6 +75,18 @@ def paused_banner_texts(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def receipt_texts(spec: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a consent receipt into the exact plain-language fields shown by its window."""
+    items = [str(item.get("text") or "") if isinstance(item, dict) else str(item) for item in (spec.get("items") or [])]
+    return {
+        "title": str(spec.get("title") or "Your AI agent finished using your computer"),
+        "headline": str(spec.get("headline") or ""),
+        "ended": str(spec.get("ended") or ""),
+        "items": items,
+        "undoable": bool(spec.get("undoable")),
+    }
+
+
 def write_ack(path: Path | None, data: dict[str, Any]) -> None:
     """Tell the app whether the window really showed (``{"shown": true, "x", "y", ...}`` or an ``error``)."""
     if path is None:
@@ -86,7 +99,7 @@ def write_ack(path: Path | None, data: dict[str, Any]) -> None:
         pass
 
 
-KINDS = ("prompt", "toast", "flash", "control")
+KINDS = ("prompt", "toast", "flash", "control", "receipt")
 
 
 def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-tested under Xvfb
@@ -130,6 +143,8 @@ def main(kind: str, spec_path: Path) -> int:  # pragma: no cover - GUI; smoke-te
         _toast(root, spec, flash=kind == "flash")
     elif kind == "control":
         _control(root, spec, Path(spec_path))
+    elif kind == "receipt":
+        _receipt(root, spec, Path(spec_path))
     root.mainloop()
     return 0
 
@@ -311,6 +326,151 @@ def _prompt(root: Any, spec: dict[str, Any], path: Path) -> None:  # pragma: no 
             root.destroy()
             return
         if time.monotonic() > deadline:
+            root.destroy()
+            return
+        root.after(200, poll)
+
+    poll()
+
+
+def _receipt(root: Any, spec: dict[str, Any], spec_path: Path) -> None:  # pragma: no cover - desktop GUI
+    """Show the user's post-session activity receipt and publish one explicit answer."""
+    import tkinter as tk
+
+    t = receipt_texts(spec)
+    rid = str(spec.get("id") or spec_path.stem)
+    answer_file = spec_path.with_name(f"{rid}.answer.json")
+    done_file = spec_path.with_name(f"{rid}.done")
+    win = tk.Toplevel(root)
+    win.title(t["title"])
+    win.attributes("-topmost", True)
+    win.configure(bg="white")
+    win.protocol("WM_DELETE_WINDOW", lambda: answer("close"))
+
+    # Keep a window-local reference to Pillow images so Tk does not collect them.
+    images: list[Any] = []
+    _RECEIPT_IMAGES[rid] = images
+
+    tk.Label(
+        win,
+        text=t["title"],
+        bg="white",
+        fg="#24292f",
+        font=("Segoe UI", 14, "bold"),
+        wraplength=560,
+        justify="left",
+    ).pack(anchor="w", padx=18, pady=(16, 4))
+    if t["headline"]:
+        tk.Label(
+            win,
+            text=t["headline"],
+            bg="white",
+            fg="#1f6feb",
+            font=("Segoe UI", 11, "bold"),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 6))
+    if t["ended"]:
+        tk.Label(
+            win,
+            text=f"Why it ended: {t['ended']}",
+            bg="white",
+            fg="#57606a",
+            font=("Segoe UI", 9),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+
+    panel = tk.Frame(win, bg="white")
+    panel.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+    canvas = tk.Canvas(panel, bg="white", highlightthickness=0, width=560, height=260)
+    scrollbar = tk.Scrollbar(panel, orient="vertical", command=canvas.yview)
+    rows = tk.Frame(canvas, bg="white")
+    rows.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=rows, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    for item in spec.get("items") or []:
+        if not isinstance(item, dict):
+            item = {"text": str(item)}
+        row = tk.Frame(rows, bg="#f6f8fa", padx=8, pady=8)
+        row.pack(fill="x", pady=3)
+        thumb = str(item.get("thumb_path") or "")
+        if thumb:
+            try:
+                from PIL import Image, ImageTk
+
+                with Image.open(thumb) as source:
+                    image = source.convert("RGB")
+                    resampling = getattr(Image, "Resampling", Image).LANCZOS
+                    image.thumbnail((128, 72), resampling)
+                    photo = ImageTk.PhotoImage(image.copy())
+                images.append(photo)
+                tk.Label(row, image=photo, bg="#f6f8fa").pack(side="left", padx=(0, 10))
+            except (OSError, ValueError, ImportError):
+                pass
+        tk.Label(
+            row,
+            text=str(item.get("text") or "Agent action"),
+            bg="#f6f8fa",
+            fg="#24292f",
+            wraplength=400,
+            justify="left",
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+    buttons = tk.Frame(win, bg="white")
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def answer(value: str) -> None:
+        try:
+            tmp = answer_file.with_name(answer_file.name + ".tmp")
+            tmp.write_text(json.dumps({"answer": value}), encoding="utf-8")
+            tmp.replace(answer_file)
+        except OSError:
+            pass
+        _RECEIPT_IMAGES.pop(rid, None)
+        root.after(100, root.destroy)
+
+    if t["undoable"]:
+        tk.Button(
+            buttons,
+            text="Undo all",
+            command=functools.partial(answer, "undo_all"),
+            bg="#cf222e",
+            fg="white",
+            activebackground="#a40e26",
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            padx=12,
+            pady=5,
+        ).pack(side="left")
+    tk.Button(
+        buttons,
+        text="Close",
+        command=functools.partial(answer, "close"),
+        bg="#f6f8fa",
+        fg="#24292f",
+        font=("Segoe UI", 10),
+        padx=12,
+        pady=5,
+    ).pack(side="right")
+
+    win.update_idletasks()
+    _place(win, min(640, max(500, win.winfo_reqwidth())), min(520, win.winfo_reqheight()), "center")
+    timeout = max(1.0, min(float(spec.get("timeout_s") or 180.0), 600.0))
+    deadline = time.monotonic() + timeout
+
+    def poll() -> None:
+        if done_file.exists():
+            done_file.unlink(missing_ok=True)
+            _RECEIPT_IMAGES.pop(rid, None)
+            root.destroy()
+            return
+        if time.monotonic() >= deadline:
+            _RECEIPT_IMAGES.pop(rid, None)
             root.destroy()
             return
         root.after(200, poll)
