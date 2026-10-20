@@ -36,6 +36,6 @@ Fourteen fix PRs, #75 through #88. All fourteen are open. None is merged. Mergin
 
 ## Notes
 
-- CI evidence for every head above lives in `docs/audits/remediation-matrix.md`, one row per PR with both run IDs. A queued run is recorded as queued. Nothing in this program counts a queued, cancelled, or missing check as a pass.
+- CI evidence for every head above lives in `docs/audits/remediation-matrix.md`, one row per PR with both run IDs. Every canonical run in that table was verified by reading its job list directly; a run recorded as cancelled is a duplicate the parent cancelled itself. Nothing in this program counts a queued, cancelled, or missing check as a pass.
 - This documentation set ships on its own docs branch. Its PR is opened separately from the fourteen fix PRs.
 - The recommended merge order is in `docs/audits/remediation-matrix.md`. It is a recommendation only.

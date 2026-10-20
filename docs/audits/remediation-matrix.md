@@ -64,28 +64,28 @@ Fix commit SHA means the PR head SHA at writing. Each head contains its fix and 
 
 ## CI evidence
 
-One row per fix PR. Run IDs are the pull_request run and the workflow_dispatch run for the head at writing. A run recorded as queued had not completed at writing. A queued, cancelled, or missing check is not a pass, and this table does not present one as a pass.
+One row per fix PR. Every pull_request run in this table was verified by the parent by reading its job list directly, not by trusting a reported verdict: each recorded success means every job in the run concluded success, including every mutation group. A cancelled dispatch run recorded below is one the parent cancelled itself as a duplicate, to drain a saturated queue; the canonical pull_request run is the evidence for that head.
 
 | PR | Head SHA | pull_request run | workflow_dispatch run | Status at writing |
 | --- | --- | --- | --- | --- |
 | #75 | `4645dcd3` | 39437897086 | 39438050682 | Both success (parent verified) |
 | #76 | `26bba6b2` | 39439650397 | 39439651402 | Both success (parent verified) |
-| #77 | `84f9eedf` | 39440434359 | 39440478195 | PR run success. Dispatch run: failure explained (infrastructure), re-run pending at writing. See the note below. |
-| #78 | `2aa3e8ec` | 39449467654 | 39449599761 | Queued at writing |
-| #79 | `c399ce03` | 39440968691 | 39440969048 | PR run success. Dispatch run: one macOS job failed on the glide self-test (assert hz > 5, measured 4.0 on a loaded runner); failed job re-run queued at writing |
+| #77 | `84f9eedf` | 39440434359 | 39440478195 | Both success. PR run 26/26 jobs. Dispatch run attempt 2 success after the attempt 1 failure explained below. |
+| #78 | `2aa3e8ec` | 39449467654 | 39449599761 | PR run success, 27 jobs including the new mutation-groups-check job. Dispatch run cancelled by the parent as a duplicate. |
+| #79 | `c399ce03` | 39440968691 | 39440969048 | Both success. PR run 26/26 jobs. Dispatch attempt 2 success after the macOS glide self-test flake (assert hz > 5, measured 4.0 on a loaded runner) was re-run. |
 | #80 | `d7114c4f` | 39441810533 | 39441809492 | Both success (parent verified) |
-| #81 | `3350a14f` | 39452426584 | 39452462697 | Queued at writing. See the history note below. |
+| #81 | `3350a14f` | 39452426584 | 39452462697 | PR run success, 26/26 jobs, attempt 2. Attempt 1 failed only the macOS job on a voice latency ratio flake (1541.5 ms against a 1536.4 ms line); re-run passed. Dispatch run cancelled by the parent as a duplicate. See the history note below. |
 | #82 | `78860f34` | 39446969989 | 39446969692 | Both success (parent verified) |
-| #83 | `8b7b7567` | 39447553917 | 39447568421 | Dispatch run success (parent verified). PR run queued at writing |
-| #84 | `de39f297` | 39447653938 | 39447687181 | Queued at writing |
-| #85 | `7ce20692` | 39450418632 | 39450420629 | Queued at writing |
-| #86 | `95a59577` | 39452121988 | 39452154791 | Queued at writing |
-| #87 | `1a24aff7` | 39452200251 | 39452239489 | Queued at writing |
-| #88 | `8e7665de` | 39453788206 | 39453810843 | Queued at writing |
+| #83 | `8b7b7567` | 39447553917 | 39447568421 | Both success (parent verified) |
+| #84 | `de39f297` | 39447653938 | 39447687181 | PR run success, 26/26 jobs. Dispatch run cancelled by the parent as a duplicate. |
+| #85 | `7ce20692` | 39450418632 | 39450420629 | PR run success, 26/26 jobs. Dispatch run cancelled by the parent as a duplicate. |
+| #86 | `95a59577` | 39452121988 | 39452154791 | PR run success, 26/26 jobs. Dispatch run cancelled by the parent as a duplicate. |
+| #87 | `1a24aff7` | 39452200251 | 39452239489 | PR run success, 26/26 jobs. Dispatch run cancelled by the parent as a duplicate. |
+| #88 | `8e7665de` | 39453788206 | 39453810843 | PR run success, 26/26 jobs. Dispatch run cancelled by the parent as a duplicate. |
 
-**Note on PR #77's dispatch run.** The mutation summary job failed in its "download mutation reports" step because downloading the filters group artifact returned HTTP 503 (GitHub artifact storage egress over the account limit). The summary step was skipped and no score was computed in that run. The pull_request run 39440434359 on the same head passed the full mutation gate. The failed job has been re-run by the parent; its status is failure explained (infrastructure), re-run pending at writing.
+**Note on PR #77's dispatch run.** The mutation summary job failed in its "download mutation reports" step because downloading the filters group artifact returned HTTP 503 (GitHub artifact storage egress over the account limit). The summary step was skipped and no score was computed in that run. The pull_request run 39440434359 on the same head passed the full mutation gate. The failed job has been re-run by the parent and completed success on attempt 2.
 
-**History note on PR #81.** The branch's first head, `3f31aaab`, failed all platform test jobs on one stale test expectation: `tests/test_msix_packaging.py` expected the SignPath action at `@v3` after the branch itself had SHA-pinned that action. The fix updated the expectation to the pin. The head in the table above, `3350a14f`, carries that fix.
+**History note on PR #81.** The branch's first head, `3f31aaab`, failed all platform test jobs on one stale test expectation: `tests/test_msix_packaging.py` expected the SignPath action at `@v3` after the branch itself had SHA-pinned that action. The fix updated the expectation to the pin. The head in the table above, `3350a14f`, carries that fix. Its attempt 1 run failed only the macOS job on a voice latency ratio flake (after total 1541.5 ms against a 1536.4 ms line on a loaded runner); the re-run passed all 26 jobs on attempt 2.
 
 ## Recommended merge order
 
