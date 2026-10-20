@@ -211,3 +211,15 @@ def test_diagonal_tie_prefers_vertical() -> None:
     assert ev is not None and ev[0] == "autoscroll"
     assert ev[1]["vx"] == 0.0
     assert ev[1]["vy"] == pytest.approx(0.2)
+
+
+# Round 3: constructor state margin
+
+
+def test_new_scroller_has_zero_velocity_and_no_anchor() -> None:
+    # Kills the 0.0 -> 1.0 constant mutants on the initial vx/vy.
+    sc = AutoScroller()
+    assert sc.vx == 0.0
+    assert sc.vy == 0.0
+    assert sc.anchor is None
+    assert sc.active is False
