@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import functools
+import ipaddress
 import json
 import re
 import threading
@@ -232,6 +233,7 @@ class Gate:
         access_log: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         tunnel_hosts: Callable[[], Any] = lambda: (),
+        tunnel_port: Callable[[], Any] = lambda: None,
         link_info: Callable[[], dict[str, Any]] = lambda: {},
         token_expiry: Callable[[], Any] = lambda: DEFAULT_TOKEN_EXPIRY,
     ) -> None:
@@ -239,6 +241,7 @@ class Gate:
         self.link_info = link_info  # v0.1.24: the current public addresses (GET /v1/link, refresh replies)
         self.service = service
         self.tunnel_hosts = tunnel_hosts  # v0.1.23: hostnames of the active secure / backup link (Host check)
+        self.tunnel_port = tunnel_port  # v0.1.29: the dedicated Cloudflare listener's live port, None when down
         self.registry = registry
         self.local_key = local_key
         self.remote_ttl_s = remote_ttl_s
@@ -280,6 +283,32 @@ class Gate:
                     )
             except OSError:
                 pass
+
+    # ------------------------------------------------------- request ingress
+    def ingress_source(self, scope: dict[str, Any], headers: dict[str, str]) -> tuple[str, str, str]:
+        """(ingress, address, key) for one request.
+
+        Ingress is "tunnel" exactly when the request arrived on the dedicated Cloudflare listener, else "shared".
+        A forwarding header is honored only on tunnel ingress, and only when it is one IP literal; anything else
+        falls back to the socket peer. The key qualifies every rate and lockout bucket by ingress, so a lockout
+        on one ingress never blocks the other. Relay traffic arrives on the shared listener, so relay users share
+        the shared key by design: per-user isolation there is the relay's own SSH authentication, not the app's.
+        A named Cloudflare tunnel is shared too: its dashboard ingress target is user-configured and fixed, and
+        the app cannot prove a request arrived through it, so its header is never trusted."""
+        peer = str((scope.get("client") or ("?", 0))[0])
+        server = scope.get("server") or (None, None)
+        server_port = server[1] if len(server) > 1 else None
+        tunnel_port: Any = None
+        with contextlib.suppress(Exception):
+            tunnel_port = self.tunnel_port()
+        on_tunnel = False
+        with contextlib.suppress(TypeError, ValueError):
+            on_tunnel = tunnel_port is not None and server_port is not None and int(server_port) == int(tunnel_port)
+        if on_tunnel:
+            raw = (headers.get("cf-connecting-ip") or "").strip()
+            addr = _single_ip(raw) or peer
+            return "tunnel", addr, f"tunnel:{addr}"
+        return "shared", peer, f"shared:{peer}"
 
     # ----------------------------------------------------------------- pairing
     def pair(
@@ -469,6 +498,15 @@ def host_without_port(value: str) -> str:
     return v
 
 
+def _single_ip(value: str) -> str | None:
+    """One IP literal, normalized, or None. A list, a hostname, or garbage is not an identity."""
+    if not value or "," in value or any(c.isspace() for c in value):
+        return None
+    with contextlib.suppress(ValueError):
+        return str(ipaddress.ip_address(value))
+    return None
+
+
 def hostname_of(url: str | None) -> str:
     """``https://abc.lhr.life/x`` -> ``abc.lhr.life`` ("" when there is none)."""
     if not url:
@@ -538,7 +576,8 @@ class AuthMiddleware:
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        ip = headers.get("cf-connecting-ip") or (scope.get("client") or ("?", 0))[0]
+        ingress, ip, key = g.ingress_source(scope, headers)
+        scope = dict(scope, state={**(scope.get("state") or {}), "ingress": ingress, "ingress_key": key})
         status_box = {"status": 0}
         agent_name = {"name": ""}
         started = {"start": False, "end": False}
@@ -595,12 +634,14 @@ class AuthMiddleware:
             auth = headers.get("authorization", "")
             bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             persistent = bearer.startswith(PERSIST_PREFIX)
-            # v0.1.24: an agent token is limited per source (with backoff) instead of by the global lockout, so a
-            # stranger guessing tokens cannot lock the person's own agents out
-            if g.lockout.locked() and not persistent:
+            # v0.1.29: the lockout is per ingress key. A request with no credential is refused outright while its
+            # ingress is locked; a request that presents a credential is authenticated below, and a valid one
+            # passes and clears its key. Persistent tokens bypass the lockout and use per-key backoff instead.
+            if g.lockout.locked(key) and not persistent and not bearer:
                 await reply(429, "too many failed attempts; wait a minute")
                 return
-            if not g.bucket.allow(ip):
+            was_locked = g.lockout.locked(key) if not persistent else False
+            if not g.bucket.allow(key):
                 await reply(429, "too many requests; slow down")
                 return
             public = (method == "GET" and path in ("/", "/openapi.json", "/favicon.ico", "/v1/ping")) or (
@@ -619,7 +660,7 @@ class AuthMiddleware:
                     if agent is None:
                         p = g.registry.find_pairing(code=code)
                         if p is None:
-                            g.lockout.fail()
+                            g.lockout.fail(key)
                             await reply(404, "this link has expired or was already used; make a new one in Agent Link")
                             return
                         body = await _read_body(receive, MAX_MCP_BODY)
@@ -638,7 +679,7 @@ class AuthMiddleware:
                     if body is not None:
                         receive = _replay_body(body, receive)
             elif not public:
-                wait = g.token_backoff.retry_after(str(ip)) if persistent else 0.0
+                wait = g.token_backoff.retry_after(key) if persistent else 0.0
                 if wait > 0:
                     await _json(
                         {"error": f"too many wrong tokens from this address; wait {int(wait) + 1} s"},
@@ -655,21 +696,26 @@ class AuthMiddleware:
                     agent = g.registry.authenticate(bearer)
                 if agent is None:
                     if persistent:
-                        g.token_backoff.fail(str(ip))
+                        g.token_backoff.fail(key)
                     else:
-                        g.lockout.fail()  # unchanged since v0.1.20 for access tokens
-                    await reply(
-                        401,
-                        "this agent token was revoked, expired or replaced; pair again in Project Away > Agent Link"
-                        if persistent
-                        else "missing or invalid token (Authorization: Bearer ...)",
-                    )
+                        g.lockout.fail(key)  # unchanged since v0.1.20 for access tokens, now per ingress key
+                    if not persistent and was_locked:
+                        await reply(429, "too many failed attempts; wait a minute")
+                    else:
+                        await reply(
+                            401,
+                            "this agent token was revoked, expired or replaced; pair again in Project Away > Agent Link"
+                            if persistent
+                            else "missing or invalid token (Authorization: Bearer ...)",
+                        )
                     return
                 if persistent:
-                    g.token_backoff.ok(str(ip))
+                    g.token_backoff.ok(key)
             if agent is not None:
                 agent_name["name"] = agent.name
                 agent_id_box["id"] = agent.id
+                if not persistent:
+                    g.lockout.reset(key)  # a valid credential clears its own ingress's failures
                 state = dict(scope.get("state") or {})
                 state["agent"] = agent
                 if token_check is not None:
@@ -679,7 +725,7 @@ class AuthMiddleware:
                 return
             await self.app(scope, receive, send_logged)
         finally:
-            g.log(str(ip), agent_name["name"], method, path, status_box["status"], (time.monotonic() - t0) * 1000.0)
+            g.log(key, agent_name["name"], method, path, status_box["status"], (time.monotonic() - t0) * 1000.0)
 
 
 def _with_header(send: Any, name: str, value: str) -> Any:
@@ -1001,7 +1047,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
             return _json({"error": str(exc)}, 400)
         p = gate.registry.find_pairing(code=data.get("code"), pin=str(data["pin"]) if data.get("pin") else None)
         if p is None:
-            gate.lockout.fail()
+            gate.lockout.fail(request.scope.get("state", {}).get("ingress_key", ""))
             return _json({"error": "unknown or expired code"}, 404)
         name = friendly_name(data.get("name") or "AI agent")
         try:
@@ -1035,7 +1081,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
                 lambda a: gate.local_ttl_s() if a.kind == "local" else gate.remote_ttl_s(),
             )
         except RefreshError as exc:
-            gate.lockout.fail()
+            gate.lockout.fail(request.scope.get("state", {}).get("ingress_key", ""))
             return _json({"error": str(exc)}, 401)
         service.events.publish("agent.reconnected", {"agent": agent.name})
         return _json({"token": token, "agent": agent.public(), **gate.reconnect_info(agent, fresh)})
@@ -1089,7 +1135,7 @@ def create_app(service: Service, gate: Gate, mcp: Any = None) -> Any:
                 )
             )
         except Forbidden as exc:
-            gate.lockout.fail()
+            gate.lockout.fail(request.scope.get("state", {}).get("ingress_key", ""))
             return _json({"error": str(exc)}, 403)
         except ValueError as exc:
             return _json({"error": str(exc)}, 400)

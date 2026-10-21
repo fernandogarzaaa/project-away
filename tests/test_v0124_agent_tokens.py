@@ -469,8 +469,10 @@ def test_wrong_tokens_are_rate_limited_per_source_with_backoff(tmp_path: Path) -
         assert st == 429 and int(hdrs["retry-after"]) >= 1 and b"wait" in body
         # even the right token is refused from that address while it waits ...
         assert http(base, "GET", "/v1/status", token=tok, headers=attacker)[0] == 429
-        # ... but the person's own agent elsewhere is not locked out, and public pages stay up
-        assert http(base, "GET", "/v1/status", token=tok, headers={"cf-connecting-ip": "203.0.113.9"})[0] == 200
+        # ... and a different forged header on the same shared listener is the same source: the header is
+        # ignored there, so it waits too. Per-source isolation on shared ingress is the relay's SSH
+        # authentication, not the app's; tunnel-listener isolation is covered in test_v0129_ingress_trust.py.
+        assert http(base, "GET", "/v1/status", token=tok, headers={"cf-connecting-ip": "203.0.113.9"})[0] == 429
         assert http(base, "GET", "/openapi.json")[0] == 200
     finally:
         stop_host(h, auto)
