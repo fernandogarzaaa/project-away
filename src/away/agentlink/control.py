@@ -476,6 +476,15 @@ class ComputerControl:
             if pending is not None and (agent_id is None or pending[0] == agent_id):
                 self._pending_admission = None
 
+    def has_pending_admission(self) -> bool:
+        """True while an approval prompt is waiting for the person's answer.
+
+        Stop surfaces check this alongside the live grant: while a prompt waits,
+        there is no grant yet and the engine is idle, so the grant/busy gates
+        alone would miss the stop."""
+        with self._lock:
+            return self._pending_admission is not None
+
     def request(self, agent_id: str, agent_name: str, why: str = "", minutes: float | None = None) -> dict[str, Any]:
         """Ask the user (on the PC) to let this agent use the computer. Blocks until answered or timed out.
 

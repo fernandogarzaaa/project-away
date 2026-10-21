@@ -786,7 +786,7 @@ class AgentLinkHost:
             self.core.prompts.feed_sign(t, sign)
         held = self._palm.update(t, sign if sign == handsigns.OPEN_PALM else None)
         ctl = self.core.control
-        if held and (ctl.grant is not None or ctl.engine.busy()):
+        if held and (ctl.grant is not None or ctl.engine.busy() or ctl.has_pending_admission()):
             ctl.engine.stop_all("you held up an open palm")  # Stop everything: every source, the agent's grant too
 
     def _on_bus(self, ev: Any) -> None:
@@ -805,7 +805,9 @@ class AgentLinkHost:
             if self.core.prompts.current is not None and self.core.prompts.feed_voice(text):
                 return
             ctl = self.core.control
-            if normalize(text) in STOP_WORDS and (ctl.grant is not None or ctl.engine.busy()):
+            if normalize(text) in STOP_WORDS and (
+                ctl.grant is not None or ctl.engine.busy() or ctl.has_pending_admission()
+            ):
                 ctl.engine.stop_all("you said stop")  # Stop everything
         if topic in ("action.cancelled", "action.undone", "feedback.wrong"):
             self.core.events.publish("misfire", {"topic": topic, **{k: str(v)[:100] for k, v in data.items()}})
