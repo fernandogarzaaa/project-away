@@ -20,7 +20,62 @@ from typing import Any
 
 import yaml
 
-SECRET_KEY = re.compile(r"(token|password|passwd|secret|api_?key|auth|credential|cookie)", re.IGNORECASE)
+# Fail closed on key names (audit Phase 4): a structured key whose name suggests a secret loses its
+# value even when the name was never listed up front, so a secret stored under an unrecognized name
+# (private_key, passphrase, a seed phrase) cannot leave the PC in a bundle. Two layers:
+# - SECRET_KEY: substrings that are unambiguous anywhere in a name.
+# - _SECRET_TOKENS: whole words after splitting on separators and camelCase humps, for short words
+#   that must not fire inside innocent words (key in keyboard/monkey, pass in passage). A *_key name
+#   still counts (hold_key's value is hidden too; that is the intended fail-closed trade-off).
+SECRET_KEY = re.compile(
+    r"(token|password|passwd|passcode|passphrase|secret|credentials?|mnemonic|api_?key)", re.IGNORECASE
+)
+_SECRET_TOKENS = frozenset(
+    {
+        "key",
+        "keys",
+        "pass",
+        "phrase",
+        "auth",
+        "oauth",
+        # Whole words, not the auth substring: "authorization" and "authentication"
+        # are credentials, but "author" is innocent and must not match.
+        "authorization",
+        "authentication",
+        "bearer",
+        "cookie",
+        "cookies",
+        "session",
+        "seed",
+        "seeds",
+        "cert",
+        "certs",
+        "cred",
+        "creds",
+        "pwd",
+        "private",
+    }
+)
+_KEY_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _key_tokens(name: str) -> list[str]:
+    out: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", name):
+        for part in _KEY_CAMEL.split(chunk):
+            tok = part.lower().rstrip("0123456789")
+            if tok:
+                out.append(tok)
+    return out
+
+
+def _is_secret_key(name: Any) -> bool:
+    text = str(name)
+    if SECRET_KEY.search(text):
+        return True
+    return any(tok in _SECRET_TOKENS for tok in _key_tokens(text))
+
+
 LOG_FILES = ("away.log", "crash.log", "update-install.log", "agent-access.log")
 TAIL_BYTES = 2_000_000
 KEEP = 20
@@ -41,7 +96,8 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # key=value, key: value, "key": "value" for anything named like a secret
     (
         re.compile(
-            r"(?i)([\"']?\b[\w.-]*(?:token|password|passwd|pwd|secret|api[_-]?key|auth\w*|credential|cookie)[\w.-]*"
+            r"(?i)([\"']?\b[\w.-]*(?:token|password|passwd|pwd|secret|api[_-]?key|auth\w*|credential|cookie"
+            r"|passphrase|passcode|mnemonic|private[_-]?key)[\w.-]*"
             r"[\"']?\s*[:=]\s*)([\"']?)[^\s\"',;&]+"
         ),
         r"\1\2" + HIDDEN,
@@ -78,8 +134,7 @@ def redact(obj: Any, home: str | None = None) -> Any:
     home = home if home is not None else str(Path.home())
     if isinstance(obj, dict):
         return {
-            k: ("***" if SECRET_KEY.search(str(k)) and v not in (None, "", False) else redact(v, home))
-            for k, v in obj.items()
+            k: ("***" if _is_secret_key(k) and v not in (None, "", False) else redact(v, home)) for k, v in obj.items()
         }
     if isinstance(obj, list):
         return [redact(v, home) for v in obj]

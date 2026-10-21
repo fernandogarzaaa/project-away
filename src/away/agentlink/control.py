@@ -222,6 +222,24 @@ def plain_end_reason(reason: str) -> str:
     return PLAIN_END_REASONS.get(reason, str(reason or ""))
 
 
+def purge_trail_folder(folder: Path | None) -> dict[str, int]:
+    """Delete every persisted audit-trail artifact in ``folder``: the ``session-*.jsonl`` files and
+    the action thumbnails (every PNG there is one; the folder holds nothing else). Returns how many
+    of each were removed. Used when the audit trail is switched off and no host is running to do it."""
+    removed = {"files": 0, "thumbnails": 0}
+    if folder is None:
+        return removed
+    folder = Path(folder)
+    if not folder.is_dir():
+        return removed
+    for pattern, key in (("session-*.jsonl", "files"), ("*.png", "thumbnails")):
+        for path in folder.glob(pattern):
+            with contextlib.suppress(Exception):
+                path.unlink(missing_ok=True)
+                removed[key] += 1
+    return removed
+
+
 class ControlRefused(ActionRefused):
     """An action that was not run; ``str(exc)`` is a plain-language reason the agent can relay."""
 
@@ -682,9 +700,17 @@ class ComputerControl:
         """Keep only the newest sessions, in memory and on disk (the PNG thumbnails are pruned with the log)."""
         while len(self._session_order) > MAX_SESSIONS:
             old = self._session_order.pop(0)
-            self.sessions.pop(old, None)
+            trail = self.sessions.pop(old, None) or []
             self._session_agents.pop(old, None)
             if self.log_folder is not None:
+                thumbs = {e.thumb for e in trail if e.thumb}
+                thumbs |= {e.thumb for e in self.log if e.session == old and e.thumb}
+                for name in thumbs:
+                    with contextlib.suppress(Exception):
+                        (self.log_folder / name).unlink(missing_ok=True)
+                for e in self.log:  # the names now dangle; the files are gone
+                    if e.session == old and e.thumb:
+                        e.thumb = ""
                 with contextlib.suppress(Exception):
                     (self.log_folder / f"session-{old}.jsonl").unlink(missing_ok=True)
 
@@ -707,6 +733,7 @@ class ComputerControl:
             )
         except Exception:
             return
+        parsed: list[tuple[float, float, str, str, list[LogEntry]]] = []
         for path in files[-MAX_SESSIONS:]:
             sid = path.name[len("session-") : -len(".jsonl")]
             if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
@@ -719,6 +746,7 @@ class ComputerControl:
             entries: list[LogEntry] = []
             by_id: dict[str, LogEntry] = {}
             seen = False
+            started_ts = 0.0
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -731,6 +759,7 @@ class ComputerControl:
                     if kind == "started":
                         seen = True
                         agent = str(ev.get("agent") or agent)
+                        started_ts = float(ev.get("ts") or 0.0)
                     elif kind == "step":
                         seen = True
                         thumb = str(ev.get("thumb") or "")
@@ -759,11 +788,35 @@ class ComputerControl:
                     continue  # one damaged line never costs the rest of the session
             if not seen:
                 continue
+            parsed.append((path.stat().st_mtime, started_ts, sid, agent, entries[-TRAIL_CAP:]))
+        # Install in age order. Modification time alone does not order sessions
+        # created in rapid sequence: on coarse-mtime filesystems several files
+        # share one timestamp, and the name tiebreak is random (session ids are
+        # random hex), so pruning dropped an arbitrary session instead of the
+        # oldest. The started line's wall-clock timestamp breaks the tie by
+        # actual creation order.
+        for _mtime, _started_ts, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2])):
             with self._lock:
-                self.sessions[sid] = entries[-TRAIL_CAP:]
+                self.sessions[sid] = entries
                 self._session_agents[sid] = agent
                 if sid not in self._session_order:
                     self._session_order.append(sid)
+
+    def clear_trail_data(self) -> dict[str, int]:
+        """Forget the whole audit trail: the in-memory sessions plus every persisted session file and
+        thumbnail. Used when the user turns the audit trail off (off means gone). The in-memory safety
+        action log itself stays (undo still needs it); its thumbnail names are blanked with the files.
+        Returns how much was removed: {"sessions": n, "files": n, "thumbnails": n}."""
+        with self._lock:
+            sessions = len(self._session_order)
+            self.sessions.clear()
+            self._session_agents.clear()
+            self._session_order.clear()
+        removed = purge_trail_folder(self.log_folder)
+        with self._lock:
+            for e in self.log:
+                e.thumb = ""
+        return {"sessions": sessions, **removed}
 
     def _session_file(self, session_id: str) -> Path | None:
         if self.log_folder is None:

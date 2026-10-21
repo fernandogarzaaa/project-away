@@ -429,14 +429,36 @@ class AgentLinkModel:
         except Exception:
             return True
 
-    def set_audit_trail(self, on: bool) -> None:
-        """v0.1.28: turn the visual audit trail on or off (no pictures kept and no session files when off)."""
+    def set_audit_trail(self, on: bool) -> dict[str, int]:
+        """v0.1.28: turn the visual audit trail on or off (no pictures kept and no session files when off).
+
+        v0.1.29: turning it off also deletes the trail data already on disk (the session files and
+        their thumbnails), so off means gone. Returns what was removed
+        ({"sessions": n, "files": n, "thumbnails": n}; all zero when turning on)."""
         from away import config as cfgmod
+        from away.agentlink.control import purge_trail_folder
 
         path = self.config_path or cfgmod.config_path()
         cfg, _ = cfgmod.load(path) if path.exists() else (cfgmod.AppConfig(), [])
         cfg.agent_link.control_audit_trail = bool(on)
         cfgmod.save(cfg, path)
+        removed = {"sessions": 0, "files": 0, "thumbnails": 0}
+        if on:
+            return removed
+        if self.alive():
+            res = self.wait_result(self.send("control_clear_trail"), 15.0)
+            result = res.get("result") if res.get("ok") else None
+            if isinstance(result, dict):
+                for key in removed:
+                    removed[key] = int(result.get(key, 0) or 0)
+                return removed
+            # The host did not return a successful clear (timeout, error): fall
+            # through to the local purge below. Without it the files stay on disk
+            # forever even though the setting is already saved as off, since
+            # startup with the trail off only skips restoring, never deletes.
+        if self.data_dir is not None:  # no host running: nothing in memory anywhere, delete from disk
+            removed.update(purge_trail_folder(hostmod.base_dir(self.data_dir) / "actions"))
+        return removed
 
     def talk_enabled(self) -> bool:
         from away import config as cfgmod
