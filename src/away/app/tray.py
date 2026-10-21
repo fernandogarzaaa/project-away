@@ -173,6 +173,7 @@ class TrayController:
             "recording": "recording",
             "idle": "push-to-talk ready",
             "off": "voice off",
+            "mic_error": "mic problem",
         }.get(state, state)
         text = f"Project Away - {'paused' if self.paused else 'active'}, {voice}"
         text += self.attention_suffix()

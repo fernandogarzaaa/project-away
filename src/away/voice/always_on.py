@@ -603,7 +603,7 @@ def _confidence(asr: Any) -> float | None:
 
 HELD_SAMPLES = 16000  # ~1 s of microphone audio (16 kHz) kept while the computer speaks, for a barge-in
 
-VOICE_STATES = ("muted", "stopped", "listening", "recording", "idle", "off")
+VOICE_STATES = ("muted", "stopped", "listening", "recording", "idle", "off", "mic_error")
 
 
 class VoiceController:
@@ -616,6 +616,7 @@ class VoiceController:
       * ``listening`` always_on, ambient listening
       * ``recording`` push_to_talk/toggle while capturing
       * ``idle``      push_to_talk/toggle waiting for the hotkey
+      * ``mic_error`` microphone capture is down (the mic supervisor is retrying)
     """
 
     def __init__(
@@ -634,6 +635,7 @@ class VoiceController:
         self.bus = bus
         self.enabled = enabled
         self.muted = False
+        self.mic_error: str | None = None  # set by the runner's mic supervisor while capture is down
         self.echo: Any = None  # v0.1.22: away.voice.speech.EchoGuard (the app sets it)
         self._echo_dropping = False
         # v0.1.26: the last ~1 s heard while the voice spoke (replayed only after a barge-in, else dropped)
@@ -656,6 +658,8 @@ class VoiceController:
             return "off"
         if self.muted:
             return "muted"
+        if self.mic_error:
+            return "mic_error"
         if self.mode == "always_on":
             return "listening" if self.listening else "stopped"
         return "recording" if (self.dictation is not None and self.dictation.recording) else "idle"
@@ -714,6 +718,17 @@ class VoiceController:
             if self.ambient is not None:
                 self.ambient.reset()
         self._emit()
+
+    def set_mic_error(self, error: str | None) -> None:
+        """Record a microphone capture failure (None once the mic is back).
+
+        While a failure is recorded the state surface (tray title, agent
+        context) reports ``mic_error``, so a dead stream is visible instead
+        of dictation silently doing nothing.
+        """
+        if error != self.mic_error:
+            self.mic_error = error
+            self._emit()
 
     def set_listening(self, on: bool) -> None:
         if self.ambient is not None:

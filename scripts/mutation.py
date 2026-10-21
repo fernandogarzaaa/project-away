@@ -33,7 +33,7 @@ GROUPS: dict[str, tuple[list[str], list[str]]] = {
     ),
     "dictation": (
         ["src/away/voice/dictation.py"],
-        ["tests/test_voice.py", "tests/test_v0129_dictation_mut.py"],
+        ["tests/test_voice.py", "tests/test_v0129_dictation_mut.py", "tests/test_v0129_mic_supervision.py"],
     ),
     "wifi_features": (["src/away/wifi/features.py"], ["tests/test_wifi.py"]),
     "wifi_classifier": (["src/away/wifi/classifier.py"], ["tests/test_wifi.py"]),
