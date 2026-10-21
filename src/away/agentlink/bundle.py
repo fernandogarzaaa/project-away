@@ -38,6 +38,10 @@ _SECRET_TOKENS = frozenset(
         "phrase",
         "auth",
         "oauth",
+        # Whole words, not the auth substring: "authorization" and "authentication"
+        # are credentials, but "author" is innocent and must not match.
+        "authorization",
+        "authentication",
         "bearer",
         "cookie",
         "cookies",

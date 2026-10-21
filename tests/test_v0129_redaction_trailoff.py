@@ -110,8 +110,26 @@ def test_redact_keeps_innocent_keys_and_prose() -> None:
         "hotkey": "ctrl+alt+k",
         "monkey_count": 3,
         "note": "the token bucket refills at 10 per second",
+        "author": "Jane Doe",
     }
     assert redact(data) == data
+
+
+def test_redact_hides_auth_derived_key_names() -> None:
+    # Codex P1 on #96: "authorization" split into one token that matched neither
+    # the substring list (no auth) nor the token set (only whole "auth"), so the
+    # credential passed through. Whole-word coverage, not the auth substring,
+    # so "author" stays innocent (see the test above).
+    out = redact(
+        {
+            "authorization": "Basic dXNlcjpwYXNz",
+            "authentication": "hunter2hunter2",
+            "author": "Jane Doe",
+        }
+    )
+    assert out["authorization"] == "***"
+    assert out["authentication"] == "***"
+    assert out["author"] == "Jane Doe"
 
 
 def test_redact_text_hides_new_secret_key_value_shapes() -> None:
@@ -204,6 +222,35 @@ def test_trail_off_without_a_running_host_still_deletes(tmp_path: Path) -> None:
     (folder / "0123abcd.png").write_bytes(b"\x89PNG\r\n")
     m = AgentLinkModel(data_dir=tmp_path, config_path=tmp_path / "config.yaml", alive=lambda: None)
     removed = m.set_audit_trail(False)
+    assert removed["files"] == 1
+    assert removed["thumbnails"] == 1
+    assert list(folder.iterdir()) == []
+
+
+def test_trail_off_falls_back_to_local_purge_when_the_host_clear_fails(tmp_path: Path) -> None:
+    # Codex P2 on #96: when the host was alive but its clear request failed, the
+    # path returned zeros with no local purge, so files stayed on disk forever
+    # even though the setting was already saved as off (startup with the trail
+    # off only skips restoring, it never deletes).
+    folder = tmp_path / "agentlink" / "actions"
+    folder.mkdir(parents=True)
+    (folder / "session-deadbeef.jsonl").write_text('{"event": "started"}\n', encoding="utf-8")
+    (folder / "0123abcd.png").write_bytes(b"\x89PNG\r\n")
+    results: dict[str, Any] = {"r1": {"ok": False, "error": "boom"}}
+
+    def send(action: str, **kw: Any) -> str:
+        assert action == "control_clear_trail"
+        return "r1"
+
+    m = AgentLinkModel(
+        data_dir=tmp_path,
+        send=send,
+        state=lambda: {"results": results},
+        alive=lambda: {"pid": 1},
+        config_path=tmp_path / "config.yaml",
+    )
+    removed = m.set_audit_trail(False)
+    assert m.audit_trail_on() is False
     assert removed["files"] == 1
     assert removed["thumbnails"] == 1
     assert list(folder.iterdir()) == []

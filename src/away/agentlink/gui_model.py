@@ -451,7 +451,11 @@ class AgentLinkModel:
             if isinstance(result, dict):
                 for key in removed:
                     removed[key] = int(result.get(key, 0) or 0)
-            return removed
+                return removed
+            # The host did not return a successful clear (timeout, error): fall
+            # through to the local purge below. Without it the files stay on disk
+            # forever even though the setting is already saved as off, since
+            # startup with the trail off only skips restoring, never deletes.
         if self.data_dir is not None:  # no host running: nothing in memory anywhere, delete from disk
             removed.update(purge_trail_folder(hostmod.base_dir(self.data_dir) / "actions"))
         return removed
