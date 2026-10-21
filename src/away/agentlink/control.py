@@ -1333,7 +1333,7 @@ class ComputerControl:
             "action": action,
             "detail": detail,
             "log_id": entry.id,
-            "steps_left": max(0, g.step_budget - g.steps_used - g.steps_reserved),
+            "steps_left": self._steps_left(g),
             "undo": undo,
             # the observed effect: what the desktop looks like right after the input landed, so the
             # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
