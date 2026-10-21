@@ -23,10 +23,13 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    line) - opening one is navigation only, anything consequential inside it still asks first; Win+R / Win+X are
    blocked.
 5. **Risky clicks ask first.** Clicking an element named like Send / Submit / Pay / Buy / Purchase / Delete /
-   Confirm / Install / Uninstall..., dragging onto or from one (the Recycle Bin, the Trash), or pressing Enter while
-   one is focused, asks the user first (with "Always allow for this agent"). A click, drag, Enter, Delete or
+   Confirm / Install / Uninstall... (a set-of-mark click counts as clicking the element under the mark),
+   dragging onto or from one (the Recycle Bin, the Trash), or pressing Enter or Space while one is focused, asks
+   the user first (with "Always allow for this agent"). A click, drag, Enter, Delete or
    shortcut whose target it cannot identify (no UI Automation name, coordinates only) asks too ("Allow for this
-   session" stops asking until the session ends). Moving, scrolling and typing into a named text box never ask.
+   session" stops asking until the session ends). Delete outside a text-editing element asks too, because it
+   acts on the selected item, not on the label that names it. Moving, scrolling and typing into a named text
+   box never ask.
 6. **Rate limited and logged.** At most ``action_rate_per_s`` actions per second; every action is logged with a
    thumbnail of the screen; "Undo last" reverses what can be reversed (cursor moves, scrolls, typed text).
 7. **Step budget.** Each approved session gets ``agent_link.control_step_budget`` actions (default 40, fresh
@@ -91,6 +94,10 @@ __all__ = [
 ]
 
 UNKNOWN_NOTE = "Project Away can't tell what is there, so it is asking first."
+DELETE_NOTE = (
+    "Delete acts on the selected item, not on the words that name it, and Project Away can't tell "
+    "whether deleting it can be undone, so it is asking first."
+)
 ALLOW_SESSION = "Allow for this session"
 
 
@@ -116,6 +123,12 @@ SAFE_SYSTEM_TOOLS: dict[str, str] = {
 }
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+&'-]{0,39}$")
 ENTER_KEYS = ("enter", "return")
+# Keys that activate the focused control the way Enter does (Space is the standard keyboard way to
+# "click" a focused button or link), so they get the same focus check as Enter.
+ACTIVATION_KEYS = ("space",)
+# UI Automation control types in which the person edits text: Delete there deletes a character,
+# not the selected item.
+TEXT_EDITING_TYPES = ("EditControl", "DocumentControl")
 # v0.1.24 hardening: the moment after approval (the click or thumbs up that allowed it) is not a takeover, but only
 # briefly; a deliberate stop (hotkey, "stop", open palm) never waits for it (:meth:`ComputerControl.stop`).
 GRACE_S = 0.75
@@ -1004,7 +1017,7 @@ class ComputerControl:
             self._emit("control.risky_denied", {"agent": g.agent_name, "target": label})
             raise ControlRefused(f"the user did not allow '{label[:60]}'")
 
-    def _confirm_unknown(self, g: Grant, what: str) -> None:
+    def _confirm_unknown(self, g: Grant, what: str, note: str = UNKNOWN_NOTE) -> None:
         """A consequential action whose target has no name (no UI Automation, nothing found there, coordinates
         only): the person decides, once or for the rest of this session."""
         if g.trust_unknown:
@@ -1014,7 +1027,7 @@ class ComputerControl:
             ["Allow", "Deny", ALLOW_SESSION],
             title="Are you sure?",
             agent=g.agent_name,
-            details=[UNKNOWN_NOTE],
+            details=[note],
             timeout_s=60.0,
             urgency="high",
             kind="confirm",
@@ -1039,15 +1052,23 @@ class ComputerControl:
         if "unknown" in kinds:
             self._confirm_unknown(g, what)
 
-    def _confirm_keys(self, g: Grant, what: str) -> None:
+    def _confirm_keys(self, g: Grant, what: str, *, delete: bool = False) -> None:
         """Enter, Delete or a shortcut acts on whatever has the focus: risky focus asks as before; with no known
-        focus (no UI Automation, nothing focused) it asks too. A named text box goes ahead."""
+        focus (no UI Automation, nothing focused) it asks too. A named text box goes ahead.
+
+        Delete is judged by what it acts on, not by the focused label: the label names the container or
+        the selected item, so a selected file called report.docx classifies safe even though Delete
+        removes the file. The one case that can be proved harmless from the UI Automation data is
+        Delete inside a text-editing element, where it deletes the next character, so Delete asks
+        everywhere else (a file or list item, a message, a table row) even under a harmless label."""
         label = self._focused_label()
         context = label or self._window_title()
         if classify(context) == "risky":
             self._confirm_risky(g, context, what)
         elif not label.strip():
             self._confirm_unknown(g, what)
+        elif delete and not self._focused_is_text_editing():
+            self._confirm_unknown(g, what, DELETE_NOTE)
 
     @staticmethod
     def _where(label: str, x: int, y: int) -> str:
@@ -1244,7 +1265,18 @@ class ComputerControl:
                     raise ControlRefused(
                         f"no annotation {mid} on your last screenshot; call get_screen(annotate=true) first"
                     )
-                return int(pt[0]), int(pt[1]), f"mark {mid}"
+                mx, my = int(pt[0]), int(pt[1])
+                # The label is the element actually under the mark, resolved exactly like the raw
+                # coordinate path below: a mark inherits the risk classification of what it sits on,
+                # so a mark on a "Delete" button asks first just as clicking that spot by coordinates
+                # does, and a mark over nothing identifiable is unknown (and asks), not silently safe.
+                label = ""
+                try:
+                    el = self.hooks.uia.element_at(mx, my)
+                    label = el.name if el is not None else ""
+                except Exception:
+                    label = ""
+                return mx, my, label
         if element_id:  # exact bounds from the agent's last ui_query; beats fuzzy name matching and coordinates
             el = self._resolve_element_id(agent_id, element_id)
             center = el.center
@@ -1297,13 +1329,22 @@ class ComputerControl:
         if fg and desktop.PASSWORD_TITLE.search(str(fg.get("title", ""))):
             raise ControlRefused("this window looks like a sign-in or password prompt; agents never type there")
 
-    def _focused_label(self) -> str:
+    def _focused_element(self) -> desktop.Element | None:
         uia = self.hooks.uia
         try:
-            el = uia.focused() if getattr(uia, "available", False) else None
+            return uia.focused() if getattr(uia, "available", False) else None
         except Exception:
-            el = None
+            return None
+
+    def _focused_label(self) -> str:
+        el = self._focused_element()
         return el.name if el is not None else ""
+
+    def _focused_is_text_editing(self) -> bool:
+        """True when the focused element is a text editor, where keys like Delete edit characters
+        instead of acting on a selected item."""
+        el = self._focused_element()
+        return el is not None and el.control_type in TEXT_EDITING_TYPES
 
     def act(self, agent_id: str, action: str, **kw: Any) -> dict[str, Any]:
         """Run one action. Raises :class:`ControlRefused` with a plain reason when it is not allowed."""
@@ -1453,7 +1494,10 @@ class ComputerControl:
             if "\n" in text:
                 self._confirm_keys(g, "press Enter")
                 # Re-validate after the user prompt: the focused window may have
-                # changed while the prompt was up. Fail closed if it did.
+                # changed while the prompt was up. Fail closed if it did. The target
+                # class check runs whether or not `expect` was given: a terminal or
+                # password field that appeared while the prompt was up gets nothing.
+                self._typing_target_ok()
                 if expect:
                     title = self._window_title()
                     if expect.lower() not in title.lower():
@@ -1467,8 +1511,11 @@ class ComputerControl:
                 self._own_mouse_until = 0.0  # while it types, any real mouse movement is the person
             typed = 0
             for i in range(0, len(text), TYPE_CHUNK):
-                # Re-verify the target window before each chunk: focus may have changed
-                # during the previous chunk. Abort before typing into the wrong app.
+                # Re-verify the target before each chunk: focus may have changed during the
+                # previous chunk (an app raising itself, a sign-in window appearing). The
+                # target class check (terminal process, password field) runs before EVERY
+                # chunk, not just the first; the `expect` window check runs alongside it
+                # when the caller gave one. Abort before typing into the wrong app.
                 if expect:
                     title = self._window_title()
                     if expect.lower() not in title.lower():
@@ -1477,6 +1524,12 @@ class ComputerControl:
                             f"the focused window changed while typing ({title!r} does not contain "
                             f"{expect!r}): stopped after {typed} of {len(text)} characters"
                         )
+                try:
+                    self._typing_target_ok()
+                except ControlRefused as exc:
+                    if typed:
+                        raise ControlRefused(f"{exc}: stopped after {typed} of {len(text)} characters") from None
+                    raise
                 chunk = text[i : i + TYPE_CHUNK]
                 self.note_own_keys(KEY_ECHO_S + KEY_ECHO_PER_CHAR_S * len(chunk))
                 step().type_text(chunk)
@@ -1501,6 +1554,12 @@ class ComputerControl:
             if any(k in ENTER_KEYS for k in keys) and len(keys) == 1:
                 self._confirm_keys(g, "press Enter")
             elif any(k in CONSEQUENTIAL_KEYS for k in keys) or any(k in SHORTCUT_MODIFIERS for k in keys):
+                self._confirm_keys(g, f"press {combo}", delete=any(k in ("delete", "del") for k in keys))
+            elif any(k in ACTIVATION_KEYS for k in keys):
+                # Space activates the focused control (it is the keyboard way to "click" a focused
+                # button), so it takes the same focus check as Enter instead of slipping past every list.
+                # Any combo containing Space counts: Shift is not a shortcut modifier, so Shift+Space
+                # used to reach hotkey() with no confirmation at all.
                 self._confirm_keys(g, f"press {combo}")
             printable = len(keys) == 1 and len(keys[0]) == 1
             if printable:

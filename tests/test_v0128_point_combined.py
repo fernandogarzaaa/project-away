@@ -117,7 +117,9 @@ def test_mark_reference_resolves_with_new_signature(core) -> None:
     first = meta["annotations"][0]
     x, y, label = core.service.control._point(a.id, None, None, "mark:1", None, False)
     assert (x, y) == (first["center"]["x"], first["center"]["y"])
-    assert label == "mark 1"
+    # the label is the element under the mark (empty here: no UI Automation in this fixture),
+    # never a synthetic "mark 1" that would classify safe (audit Phase 4, lane B item 1.1)
+    assert label == ""
 
 
 def test_mark_reference_wins_over_element_id(core) -> None:
@@ -128,7 +130,7 @@ def test_mark_reference_wins_over_element_id(core) -> None:
     first = meta["annotations"][0]
     x, y, label = core.service.control._point(a.id, None, None, "mark:1", "e999", False)
     assert (x, y) == (first["center"]["x"], first["center"]["y"])
-    assert label == "mark 1"
+    assert label == ""
 
 
 def test_unknown_mark_still_refused_with_new_signature(core) -> None:
