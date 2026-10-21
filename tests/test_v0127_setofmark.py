@@ -134,13 +134,16 @@ def test_pointer_accepts_mark_reference_without_uia(core) -> None:
     first = meta["annotations"][0]
     x, y, label = core.service.control._point(a.id, None, None, "mark:1", None, False)
     assert (x, y) == (first["center"]["x"], first["center"]["y"])
-    assert label == "mark 1"
+    # the label is the element under the mark, as with raw coordinates: with no UI Automation
+    # there is nothing identifiable there, so it is empty (unknown) rather than a synthetic
+    # "mark 1" that would classify safe (audit Phase 4, lane B item 1.1)
+    assert label == ""
     # the other spellings work too
     assert core.service.control._point(a.id, None, None, "#2", None, False)[:2] == (
         meta["annotations"][1]["center"]["x"],
         meta["annotations"][1]["center"]["y"],
     )
-    assert core.service.control._point(a.id, None, None, "MARK 3", None, False)[2] == "mark 3"
+    assert core.service.control._point(a.id, None, None, "MARK 3", None, False)[2] == ""
 
 
 def test_pointer_rejects_unknown_mark(core) -> None:
