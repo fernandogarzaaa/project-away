@@ -440,12 +440,25 @@ def test_reload_is_bounded_to_the_newest_sessions(tmp_path: Path) -> None:
 
 
 def test_restored_sessions_count_toward_pruning(tmp_path: Path) -> None:
+    # Same Windows clock-quantization flake as the pinned test below: sessions
+    # created in rapid sequence can share mtime, started time, and file time,
+    # so restore order falls through to random hex ids and pruning drops the
+    # wrong session. Pin the started timestamps increasing around creation.
+    import itertools
+    import time as time_mod
+
     ctl = _control(Clock(), tmp_path)
     ids = []
-    for _ in range(MAX_SESSIONS):
-        ctl.request("a1", "Claude")
-        ids.append(_session_id(ctl))
-        ctl.stop("done")
+    ticks = itertools.count(2000)
+    real_time = time_mod.time
+    time_mod.time = lambda: float(next(ticks))
+    try:
+        for _ in range(MAX_SESSIONS):
+            ctl.request("a1", "Claude")
+            ids.append(_session_id(ctl))
+            ctl.stop("done")
+    finally:
+        time_mod.time = real_time
     ctl2 = _control(Clock(), tmp_path)  # restart: all of them come back
     assert len(ctl2.sessions) == MAX_SESSIONS
     ctl2.request("a1", "Claude")  # one new session pushes the oldest restored one out
