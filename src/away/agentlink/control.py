@@ -31,7 +31,9 @@ Safety rules, all enforced here (the service only adds the per-agent permission 
    thumbnail of the screen; "Undo last" reverses what can be reversed (cursor moves, scrolls, typed text).
 7. **Step budget.** Each approved session gets ``agent_link.control_step_budget`` actions (default 40, fresh
    every grant): every action result tells the agent how many steps it has left, and a session that used them
-   all refuses new actions in plain words until the person approves again.
+   all refuses new actions in plain words until the person approves again. A sequence reserves its steps
+   atomically when it is admitted, so a concurrent action cannot spend them and refuse the sequence mid-way;
+   reserved steps a stopped or refused sequence never used are released again.
 8. **Visual audit trail.** Every control step is kept per session (``agent_link.control_audit_trail``, on by
    default): timestamp, action, screenshot thumbnail and result, persisted to ``actions/session-<id>.jsonl`` and
    replayable step by step in the app (Settings > Agent Link).
@@ -232,6 +234,11 @@ class Grant:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     step_budget: int = 40
     steps_used: int = 0
+    # v0.1.29: steps an admitted sequence has reserved but not yet spent. Admission is atomic: a sequence
+    # that starts holds its whole budget, so a concurrent action can never spend a step out from under it
+    # and force a refusal after side effects already happened. Unused reservations release when the
+    # sequence stops or is refused part-way. Invariant: steps_used + steps_reserved <= step_budget.
+    steps_reserved: int = 0
     # proposal #21: the person picked "Yes, for the rest of this session". resume() then skips the prompt for the rest
     # of the session. A takeover still pauses at once; nothing auto-resumes.
     no_reprompt: bool = False
@@ -417,7 +424,7 @@ class ComputerControl:
             "session": g.id,
             "step_budget": g.step_budget,
             "steps_used": g.steps_used,
-            "steps_left": max(0, g.step_budget - g.steps_used),
+            "steps_left": max(0, g.step_budget - g.steps_used - g.steps_reserved),
         }
 
     def _check_expiry(self) -> Grant | None:
@@ -722,14 +729,41 @@ class ComputerControl:
             raise ControlRefused(f"paused because {g.paused}; call resume_control to ask the user to continue")
         return g
 
-    def _consume_step(self, g: Grant) -> None:
+    def _consume_step(self, g: Grant, *, reserved: bool = False) -> None:
         """Spend one step of the session's budget; refuses in plain words when the budget is exhausted."""
         # Each attempted agent action, including undo, consumes one step. An exhausted session
         # refuses politely, in plain words, until the person approves again (a new grant = a fresh budget).
+        # Steps another operation has reserved count as spent here: admission already promised them.
         with self._lock:
-            if g.steps_used >= g.step_budget:
+            if reserved and g.steps_reserved > 0:
+                g.steps_reserved -= 1
+                g.steps_used += 1
+                return
+            if g.steps_used + g.steps_reserved >= g.step_budget:
                 raise ControlRefused(BUDGET_EXHAUSTED.format(budget=g.step_budget))
             g.steps_used += 1
+
+    def _reserve_steps(self, g: Grant, n: int) -> None:
+        """Reserve ``n`` budget steps for an operation about to run (a sequence's whole plan), atomically.
+
+        Refuses in plain words when the plan does not fit in what is left after steps already used and
+        steps already reserved, so the refusal lands before any side effect. The caller releases the
+        reservation for sub-steps that never ran (see :meth:`_release_reservation`)."""
+        with self._lock:
+            left = g.step_budget - g.steps_used - g.steps_reserved
+            if n > left:
+                raise ControlRefused(
+                    f"that sequence needs {n} steps but only {max(0, left)} are left in this "
+                    "session; use a shorter sequence or ask the person to approve again for a fresh budget"
+                )
+            g.steps_reserved += n
+
+    def _release_reservation(self, g: Grant, n: int) -> None:
+        """Give back ``n`` reserved-but-unspent steps (a sequence stopped or refused part-way)."""
+        if n <= 0:
+            return
+        with self._lock:
+            g.steps_reserved = max(0, g.steps_reserved - n)
 
     def _require(self, agent_id: str) -> Grant:
         g = self._require_grant(agent_id)
@@ -1289,7 +1323,7 @@ class ComputerControl:
             "action": action,
             "detail": detail,
             "log_id": entry.id,
-            "steps_left": max(0, g.step_budget - g.steps_used),
+            "steps_left": max(0, g.step_budget - g.steps_used - g.steps_reserved),
             "undo": undo,
             # the observed effect: what the desktop looks like right after the input landed, so the
             # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
@@ -1323,15 +1357,13 @@ class ComputerControl:
         self._policy_check(agent_id)
         # v0.1.28: a sequence spends one budget step per sub-step, like one per single action. It must fit
         # in the remaining budget before it starts: a batch cannot spend steps it does not have.
-        with self._lock:
-            remaining = g.step_budget - g.steps_used
-        if len(plan) > remaining:
-            raise ControlRefused(
-                f"that sequence needs {len(plan)} steps but only {max(0, remaining)} are left in this "
-                "session; use a shorter sequence or ask the person to approve again for a fresh budget"
-            )
+        # v0.1.29: fitting is not enough - the steps are RESERVED atomically here, so a concurrent action
+        # cannot spend them after admission and refuse this sequence mid-way, after side effects. The
+        # reservation for sub-steps that never run is released in the finally below.
+        self._reserve_steps(g, len(plan))
         b = self.hooks.backend
         done: list[dict[str, Any]] = []
+        consumed = 0
         try:
             with self.engine.begin(
                 AGENT, "sequence", actor=agent_id, token=g.cancel, backend=b, sleep=self.hooks.sleep, audit=False
@@ -1341,7 +1373,8 @@ class ComputerControl:
                     # one rate-limit token per sub-step, like one per single action: a batch must not spend
                     # the whole budget on the single grant-time check
                     self._policy_check(agent_id)
-                    self._consume_step(g)  # one budget step per executed sub-step
+                    self._consume_step(g, reserved=True)  # one budget step per executed sub-step
+                    consumed += 1
                     done.append(self._act(g, agent_id, action, kw, b, a, record=False))
         except ActionCancelled:
             reason = g.paused or g.ended or "it was stopped"
@@ -1366,6 +1399,10 @@ class ComputerControl:
             )
             self._emit("control.interrupted", {"agent": g.agent_name, "action": "sequence", "reason": str(exc)})
             raise
+        finally:
+            # Sub-steps that never ran never spent their step: their reservation goes back. On success
+            # every step was consumed, so this releases nothing.
+            self._release_reservation(g, len(plan) - consumed)
         detail = self._seq_detail(done)
         undos = [r["undo"] for r in done if r.get("undo")]
         undo: dict[str, Any] | None = {"sequence": undos} if undos else None
@@ -1637,7 +1674,7 @@ class ComputerControl:
             # Select the entry, mark it in-flight, and reserve budget atomically. Concurrent undo calls
             # cannot select the same action or race past the session's limit.
             if budget_grant is not None:
-                if budget_grant.steps_used >= budget_grant.step_budget:
+                if budget_grant.steps_used + budget_grant.steps_reserved >= budget_grant.step_budget:
                     raise ControlRefused(BUDGET_EXHAUSTED.format(budget=budget_grant.step_budget))
                 budget_grant.steps_used += 1
             e.result = "undoing"
