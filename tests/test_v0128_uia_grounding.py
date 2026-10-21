@@ -109,6 +109,7 @@ def _control(
 def test_ui_query_lists_elements_with_ids_names_roles_and_bounds() -> None:
     clock = Clock()
     ctl, _, _ = _control(clock, uia=FakeUIA(), fg={"title": "Mail", "process": "mail.exe"})
+    ctl.request("a1", "Claude")
     res = ctl.ui_query("a1")
     assert res["available"] is True
     assert res["count"] == 3  # the disabled pane is not interactable
@@ -123,20 +124,24 @@ def test_ui_query_lists_elements_with_ids_names_roles_and_bounds() -> None:
 def test_ui_query_degrades_when_uia_is_missing() -> None:
     clock = Clock()
     ctl, _, _ = _control(clock)  # default hooks: NullUIA
+    ctl.request("a1", "Claude")
     res = ctl.ui_query("a1")
     assert res["available"] is False and res["reason"]
 
 
-def test_ui_query_needs_no_grant_but_the_service_needs_control_permission(core: Any) -> None:
+def test_ui_query_needs_control_permission_and_a_live_grant(core: Any) -> None:
     from away.agentlink.service import Forbidden
 
     reader, _ = core.registry.issue("Eve", ["read"], 3600)
     with pytest.raises(Forbidden, match="Let it use my computer"):
         core.service.ui_query(reader)
     agent, _ = core.registry.issue("Claude", ["read", "control"], 3600)
-    res = core.service.ui_query(agent)  # no control grant: reading the tree is not acting
-    assert res["available"] is False  # the core fixture has no UI Automation
+    with pytest.raises(ControlRefused, match="request_control first"):
+        core.service.ui_query(agent)  # the permission alone is not enough: no approved session
     core.service.control.hooks.uia = FakeUIA()
+    core.service.control.hooks.foreground = lambda: {"title": "Mail", "process": "mail.exe"}
+    core.service.control.ask = lambda *a, **k: {"answer": "Allow", "method": "test"}  # type: ignore[method-assign]
+    core.service.request_control(agent)
     res = core.service.ui_query(agent)
     assert res["available"] is True and res["count"] == 3
 
@@ -151,10 +156,12 @@ def test_ids_expire_on_requery() -> None:
     cancel = Element("Cancel", "ButtonControl", rect=(0, 0, 10, 10))
     root = Element("Dialog", "WindowControl", rect=(0, 0, 40, 40), children=[cancel])
     uia._root = root
-    ctl.ui_query("a1")
+    res = ctl.ui_query("a1")
     with pytest.raises(ControlRefused, match="unknown element id"):
         ctl.act("a1", "click", element_id="e3")  # the old Subject is gone; ids are per-query
-    ctl.act("a1", "click", element_id="e2")  # Cancel is now e2
+    cancel_id = next(e["id"] for e in res["elements"] if e["name"] == "Cancel")
+    assert cancel_id != "e2"  # ids are never reissued: Cancel does not inherit Send's old id
+    ctl.act("a1", "click", element_id=cancel_id)  # Cancel, under its fresh id
 
 
 # ------------------------------------------------------------------ id resolution in pointer
@@ -344,14 +351,13 @@ def test_element_ids_are_isolated_per_agent() -> None:
     uia = FakeUIA()
     fg = {"title": "Mail", "process": "mail.exe"}
     ctl, backend, _ = _control(clock, ["Allow", "Allow"], uia=uia, fg=fg)
-    ctl.ui_query("a1")  # a1 sees Mail: e2 = Send at (120, 110)
-    mail_root = uia._root
-    cancel = Element("Cancel", "ButtonControl", rect=(0, 0, 10, 10))
-    uia._root = Element("Dialog", "WindowControl", rect=(0, 0, 40, 40), children=[cancel])
-    ctl.ui_query("a2")  # a2 sees Dialog: e2 = Cancel at (5, 5)
-    uia._root = mail_root  # restore: a1's revalidation sees the Mail tree again
     ctl.request("a1", "Claude")
-    ctl.act("a1", "click", element_id="e2")  # a1's e2 is still Send, not a2's Cancel
+    ctl.ui_query("a1")  # a1 sees Mail: e2 = Send at (120, 110)
+    with pytest.raises(ControlRefused):
+        ctl.ui_query("a2")  # a2 holds no grant: it cannot query, so it can never plant its own e2
+    with pytest.raises(ControlRefused):
+        ctl.act("a2", "click", element_id="e2")  # nor act on a1's ids
+    ctl.act("a1", "click", element_id="e2")  # a1's e2 is still Send
     assert backend.calls[-2:] == [("move", (120, 110)), ("click", (1,))]
 
 
@@ -427,14 +433,15 @@ def test_query_failure_on_tree_walk_invalidates() -> None:
 
 
 def test_missing_fingerprint_refuses() -> None:
-    """A missing foreground fingerprint must not compare equal to another missing one."""
+    """An unverifiable foreground window fails closed at query time: no registry is installed."""
     clock = Clock()
     ctl, _, _ = _control(clock, ["Allow"], uia=FakeUIA(), fg=None)
     # Override the default fg with None to simulate an untellable foreground.
     ctl.hooks.foreground = lambda: None
     ctl.request("a1", "Claude")
-    ctl.ui_query("a1")  # query succeeds but the window fingerprint is None
-    with pytest.raises(ControlRefused, match="could not verify the foreground window"):
+    res = ctl.ui_query("a1")  # the fingerprint cannot be captured, so nothing is registered
+    assert res["available"] is False
+    with pytest.raises(ControlRefused, match="unknown element id"):
         ctl.act("a1", "click", element_id="e1")
 
 
