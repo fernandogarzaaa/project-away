@@ -375,6 +375,12 @@ class ComputerControl:
         self._session_order: list[str] = []
         self._session_agents: dict[str, str] = {}  # session id -> agent name (for the trail view)
         self.grant: Grant | None = None
+        # Grant admission: (agent_id, token) of the one approval prompt currently in
+        # flight, or None. request() reserves this under the lock BEFORE prompting and
+        # installs the grant only while the reservation is still its own, so two
+        # approved prompts can never both become grants and a live grant is never
+        # overwritten. Stop / revocation clear it, which makes a late approval moot.
+        self._pending_admission: tuple[str, object] | None = None
         self._lock = threading.RLock()
         self._own_mouse_until = 0.0  # the agent's own mouse input may echo back until then
         self._own_keys_until = 0.0  # the agent's own key presses may echo back until then
@@ -418,6 +424,7 @@ class ComputerControl:
 
     def _on_stop_all(self, reason: str) -> None:
         """ "Stop everything" from any trigger ends the grant too."""
+        self._cancel_pending_admission()  # a prompt still on screen must not install a grant after this
         if self.grant is not None:
             self._end(reason)
 
@@ -462,43 +469,107 @@ class ComputerControl:
                 return None
             return g
 
-    def request(self, agent_id: str, agent_name: str, why: str = "", minutes: float | None = None) -> dict[str, Any]:
-        """Ask the user (on the PC) to let this agent use the computer. Blocks until answered or timed out."""
-        g = self._check_expiry()
-        if g is not None and g.agent_id == agent_id and not g.paused:
-            return self.status()
-        if g is not None and g.agent_id != agent_id:
-            raise ControlRefused(f"{g.agent_name} is using the computer right now")
-        ttl = self.ttl_s if minutes is None else max(1.0, min(float(minutes) * 60.0, self.ttl_s))
-        details = [
-            f"For up to {int(ttl // 60)} minutes.",
-            "Move your hand or mouse to take over at any time.",
-            "It will ask before sending, paying, deleting or installing anything,",
-            "and before clicking something it can't identify.",
-        ]
-        if why:
-            details.insert(0, f"Why: {str(why)[:150]}")
-        res = self.ask(
-            f"{agent_name} wants to use your computer",
-            ["Allow", "Deny"],
-            title="Use your computer?",
-            agent=agent_name,
-            details=details,
-            timeout_s=60.0,
-            urgency="high",
-            kind="approve",
-        )
-        if res.get("answer") != "Allow":
-            self._emit("control.denied", {"agent": agent_name, "method": res.get("method")})
-            raise ControlRefused("the user did not allow it" if res.get("answer") else "no answer from the user")
+    def _cancel_pending_admission(self, agent_id: str | None = None) -> None:
+        """Cancel an in-flight approval prompt's reservation (Stop, revocation).
+
+        The prompt itself cannot be un-shown, but its answer becomes moot: when it
+        returns, request() finds its reservation gone and installs nothing."""
         with self._lock:
-            now = self.clock()
-            g = Grant(agent_id, agent_name, now, now + ttl)
-            g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
-            g.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
-            self.grant = g
-            self._start_session(g)
-            self._grace_until = now + GRACE_S
+            pending = self._pending_admission
+            if pending is not None and (agent_id is None or pending[0] == agent_id):
+                self._pending_admission = None
+
+    def has_pending_admission(self) -> bool:
+        """True while an approval prompt is waiting for the person's answer.
+
+        Stop surfaces check this alongside the live grant: while a prompt waits,
+        there is no grant yet and the engine is idle, so the grant/busy gates
+        alone would miss the stop."""
+        with self._lock:
+            return self._pending_admission is not None
+
+    def request(self, agent_id: str, agent_name: str, why: str = "", minutes: float | None = None) -> dict[str, Any]:
+        """Ask the user (on the PC) to let this agent use the computer. Blocks until answered or timed out.
+
+        Admission is decided atomically under the lock before any prompt is shown,
+        so a live grant is never overwritten and two prompts are never in flight:
+
+        - this agent already holds the grant and it is running: return its status;
+        - another agent holds the grant: refuse;
+        - this agent's grant is PAUSED: refuse and point at resume_control. The
+          paused session (its remaining budget, undo state and trail) is still the
+          session; a fresh request never silently discards it. The session ends
+          only through stop, revocation or expiry, and only then does a new
+          request start a fresh session;
+        - another request's prompt is already waiting for an answer: refuse (the
+          caller can ask again once that one has been answered).
+
+        Otherwise this call reserves the admission, prompts without holding the
+        lock, and installs the grant only if the reservation is still its own
+        when the answer arrives. A grant ends only through :meth:`_end`, which
+        sets its cancel token (the engine then releases any held input), drops
+        its element ids and emits its receipt; there is no other teardown path.
+        """
+        token = object()
+        with self._lock:
+            g = self._check_expiry()
+            if g is not None:
+                if g.agent_id != agent_id:
+                    raise ControlRefused(f"{g.agent_name} is using the computer right now")
+                if not g.paused:
+                    return self.status()
+                raise ControlRefused(
+                    f"this session is paused because {g.paused}; it has not ended, and a new session "
+                    "cannot start over it. Ask to carry on with resume_control, or the person can stop it first."
+                )
+            if self._pending_admission is not None:
+                raise ControlRefused(
+                    "another request to use the computer is already waiting for the person's answer; "
+                    "ask again once they have answered it"
+                )
+            self._pending_admission = (agent_id, token)
+        try:
+            ttl = self.ttl_s if minutes is None else max(1.0, min(float(minutes) * 60.0, self.ttl_s))
+            details = [
+                f"For up to {int(ttl // 60)} minutes.",
+                "Move your hand or mouse to take over at any time.",
+                "It will ask before sending, paying, deleting or installing anything,",
+                "and before clicking something it can't identify.",
+            ]
+            if why:
+                details.insert(0, f"Why: {str(why)[:150]}")
+            res = self.ask(
+                f"{agent_name} wants to use your computer",
+                ["Allow", "Deny"],
+                title="Use your computer?",
+                agent=agent_name,
+                details=details,
+                timeout_s=60.0,
+                urgency="high",
+                kind="approve",
+            )
+            if res.get("answer") != "Allow":
+                self._emit("control.denied", {"agent": agent_name, "method": res.get("method")})
+                raise ControlRefused("the user did not allow it" if res.get("answer") else "no answer from the user")
+            with self._lock:
+                pending = self._pending_admission
+                if pending is None or pending[1] is not token or self.grant is not None:
+                    # Stop or a revocation landed while the prompt was up (the grant
+                    # check is defensive: the reservation already excludes a second
+                    # install). The approval is moot; never overwrite a live grant.
+                    raise ControlRefused("the request was stopped before it took effect")
+                now = self.clock()
+                g = Grant(agent_id, agent_name, now, now + ttl)
+                g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
+                g.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
+                self.grant = g
+                self._start_session(g)
+                self._grace_until = now + GRACE_S
+        finally:
+            with self._lock:
+                pending = self._pending_admission
+                if pending is not None and pending[1] is token:
+                    self._pending_admission = None
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(agent_name)
         self._emit("control.started", {"agent": agent_name, "minutes": int(ttl // 60), "method": res.get("method")})
@@ -763,12 +834,14 @@ class ComputerControl:
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
         had = self.grant is not None
+        self._cancel_pending_admission()  # a prompt still on screen must not install a grant after this
         self._end(reason)
         return had
 
     def revoke_agent(self, agent_id: str, reason: str = "the agent was disconnected") -> None:
         """End this agent's grant now (an action in progress stops and lets go of buttons and keys) and forget
         its screenshot geometry."""
+        self._cancel_pending_admission(agent_id)  # its prompt, if one is up, must not install a grant now
         if self.grant is not None and self.grant.agent_id == agent_id:
             self._end(reason)
         self.views.pop(agent_id, None)
