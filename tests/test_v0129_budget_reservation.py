@@ -403,3 +403,30 @@ def test_op_lock_is_released_when_the_post_acquire_check_raises() -> None:
     assert not t2.is_alive(), "a later operation deadlocked behind the leaked operation lock"
     assert second.get("completed") is True, f"the later operation did not run: {second}"
     assert ("click", (1,)) in backend.calls
+
+def test_steps_left_includes_inflight_reservations(tmp_path: Path) -> None:
+    ctl = _control(tmp_path, step_budget=10)
+    ctl.request("agent-a", "Claude")
+    grant = ctl.grant
+    assert grant is not None
+
+    ctl._reserve_steps(grant, 4)
+    assert ctl._steps_left(grant) == 6
+    assert ctl.status()["steps_left"] == 6
+
+    # A separate single action must not report reserved steps as available.
+    result = ctl.act("agent-a", "move", x=10, y=10)
+    assert result["steps_left"] == ctl.status()["steps_left"] == 5
+
+
+def test_sequence_and_undo_results_report_reserved_aware_steps_left(tmp_path: Path) -> None:
+    ctl = _control(tmp_path, step_budget=10)
+    ctl.request("agent-a", "Claude")
+
+    result = ctl.act_sequence("agent-a", [{"action": "move", "x": 20, "y": 20}, {"action": "move", "x": 30, "y": 30}])
+    assert result["steps_left"] == ctl.status()["steps_left"]
+    assert all("steps_left" in step for step in result["steps"])
+    assert result["steps"][-1]["steps_left"] == result["steps_left"]
+
+    undone = ctl.undo_last("agent-a")
+    assert undone["steps_left"] == ctl.status()["steps_left"]
