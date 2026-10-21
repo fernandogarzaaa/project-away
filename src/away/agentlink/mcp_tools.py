@@ -367,7 +367,9 @@ def build(backend: Backend, name: str = "Project Away", screen_fps: Callable[[],
         element_id: str | None = None,
     ) -> dict:
         """Keyboard actions (after control was approved): action="type" types `text` into the focused field
-        (never into password fields or terminals; a newline counts as Enter and asks first in risky contexts).
+        (never into terminals; password fields are blocked on Windows through UI Automation, while off
+        Windows the password check is only a window-title heuristic, so the block is best-effort there;
+        a newline counts as Enter and asks first in risky contexts).
         Pass `expect` to type only when the focused window's title contains that text (case-insensitive): a
         mismatch refuses before anything is typed, so text never lands in the wrong window. Pass element_id=
         (from ui_query) to click that field first so the input lands there. The result reports the observed
