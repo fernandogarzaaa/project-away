@@ -146,6 +146,7 @@ def test_unknown_mark_still_refused_with_new_signature(core) -> None:
 
 def test_fresh_element_id_resolves() -> None:
     ctl = _control(fg={"title": "Mail", "process": "mail.exe", "class": "Win", "rect": [0, 0, 800, 600]})
+    ctl.request("a1", "Claude")
     res = ctl.ui_query("a1")
     assert res["available"] is True
     x, y, label = ctl._point("a1", None, None, None, "e2", False)
@@ -155,6 +156,7 @@ def test_fresh_element_id_resolves() -> None:
 
 def test_stale_element_id_refused_after_window_change() -> None:
     ctl = _control(fg={"title": "Mail", "process": "mail.exe", "class": "Win", "rect": [0, 0, 800, 600]})
+    ctl.request("a1", "Claude")
     ctl.ui_query("a1")
     # the foreground window changes: the id must stop resolving
     ctl.hooks.foreground = lambda: {
@@ -169,6 +171,7 @@ def test_stale_element_id_refused_after_window_change() -> None:
 
 def test_element_id_of_other_agent_refused() -> None:
     ctl = _control(fg={"title": "Mail", "process": "mail.exe", "class": "Win", "rect": [0, 0, 800, 600]})
+    ctl.request("a1", "Claude")
     ctl.ui_query("a1")
     with pytest.raises(ControlRefused, match="call ui_query first"):
         ctl._point("a2", None, None, None, "e2", False)
@@ -176,6 +179,7 @@ def test_element_id_of_other_agent_refused() -> None:
 
 def test_unknown_element_id_refused() -> None:
     ctl = _control(fg={"title": "Mail", "process": "mail.exe", "class": "Win", "rect": [0, 0, 800, 600]})
+    ctl.request("a1", "Claude")
     ctl.ui_query("a1")
     with pytest.raises(ControlRefused, match="unknown element id"):
         ctl._point("a1", None, None, None, "e99", False)
@@ -183,6 +187,7 @@ def test_unknown_element_id_refused() -> None:
 
 def test_ui_query_unavailable_without_uia() -> None:
     ctl = _control(fg={"title": "Mail", "process": "mail.exe"})
+    ctl.request("a1", "Claude")
     ctl.hooks.uia = type("NullUIA", (), {"available": False, "reason": "nope"})()
     res = ctl.ui_query("a1")
     assert res["available"] is False

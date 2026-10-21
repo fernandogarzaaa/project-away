@@ -388,6 +388,12 @@ class ComputerControl:
         self._session_order: list[str] = []
         self._session_agents: dict[str, str] = {}  # session id -> agent name (for the trail view)
         self.grant: Grant | None = None
+        # Grant admission: (agent_id, token) of the one approval prompt currently in
+        # flight, or None. request() reserves this under the lock BEFORE prompting and
+        # installs the grant only while the reservation is still its own, so two
+        # approved prompts can never both become grants and a live grant is never
+        # overwritten. Stop / revocation clear it, which makes a late approval moot.
+        self._pending_admission: tuple[str, object] | None = None
         self._lock = threading.RLock()
         self._own_mouse_until = 0.0  # the agent's own mouse input may echo back until then
         self._own_keys_until = 0.0  # the agent's own key presses may echo back until then
@@ -404,6 +410,9 @@ class ComputerControl:
         # query never replaces another's, and an id stops resolving when the foreground window changes.
         self._element_queries: dict[str, _ElementQuery] = {}
         self._query_generations: dict[str, int] = {}  # agent -> last query generation number
+        # agent -> how many element ids it has ever been issued. Ids are never reissued, so an id names
+        # exactly one element from exactly one query generation for the whole life of the process.
+        self._element_id_counters: dict[str, int] = {}
         # The persisted session trails come back on startup, so the Settings replay survives a restart.
         self._restore_sessions()
 
@@ -428,6 +437,7 @@ class ComputerControl:
 
     def _on_stop_all(self, reason: str) -> None:
         """ "Stop everything" from any trigger ends the grant too."""
+        self._cancel_pending_admission()  # a prompt still on screen must not install a grant after this
         if self.grant is not None:
             self._end(reason)
 
@@ -472,43 +482,107 @@ class ComputerControl:
                 return None
             return g
 
-    def request(self, agent_id: str, agent_name: str, why: str = "", minutes: float | None = None) -> dict[str, Any]:
-        """Ask the user (on the PC) to let this agent use the computer. Blocks until answered or timed out."""
-        g = self._check_expiry()
-        if g is not None and g.agent_id == agent_id and not g.paused:
-            return self.status()
-        if g is not None and g.agent_id != agent_id:
-            raise ControlRefused(f"{g.agent_name} is using the computer right now")
-        ttl = self.ttl_s if minutes is None else max(1.0, min(float(minutes) * 60.0, self.ttl_s))
-        details = [
-            f"For up to {int(ttl // 60)} minutes.",
-            "Move your hand or mouse to take over at any time.",
-            "It will ask before sending, paying, deleting or installing anything,",
-            "and before clicking something it can't identify.",
-        ]
-        if why:
-            details.insert(0, f"Why: {str(why)[:150]}")
-        res = self.ask(
-            f"{agent_name} wants to use your computer",
-            ["Allow", "Deny"],
-            title="Use your computer?",
-            agent=agent_name,
-            details=details,
-            timeout_s=60.0,
-            urgency="high",
-            kind="approve",
-        )
-        if res.get("answer") != "Allow":
-            self._emit("control.denied", {"agent": agent_name, "method": res.get("method")})
-            raise ControlRefused("the user did not allow it" if res.get("answer") else "no answer from the user")
+    def _cancel_pending_admission(self, agent_id: str | None = None) -> None:
+        """Cancel an in-flight approval prompt's reservation (Stop, revocation).
+
+        The prompt itself cannot be un-shown, but its answer becomes moot: when it
+        returns, request() finds its reservation gone and installs nothing."""
         with self._lock:
-            now = self.clock()
-            g = Grant(agent_id, agent_name, now, now + ttl)
-            g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
-            g.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
-            self.grant = g
-            self._start_session(g)
-            self._grace_until = now + GRACE_S
+            pending = self._pending_admission
+            if pending is not None and (agent_id is None or pending[0] == agent_id):
+                self._pending_admission = None
+
+    def has_pending_admission(self) -> bool:
+        """True while an approval prompt is waiting for the person's answer.
+
+        Stop surfaces check this alongside the live grant: while a prompt waits,
+        there is no grant yet and the engine is idle, so the grant/busy gates
+        alone would miss the stop."""
+        with self._lock:
+            return self._pending_admission is not None
+
+    def request(self, agent_id: str, agent_name: str, why: str = "", minutes: float | None = None) -> dict[str, Any]:
+        """Ask the user (on the PC) to let this agent use the computer. Blocks until answered or timed out.
+
+        Admission is decided atomically under the lock before any prompt is shown,
+        so a live grant is never overwritten and two prompts are never in flight:
+
+        - this agent already holds the grant and it is running: return its status;
+        - another agent holds the grant: refuse;
+        - this agent's grant is PAUSED: refuse and point at resume_control. The
+          paused session (its remaining budget, undo state and trail) is still the
+          session; a fresh request never silently discards it. The session ends
+          only through stop, revocation or expiry, and only then does a new
+          request start a fresh session;
+        - another request's prompt is already waiting for an answer: refuse (the
+          caller can ask again once that one has been answered).
+
+        Otherwise this call reserves the admission, prompts without holding the
+        lock, and installs the grant only if the reservation is still its own
+        when the answer arrives. A grant ends only through :meth:`_end`, which
+        sets its cancel token (the engine then releases any held input), drops
+        its element ids and emits its receipt; there is no other teardown path.
+        """
+        token = object()
+        with self._lock:
+            g = self._check_expiry()
+            if g is not None:
+                if g.agent_id != agent_id:
+                    raise ControlRefused(f"{g.agent_name} is using the computer right now")
+                if not g.paused:
+                    return self.status()
+                raise ControlRefused(
+                    f"this session is paused because {g.paused}; it has not ended, and a new session "
+                    "cannot start over it. Ask to carry on with resume_control, or the person can stop it first."
+                )
+            if self._pending_admission is not None:
+                raise ControlRefused(
+                    "another request to use the computer is already waiting for the person's answer; "
+                    "ask again once they have answered it"
+                )
+            self._pending_admission = (agent_id, token)
+        try:
+            ttl = self.ttl_s if minutes is None else max(1.0, min(float(minutes) * 60.0, self.ttl_s))
+            details = [
+                f"For up to {int(ttl // 60)} minutes.",
+                "Move your hand or mouse to take over at any time.",
+                "It will ask before sending, paying, deleting or installing anything,",
+                "and before clicking something it can't identify.",
+            ]
+            if why:
+                details.insert(0, f"Why: {str(why)[:150]}")
+            res = self.ask(
+                f"{agent_name} wants to use your computer",
+                ["Allow", "Deny"],
+                title="Use your computer?",
+                agent=agent_name,
+                details=details,
+                timeout_s=60.0,
+                urgency="high",
+                kind="approve",
+            )
+            if res.get("answer") != "Allow":
+                self._emit("control.denied", {"agent": agent_name, "method": res.get("method")})
+                raise ControlRefused("the user did not allow it" if res.get("answer") else "no answer from the user")
+            with self._lock:
+                pending = self._pending_admission
+                if pending is None or pending[1] is not token or self.grant is not None:
+                    # Stop or a revocation landed while the prompt was up (the grant
+                    # check is defensive: the reservation already excludes a second
+                    # install). The approval is moot; never overwrite a live grant.
+                    raise ControlRefused("the request was stopped before it took effect")
+                now = self.clock()
+                g = Grant(agent_id, agent_name, now, now + ttl)
+                g.step_budget = self._budget()  # v0.1.28: the budget resets with every new grant
+                g.last_log_id = self.log[-1].id if self.log else ""  # proposal #17: the receipt's start
+                self.grant = g
+                self._start_session(g)
+                self._grace_until = now + GRACE_S
+        finally:
+            with self._lock:
+                pending = self._pending_admission
+                if pending is not None and pending[1] is token:
+                    self._pending_admission = None
         with contextlib.suppress(Exception):
             self.hooks.overlay_on(agent_name)
         self._emit("control.started", {"agent": agent_name, "minutes": int(ttl // 60), "method": res.get("method")})
@@ -559,9 +633,14 @@ class ComputerControl:
             if g is not None:
                 g.ended = reason
                 g.cancel.set()  # an action in progress stops before its next step
-                # The grant is over: its agent's element ids must not outlive the session.
-                if g is not None:
-                    self._element_queries.pop(g.agent_id, None)
+                # The grant is over: none of its session-scoped targeting state may outlive it. The
+                # element ids, the set-of-mark coordinates and the screenshot geometry all die here, on
+                # every end path (stop, expiry, takeover, disconnect), so a later session must take a
+                # fresh screenshot and run a fresh ui_query before anything resolves again.
+                self._element_queries.pop(g.agent_id, None)
+                self.marks.pop(g.agent_id, None)
+                self.views.pop(g.agent_id, None)
+                self.scales.pop(g.agent_id, None)
         receipt = self.receipt(g) if g is not None else None
         if g is not None:
             self._trail_event(g, {"event": "ended", "reason": reason, "steps_used": g.steps_used})
@@ -768,12 +847,14 @@ class ComputerControl:
     def stop(self, reason: str = "stopped") -> bool:
         """Global stop (hotkey, "stop", open palm, Disconnect, revoke): ends the grant at once."""
         had = self.grant is not None
+        self._cancel_pending_admission()  # a prompt still on screen must not install a grant after this
         self._end(reason)
         return had
 
     def revoke_agent(self, agent_id: str, reason: str = "the agent was disconnected") -> None:
         """End this agent's grant now (an action in progress stops and lets go of buttons and keys) and forget
         its screenshot geometry."""
+        self._cancel_pending_admission(agent_id)  # its prompt, if one is up, must not install a grant now
         if self.grant is not None and self.grant.agent_id == agent_id:
             self._end(reason)
         self.views.pop(agent_id, None)
@@ -1020,9 +1101,17 @@ class ComputerControl:
 
     def ui_query(self, agent_id: str) -> dict[str, Any]:
         """The foreground window's interactable elements: ``[{id, name, role, bounds}]`` with screen-pixel
-        bounds. Ids belong to the querying agent only and stay valid until that agent's next query; an id
-        stops resolving when the foreground window changes, so a stale id can never click into a new window."""
+        bounds. Ids belong to the querying agent only, are never reissued, and stay valid until that agent's
+        next query; an id stops resolving when the foreground window changes, so a stale id can never click
+        into a new window.
+
+        Querying needs the agent's own live, unpaused control grant, exactly like acting: the tree exposes
+        the foreground window's contents, so it is part of the approved session, not a free read. (The
+        CONTROL permission is checked by the service layer before this is reached.) The registry is bound
+        to one verified window: the foreground fingerprint is captured before and after the tree walk and
+        the registry is installed only when both fingerprints are non-null and equal."""
         aid = str(agent_id)
+        self._require_grant(aid)
         # Invalidate the prior registry at the START: a failed or incomplete query must not leave the old
         # ids usable. The new registry is installed only on success below.
         with self._lock:
@@ -1033,6 +1122,7 @@ class ComputerControl:
                 "available": False,
                 "reason": str(getattr(uia, "reason", "UI Automation is not available on this system")),
             }
+        fp_before = self._window_fingerprint()
         try:
             root = uia.tree(self.UI_QUERY_DEPTH, self.UI_QUERY_NODES)
         except Exception as exc:  # the tree walk itself failed
@@ -1044,25 +1134,32 @@ class ComputerControl:
             if el.enabled and el.rect is not None:
                 found.append(el)
             stack.extend(reversed(el.children or []))
+        fp_after = self._window_fingerprint()
+        if fp_before is None or fp_after is None:
+            return {
+                "available": False,
+                "reason": "could not verify the foreground window while reading its elements; run ui_query again",
+            }
+        if fp_before != fp_after:
+            return {
+                "available": False,
+                "reason": "the foreground window changed while its elements were being read; run ui_query again",
+            }
         registry: dict[str, desktop.Element] = {}
         items: list[dict[str, Any]] = []
-        for i, el in enumerate(found, 1):
-            rect = el.rect
-            assert rect is not None  # filtered above
-            eid = f"e{i}"
-            registry[eid] = el
-            items.append({"id": eid, "name": el.name, "role": el.control_type, "bounds": list(rect)})
         with self._lock:
             gen = self._query_generations.get(aid, 0) + 1
             self._query_generations[aid] = gen
-            self._element_queries[aid] = _ElementQuery(self._window_fingerprint(), registry, gen)
-        window: dict[str, str] | None = None
-        try:
-            fg = self.hooks.foreground()
-            if fg:
-                window = {"title": str(fg.get("title", "")), "process": str(fg.get("process", ""))}
-        except Exception:
-            window = None
+            base = self._element_id_counters.get(aid, 0)
+            for i, el in enumerate(found, 1):
+                rect = el.rect
+                assert rect is not None  # filtered above
+                eid = f"e{base + i}"  # never reissued: a stale id from an older query stays unknown
+                registry[eid] = el
+                items.append({"id": eid, "name": el.name, "role": el.control_type, "bounds": list(rect)})
+            self._element_id_counters[aid] = base + len(found)
+            self._element_queries[aid] = _ElementQuery(fp_after, registry, gen)
+        window = {"title": fp_after[0], "process": fp_after[1]}
         self._emit("control.ui_query", {"count": len(items)})
         return {"available": True, "window": window, "count": len(items), "elements": items}
 
@@ -1091,7 +1188,15 @@ class ComputerControl:
 
     def _revalidate_element(self, el: desktop.Element) -> None:
         """Refuse when the live UI no longer shows this element where the snapshot recorded it. Fail closed:
-        a missing, failed, or inconclusive live lookup refuses rather than falling back to the cached element."""
+        a missing, failed, or inconclusive live lookup refuses rather than falling back to the cached element.
+
+        Identity, strongest first: the live element must occupy exactly the recorded bounds (this alone
+        separates duplicate-named controls at different spots, and catches swaps). When the snapshot
+        carries an automation id, that id is the identity: the live element must carry the same one, and a
+        live element that lost its automation id is NOT waved through on name plus control type. When the
+        snapshot has no automation id, name plus control type at the recorded bounds is the identity. An
+        element with neither an automation id nor a name is identified by its bounds alone; no check is
+        ever skipped."""
         center = el.center
         if center is None:
             return
@@ -1103,17 +1208,46 @@ class ComputerControl:
             ) from exc
         if live is None:
             raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
-        if el.automation_id and live.automation_id:
+        if el.rect is not None and live.rect != el.rect:
+            raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
+        if el.automation_id:
             if live.automation_id != el.automation_id:
                 raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
             return
         if el.name and (live.name != el.name or live.control_type != el.control_type):
             raise ControlRefused("that element is gone or has moved; run ui_query again and use a fresh id")
 
+    def _recheck_point(
+        self,
+        agent_id: str,
+        element: Any,
+        element_id: Any,
+        x: int,
+        y: int,
+        label: str,
+    ) -> tuple[int, int, str]:
+        """Re-resolve an identity-bearing pointer target after an approval prompt. The prompt can stay up
+        for a minute: the foreground window may have changed, or the element may have moved or been
+        replaced, since the target was first resolved and approved. Refuses when the target can no longer
+        be confirmed as the one that was approved, or when it sits somewhere else now. Raw coordinates and
+        set-of-mark references carry no UIA identity, so there is nothing to re-check for them."""
+        if element_id:
+            fresh = self._point(agent_id, None, None, None, str(element_id), False)
+        elif element and self.MARK_REF.match(str(element).strip()) is None:
+            fresh = self._point(agent_id, None, None, str(element), None, False)
+        else:
+            return x, y, label
+        if fresh[:2] != (x, y):
+            raise ControlRefused(
+                "the target moved while the confirmation was up; run ui_query again and retry the action"
+            )
+        return fresh
+
     def _focus_element_id(self, g: Grant, agent_id: str, step: Callable[[], Any], element_id: str) -> str:
         """Click the center of a ui_query element so keyboard input lands in it; returns the element's name."""
         x, y, label = self._point(agent_id, None, None, None, element_id, False)
         self._confirm_targets(g, f"click {self._where(label, x, y)}", [label])
+        x, y, label = self._recheck_point(agent_id, None, element_id, x, y, label)
         self.note_own_mouse()
         step().move(x, y)
         step().click(1)
@@ -1266,6 +1400,10 @@ class ComputerControl:
             elif action != "move":
                 verb = "double-click" if action == "double_click" else "click"
                 self._confirm_targets(g, f"{verb} {self._where(label, x, y)}", [label])
+            if action != "move":
+                # The approval prompt may have been up for a while: revalidate the target before the
+                # input lands, and refuse if the window or the element changed underneath the prompt.
+                x, y, label = self._recheck_point(agent_id, kw.get("element"), kw.get("element_id"), x, y, label)
             if action == "right_click" and not hasattr(b, "click_button"):
                 raise ControlRefused("right click is not supported on this system")
             self.note_own_mouse()
@@ -1296,6 +1434,9 @@ class ComputerControl:
             )
             # both ends count: dropping a file on the Recycle Bin is as risky as clicking Delete
             self._confirm_targets(g, f"drag {self._where(l1, x1, y1)} to {self._where(l2, x2, y2)}", [l1, l2])
+            # Same post-prompt revalidation as clicks, for both ends of the drag.
+            x1, y1, l1 = self._recheck_point(agent_id, kw.get("element"), kw.get("element_id"), x1, y1, l1)
+            x2, y2, l2 = self._recheck_point(agent_id, kw.get("to_element"), kw.get("to_element_id"), x2, y2, l2)
             self.note_own_mouse()
             step().move(x1, y1)
             a.press_button()
@@ -1414,9 +1555,11 @@ class ComputerControl:
                 self._confirm_keys(g, "press Enter")
             elif any(k in CONSEQUENTIAL_KEYS for k in keys) or any(k in SHORTCUT_MODIFIERS for k in keys):
                 self._confirm_keys(g, f"press {combo}", delete=any(k in ("delete", "del") for k in keys))
-            elif len(keys) == 1 and keys[0] in ACTIVATION_KEYS:
+            elif any(k in ACTIVATION_KEYS for k in keys):
                 # Space activates the focused control (it is the keyboard way to "click" a focused
                 # button), so it takes the same focus check as Enter instead of slipping past every list.
+                # Any combo containing Space counts: Shift is not a shortcut modifier, so Shift+Space
+                # used to reach hotkey() with no confirmation at all.
                 self._confirm_keys(g, f"press {combo}")
             printable = len(keys) == 1 and len(keys[0]) == 1
             if printable:

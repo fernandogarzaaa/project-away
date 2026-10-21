@@ -179,6 +179,21 @@ def test_space_on_a_safe_focused_button_does_not_ask() -> None:
     assert ("key", ("space",)) in backend.calls
 
 
+def test_shift_space_on_a_focused_risky_button_asks_first_and_denial_blocks_it() -> None:
+    # Codex P1 on #95: Shift is not a shortcut modifier, so Shift+Space fell past
+    # the singleton Space check and reached hotkey() with no confirmation, while
+    # Shift does not stop Space from activating the focused button.
+    clock = Clock()
+    pay = Element("Pay now", "ButtonControl", rect=(0, 0, 9, 9))
+    ctl, backend, asked = _control(clock, ["Allow", "Deny"], uia=FakeUIA(focused=pay))
+    ctl.request("a1", "Claude")
+    asked.clear()
+    with pytest.raises(ControlRefused, match="did not allow"):
+        ctl.act("a1", "press_keys", keys="shift+space")
+    assert len(asked) == 1, "Shift+Space still activates the focused button, so it asks like Space does"
+    assert "hotkey" not in [c[0] for c in backend.calls]
+
+
 # --------------------------------------------------------------------- 3. typing target, re-verified per chunk
 
 
