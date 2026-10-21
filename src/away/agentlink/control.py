@@ -414,6 +414,11 @@ class ComputerControl:
                 self.on_event(topic, data)
 
     # --------------------------------------------------------------- session
+    @staticmethod
+    def _steps_left(g: Grant) -> int:
+        """Return the remaining budget, including steps reserved by in-flight sequences."""
+        return max(0, g.step_budget - g.steps_used - g.steps_reserved)
+
     def status(self) -> dict[str, Any]:
         g = self._check_expiry()
         if g is None:
@@ -428,7 +433,7 @@ class ComputerControl:
             "session": g.id,
             "step_budget": g.step_budget,
             "steps_used": g.steps_used,
-            "steps_left": max(0, g.step_budget - g.steps_used - g.steps_reserved),
+            "steps_left": self._steps_left(g),
         }
 
     def _check_expiry(self) -> Grant | None:
@@ -1312,6 +1317,7 @@ class ComputerControl:
                 "action": action,
                 "detail": detail,
                 "log_id": "",
+                "steps_left": self._steps_left(g),
                 "undo": undo,
                 # the observed effect: what the desktop looks like right after the input landed, so the
                 # agent can see e.g. "clicked 'Desktop', not 'Start'" and self-correct
@@ -1412,7 +1418,14 @@ class ComputerControl:
         undo: dict[str, Any] | None = {"sequence": undos} if undos else None
         entry = self._log(g, "sequence", detail, "done", undo)
         self._emit("control.action", {"agent": g.agent_name, "action": "sequence", "detail": detail, "id": entry.id})
-        return {"ok": True, "action": "sequence", "detail": detail, "log_id": entry.id, "steps": done}
+        return {
+            "ok": True,
+            "action": "sequence",
+            "detail": detail,
+            "log_id": entry.id,
+            "steps_left": self._steps_left(g),
+            "steps": done,
+        }
 
     @staticmethod
     def _seq_detail(done: list[dict[str, Any]]) -> str:
@@ -1766,7 +1779,10 @@ class ComputerControl:
             # The undo is a distinct agent action in the session's visual audit trail as well as the budget.
             self._log(budget_grant, "undo", f"Undid {e.action}", "done", None)
         self._emit("control.undo", {"id": e.id, "action": e.action})
-        return {"undone": e.action, "detail": e.detail}
+        out: dict[str, Any] = {"undone": e.action, "detail": e.detail}
+        if budget_grant is not None:
+            out["steps_left"] = self._steps_left(budget_grant)
+        return out
 
     @staticmethod
     def _apply_undo_step(a: Action, b: Any, u: dict[str, Any]) -> None:
