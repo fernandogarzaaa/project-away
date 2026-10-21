@@ -364,7 +364,7 @@ async with streamablehttp_client("https://<random>.trycloudflare.com/c/<code>") 
 or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123456`, then `... status`, `stream`,
 `ask "Ready?" Yes No`, `look out.jpg`, `set hands.cursor.gain 1.8 --why "..."`, `bundle out.zip`.
 
-**Tools (17; 15 in v0.1.21, `inbox` added in v0.1.22, `shell` in v0.1.28).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
+**Tools (18; 15 in v0.1.21, `inbox` added in v0.1.22, `shell` and `ui_query` in v0.1.28).** Related tools are grouped into one tool with an `action`, so an agent sees a short list:
 
 | Tool | Actions / arguments | Permission |
 |---|---|---|
@@ -376,12 +376,13 @@ or without MCP: `python scripts/agent_link_client.py --url <link> pair --pin 123
 | `diagnostics` | `run` (`kind` = `cameras` \| `sweep` \| `benchmark`, `device`, `seconds`), `job` (`job_id`), `record`, `bundle`, `files`, `download` (`path`), `logs` (`lines`) | run camera and speed checks (`record`, `bundle`, `files`, `download`, `logs`: share my logs and recordings) |
 | `look` | `camera` | see my camera when I allow |
 | `get_screen` | `scale`, `monitor`, `region`, `elements` (see below) | see my screen when I allow |
+| `ui_query` | (none) - the foreground window's interactable elements with ids, names, roles and exact bounds (Windows UI Automation, no screenshot taken); pass an id back as `element_id` to `pointer` or `keyboard` | use my computer |
 | `ask_user` | `question` (or `message`), `options`, `timeout_s`, `urgency`, `speak` | always |
 | `notify_user` | `text` (or `message`), `level`, `speak` | always |
 | `control` | `request` (`why`, `minutes`), `resume`, `stop`, `undo`, `log` | use my computer (`stop` and `log` always; `log` shows only your own actions) |
 | `pointer` | `move`, `click`, `double_click`, `right_click`, `drag`, `scroll` (`x`, `y`, `element`, `from_image`, ...) | use my computer |
 | `keyboard` | `type` (`text`), `press` (`keys`) | use my computer |
-| `open` | `app` (`name`), `url` (`url`) | use my computer |
+| `open` | `app` (`name`), `system` (`name`), `url` (`url`) | use my computer |
 | `shell` | `list`, `run` (`command` = tier-1 name \| `argv` = tier 2, `why`), `log` (`limit`) - staged shell: tier 1 read-only diagnostics run at once in an approved session, tier 2 asks the person every time | use my computer |
 | `disconnect` | (none) | always |
 

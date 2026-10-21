@@ -340,7 +340,7 @@ def test_signpath_steps_are_gated_and_skip_without_secrets():
     for s in signpath:
         assert s["if"] == "env.SIGNPATH_ENABLED == 'true'", s["name"]
     actions = [s for s in signpath if str(s.get("uses", "")).startswith("signpath/")]
-    assert [a["uses"] for a in actions] == ["signpath/github-action-submit-signing-request@v3"] * 2
+    assert [a["uses"] for a in actions] == ["signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092"] * 2  # fmt: skip
     for a in actions:
         w = a["with"]
         assert w["api-token"] == "${{ secrets.SIGNPATH_API_TOKEN }}"
