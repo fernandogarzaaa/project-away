@@ -39,3 +39,7 @@ Fourteen fix PRs, #75 through #88. All fourteen are open. None is merged. Mergin
 - CI evidence for every head above lives in `docs/audits/remediation-matrix.md`, one row per PR with both run IDs. Every canonical run in that table was verified by reading its job list directly; a run recorded as cancelled is a duplicate the parent cancelled itself. Nothing in this program counts a queued, cancelled, or missing check as a pass.
 - This documentation set ships on its own docs branch. Its PR is opened separately from the fourteen fix PRs.
 - The recommended merge order is in `docs/audits/remediation-matrix.md`. It is a recommendation only.
+
+## Resume mission outcome (2026-10-21 to 2026-10-22)
+
+The fourteen fix PRs above are all resolved. Inan merged #75, #78, #83, #87, and #88 on 2026-10-21. The resume mission merged #90 through #100 (see `remediation-matrix.md` for the merge commits and the final CI table) and closed #76, #77, #79, #80, #81, #82, #84, #85, and #86 as superseded by their successors, each with an explanation comment. No original audit PR remains open. Final main head: `f72c9332f642a746329e21f9c2bd90cb6d4129a4`.

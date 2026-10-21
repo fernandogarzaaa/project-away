@@ -114,3 +114,33 @@ Nothing in this program merges without Inan's explicit call. This order is a rec
 2. **Permission census** (from finding A-5). The permission-negative sweep exercised the named boundaries and both image scopes, not all roughly 30 service methods. A mechanical census that matches each service method's require call against the tool table would close the coverage gap permanently, ideally as a test.
 3. **DNS-rebinding structural guard** (from finding A-3). The rebinding defense is one middleware wrapper around one application. A test that fails when a route or mount exists outside that wrapper would turn the fragility note into a checked invariant.
 4. **Real-hardware passes.** PR #76's exact-bounds identity check and PR #88's mic supervision are proven by deterministic tests. Both still need a pass on real Windows hardware: UIA hit-testing on the Acer for #76, and a device-less dictation run for #88.
+
+## Resume mission outcome (2026-10-21 to 2026-10-22)
+
+The resume mission ("Resume Repository Audit, Resolve Blockers, Integrate Fixes, and Verify Production Readiness") explicitly authorized merging eligible fixes with full pre-merge verification. That authorization supersedes the audit-phase rule quoted above for this phase only. Every merge below was squash, verified by merge-commit read-back (single parent, exact file list), and followed by job-level green main CI before the next merge.
+
+Merged under the mission, in order (short SHAs are merge commits on main):
+
+| PR | Merge commit | What landed |
+| --- | --- | --- |
+| #91 | 5c44a758 | Request-specific ingress trust (supersedes #82/#84, closed with explanation comments) |
+| #90 | cc76e2fa | Reserved-aware steps_left contract |
+| #92 | 066fa76c | Audit-trail integrity, successor to #77 (closed as superseded) |
+| #93 | 596da3f8 | UIA identity, successor to #76 (closed as superseded) |
+| #94 | 8c22c742 | Grant admission, successor to #79 (closed as superseded); included a Codex P2 fix for stop paths during pending admission |
+| #95 | 92d2509e | Prompt coverage, successor to #86 (closed as superseded); included a Codex P1 fix for Shift+Space bypassing the confirmation ladder |
+| #96 | fb7998c7 | Redaction and trail-off, successor to #85 (closed as superseded); included two Codex fixes and a Windows pruning-order fix |
+| #97 | 8245ebd6 | Undo progress tracking, successor to #80 (closed as superseded); included three review fixes (receipt failure notice, uncertain half-applied scroll steps, stuck-partial reporting) and a ctime pruning tiebreak |
+| #99 | 5cb5db8 | Test-only: pinned started timestamps in the forced-mtime pruning test (Windows clock-quantization flake) |
+| #98 | d0fa331f | Docs/API contract, successor to #81 (closed as superseded); included a Codex P2 fix scoping the tool check to the Tools table rows |
+| #100 | f72c9332 | Test-only: pinned started timestamps in the sibling pruning test (same flake) |
+
+Final main head: `f72c9332f642a746329e21f9c2bd90cb6d4129a4`. Final main CI run 39692611106: completed/success, 27/27 jobs, including all 17 mutation jobs (15 groups plus the matrix-sync check and the score gate).
+
+Residual risks carried forward, stated honestly:
+
+1. Undo progress does not survive restart: session files carry status transitions, not per-step progress, so a partly undone entry after restart shows "partially undone" but is not re-offered. Fail-closed; nothing double-applies.
+2. When mtime, started time, AND file time all tie in production, the final session-pruning tiebreak is the random-hex name, and pruning may drop a same-tick session other than the oldest.
+3. The revoke test (`test_revoke_ends_a_live_mcp_call_and_session`) failed twice on Windows CI on #96 heads and passed on rerun with no revoke-path changes; root cause not established.
+4. Known loaded-runner timing flakes remain: macOS voice latency ratios and simulated-camera fps thresholds, both marginal misses unrelated to the code under test.
+5. Named Cloudflare tunnels share the main port by design in #91; only quick tunnels get the dedicated loopback server. The per-ingress trust rule (cf-connecting-ip honored only on tunnel ingress, single IP literal) is the control, not a global tunnel boolean.
