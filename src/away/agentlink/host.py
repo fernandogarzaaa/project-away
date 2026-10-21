@@ -272,6 +272,7 @@ class AgentLinkHost:
         self.headless = headless
         self.frames: dict[str, Any] = {}
         self.server: Any = None
+        self.tunnel_server: Any = None  # v0.1.29: the dedicated Cloudflare listener (None when no tunnel runs)
         self.gate: Any = None
         self.tunnel: Any = None
         self.relay: Any = None  # v0.1.23 backup link (SSH relay, no Cloudflare)
@@ -990,6 +991,7 @@ class AgentLinkHost:
                 rate=(float(s.rate_per_s), int(s.rate_burst)),
                 access_log=self.data_dir / "logs" / "agent-access.log",
                 tunnel_hosts=self.tunnel_hosts,
+                tunnel_port=self.tunnel_server_port,
                 link_info=self.link_info,
                 token_expiry=lambda: str(getattr(self.cfg().agent_link, "token_expiry", "90d") or "90d"),
             )
@@ -1049,6 +1051,11 @@ class AgentLinkHost:
     def _ensure_named(self, port: int, download: bool) -> str:
         from away.agentlink import tunnel
 
+        # v0.1.29: a named tunnel is NOT redirected to the dedicated listener. NamedTunnel.start ignores its port
+        # argument: cloudflared run reads the ingress target from the Cloudflare dashboard, which is
+        # user-configured and fixed, and the app cannot verify it. Named traffic therefore arrives on the main
+        # listener and is classified shared, so its forwarding header is never trusted. Pointing the dashboard
+        # at a dedicated listener is a future migration, not something this code can do silently.
         if self.named is not None and self.named.alive() and self.named.url:
             return str(self.named.url)
         s = self.cfg().agent_link
@@ -1136,7 +1143,10 @@ class AgentLinkHost:
         threading.Thread(target=run, daemon=True, name="agentlink-restore").start()
 
     def _ensure_relay(self, port: int) -> str:
-        """v0.1.23: the backup link (localhost.run or Pinggy over the system's ssh; no Cloudflare, no account)."""
+        """v0.1.23: the backup link (localhost.run or Pinggy over the system's ssh; no Cloudflare, no account).
+
+        v0.1.29: the relay keeps pointing at the main port on purpose. Its users share the shared-ingress key,
+        so per-user isolation on that path is the relay's own SSH authentication, not the app's."""
         from away.agentlink import relay
 
         if self.relay is not None and self.relay.alive() and self.relay.url:
@@ -1162,19 +1172,49 @@ class AgentLinkHost:
         if not any(a.kind != "local" for a in self.core.registry.reconnectable()):
             self._notice("Project Away", "Your backup link has a new address. Paste the new link into your AI app.")
 
+    def tunnel_server_port(self) -> int | None:
+        """The dedicated Cloudflare listener's live port, or None when it is not running."""
+        t = self.tunnel_server
+        return int(t.port) if t is not None and t.running else None
+
+    def _ensure_tunnel_server(self) -> int:
+        """A second loopback listener serving the same app, for Cloudflare traffic only. The SSH relay keeps the
+        main listener, so relay users never share a key with tunnel users. Raises when it cannot start: a tunnel
+        without its dedicated listener would silently route tunnel traffic to shared ingress, so startup fails
+        closed instead of starting a tunnel the app cannot attribute."""
+        from away.agentlink.server import Server
+
+        if self.tunnel_server is not None and self.tunnel_server.running:
+            return int(self.tunnel_server.port)
+        if self.server is None or not self.server.running:
+            raise RuntimeError("the Agent Link server is not running")
+        srv = Server(self.server.app, 0)
+        port = srv.start()
+        self.tunnel_server = srv
+        return port
+
     def _ensure_tunnel(self, port: int, download: bool) -> str:
         from away.agentlink import tunnel
 
+        # v0.1.29: the quick tunnel points at the dedicated listener, never the main port, so a request's
+        # listener proves its ingress. A live tunnel whose listener died is restarted, not reused: the old
+        # address is dead anyway, and reusing it would leave tunnel traffic on the shared listener. ``port``
+        # is the main port, kept in the signature for the relay path; the tunnel ignores it now.
         if self.tunnel is not None and self.tunnel.alive() and self.tunnel.url:
-            return str(self.tunnel.url)
+            if self.tunnel_server is not None and self.tunnel_server.running:
+                return str(self.tunnel.url)
+            with contextlib.suppress(Exception):
+                self.tunnel.stop()
+            self.tunnel = None
         s = self.cfg().agent_link
         exe = tunnel.find(self.data_dir, s.cloudflared_path)
         if exe is None:
             if not (download and s.cloudflared_download):
                 raise tunnel.TunnelError("the secure link helper (cloudflared) is not installed")
             exe = tunnel.download(self.data_dir)
+        tport = self._ensure_tunnel_server()  # raises: no tunnel without its dedicated listener
         self.tunnel = tunnel.Tunnel(exe)
-        return self.tunnel.start(port)
+        return self.tunnel.start(tport)
 
     def new_link(self, scopes: Any = None, relay: str | None = None) -> dict[str, Any]:
         """v0.1.22 "New link": a fresh secure link (a new web address) without disconnecting anyone. Cloudflare
@@ -1216,6 +1256,9 @@ class AgentLinkHost:
             if t is not None:
                 t.stop()
                 setattr(self, which, None)
+        if self.tunnel_server is not None:
+            self.tunnel_server.stop()
+            self.tunnel_server = None
         self.pairing = None
 
     def disconnect_all(self) -> int:
