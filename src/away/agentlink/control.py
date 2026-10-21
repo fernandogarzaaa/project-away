@@ -328,6 +328,10 @@ class LogEntry:
     source: str = AGENT  # the action engine source it ran as
     session: str = ""  # v0.1.28: the control session (grant id) this step belongs to
     parent: str = ""  # for a sequence sub-step: the id of the sequence's log entry that groups it
+    # Per-inverse-step outcome of the latest undo attempt, aligned with the newest-first inverse order:
+    # "done" / "failed" / "cancelled" / "pending". None until an undo is first attempted. Kept last:
+    # _log constructs LogEntry positionally up to session.
+    undo_progress: list[str] | None = None
 
 
 @dataclass
@@ -729,11 +733,11 @@ class ComputerControl:
         try:
             files = sorted(
                 self.log_folder.glob("session-*.jsonl"),
-                key=lambda p: (p.stat().st_mtime, p.name),
+                key=lambda p: (p.stat().st_mtime, p.stat().st_ctime, p.name),
             )
         except Exception:
             return
-        parsed: list[tuple[float, float, str, str, list[LogEntry]]] = []
+        parsed: list[tuple[float, float, float, str, str, list[LogEntry]]] = []
         for path in files[-MAX_SESSIONS:]:
             sid = path.name[len("session-") : -len(".jsonl")]
             if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
@@ -788,14 +792,15 @@ class ComputerControl:
                     continue  # one damaged line never costs the rest of the session
             if not seen:
                 continue
-            parsed.append((path.stat().st_mtime, started_ts, sid, agent, entries[-TRAIL_CAP:]))
+            parsed.append((path.stat().st_mtime, started_ts, path.stat().st_ctime, sid, agent, entries[-TRAIL_CAP:]))
         # Install in age order. Modification time alone does not order sessions
         # created in rapid sequence: on coarse-mtime filesystems several files
-        # share one timestamp, and the name tiebreak is random (session ids are
-        # random hex), so pruning dropped an arbitrary session instead of the
-        # oldest. The started line's wall-clock timestamp breaks the tie by
-        # actual creation order.
-        for _mtime, _started_ts, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2])):
+        # share one timestamp, and the started line's wall-clock timestamp can
+        # share one coarse tick too (Windows time.time), so neither breaks the
+        # tie on its own. File creation/metadata time is the next signal (on
+        # Windows it is true creation time), and the name tiebreak after it is
+        # random (session ids are random hex) and only a last resort.
+        for _mtime, _started_ts, _ctime, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2], r[3])):
             with self._lock:
                 self.sessions[sid] = entries
                 self._session_agents[sid] = agent
@@ -869,6 +874,8 @@ class ComputerControl:
                 text += " (stopped part-way)"
             elif e.result == "undone":
                 text += " (you already put this back)"
+            elif e.result == "partially undone":
+                text += " (partly put back)"
             items.append(
                 {
                     "id": e.id,
@@ -2081,7 +2088,7 @@ class ComputerControl:
 
     @staticmethod
     def _entry_dict(e: LogEntry) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": e.id,
             "ts": e.ts,
             "agent": e.agent,
@@ -2094,6 +2101,9 @@ class ComputerControl:
             "session": e.session,
             "parent": e.parent,
         }
+        if e.undo_progress is not None:
+            d["undo_progress"] = ["not_attempted" if s == "pending" else s for s in e.undo_progress]
+        return d
 
     def session_trail(self, session_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """v0.1.28: one control session's audit trail, oldest first (the live session when ``session_id`` is not
@@ -2156,6 +2166,18 @@ class ComputerControl:
                 if "nothing that can be undone" not in str(exc):
                     failed.append(str(exc))
                 break
+            except Exception as exc:
+                # A backend failure mid-press leaves that entry "partially undone" (its completed
+                # inverses are recorded and will not be repeated); report it instead of raising
+                # past the caller, and stop rather than hammering a failing backend.
+                failed.append(str(exc))
+                break
+            if r.get("partial"):
+                # The press resumed a partly-undone item and ran its remaining steps, but one
+                # inverse is recorded failed/cancelled and cannot be safely retried. Report the
+                # item as failed, then keep going: the stuck entry is skipped from here on.
+                failed.append(f"{describe_action(r['undone'], r['detail'])} was only partly put back")
+                continue
             undone.append(describe_action(r["undone"], r["detail"]))
         out: dict[str, Any] = {"undone": undone, "count": len(undone)}
         if failed:
@@ -2163,22 +2185,98 @@ class ComputerControl:
             out["partial"] = True
         return out
 
+    @staticmethod
+    def _undo_step_count(e: LogEntry) -> int:
+        u = e.undo or {}
+        return len(u["sequence"]) if "sequence" in u else 1
+
+    def _undo_progress(self, e: LogEntry) -> list[str]:
+        """The entry's per-inverse-step outcomes, aligned with the newest-first inverse order
+        (done / failed / cancelled / pending). A fresh entry starts all pending."""
+        n = self._undo_step_count(e)
+        saved = e.undo_progress or []
+        return (list(saved) + ["pending"] * n)[:n]
+
+    def _undo_pending(self, e: LogEntry) -> list[int]:
+        """Inverse-step indexes an undo call may still attempt: every step of a never-undone entry,
+        or only the never-attempted steps of a partially undone one. Completed, failed and cancelled
+        steps are never re-attempted: a failed or cancelled step may have applied part of its input,
+        so repeating it could double-apply it."""
+        if e.result == "done":
+            return list(range(self._undo_step_count(e)))
+        if e.result == "partially undone":
+            return [i for i, s in enumerate(self._undo_progress(e)) if s == "pending"]
+        return []
+
+    def _partial_message(self, e: LogEntry) -> str:
+        progress = self._undo_progress(e)
+        done = progress.count("done")
+        failed = len(progress) - progress.count("pending") - done
+        return (
+            "only partly undone: the newest matching action "
+            f"({done} of {len(progress)} inverse steps completed, {failed} failed or cancelled) "
+            "and the completed steps will not be repeated"
+        )
+
+    @staticmethod
+    def _undo_report(sub: list[dict[str, Any]], progress: list[str]) -> list[dict[str, Any]]:
+        """Per-inverse-step outcome for the caller: which steps succeeded, failed, were cancelled,
+        or were not attempted."""
+        label = {"pending": "not_attempted"}
+        return [{"index": i, "inverse": s, "status": label.get(progress[i], progress[i])} for i, s in enumerate(sub)]
+
+    @staticmethod
+    def _undo_uncertain(sub: list[dict[str, Any]], progress: list[str], backend: Any) -> bool:
+        """True when a failed or cancelled step may have applied part of its input. Only a
+        scroll inverse with both components is two backend calls (scroll then hscroll), so a
+        failure on the second leaves the first applied. Every other inverse is one backend
+        call, so its failure sent nothing and the entry stays retryable."""
+        for step, outcome in zip(sub, progress):
+            if outcome in ("failed", "cancelled") and "scroll" in step:
+                dy, dx = step["scroll"]
+                if dy and dx and hasattr(backend, "hscroll"):
+                    return True
+        return False
+
+    def _settle_undo(self, e: LogEntry, progress: list[str], uncertain: bool = False) -> None:
+        """Record an interrupted undo's outcome on its entry. Every step done means the action was
+        in fact put back. Any step done, or any failed/cancelled step that may have half applied
+        (see _undo_uncertain), leaves the distinct "partially undone" state (never plain
+        "done": the entry is not fully undoable again, completed steps are never repeated, and
+        failed steps in a partly done undo are never re-attempted). Nothing completed and
+        nothing uncertain leaves the entry fully undoable (a transient backend failure must
+        not brick its undo) with every step back to "pending", so the retry genuinely
+        re-runs them."""
+        with self._lock:
+            if all(s == "done" for s in progress):
+                e.undo_progress = list(progress)
+                e.result = "undone"
+            elif uncertain or any(s == "done" for s in progress):
+                e.undo_progress = list(progress)
+                e.result = "partially undone"
+            else:
+                e.undo_progress = ["pending"] * len(progress)
+                e.result = "done"
+
     def _undo(
         self, agent_id: str | None, only_ids: set[str] | None = None, budget_grant: Grant | None = None
     ) -> dict[str, Any]:
         with self._lock:
-            e = next(
-                (
-                    x
-                    for x in reversed(self.log)
-                    if x.undo is not None
-                    and x.result == "done"
-                    and (agent_id is None or x.agent_id == agent_id)
-                    and (only_ids is None or x.id in only_ids)
-                ),
-                None,
-            )
+            e: LogEntry | None = None
+            stuck: LogEntry | None = None
+            for x in reversed(self.log):
+                if x.undo is None or (agent_id is not None and x.agent_id != agent_id):
+                    continue
+                if only_ids is not None and x.id not in only_ids:
+                    continue
+                if self._undo_pending(x):
+                    e = x
+                    break
+                if x.result == "partially undone" and stuck is None:
+                    stuck = x  # partly undone, with nothing left that is safe to attempt
             if e is None:
+                if stuck is not None:
+                    raise ControlRefused(self._partial_message(stuck))
                 raise ControlRefused("nothing that can be undone (clicks and key presses can't be)")
             # Select the entry, mark it in-flight, and reserve budget atomically. Concurrent undo calls
             # cannot select the same action or race past the session's limit.
@@ -2187,47 +2285,65 @@ class ComputerControl:
                     raise ControlRefused(BUDGET_EXHAUSTED.format(budget=budget_grant.step_budget))
                 budget_grant.steps_used += 1
             e.result = "undoing"
+            progress = self._undo_progress(e)
         b = self.hooks.backend
         u = e.undo or {}
         sub = list(reversed(u["sequence"])) if "sequence" in u else [u]
+        progress = (progress + ["pending"] * len(sub))[: len(sub)]
         source = USER if agent_id is None else AGENT
-        applied = 0  # inverse steps that actually ran: an interrupted undo is reported honestly
+        live_action: list[Any] = []
         try:
             if any("keys" in s for s in sub):
                 self.note_own_keys()
             else:
                 self.note_own_mouse()
             with self.engine.begin(source, "undo", actor=agent_id or "", backend=b) as a:
-                for s in sub:
-                    self._apply_undo_step(a, b, s)
-                    applied += 1
+                live_action.append(a)
+                for i in [i for i, s in enumerate(progress) if s == "pending"]:
+                    try:
+                        self._apply_undo_step(a, b, sub[i])
+                    except ActionCancelled:
+                        # Action.step() checks the cancel token before handing out the backend, so
+                        # when this action never sent any input the step provably applied nothing
+                        # and stays retryable. Otherwise the step is uncertain (a multi-part step
+                        # may have applied some of its input) and is never blindly repeated.
+                        progress[i] = "pending" if not a.sent else "cancelled"
+                        raise
+                    except Exception:
+                        progress[i] = "failed"
+                        raise
+                    progress[i] = "done"
                 a.ok = True
         except ActionCancelled as exc:
-            self._undo_interrupted(e, applied, len(sub))
+            self._settle_undo(e, progress, self._undo_uncertain(sub, progress, b))
+            status = {"undone": "undone", "partially undone": "partially undone"}.get(e.result, "undo failed")
+            self._trail_status(e, status, sum(1 for s in progress if s == "done"), len(sub))
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         except Exception:
-            self._undo_interrupted(e, applied, len(sub))
+            self._settle_undo(e, progress, self._undo_uncertain(sub, progress, b))
+            status = {"undone": "undone", "partially undone": "partially undone"}.get(e.result, "undo failed")
+            self._trail_status(e, status, sum(1 for s in progress if s == "done"), len(sub))
             raise
         with self._lock:
-            e.result = "undone"
-        self._trail_status(e, "undone", applied, len(sub))
+            e.undo_progress = list(progress)
+            e.result = "undone" if all(s == "done" for s in progress) else "partially undone"
+            partial = e.result == "partially undone"
+        done = sum(1 for s in progress if s == "done")
+        self._trail_status(e, "partially undone" if partial else "undone", done, len(sub))
         if budget_grant is not None:
             # The undo is a distinct agent action in the session's visual audit trail as well as the budget.
-            self._log(budget_grant, "undo", f"Undid {e.action}", "done", None)
-        self._emit("control.undo", {"id": e.id, "action": e.action})
-        out: dict[str, Any] = {"undone": e.action, "detail": e.detail}
+            self._log(budget_grant, "undo", f"Undid {e.action}", "partially undone" if partial else "done", None)
+        event: dict[str, Any] = {"id": e.id, "action": e.action}
+        out: dict[str, Any] = {"undone": e.action, "detail": e.detail, "undo_steps": self._undo_report(sub, progress)}
+        if partial:
+            event["partial"] = True
+            out["partial"] = True
+        if stuck is not None:
+            out["skipped_partial"] = stuck.id  # a newer entry is stuck partly undone; never silently dropped
         if budget_grant is not None:
             out["steps_left"] = self._steps_left(budget_grant)
+        self._emit("control.undo", event)
         return out
-
-    def _undo_interrupted(self, e: LogEntry, applied: int, total: int) -> None:
-        """An undo that did not finish. Nothing ran, so the action stays "done" and the undo may be
-        retried; some inverse steps ran, so the action is "partially undone" and is not offered for a
-        blind repeat. Either way the outcome is persisted as a status transition on the original
-        action, where before it vanished without a trace."""
-        with self._lock:
-            e.result = "partially undone" if applied else "done"
-        self._trail_status(e, "partially undone" if applied else "undo failed", applied, total)
 
     @staticmethod
     def _apply_undo_step(a: Action, b: Any, u: dict[str, Any]) -> None:

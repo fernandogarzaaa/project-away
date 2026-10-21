@@ -288,7 +288,7 @@ def test_partial_undo_is_recorded_as_partial_and_not_reoffered(tmp_path: Path) -
     assert status["applied"] == 1 and status["of"] == 2
     (entry,) = [e for e in ctl.log if e.id == res["log_id"]]
     assert entry.result == "partially undone"
-    with pytest.raises(ControlRefused, match="nothing that can be undone"):
+    with pytest.raises(ControlRefused, match="partly undone"):
         ctl.undo_last_by_user()  # a partly-applied inverse is never blindly repeated
 
 
@@ -455,19 +455,22 @@ def test_restored_sessions_count_toward_pruning(tmp_path: Path) -> None:
     ctl2.stop("done")
 
 
-def test_restored_pruning_uses_started_order_when_mtimes_tie(tmp_path: Path) -> None:
-    # #96 CI on Windows: session files written in rapid sequence shared one
-    # modification timestamp, and the name tiebreak (random hex ids) made
-    # pruning drop an arbitrary session instead of the oldest. The started
-    # line's wall-clock timestamp breaks the tie by actual creation order.
+def test_restored_pruning_uses_creation_order_when_mtimes_tie(tmp_path: Path) -> None:
+    # #96/#97 CI on Windows: session files written in rapid sequence shared one
+    # modification timestamp, and the started lines shared one coarse wall-clock
+    # tick, so the sort fell through to the name tiebreak (random hex ids) and
+    # pruning dropped an arbitrary session instead of the oldest. The chain is
+    # mtime, then started wall time, then file creation/metadata time. Forcing
+    # the mtimes resets each file's metadata time in turn, so the forcing loop
+    # must run in creation order or it scrambles the very signal it preserves.
     ctl = _control(Clock(), tmp_path)
     ids = []
     for _ in range(MAX_SESSIONS):
         ctl.request("a1", "Claude")
         ids.append(_session_id(ctl))
         ctl.stop("done")
-    for path in (tmp_path / "actions").glob("session-*.jsonl"):
-        os.utime(path, (1700000000.0, 1700000000.0))
+    for sid in ids:
+        os.utime(tmp_path / "actions" / f"session-{sid}.jsonl", (1700000000.0, 1700000000.0))
     ctl2 = _control(Clock(), tmp_path)
     assert len(ctl2.sessions) == MAX_SESSIONS
     ctl2.request("a1", "Claude")
