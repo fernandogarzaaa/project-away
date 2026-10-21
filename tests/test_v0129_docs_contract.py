@@ -44,9 +44,25 @@ def test_readme_tool_count_and_table_match_registered_mcp_tools() -> None:
     assert int(m.group(1)) == len(names), (
         f"README claims {m.group(1)} tools but the MCP surface registers {len(names)}: {sorted(names)}"
     )
-    for name in sorted(names):
-        assert f"`{name}`" in text, f"README's tool table never mentions the registered tool {name!r}"
-    open_row = next((line for line in text.splitlines() if line.startswith("| `open`")), "")
+    # The names must come from the Tools table itself, not from anywhere in the
+    # README: a whole-document search would still pass if a row were deleted
+    # while its name survived in the heading or elsewhere. Rows start with
+    # "| `name`", and one row groups two tools with a comma.
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("**Tools ("))
+    rows = []
+    for line in lines[start:]:
+        if line.startswith("| `"):
+            rows.append(line)
+        elif rows and not line.startswith("|"):
+            break
+    table_names = set()
+    for row in rows:
+        table_names.update(re.findall(r"`([^`]+)`", row.split("|")[1]))
+    assert table_names == names, (
+        f"README tool table names {sorted(table_names)} but the MCP surface registers {sorted(names)}"
+    )
+    open_row = next((line for line in rows if line.startswith("| `open`")), "")
     assert "`system`" in open_row, "README's `open` row omits the `system` action"
 
 
