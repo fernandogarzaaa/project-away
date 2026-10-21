@@ -423,7 +423,10 @@ def test_sequence_and_undo_results_report_reserved_aware_steps_left(tmp_path: Pa
     ctl = _control(tmp_path, step_budget=10)
     ctl.request("agent-a", "Claude")
 
-    result = ctl.act_sequence("agent-a", [{"action": "move", "x": 20, "y": 20}, {"action": "move", "x": 30, "y": 30}])
+    result = ctl.act_sequence(
+        "agent-a",
+        [{"action": "move", "x": 20, "y": 20}, {"action": "move", "x": 30, "y": 30}],
+    )
     assert result["steps_left"] == ctl.status()["steps_left"]
     assert all("steps_left" in step for step in result["steps"])
     assert result["steps"][-1]["steps_left"] == result["steps_left"]
