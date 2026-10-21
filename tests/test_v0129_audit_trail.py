@@ -455,6 +455,28 @@ def test_restored_sessions_count_toward_pruning(tmp_path: Path) -> None:
     ctl2.stop("done")
 
 
+def test_restored_pruning_uses_started_order_when_mtimes_tie(tmp_path: Path) -> None:
+    # #96 CI on Windows: session files written in rapid sequence shared one
+    # modification timestamp, and the name tiebreak (random hex ids) made
+    # pruning drop an arbitrary session instead of the oldest. The started
+    # line's wall-clock timestamp breaks the tie by actual creation order.
+    ctl = _control(Clock(), tmp_path)
+    ids = []
+    for _ in range(MAX_SESSIONS):
+        ctl.request("a1", "Claude")
+        ids.append(_session_id(ctl))
+        ctl.stop("done")
+    for path in (tmp_path / "actions").glob("session-*.jsonl"):
+        os.utime(path, (1700000000.0, 1700000000.0))
+    ctl2 = _control(Clock(), tmp_path)
+    assert len(ctl2.sessions) == MAX_SESSIONS
+    ctl2.request("a1", "Claude")
+    assert len(ctl2.sessions) == MAX_SESSIONS
+    assert ids[0] not in ctl2.sessions
+    assert not (tmp_path / "actions" / f"session-{ids[0]}.jsonl").exists()
+    ctl2.stop("done")
+
+
 def test_trail_off_persists_nothing_and_reloads_nothing(tmp_path: Path) -> None:
     ctl = _control(Clock(), tmp_path)
     ctl.request("a1", "Claude")

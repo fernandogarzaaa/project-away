@@ -733,6 +733,7 @@ class ComputerControl:
             )
         except Exception:
             return
+        parsed: list[tuple[float, float, str, str, list[LogEntry]]] = []
         for path in files[-MAX_SESSIONS:]:
             sid = path.name[len("session-") : -len(".jsonl")]
             if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
@@ -745,6 +746,7 @@ class ComputerControl:
             entries: list[LogEntry] = []
             by_id: dict[str, LogEntry] = {}
             seen = False
+            started_ts = 0.0
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -757,6 +759,7 @@ class ComputerControl:
                     if kind == "started":
                         seen = True
                         agent = str(ev.get("agent") or agent)
+                        started_ts = float(ev.get("ts") or 0.0)
                     elif kind == "step":
                         seen = True
                         thumb = str(ev.get("thumb") or "")
@@ -785,8 +788,16 @@ class ComputerControl:
                     continue  # one damaged line never costs the rest of the session
             if not seen:
                 continue
+            parsed.append((path.stat().st_mtime, started_ts, sid, agent, entries[-TRAIL_CAP:]))
+        # Install in age order. Modification time alone does not order sessions
+        # created in rapid sequence: on coarse-mtime filesystems several files
+        # share one timestamp, and the name tiebreak is random (session ids are
+        # random hex), so pruning dropped an arbitrary session instead of the
+        # oldest. The started line's wall-clock timestamp breaks the tie by
+        # actual creation order.
+        for _mtime, _started_ts, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2])):
             with self._lock:
-                self.sessions[sid] = entries[-TRAIL_CAP:]
+                self.sessions[sid] = entries
                 self._session_agents[sid] = agent
                 if sid not in self._session_order:
                     self._session_order.append(sid)
