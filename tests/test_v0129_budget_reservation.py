@@ -403,3 +403,113 @@ def test_op_lock_is_released_when_the_post_acquire_check_raises() -> None:
     assert not t2.is_alive(), "a later operation deadlocked behind the leaked operation lock"
     assert second.get("completed") is True, f"the later operation did not run: {second}"
     assert ("click", (1,)) in backend.calls
+
+
+def test_steps_left_includes_inflight_reservations(tmp_path: Path) -> None:
+    ctl = _control(tmp_path, step_budget=10)
+    ctl.request("agent-a", "Claude")
+    grant = ctl.grant
+    assert grant is not None
+
+    ctl._reserve_steps(grant, 4)
+    assert ctl._steps_left(grant) == 6
+    assert ctl.status()["steps_left"] == 6
+
+    # A separate single action must not report reserved steps as available.
+    result = ctl.act("agent-a", "move", x=10, y=10)
+    assert result["steps_left"] == ctl.status()["steps_left"] == 5
+
+
+def test_sequence_and_undo_results_report_reserved_aware_steps_left(tmp_path: Path) -> None:
+    ctl = _control(tmp_path, step_budget=10)
+    ctl.request("agent-a", "Claude")
+
+    result = ctl.act_sequence(
+        "agent-a",
+        [{"action": "move", "x": 20, "y": 20}, {"action": "move", "x": 30, "y": 30}],
+    )
+    assert result["steps_left"] == ctl.status()["steps_left"]
+    assert all("steps_left" in step for step in result["steps"])
+    assert result["steps"][-1]["steps_left"] == result["steps_left"]
+
+    undone = ctl.undo_last("agent-a")
+    assert undone["steps_left"] == ctl.status()["steps_left"]
+
+
+def test_steps_left_agrees_while_a_sequence_is_in_flight(tmp_path: Path) -> None:
+    """A real in-flight sequence, not a fabricated reservation: while the first
+    sub-step is blocked, status must already count the whole plan as spent."""
+    backend = GatedScrollBackend(block_on=1)
+    ctl = _control(tmp_path, backend=backend, step_budget=10)
+    ctl.request("a1", "Agent1")
+    t, outcome = _run(
+        lambda: ctl.act_sequence(
+            "a1",
+            [{"action": "scroll", "dy": 1}, {"action": "scroll", "dy": 2}, {"action": "scroll", "dy": 3}],
+        )
+    )
+    assert backend.entered.wait(timeout=10)  # first sub-step executing: 1 used, 2 reserved
+    assert ctl.status()["steps_left"] == 7
+    backend.release.set()
+    t.join(15)
+    assert not t.is_alive()
+    result = outcome.get("result", {})
+    assert result.get("ok") is True
+    assert result["steps_left"] == 7
+    assert all(step["steps_left"] == 7 for step in result["steps"])
+    assert ctl.status()["steps_left"] == 7
+
+
+def test_partial_sequence_releases_reservation_on_the_exposed_surface(tmp_path: Path) -> None:
+    """A stopped sequence raises, so the budget state is checked through status:
+    the executed steps stay spent and the unexecuted reservation comes back."""
+    clock = Clock()
+    backend = GatedScrollBackend(block_on=2)
+    ctl = _control(tmp_path, backend=backend, step_budget=10, clock=clock)
+    ctl.request("a1", "Agent1")
+    t, outcome = _run(
+        lambda: ctl.act_sequence(
+            "a1",
+            [{"action": "scroll", "dy": 1}, {"action": "scroll", "dy": 2}, {"action": "scroll", "dy": 3}],
+        )
+    )
+    assert backend.entered.wait(timeout=10)  # second sub-step executing: 2 used, 1 reserved
+    assert ctl.status()["steps_left"] == 7
+    clock.advance(60.0)  # past the approval grace and the agent's own-input echo windows
+    assert ctl.user_input("mouse") is True  # the person takes over: the sequence is cancelled
+    backend.release.set()
+    t.join(15)
+    assert not t.is_alive()
+    err = outcome.get("error")
+    assert isinstance(err, ControlRefused) and "stopped part-way" in str(err), f"unexpected outcome: {outcome}"
+    assert ctl.status()["steps_left"] == 8  # 2 spent, 1 released, nothing else
+
+
+def test_steps_left_never_negative_at_exhaustion(tmp_path: Path) -> None:
+    ctl = _control(tmp_path, step_budget=2)
+    ctl.request("a1", "Agent1")
+    first = ctl.act("a1", "move", x=1, y=1)
+    assert first["steps_left"] == 1 == ctl.status()["steps_left"]
+    second = ctl.act("a1", "move", x=2, y=2)
+    assert second["steps_left"] == 0 == ctl.status()["steps_left"]
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "move", x=3, y=3)
+    assert ctl.status()["steps_left"] == 0
+    with pytest.raises(ControlRefused):
+        ctl.act_sequence("a1", [{"action": "move", "x": 4, "y": 4}])
+    assert ctl.status()["steps_left"] == 0
+    with pytest.raises(ControlRefused):
+        ctl.undo_last("a1")
+    assert ctl.status()["steps_left"] == 0
+
+
+def test_refused_action_spends_one_step_and_results_agree(tmp_path: Path) -> None:
+    """Attempts count, including refused ones: a blocked app name is refused
+    after the step is spent, and every later result agrees with status."""
+    ctl = _control(tmp_path, step_budget=5)
+    ctl.request("a1", "Agent1")
+    with pytest.raises(ControlRefused):
+        ctl.act("a1", "open_app", name="terminal")
+    assert ctl.status()["steps_left"] == 4
+    result = ctl.act("a1", "move", x=1, y=1)
+    assert result["steps_left"] == 3 == ctl.status()["steps_left"]
