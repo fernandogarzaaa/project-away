@@ -455,20 +455,35 @@ def test_restored_sessions_count_toward_pruning(tmp_path: Path) -> None:
     ctl2.stop("done")
 
 
-def test_restored_pruning_uses_creation_order_when_mtimes_tie(tmp_path: Path) -> None:
-    # #96/#97 CI on Windows: session files written in rapid sequence shared one
+def test_restored_pruning_uses_started_order_when_mtimes_tie(tmp_path: Path) -> None:
+    # #96/#97/#98 CI on Windows: session files written in rapid sequence shared one
     # modification timestamp, and the started lines shared one coarse wall-clock
     # tick, so the sort fell through to the name tiebreak (random hex ids) and
-    # pruning dropped an arbitrary session instead of the oldest. The chain is
-    # mtime, then started wall time, then file creation/metadata time. Forcing
-    # the mtimes resets each file's metadata time in turn, so the forcing loop
-    # must run in creation order or it scrambles the very signal it preserves.
+    # pruning dropped an arbitrary session instead of the oldest. The ctime
+    # fallback added in #97 helps when file times differ, but Windows file
+    # times quantize too, so no real clock signal is deterministic here. The
+    # test therefore pins the started timestamps strictly increasing (the
+    # mechanism under test: started order breaks mtime ties) by patching
+    # time.time only around session creation; grant times use the injected
+    # clock and are unaffected. Residual limitation, stated honestly: when
+    # mtime, started time, AND file time all tie in production, the final
+    # name tiebreak is still arbitrary, and pruning may drop a same-tick
+    # session other than the oldest.
+    import itertools
+    import time as time_mod
+
     ctl = _control(Clock(), tmp_path)
     ids = []
-    for _ in range(MAX_SESSIONS):
-        ctl.request("a1", "Claude")
-        ids.append(_session_id(ctl))
-        ctl.stop("done")
+    ticks = itertools.count(2000)
+    real_time = time_mod.time
+    time_mod.time = lambda: float(next(ticks))
+    try:
+        for _ in range(MAX_SESSIONS):
+            ctl.request("a1", "Claude")
+            ids.append(_session_id(ctl))
+            ctl.stop("done")
+    finally:
+        time_mod.time = real_time
     for sid in ids:
         os.utime(tmp_path / "actions" / f"session-{sid}.jsonl", (1700000000.0, 1700000000.0))
     ctl2 = _control(Clock(), tmp_path)
