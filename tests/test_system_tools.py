@@ -127,6 +127,17 @@ def test_plain_open_app_still_blocks_terminals_and_system_tools() -> None:
 def test_plain_open_app_still_works_for_normal_apps() -> None:
     clock = Clock()
     ctl, backend, launched = _control(clock)
+    n = {"i": 0}
+
+    def fg() -> dict[str, Any]:
+        n["i"] += 1
+        # the Start search UI is in front while open_app verifies the launcher and types;
+        # the app itself is foreground by the post-Enter verification poll
+        if n["i"] < 4:
+            return {"title": "Search", "process": "SearchHost.exe"}
+        return {"title": "Untitled - Notepad", "process": "notepad.exe"}
+
+    ctl.hooks.foreground = fg
     res = ctl.act("a1", "open_app", name="Notepad")
     assert res["ok"] is True
     assert launched == []  # normal apps still go through the Start-menu keystroke path
