@@ -733,11 +733,11 @@ class ComputerControl:
         try:
             files = sorted(
                 self.log_folder.glob("session-*.jsonl"),
-                key=lambda p: (p.stat().st_mtime, p.name),
+                key=lambda p: (p.stat().st_mtime, p.stat().st_ctime, p.name),
             )
         except Exception:
             return
-        parsed: list[tuple[float, float, str, str, list[LogEntry]]] = []
+        parsed: list[tuple[float, float, float, str, str, list[LogEntry]]] = []
         for path in files[-MAX_SESSIONS:]:
             sid = path.name[len("session-") : -len(".jsonl")]
             if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
@@ -792,14 +792,15 @@ class ComputerControl:
                     continue  # one damaged line never costs the rest of the session
             if not seen:
                 continue
-            parsed.append((path.stat().st_mtime, started_ts, sid, agent, entries[-TRAIL_CAP:]))
+            parsed.append((path.stat().st_mtime, started_ts, path.stat().st_ctime, sid, agent, entries[-TRAIL_CAP:]))
         # Install in age order. Modification time alone does not order sessions
         # created in rapid sequence: on coarse-mtime filesystems several files
-        # share one timestamp, and the name tiebreak is random (session ids are
-        # random hex), so pruning dropped an arbitrary session instead of the
-        # oldest. The started line's wall-clock timestamp breaks the tie by
-        # actual creation order.
-        for _mtime, _started_ts, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2])):
+        # share one timestamp, and the started line's wall-clock timestamp can
+        # share one coarse tick too (Windows time.time), so neither breaks the
+        # tie on its own. File creation/metadata time is the next signal (on
+        # Windows it is true creation time), and the name tiebreak after it is
+        # random (session ids are random hex) and only a last resort.
+        for _mtime, _started_ts, _ctime, sid, agent, entries in sorted(parsed, key=lambda r: (r[0], r[1], r[2], r[3])):
             with self._lock:
                 self.sessions[sid] = entries
                 self._session_agents[sid] = agent
