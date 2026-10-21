@@ -940,7 +940,12 @@ class Service:
 
     def action_log(self, agent: Agent, limit: int = 30) -> list[dict[str, Any]]:
         """This agent's own computer actions (v0.1.24), or everyone's when the person turned on
-        ``agent_link.share_control_history``."""
+        ``agent_link.share_control_history``. The agent-supplied ``limit`` is clamped here as well as in
+        the model: zero or negative returns no entries, never the whole log."""
+        try:
+            limit = max(0, int(limit))
+        except (TypeError, ValueError):
+            limit = 0
         if bool(self._s("share_control_history", False)):
             return self.control.actions(limit)
         return self.control.actions(limit, agent_id=agent.id)
