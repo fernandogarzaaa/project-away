@@ -575,10 +575,16 @@ class AgentLinkHost:
                             item_ids = [str(i["id"]) for i in items if "id" in i]
                             res = self.core.control.undo_all_by_user(item_ids)
                             n = int(res.get("count") or 0)
-                            self._notice(
-                                "Project Away",
-                                "Put everything back." if n else "There was nothing left to put back.",
-                            )
+                            failed = res.get("failed") or []
+                            if failed:
+                                # The receipt must not claim success when items failed:
+                                # undo_all reports failures separately from its count.
+                                self._notice("Project Away", f"Could not put it all back: {failed[0]}")
+                            else:
+                                self._notice(
+                                    "Project Away",
+                                    "Put everything back." if n else "There was nothing left to put back.",
+                                )
                         except Exception as exc:
                             self._notice("Project Away", f"Could not put it back: {exc}")
                         break

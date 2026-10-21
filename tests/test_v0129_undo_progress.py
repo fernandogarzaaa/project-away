@@ -199,6 +199,35 @@ def test_single_scroll_undo_failure_stays_retryable(tmp_path: Path) -> None:
     assert _recorded(backend, -5) == 1, "the retry genuinely re-ran the inverse once"
 
 
+def test_scroll_with_both_components_failing_mid_step_is_uncertain_not_retryable(tmp_path: Path) -> None:
+    # Review finding on #97: a scroll inverse with dy and dx is two backend calls, so a
+    # failure on the second leaves the first applied. Resetting it to pending would
+    # double-apply dy on retry, so the entry is partly undone and the step never repeats.
+    class FailHscrollBackend(FlakyScrollBackend):
+        fail_hscroll = False
+
+        def hscroll(self, dx: float) -> None:
+            if self.fail_hscroll:
+                raise RuntimeError("injected hscroll failure")
+            super().hscroll(dx)
+
+    backend = FailHscrollBackend()
+    c = _control(tmp_path, backend=backend)
+    c.request("agent1", "Agent1")
+    c.act("agent1", "scroll", dy=5, dx=3)
+    entry = c.log[-1]
+    backend.fail_hscroll = True
+    with pytest.raises(RuntimeError, match="injected hscroll failure"):
+        c.undo_last("agent1")
+    assert entry.result == "partially undone"
+    assert entry.undo_progress == ["failed"]
+    assert _recorded(backend, -5) == 1, "the vertical inverse applied exactly once"
+    assert ("hscroll", (-3,)) not in backend.calls, "the failed horizontal inverse never applied"
+    with pytest.raises(ControlRefused, match="partly undone"):
+        c.undo_last("agent1")
+    assert _recorded(backend, -5) == 1, "the retry must not re-apply the vertical inverse"
+
+
 def test_undo_cancelled_mid_sequence_never_repeats_completed_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

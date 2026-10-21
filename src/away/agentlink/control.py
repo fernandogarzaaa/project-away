@@ -2212,7 +2212,7 @@ class ComputerControl:
         done = progress.count("done")
         failed = len(progress) - progress.count("pending") - done
         return (
-            "nothing that can be undone: the newest matching action was only partly undone "
+            "only partly undone: the newest matching action "
             f"({done} of {len(progress)} inverse steps completed, {failed} failed or cancelled) "
             "and the completed steps will not be repeated"
         )
@@ -2224,18 +2224,33 @@ class ComputerControl:
         label = {"pending": "not_attempted"}
         return [{"index": i, "inverse": s, "status": label.get(progress[i], progress[i])} for i, s in enumerate(sub)]
 
-    def _settle_undo(self, e: LogEntry, progress: list[str]) -> None:
+    @staticmethod
+    def _undo_uncertain(sub: list[dict[str, Any]], progress: list[str], backend: Any) -> bool:
+        """True when a failed or cancelled step may have applied part of its input. Only a
+        scroll inverse with both components is two backend calls (scroll then hscroll), so a
+        failure on the second leaves the first applied. Every other inverse is one backend
+        call, so its failure sent nothing and the entry stays retryable."""
+        for step, outcome in zip(sub, progress):
+            if outcome in ("failed", "cancelled") and "scroll" in step:
+                dy, dx = step["scroll"]
+                if dy and dx and hasattr(backend, "hscroll"):
+                    return True
+        return False
+
+    def _settle_undo(self, e: LogEntry, progress: list[str], uncertain: bool = False) -> None:
         """Record an interrupted undo's outcome on its entry. Every step done means the action was
-        in fact put back. Any step done leaves the distinct "partially undone" state (never plain
+        in fact put back. Any step done, or any failed/cancelled step that may have half applied
+        (see _undo_uncertain), leaves the distinct "partially undone" state (never plain
         "done": the entry is not fully undoable again, completed steps are never repeated, and
-        failed steps in a partly done undo are never re-attempted). Nothing completed leaves the
-        entry fully undoable (a transient backend failure must not brick its undo) with every
-        step back to "pending", so the retry genuinely re-runs them."""
+        failed steps in a partly done undo are never re-attempted). Nothing completed and
+        nothing uncertain leaves the entry fully undoable (a transient backend failure must
+        not brick its undo) with every step back to "pending", so the retry genuinely
+        re-runs them."""
         with self._lock:
             if all(s == "done" for s in progress):
                 e.undo_progress = list(progress)
                 e.result = "undone"
-            elif any(s == "done" for s in progress):
+            elif uncertain or any(s == "done" for s in progress):
                 e.undo_progress = list(progress)
                 e.result = "partially undone"
             else:
@@ -2299,12 +2314,12 @@ class ComputerControl:
                     progress[i] = "done"
                 a.ok = True
         except ActionCancelled as exc:
-            self._settle_undo(e, progress)
+            self._settle_undo(e, progress, self._undo_uncertain(sub, progress, b))
             status = {"undone": "undone", "partially undone": "partially undone"}.get(e.result, "undo failed")
             self._trail_status(e, status, sum(1 for s in progress if s == "done"), len(sub))
             raise ControlRefused(f"stopped part-way because {exc.reason}") from None
         except Exception:
-            self._settle_undo(e, progress)
+            self._settle_undo(e, progress, self._undo_uncertain(sub, progress, b))
             status = {"undone": "undone", "partially undone": "partially undone"}.get(e.result, "undo failed")
             self._trail_status(e, status, sum(1 for s in progress if s == "done"), len(sub))
             raise

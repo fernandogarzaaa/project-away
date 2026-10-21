@@ -288,7 +288,7 @@ def test_partial_undo_is_recorded_as_partial_and_not_reoffered(tmp_path: Path) -
     assert status["applied"] == 1 and status["of"] == 2
     (entry,) = [e for e in ctl.log if e.id == res["log_id"]]
     assert entry.result == "partially undone"
-    with pytest.raises(ControlRefused, match="nothing that can be undone"):
+    with pytest.raises(ControlRefused, match="partly undone"):
         ctl.undo_last_by_user()  # a partly-applied inverse is never blindly repeated
 
 
