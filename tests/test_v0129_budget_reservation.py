@@ -404,6 +404,7 @@ def test_op_lock_is_released_when_the_post_acquire_check_raises() -> None:
     assert second.get("completed") is True, f"the later operation did not run: {second}"
     assert ("click", (1,)) in backend.calls
 
+
 def test_steps_left_includes_inflight_reservations(tmp_path: Path) -> None:
     ctl = _control(tmp_path, step_budget=10)
     ctl.request("agent-a", "Claude")
