@@ -168,18 +168,37 @@ jobs:
           Remove-AppxPackage -Package $pkg.PackageFullName
           Write-Host "MSIX install/remove OK"
 
+  mutation-groups-check:
+    # The matrix below is a hand-maintained copy of GROUPS in
+    # scripts/mutation.py. This job compares the two sets and fails before
+    # any mutation job starts if they drift.
+    name: mutation matrix in sync with GROUPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      # --noconftest: this job installs only pytest, but tests/conftest.py
+      # imports the full suite's deps (numpy). The sync test needs no fixtures.
+      - run: python -m pytest tests/test_mutation_matrix_sync.py -q --noconftest
+
   mutation:
     # Blocking check: a failed group fails the workflow, and the summary fails
     # on any missing report or any group below --fail-under. This is intentional:
     # a cancelled or silently skipped mutation run is not an acceptable signal.
     name: mutation ${{ matrix.group }} (testteeth)
+    needs: mutation-groups-check
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # Keep in sync with GROUPS in scripts/mutation.py
-        # (verify with: python scripts/mutation.py --list-groups)
+        # Keep in sync with GROUPS in scripts/mutation.py; enforced by the
+        # mutation-groups-check job above (tests/test_mutation_matrix_sync.py).
+        # Full list: python scripts/mutation.py --list-groups
         group:
           - filters
           - landmarks
