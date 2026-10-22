@@ -1,112 +1,45 @@
-# Project Away: Open PR Re-audit Review
+# Project Away: Open-PR Review, Security Audit 2026-10-20
 
-**Review date:** 2026-10-18  
-**Repository:** fernandogarzaaa/project-away  
-**Main branch:** 234a2ab2 (after #71, #45, #73 merges; merge queue PAUSED per audit rules)  
-**Auditor:** Cookie (4 crew subagents + 1 mutation crew)
+**Audit date:** 2026-10-20
+**Repository:** fernandogarzaaa/project-away
+**Base:** main at `9347132afc5e5a9837a3e7525a099493b986e498` (verified live through the GitHub API at audit start and again before every fix branch was cut)
+**Companion documents:** `docs/audits/main-branch-security-audit.md` (the findings) and `docs/audits/remediation-matrix.md` (finding-to-fix mapping, CI evidence, merge order)
 
-## Executive Verdict
+This document supersedes the 2026-10-18 open-PR re-audit review that previously lived at this path. That program closed on 2026-10-20 with all 23 of its PRs merged.
 
-**20 open PRs reviewed.**  
-- **Ready (pending CI):** 19  
-- **Blocked:** 1 (#70, mutation scores unverified for 6 groups)  
-- **On hold:** 0  
-- **Needs human review:** 0  
+## State at audit start
 
-**Fixes made:** 14 PRs received code fixes with regression tests.  
-**Verified clean:** 6 PRs needed no changes.
+The audit mission assumed PR #66 was still open at head `7d7ce017`. That premise was stale. PR #66 had merged minutes before the audit began, as main commit `9347132a`. Zero PRs were open when the audit started.
 
-## Inventory
+Consequence: the code the mission targeted for review is main-branch code. Phase 2 therefore verified the external review's claims against main itself, and every fix landed as a new branch and a new PR off main. The audit mission's rules bound the whole program: nothing merged, nothing pushed to main directly, no PR closed, no force-push, one branch per coherent fix.
 
-| PR | Title | Head SHA | Branch |
-|----|-------|----------|--------|
-| #46 | Driver-state diagnostics | 77394e72 | feature/away-09-driver-state |
-| #49 | Focus-verified typing | 897ae6bb | feature/away-05-focus-type |
-| #50 | App-open verification | 9970600f | feature/away-07-openapp-verify |
-| #52 | Grant-end toast | 0a6e56bf | feature/away-20-grantend-toast |
-| #53 | Friendlier resume wording | 26a935cb | feature/away-21-resume-wording |
-| #54 | Pairing permission explanations | 7e8250a7 | feature/away-18-pairing-meanings |
-| #55 | Driver fix buttons | 9ab759e2 | feature/away-11-driver-fixbtn |
-| #56 | Click verification via UIA | 3c1a3081 | feature/away-06-click-verify |
-| #57 | Camera-holder diagnosis | a0dd930f | feature/away-13-cam-holders |
-| #59 | Camera privacy/shutter | 7251a538 | feature/away-12-privacy-shutter |
-| #60 | Self-test report audiences | 52ca9ac3 | feature/away-14-audience-fix |
-| #61 | Tray privacy popup | cc02f136 | feature/away-19-tray-popup |
-| #63 | First-run wizard | fa4962c4 | feature/away-23-first-run-wizard |
-| #64 | Consent receipts | 3d56d63d | feature/away-17-consent-receipts |
-| #65 | Set-of-mark annotations | d00b7675 | feature/away-25-setofmark |
-| #66 | Step budget + audit trail | fed4a2ab | feature/away-27-step-budget |
-| #68 | UIA grounding + element IDs | 83a1feb1 | feature/away-24-uia-grounding |
-| #70 | Mutation CI matrix | 6b4d7fba | fix/mutation-ci-timeout |
-| #72 | COM hardening | 4ec90841 | fix/com-hardening |
-| #74 | Audio output serialization | dc41b703 | fix/audio-out-serialize |
+## What the audit produced
 
-## Confirmed Defects and Fixes
+Fourteen fix PRs, #75 through #88. All fourteen are open. None is merged. Merging any of them needs Inan's explicit call.
 
-### HIGH Severity
+| PR | Branch | Head SHA | Purpose |
+|----|--------|----------|---------|
+| #75 | `fix/budget-reservation` | `4645dcd3b27b5e7f79aebc1b1d8720ef476d757a` | Sequence budget reservation plus whole-operation serialization in the action engine (Phase 2 claims C and C2) |
+| #76 | `fix/uia-identity` | `26bba6b2bdf6083cf375e778015abda270f33b16` | UIA element identity hardening (Phase 2 claims D1 to D6) |
+| #77 | `fix/audit-trail-integrity` | `84f9eedfe4bde6c1c1fee63595cb4520dd81556f` | Audit trail integrity (Phase 2 claims E1 to E4) |
+| #78 | `fix/mutation-summary-integrity` | `2aa3e8ec1dc302570c06fc2f44a2f2caff5ff5f6` | Mutation summary denominators plus a matrix/GROUPS sync check (Phase 2 claims F and F2) |
+| #79 | `fix/grant-admission-race` | `c399ce03cf3a797be59079c2c666ea633ddf13de` | Control grant admission race and re-request while paused (Phase 2 claims A and A2) |
+| #80 | `fix/undo-progress-tracking` | `d7114c4ffc895c1c2214d5b0d7cab3136a4f0855` | Undo per-step progress tracking (Phase 2 claim B) |
+| #81 | `fix/docs-api-contract` | `3350a14f0ef841eb338a8612f3b1440837d2112b` | Docs and API contract: README tool count, `steps_left` coverage, password-field wording, GitHub Action SHA pinning (Phase 4 lane B items 5.1, 5.2, 5.3, 4.4 in part) |
+| #82 | `fix/source-identity-trust` | `78860f34f1159f73868f7e1984ca45be7836834e` | Source identity trust: `cf-connecting-ip` honored only while a Cloudflare tunnel is up (Phase 4 lane A item 1) |
+| #83 | `fix/open-app-keystroke-safety` | `8b7b7567529cb6e933b9b0bee2af1dad5319f7b9` | open_app verifies the launcher is foreground before any keystroke (Phase 4 lane B item 1.6) |
+| #84 | `fix/auth-lockout-scope` | `de39f2974c2b1d602817d8edf79a76567a18676a` | Failed-auth lockout scoped per source; valid credentials pass during a lock (Phase 4 lane A item 2) |
+| #85 | `fix/redaction-and-trail-off` | `7ce20692f83212387b992743a2d2fa822061625a` | Redaction fails closed on secret-shaped key names; switching the audit trail off deletes stored trail files; pruning removes a session's thumbnails (Phase 4 lane A items 6a, 6c, 6b residue) |
+| #86 | `fix/action-prompt-coverage` | `95a59577fc2c3acf59ad9e88f84bc3e1e6eac388` | Prompt coverage for mark clicks and drags, activation keys, Delete, and per-chunk typing re-verification (Phase 4 lane B items 1.1, 1.2, 1.3, 1.4) |
+| #87 | `fix/config-atomic-save` | `1a24aff78ec8327d95a756a7a29f545694808de7` | Atomic config save with a backup fallback on load (Phase 4 lane B item 4.1) |
+| #88 | `fix/mic-thread-supervision` | `8e7665de12f2ccaeaa50d5d74cf5ea829d6db42b` | Supervised microphone lifecycle for dictation (Phase 4 lane B item 3.4) |
 
-**#68: Stale element IDs usable after failed query**  
-`ui_query()` returned early on UIA failure without clearing the agent's registry. Old IDs stayed resolvable. Fixed: invalidate registry at start of query; install only on success. 9 regression tests added.
+## Notes
 
-**#68: Missing fingerprints compared equal**  
-`None != None` is False, so two "unknown" windows passed the check. Fixed: require non-None fingerprints.
+- CI evidence for every head above lives in `docs/audits/remediation-matrix.md`, one row per PR with both run IDs. Every canonical run in that table was verified by reading its job list directly; a run recorded as cancelled is a duplicate the parent cancelled itself. Nothing in this program counts a queued, cancelled, or missing check as a pass.
+- This documentation set ships on its own docs branch. Its PR is opened separately from the fourteen fix PRs.
+- The recommended merge order is in `docs/audits/remediation-matrix.md`. It is a recommendation only.
 
-**#68: Inconclusive revalidation fell back to cached**  
-`_revalidate_element()` silently returned on exception/None, allowing stale element. Fixed: fail closed with ControlRefused.
+## Resume mission outcome (2026-10-21 to 2026-10-22)
 
-**#74: Double-close on dead stream handle**  
-`_closed_by_stop` (single-element list) was overwritten when multiple play_blocking calls unwound. Caused double `Pa_CloseStream` on already-closed handle. Fixed: set-based per-stream tracking. Reproduced and verified.
-
-**#64: Concurrent undo double-undo race**  
-Entry selected under lock, but `result="undone"` set outside lock. Two threads could select same entry. Fixed: atomic claim with "undoing" state.
-
-### MEDIUM Severity
-
-**#68: Element IDs survived revocation**  
-`revoke_agent()` and `_end()` didn't clear `_element_queries`. Fixed.
-
-**#60: Cross-run report attribution**  
-`run_selftest(wait=True)` returned another agent's report without indicating it wasn't the caller's. Fixed: response now marks `joined=True` with trigger name.
-
-**#64: Partial undo failures swallowed**  
-`undo_all_by_user` broke silently on cancellation, returning only success count. Fixed: includes `failed=[...]` and `partial=True`.
-
-### LOW Severity
-
-**#49: Focus check not per-chunk**  
-Window verified before typing but not between chunks. Could type into wrong app after focus change. Fixed: per-chunk verification.
-
-**#50: Substring matching false positives**  
-Short names ("a", "it") matched unrelated apps. Fixed: names <3 chars require exact match.
-
-**#55: Substring device matching**  
-"HD Webcam" could match "HD Webcam Pro". Fixed: exact match only.
-
-**#53: Ambiguous resume wording**  
-"Until I take over again" implied expiry on takeover. Fixed: "for the rest of this session".
-
-**#63: Wizard crash on close**  
-Background thread called `root.after()` after window destroyed. Fixed: `winfo_exists()` check.
-
-**#66: Ruff F841**  
-Unused variable `g` in `undo_last()`. Fixed.
-
-## Security Findings
-
-**#60 Policy:** DIAGNOSE is intentionally permitted to read full self-test reports (per `perms.py` line 14: "run them, read their results"). Not an implementation inference.
-
-**#64:** Receipts properly scoped via `only_ids`. Forged IDs fail closed. No sensitive data in receipts (filenames not images, "Typed 7 characters" not content).
-
-**#59:** Consent interpretation correct. `read_consent` returns None (not "Allow") for missing stores. Never infers positive permission.
-
-**#57:** Three-way distinction preserved (confirmed/maybe/historical). No changes needed.
-
-## Remaining Blockers
-
-**#70:** 6 mutation groups have new tests but scores unverified (cursor, face, dictation, autoscroll, cleanup, vad). Crashlog verified at 80.2%. CI script now includes new test files (was the root cause of stagnant scores).
-
-## Limitations
-
-- On-device Windows/COM/UIA validation outstanding (mock tests only).
-- CI results pending for all new heads at report time.
-- #65/#66 carry #68's pre-hardening code; need forward-merge after #68 lands.
+The fourteen fix PRs above are all resolved. Inan merged #75, #78, #83, #87, and #88 on 2026-10-21. The resume mission merged #90 through #100 (see `remediation-matrix.md` for the merge commits and the final CI table) and closed #76, #77, #79, #80, #81, #82, #84, #85, and #86 as superseded by their successors, each with an explanation comment. No original audit PR remains open. Final main head: `f72c9332f642a746329e21f9c2bd90cb6d4129a4`.
