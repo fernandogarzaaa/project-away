@@ -2156,6 +2156,43 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.29
+
+* **A full security audit, fixed and merged.** Every finding from the
+  October security audit program is now on main: 14 fix PRs plus the
+  integration pass that rebased them onto each other, with zero PRs left
+  open. Each fix carries a regression test that fails on unfixed code,
+  and every merge was verified against green CI before the next one
+  landed.
+* **Ingress trust is per-request, not a global switch.** Cloudflare
+  quick tunnels now get a dedicated loopback server, so the relay port
+  and the tunnel port are separate; the tunnel's connecting-IP header is
+  honored only on tunnel ingress and only as a single IP literal. Rate
+  limits and lockouts are keyed by ingress too.
+* **The step budget counts reserved steps.** The remaining-steps number
+  agents see now subtracts steps already reserved, so a budget can no
+  longer overspend through reservations.
+* **Undo tells the truth about partial progress.** Undo now reports
+  per-step progress: fully undone, partly undone with progress kept, or
+  retryable when nothing actually applied. A half-applied scroll (one
+  axis applied, the other failed) is marked uncertain, never retried, so
+  it cannot double-apply. After a restart a partly undone entry stays
+  visible but is not re-offered; nothing double-applies.
+* **Stop means stop, even while a prompt waits.** Open-palm stop and
+  voice stop-words now fire while an approval prompt is pending, and
+  Shift+Space no longer slips past the confirmation ladder on a focused
+  Pay/Submit button.
+* **Redaction is fail-closed.** Authorization and authentication keys
+  are redacted everywhere, including nested structures, and turning the
+  audit trail off now purges the session files and thumbnails even when
+  the host-side clear fails.
+* **Supply chain pinned.** Every third-party GitHub Action in the CI
+  and release workflows is pinned to a commit SHA, and a docs contract
+  test now checks the README tool table against the registered tools,
+  so the docs cannot silently drift from the code.
+* **Still untested on real hardware:** UIA exact-bounds hit-testing on
+  the Acer, mic reconnection, and the live Cloudflare tunnel paths.
+
 ## What's new in 0.1.28
 
 * **Agents that drive your PC got sharper.** Several computer actions now run in one call instead of one round
