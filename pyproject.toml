@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-away"
-version = "0.1.30"
+version = "0.1.31"
 description = "The bridge between you and your AI agents, controlled by your hands, face and voice: hands-free PC control, dictation, Agent Link (MCP) and more. Local-first."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -104,6 +104,9 @@ all = [
 # comtypes (Windows only): the smart pointer's real UI Automation smoke test runs on the Windows CI job
 dev = [
   "pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML",
+  # the real tray menu is built against the real pystray (tests/test_v0131_tray_menu.py); Linux only, where the
+  # "dummy" backend needs no display and nothing else is pulled in
+  "pystray>=0.19; sys_platform == 'linux'",
   "comtypes>=1.2; sys_platform == 'win32'",
   # the Smart cleanup engine's import-time dependencies (tests load the real downloaded engine on CI)
   "diskcache>=5.6.1", "jinja2>=3.1", "typing_extensions>=4.5",

@@ -326,6 +326,13 @@ jobs:
           python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
       - name: PyInstaller (strict)
         run: AWAY_VERSION="$AWAY_REL_VERSION" pyinstaller packaging/pyinstaller/away.spec --noconfirm
+      - name: Exactly one libavdevice (PyAV is left out of the macOS bundle, see away.spec)
+        # two copies define the same Objective-C classes and macOS warns of "mysterious crashes"
+        run: |
+          find dist/ProjectAway.app -type f -name 'libavdevice*' -print
+          n=$(find dist/ProjectAway.app -type f -name 'libavdevice*' | wc -l | tr -d ' ')
+          if [ "$n" != "1" ]; then echo "::error::expected exactly one libavdevice in the app, found $n"; exit 1; fi
+          if [ -e dist/ProjectAway.app/Contents/Frameworks/av ]; then echo "::error::PyAV (Frameworks/av) is in the app"; exit 1; fi
       - name: Smoke-test the frozen app
         run: |
           set -e
