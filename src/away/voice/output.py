@@ -97,5 +97,6 @@ def emit_paste(engine: Any, backend: Any, clip: Any, mod: str, text: str, restor
                 clip.copy(old)
 
 
-def make_sink(kind: str) -> TextSink:  # pragma: no cover
-    return PasteSink() if kind == "paste" else TypeSink()
+def make_sink(kind: str, backend: Any = None) -> TextSink:  # pragma: no cover
+    """``backend``: the OS backend to type through (the app passes one wrapped by the auto-pause guard)."""
+    return PasteSink(backend=backend) if kind == "paste" else TypeSink(backend=backend)

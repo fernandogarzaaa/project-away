@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -708,6 +709,8 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             backend_factory=(lambda _mark: DryRunBackend()) if dry_run else None,
         )
         self._paused_before_shortcut = True
+        self._pause_requests = 0  # AwayApp.set_paused calls: a shortcut replay never undoes a pause made during it
+        self._pause_requests_at_shortcut = 0
         self.pipeline.executor.hooks["macro"] = self.macros.hook_macro
         self.pipeline.executor.hooks["macro_control"] = self.macros.hook_control
         self.camera_confidences: dict[int, float] = {}  # multi-camera: latest per-view confidence
@@ -805,8 +808,9 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         """A shortcut replays: gesture output pauses so the hand cannot fight the replay, then resumes."""
         if started:
             self._paused_before_shortcut = self.pipeline.paused
+            self._pause_requests_at_shortcut = self._pause_requests
             self.pipeline.set_paused(True)
-        elif not self._paused_before_shortcut:
+        elif not self._paused_before_shortcut and self._pause_requests == self._pause_requests_at_shortcut:
             self.pipeline.set_paused(False)
 
     def _publish_quiet(self, topic: str, data: dict[str, Any]) -> None:
@@ -882,6 +886,17 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 key="gate-hint",
             )
 
+    def _update_config_file(self, change: Callable[[Any], Any]) -> None:
+        """Apply ``change`` to the settings file as it is on disk and save it. Never saves ``self.cfg`` itself: the
+        live config carries this camera's calibration and the focused app's profile tuning layered in, and its
+        sections that are not hot-reloaded may be older than edits Settings saved since."""
+        from away import config as cfgmod
+
+        path = getattr(self, "config_path", None) or cfgmod.config_path()
+        disk, _notes = cfgmod.load(path)
+        change(disk)
+        cfgmod.save(disk, path)
+
     def _save_migrations(self) -> None:
         """Re-save a config an older version wrote, so its migration (e.g. asr_model -> auto) sticks."""
         if not self.cfg.migrations or self.dry_run:
@@ -891,7 +906,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         path = self.config_path or cfgmod.config_path()
         try:
             if path.exists():
-                cfgmod.save(self.cfg, path)
+                self._update_config_file(lambda _disk: None)  # load() migrates; saving makes it stick
             self.bus.publish("config.migrated", {"changes": list(self.cfg.migrations), "path": str(path)})
         except Exception as exc:
             self.bus.publish("config.error", {"error": f"could not save the migrated config: {exc}"})
@@ -913,6 +928,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     # public controls used by the tray --------------------------------------
     def set_paused(self, paused: bool) -> None:
+        self._pause_requests = getattr(self, "_pause_requests", 0) + 1
         self.pipeline.set_paused(paused)
         self.bus.publish("app.paused", {"paused": paused})
 
@@ -956,6 +972,10 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
                 self.bus.publish("config.error", {"error": str(exc)})
                 continue
             self.pipeline.apply_config(new)
+            # sections read straight from self.cfg (the hotkey restart below reads app.toggle_hotkey); kept current
+            # so a later save of this file through _update_config_file never sees them stale either
+            for name in ("app", "updates", "performance", "models_next", "agent_link"):
+                setattr(self.cfg, name, getattr(new, name))
             self._apply_camera_switch(new)
             self.macros.set_config(new.macros)
             if self.voice is not None:
@@ -1166,7 +1186,14 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         else:
             from away.control.macro_record import MarkingBackend
 
-            sink = MarkingBackend(make_sink(v.output))  # dictated text is Away's own input: never recorded (v0.1.20)
+            out_backend = None
+            if self.guard is not None:  # typed text is Away's own input: it must not auto-pause gesture control
+                from away.actions_engine import get_engine
+                from away.app.autopause import GuardedBackend
+
+                out_backend = GuardedBackend(get_engine().os_backend(), self.guard)
+            # dictated text is Away's own input: never recorded (v0.1.20)
+            sink = MarkingBackend(make_sink(v.output, backend=out_backend))
         commands = self._run_voice_command if v.commands_enabled else None
         dictation = DictationSession(
             asr,
@@ -1751,10 +1778,12 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def _save_cfg(self) -> None:
         """Save the settings file now (v0.1.24: after an automatic model rollback)."""
-        from away import config as cfgmod
+
+        def take_models(disk: Any) -> None:
+            disk.models_next = copy.deepcopy(self.cfg.models_next)  # the rollback changed this section only
 
         with contextlib.suppress(Exception):
-            cfgmod.save(self.cfg, getattr(self, "config_path", None) or cfgmod.config_path())
+            self._update_config_file(take_models)
 
     def _next_hands(self) -> dict[str, Any]:
         from away.app import next_wiring
@@ -1765,12 +1794,11 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
     def turn_off_camera(self, device: Any) -> str:
         """ "Turn off" next to a failing camera (tray / Settings > Cameras): saved to the config file."""
-        from away import config as cfgmod
         from away.app.camera_switch import turn_off
 
         msg = turn_off(self.cfg, str(device))
         with contextlib.suppress(Exception):
-            cfgmod.save(self.cfg, getattr(self, "config_path", None) or cfgmod.config_path())
+            self._update_config_file(lambda disk: turn_off(disk, str(device)))
         self._retry_status(None)
         self.camera_retry_stopped = False
         self._retry_event().set()  # wake the prober so it notices

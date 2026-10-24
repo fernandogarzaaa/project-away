@@ -282,6 +282,21 @@ def test_uninstall(tmp_path, capsys):
     assert "no Project Away user data found" in out
 
 
+def test_uninstall_keep_config_when_config_and_data_share_a_folder(tmp_path, monkeypatch):
+    # macOS: config_dir() == data_dir(); --keep-config must not delete config.yaml with the data
+    shared = tmp_path / "ProjectAway"
+    monkeypatch.setenv("AWAY_DATA_DIR", str(shared))
+    monkeypatch.setenv("AWAY_CONFIG_DIR", str(shared))
+    (shared / "models").mkdir(parents=True)
+    (shared / "models" / "m.bin").write_bytes(b"x")
+    (shared / "config.yaml").write_text("config_version: 4\n")
+    (shared / "config.yaml.bak").write_text("config_version: 4\n")
+    uninstall.run(yes=True, keep_config=True)
+    assert sorted(p.name for p in shared.iterdir()) == ["config.yaml", "config.yaml.bak"]
+    uninstall.run(yes=True)
+    assert not shared.exists()
+
+
 def test_uninstall_abort(monkeypatch):
     paths.data_dir().mkdir(parents=True)
     monkeypatch.setattr("builtins.input", lambda p: "n")

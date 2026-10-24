@@ -100,11 +100,16 @@ class GuardedBackend:
         ):
 
             def wrapped(*a: Any, **k: Any) -> Any:
-                if name in ("key", "hotkey", "type_text"):
+                key = name in ("key", "hotkey", "type_text")
+                if key:
                     self._g.note_synthetic_key()
                 else:
                     self._g._synth_t = self._g.clock()
-                return attr(*a, **k)
+                try:
+                    return attr(*a, **k)
+                finally:
+                    if key:  # a long type_text: its last keys arrive after the window started above
+                        self._g.note_synthetic_key()
 
             return wrapped
         return attr

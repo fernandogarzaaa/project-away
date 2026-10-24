@@ -60,13 +60,15 @@ def top_processes(n: int = 5, psutil_mod: Any = None, interval: float = 0.0) -> 
     cores = max(1, int(ps.cpu_count() or 1))
     totals: dict[str, dict[str, Any]] = {}
     procs = list(ps.process_iter(["name", "pid"]))
-    for p in procs:
-        try:
-            p.cpu_percent(None)  # prime
-        except Exception:
-            continue
     if interval > 0:
+        for p in procs:
+            try:
+                p.cpu_percent(None)  # prime
+            except Exception:
+                continue
         time.sleep(interval)
+    # interval 0: no priming (a read microseconds later is noise, even over 100%); process_iter keeps its Process
+    # objects, so cpu_percent then measures since the previous call (the first call of all reads 0 and is skipped)
     for p in procs:
         try:
             pct = float(p.cpu_percent(None)) / cores
