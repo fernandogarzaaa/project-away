@@ -105,7 +105,8 @@ class OnnxFaceLandmarker:
             for r in self._detect(rgb):  # someone new in view (the tracked faces alone never find them)
                 if len(rois) < self.max_faces and all(_overlap(r, t, w, h) < SAME_HAND_IOU for t in rois):
                     rois.append(r)
-        out, nxt = [], []
+        out: list[tuple[np.ndarray, dict[str, float]]] = []
+        nxt: list[mp.Rect] = []
         for r in rois[: self.max_faces]:
             lm = self._mesh(rgb, r)
             if lm is None:

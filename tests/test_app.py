@@ -257,6 +257,14 @@ def test_desktop_entry_quotes_spaces():
     assert 'Exec="/a b/away" tray' in autostart.desktop_entry(["/a b/away", "tray"])
 
 
+def test_windows_autostart_uses_pythonw(tmp_path):
+    (tmp_path / "python.exe").write_bytes(b"")
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    cmd = [str(tmp_path / "python.exe"), "-m", "away", "tray"]
+    assert autostart.windowless(cmd) == [str(tmp_path / "pythonw.exe"), "-m", "away", "tray"]
+    assert autostart.windowless(["C:/x/ProjectAway.exe", "tray"]) == ["C:/x/ProjectAway.exe", "tray"]
+
+
 def test_launch_command(monkeypatch):
     import sys
 
