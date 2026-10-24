@@ -749,6 +749,11 @@ def migrate(data: dict[str, Any]) -> list[str]:
     return notes
 
 
+def _is_number(v: Any) -> bool:
+    # order checks run before the tunables' type/range loop: a mistyped value reaches that loop's clear error
+    return not isinstance(v, bool) and isinstance(v, (int, float))
+
+
 def _get_path(data: Any, keys: tuple[str, ...]) -> Any:
     for k in keys:
         if not isinstance(data, dict):
@@ -770,7 +775,11 @@ def _merge(obj: Any, data: dict[str, Any], prefix: str, unknown: list[str]) -> A
         if key in ("cameras", "disabled_cameras") and isinstance(obj, HandsConfig):
             setattr(obj, key, _parse_cameras(value, prefix + key, unknown))
             continue
-        if is_dataclass(current) and isinstance(value, dict):
+        if is_dataclass(current) and not isinstance(value, dict):
+            if value is None:  # a section with every child commented out: keep its defaults
+                continue
+            raise ValueError(f"{prefix}{key} must be a mapping of settings, got {value!r}")
+        if is_dataclass(current):
             _merge(current, value, prefix + key + ".", unknown)
         elif isinstance(current, tuple) and isinstance(value, list):
             setattr(obj, key, tuple(value))
@@ -891,8 +900,20 @@ def validate(cfg: AppConfig) -> None:
     c = cfg.hands.cursor
     if c.curve not in ("power", "sigmoid"):
         raise ValueError(f"hands.cursor.curve must be power|sigmoid, got {c.curve!r}")
-    if not c.sigmoid_low <= c.sigmoid_high:
+    if _is_number(c.sigmoid_low) and _is_number(c.sigmoid_high) and not c.sigmoid_low <= c.sigmoid_high:
         raise ValueError("hands.cursor.sigmoid_low must be <= sigmoid_high")
+    ar = c.active_region
+    if (
+        not isinstance(ar, (list, tuple))
+        or len(ar) != 4
+        or not all(_is_number(x) for x in ar)
+        or not (0.0 <= ar[0] < ar[2] <= 1.0 and 0.0 <= ar[1] < ar[3] <= 1.0)
+    ):
+        raise ValueError(
+            f"hands.cursor.active_region must be [left, top, right, bottom] with 0 <= left < right <= 1 "
+            f"(same for top/bottom), got {ar!r}"
+        )
+    c.active_region = (float(ar[0]), float(ar[1]), float(ar[2]), float(ar[3]))
     from away.control.monitors import parse_monitor_spec
 
     c.monitors = parse_monitor_spec(c.monitors)
@@ -949,7 +970,7 @@ def validate(cfg: AppConfig) -> None:
             except KeyComboError as exc:
                 raise ValueError(f"{name}: {exc}") from None
     g = cfg.hands.gestures
-    if not g.pinch_on < g.pinch_off:
+    if _is_number(g.pinch_on) and _is_number(g.pinch_off) and not g.pinch_on < g.pinch_off:
         raise ValueError("hands.gestures.pinch_on must be < pinch_off (hysteresis)")
     v = cfg.voice
     if v.mode not in VOICE_MODES:

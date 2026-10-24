@@ -132,6 +132,20 @@ class ToolBox:
         if action not in ACTIONS:
             raise ToolError(f"unknown action {action!r}")
         agent = self.agent()
+        # resolve the element first: the risk check and the "Are you sure?" prompt must judge what will be clicked
+        if (
+            action in ("click", "double_click", "right_click", "move")
+            and kw.get("element")
+            and self.decider is not None
+        ):
+            try:
+                names, _ = self.elements()
+            except ToolError:
+                names = []
+            if names:
+                pick = self.decider.pick_element(str(kw["element"]), names)
+                if pick is not None:
+                    kw["element"] = pick.value
         target = str(kw.get("element") or kw.get("text") or kw.get("keys") or kw.get("name") or kw.get("url") or "")
         if self.decider is not None and action not in ("move", "scroll"):
             risk = self.decider.risk(f"{action} {target}".strip(), target, screen_text)
@@ -154,19 +168,6 @@ class ToolBox:
                     raise ToolError(f"you did not allow '{target[:60]}'")
         if svc.control.grant is None or svc.control.grant.agent_id != AGENT_ID:
             svc.request_control(agent, why=why or "a request you just made", minutes=5)
-        if (
-            action in ("click", "double_click", "right_click", "move")
-            and kw.get("element")
-            and self.decider is not None
-        ):
-            try:
-                names, _ = self.elements()
-            except ToolError:
-                names = []
-            if names:
-                pick = self.decider.pick_element(str(kw["element"]), names)
-                if pick is not None:
-                    kw["element"] = pick.value
         args = {
             k: v
             for k, v in kw.items()

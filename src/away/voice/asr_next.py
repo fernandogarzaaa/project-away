@@ -578,8 +578,16 @@ def build_next(
             raise RuntimeError(f"{m.title} is incomplete; download it again")
         srv = NemoServer(exe, gguf, plan["device"], int(getattr(opts, "nemotron_chunk_ms", 560) or 560))
         srv.start()
-        asr = NemotronASR(srv, sample_rate, bool(getattr(opts, "stream_partials", True)))
-        asr.transcribe(np.zeros(16000, dtype=np.float32))  # warm-up: a CUDA problem shows here, not mid-dictation
+        try:
+            asr = NemotronASR(srv, sample_rate, bool(getattr(opts, "stream_partials", True)))
+        except BaseException:
+            srv.stop()
+            raise
+        try:
+            asr.transcribe(np.zeros(16000, dtype=np.float32))  # warm-up: a CUDA problem shows here, not mid-dictation
+        except BaseException:
+            asr.close()  # else the server keeps its VRAM while the Whisper fallback starts
+            raise
         return asr
     raise ValueError(f"unknown speech backend {backend!r}")
 

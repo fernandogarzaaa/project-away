@@ -184,17 +184,22 @@ class Decider:
         names = [c for c in dict.fromkeys(c.strip() for c in candidates if c and c.strip())][:64]
         if not names:
             return None
-        if len(names) == 1:
-            return Answer(names[0], 1.0, {names[0]: 1.0}, "rules")
-        opts = {f"e{i}": n[:120] for i, n in enumerate(names)}
-        a = self._try("choice", f"The user wants: {target}", "Which on-screen element is the user's target?", opts)
-        if a is None or a.value not in opts:
-            from difflib import get_close_matches
+        if len(names) > 1:
+            opts = {f"e{i}": n[:120] for i, n in enumerate(names)}
+            a = self._try("choice", f"The user wants: {target}", "Which on-screen element is the user's target?", opts)
+            if a is not None and a.value in opts:
+                return Answer(opts[str(a.value)], a.confidence, a.probabilities, a.source, a.latency_s)
+        # rules: an element whose name the request mentions, else a close spelling; never "whatever is nearest"
+        # (the caller then keeps the request's own name and Agent Link resolves it, or reports it missing)
+        from difflib import get_close_matches
 
-            m = get_close_matches(target, names, 1, 0.0)
-            self.last_source = "rules"
-            return Answer(m[0], 0.3, {}, "rules") if m else None
-        return Answer(opts[str(a.value)], a.confidence, a.probabilities, a.source, a.latency_s)
+        self.last_source = "rules"
+        low = target.lower()
+        named = [n for n in names if n.lower() in low]
+        if named:
+            return Answer(max(named, key=len), 0.6, {}, "rules")
+        m = get_close_matches(target, names, 1, 0.6)
+        return Answer(m[0], 0.3, {}, "rules") if m else None
 
     # 3. post-action success check
     def succeeded(self, goal: str, after_text: str) -> Answer:

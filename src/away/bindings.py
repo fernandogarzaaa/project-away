@@ -675,7 +675,7 @@ def merge_bindings(current: BindingsConfig, incoming: BindingsConfig, raw: Any) 
     for c in incoming.custom_gestures:
         if c not in out.custom_gestures:
             out.custom_gestures.append(c)
-    out.allow_shell = out.allow_shell or incoming.allow_shell
+    # an imported file never turns shell actions on: that stays the user's own switch (see load_bindings_file)
     for name, pdata in (raw.get("profiles") or {}).items():
         name = str(name)
         src = incoming.profiles[name]
@@ -698,8 +698,12 @@ def merge_bindings(current: BindingsConfig, incoming: BindingsConfig, raw: Any) 
     return parse_bindings(out.to_dict())
 
 
-def load_bindings_file(path: Any) -> tuple[BindingsConfig, Any]:
-    """Read a YAML file holding either ``bindings:`` or the bindings mapping itself. Returns (parsed, raw)."""
+def load_bindings_file(path: Any, *, allow_shell: bool = False) -> tuple[BindingsConfig, Any]:
+    """Read a YAML file holding either ``bindings:`` or the bindings mapping itself. Returns (parsed, raw).
+
+    The file's own ``allow_shell`` is ignored: a shared or downloaded file must not be able to switch on shell
+    commands. ``allow_shell`` is the importing user's current setting; ``shell:`` actions fail validation without it.
+    """
     from pathlib import Path
 
     import yaml
@@ -707,4 +711,6 @@ def load_bindings_file(path: Any) -> tuple[BindingsConfig, Any]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if isinstance(raw, dict) and "bindings" in raw:
         raw = raw["bindings"]
+    if isinstance(raw, dict):
+        raw = {**raw, "allow_shell": bool(allow_shell)}
     return parse_bindings(raw), raw

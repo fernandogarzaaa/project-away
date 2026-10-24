@@ -492,7 +492,7 @@ class SettingsModel:
 
     def import_bindings(self, path: Path, replace: bool = False) -> str | None:
         try:
-            incoming, raw = load_bindings_file(path)
+            incoming, raw = load_bindings_file(path, allow_shell=self.bindings.allow_shell)
             self.cfg.bindings = incoming if replace else merge_bindings(self.bindings, incoming, raw)
         except BindingsError as exc:
             return "\n".join(exc.errors)

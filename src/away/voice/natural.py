@@ -229,19 +229,29 @@ def lib_dir(data_dir: Path | None = None) -> Path:
     return voices_dir(data_dir) / "lib"
 
 
+# the processors the pinned espeak-ng wheels are built for (plat_key values)
+ESPEAK_PLATFORMS = ("win32", "linux", "linux-aarch64", "darwin")
+
+
 def plat_key(plat: str | None = None, machine: str | None = None) -> str:
     p = plat or sys.platform
     if p.startswith("win"):
         return "win32"
-    if p == "darwin":
-        return "darwin"
+    if p == "darwin":  # the pinned espeak-ng wheel is Apple silicon only
+        m = (machine if machine is not None else (_pf.machine() if plat is None else "arm64")).lower()
+        return "darwin" if m in ("arm64", "aarch64") else f"darwin-{m}"
     m = (machine if machine is not None else (_pf.machine() if plat is None else "x86_64")).lower()
-    return "linux-aarch64" if m in ("aarch64", "arm64") else "linux"
+    if m in ("aarch64", "arm64"):
+        return "linux-aarch64"
+    return "linux" if m in ("x86_64", "amd64") else f"linux-{m}"
 
 
 def assets_for(engine: str, voice: str = "", plat: str | None = None) -> list[Asset]:
     """What :func:`download` fetches for ``engine`` (kokoro / piper)."""
-    esp = ESPEAK_WHEELS.get(plat_key(plat))
+    key = plat_key(plat)
+    if key not in ESPEAK_PLATFORMS:  # no espeak-ng build for this processor: the engine cannot run here
+        return []
+    esp = ESPEAK_WHEELS.get(key)
     wheels = WHEELS_ANY + ([esp] if esp else [])
     if engine == "kokoro":
         return KOKORO_MODEL + wheels
@@ -302,13 +312,30 @@ def _safe(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     return out
 
 
-def unpack_wheels(data_dir: Path | None = None) -> None:
+def unpack_wheels(data_dir: Path | None = None, only: list[Asset] | None = None) -> None:
+    """Extract the wheels into ``lib`` (on ``sys.path`` once activated). ``only``: just these pinned wheels, each
+    re-checked against its sha256 first (a stale or planted file in ``wheels/`` is never unpacked)."""
     lib = lib_dir(data_dir)
     lib.mkdir(parents=True, exist_ok=True)
-    for whl in sorted((voices_dir(data_dir) / "wheels").glob("*.whl")):
+    marker = lib / ".unpacked"
+    marker.unlink(missing_ok=True)  # a half-finished unpack must not count as done
+    d = voices_dir(data_dir)
+    if only is None:
+        files = sorted((d / "wheels").glob("*.whl"))
+    else:
+        files = []
+        for a in only:
+            if not a.name.endswith(".whl"):
+                continue
+            f = _path(d, a)
+            if hashlib.sha256(f.read_bytes()).hexdigest() != a.sha256:
+                f.unlink(missing_ok=True)
+                raise VoiceDownloadError(f"{a.name} is damaged; download it again")
+            files.append(f)
+    for whl in files:
         with zipfile.ZipFile(whl) as zf:
             zf.extractall(lib, _safe(zf))
-    (lib / ".unpacked").write_text("ok", encoding="utf-8")
+    marker.write_text("ok", encoding="utf-8")
 
 
 def download(
@@ -336,7 +363,7 @@ def download(
 
     for a in todo:
         _fetch(a, _path(d, a), opener, step)
-    unpack_wheels(data_dir)
+    unpack_wheels(data_dir, only=need)
     return d
 
 
@@ -386,27 +413,41 @@ def play_chunks(synth: Callable[[str], tuple[Any, int]], pieces: list[str], play
     """Synthesize piece n+1 while piece n plays. Returns how many pieces were played."""
     q: queue.Queue[Any] = queue.Queue(maxsize=2)
     err: list[BaseException] = []
+    stop = threading.Event()  # set when playback ends early (play raised): the producer must not block on put
+
+    def put(item: Any) -> bool:
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def producer() -> None:
         try:
             for p in pieces:
-                q.put(synth(p))
+                if stop.is_set() or not put(synth(p)):
+                    return
         except BaseException as exc:  # re-raised on the speaking thread
             err.append(exc)
         finally:
-            q.put(None)
+            put(None)
 
     threading.Thread(target=producer, daemon=True, name="voice-synth").start()
     n = 0
-    while True:
-        item = q.get()
-        if item is None:
-            break
-        samples, sr = item
-        if n == 0:
-            latency.mark("first_audio")  # v0.1.26 latency log: the first piece is synthesized and starts playing
-        play(samples, sr)
-        n += 1
+    try:
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            samples, sr = item
+            if n == 0:
+                latency.mark("first_audio")  # v0.1.26 latency log: the first piece is synthesized and starts playing
+            play(samples, sr)
+            n += 1
+    finally:
+        stop.set()
     if err and n == 0:
         raise err[0]
     return n
