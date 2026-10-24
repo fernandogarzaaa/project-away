@@ -2166,6 +2166,11 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
   tracking) also did nothing when clicked.
 * **A test that would have caught it.** The tray menu is now built with the
   real `pystray` library in the tests, not a stand-in.
+* **macOS: one copy of the FFmpeg device library, not two.** The Mac app
+  shipped two (one inside PyAV, one inside OpenCV), which macOS warns can
+  cause "mysterious crashes". PyAV, which faster-whisper only uses to read
+  audio files (Project Away passes audio as arrays), is left out of the
+  Mac app. The release build checks that exactly one copy remains.
 * **Still untested on real hardware:** the rest of the macOS start-up after
   the menu (the tray icon itself, camera and microphone permissions), and
   macOS shows its own prompts for Accessibility and Input Monitoring
