@@ -305,7 +305,7 @@ def build(
     if publisher == UNCONFIGURED_PUBLISHER:
         print(
             "WARNING: MSIX_PUBLISHER is not set; the Store package has a placeholder identity and Partner Center "
-            "will refuse it. See docs/SIGNING-AND-STORE.md, 'Microsoft Store'.",
+            "will refuse it. See README.md, 'Code signing policy'.",
             flush=True,
         )
 

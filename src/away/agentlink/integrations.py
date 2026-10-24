@@ -128,7 +128,7 @@ def gestures_domain(store: Any = None) -> Any:
 
 # ------------------------------------------------------------------------------------------ Shortcuts
 def macros_domain(store_factory: Callable[[Any], Any] | None = None) -> Any:
-    from away.agentlink.registry import Applied, Domain, Op
+    from away.agentlink.registry import Applied, Domain, Op, is_dry_run
 
     def store_for(cfg: Any) -> Any:
         if store_factory is not None:
@@ -170,7 +170,8 @@ def macros_domain(store_factory: Callable[[Any], Any] | None = None) -> Any:
                 m = Macro.from_dict({**spec, "name": name, "created": time.time()})
             except MacroError as exc:
                 raise _change_error(str(exc)) from None
-            store.save(m)
+            if not is_dry_run():
+                store.save(m)
             redacted = {**spec, "steps": [s.describe() for s in m.steps]}  # the change history never keeps text
             return Applied(
                 Op(op.domain, op.op, name, redacted, op.profile),
@@ -184,9 +185,10 @@ def macros_domain(store_factory: Callable[[Any], Any] | None = None) -> Any:
                 raise _change_error(f"there is no shortcut named {op.key!r}")
             src = Path(store.path(op.key))
             backup_dir = src.parent / BACKUP_DIR
-            backup_dir.mkdir(parents=True, exist_ok=True)
             backup = backup_dir / f"{op.key}-{int(time.time() * 1000)}.json"
-            src.replace(backup)  # private, on this PC; the change history only keeps the file name
+            if not is_dry_run():
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                src.replace(backup)  # private, on this PC; the change history only keeps the file name
             return Applied(
                 op,
                 op.key,
@@ -198,6 +200,8 @@ def macros_domain(store_factory: Callable[[Any], Any] | None = None) -> Any:
             backup = Path(store.folder) / BACKUP_DIR / str(op.value or "")
             if not op.value or not backup.is_file() or backup.parent.name != BACKUP_DIR:
                 raise _change_error("that shortcut can no longer be restored")
+            if is_dry_run():
+                return Applied(op, None, op.key, [Op("macros", "delete", op.key)], f'Restored shortcut "{op.key}"')
             m = Macro.from_dict({**json.loads(backup.read_text(encoding="utf-8")), "name": op.key})
             store.save(m)
             backup.unlink()

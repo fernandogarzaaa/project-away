@@ -10,6 +10,7 @@ through a shell). Output is kept in ``<data>/diagnostics/cameras-<kind>-<time>.t
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -187,7 +188,7 @@ class JobRunner:
         self.keep_s, self.keep_unread_s = float(keep_s), float(keep_unread_s)
         self.jobs: dict[str, Job] = {}
         self._expired: dict[str, float] = {}  # ids dropped after keep_s: "expired", not "unknown"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # start() calls running() while holding it
 
     def running(self) -> Job | None:
         with self._lock:
@@ -196,13 +197,11 @@ class JobRunner:
     def start(self, kind: str, device: str | None = None, seconds: float | None = None, quick: bool = False) -> Job:
         if kind not in KINDS:
             raise ValueError(f"unknown check {kind!r}; use {', '.join(KINDS)}")
-        if self.running() is not None:
-            raise RuntimeError("another check is still running; wait for it (get_job)")
         args: list[str] = []
         if kind == "cameras":
             args = ["cameras", "diagnose"]
             if device:
-                if not DEVICE_RE.match(str(device)):
+                if not DEVICE_RE.match(str(device)) or str(device).startswith("-"):  # never a CLI flag
                     raise ValueError("camera name has characters that are not allowed")
                 args.append(str(device))
             args += ["--seconds", f"{max(0.3, min(float(seconds or 1.0), 5.0)):g}"]
@@ -211,7 +210,9 @@ class JobRunner:
         elif kind == "sweep":
             args = ["cameras", "test", "--seconds", f"{max(2.0, min(float(seconds or 10.0), 30.0)):g}"]
         job = Job(_new_id(), kind, self.clock())
-        with self._lock:
+        with self._lock:  # check and insert together: two concurrent requests must not both start a check
+            if self.running() is not None:
+                raise RuntimeError("another check is still running; wait for it (get_job)")
             self._prune()
             self.jobs[job.id] = job
         threading.Thread(target=self._run, args=(job, args), daemon=True, name=f"agentlink-job-{kind}").start()
@@ -241,6 +242,17 @@ class JobRunner:
                 noise = NoiseFilter()  # v0.1.22: NVIDIA Broadcast's [VCAMDS] stderr lines flooded the output
                 proc = self.runner(self.command(args), **kw)
                 deadline = time.time() + 600
+                # a child that hangs without printing never reaches the deadline check below: kill it on a timer
+                fired = threading.Event()
+
+                def _watchdog(p: Any = proc) -> None:
+                    fired.set()
+                    with contextlib.suppress(Exception):
+                        p.kill()
+
+                timer = threading.Timer(600 + 5, _watchdog)
+                timer.daemon = True
+                timer.start()
                 assert proc.stdout is not None
                 structured: dict[str, Any] | None = None
                 for line in proc.stdout:
@@ -256,6 +268,10 @@ class JobRunner:
                         budget_hit = True
                         job.output.append("(stopped after 10 minutes)")
                         break
+                timer.cancel()
+                if fired.is_set() and not budget_hit:
+                    budget_hit = True
+                    job.output.append("(stopped after 10 minutes)")
                 rc = proc.wait(timeout=30)
                 if noise.summary():
                     job.output.append(noise.summary())

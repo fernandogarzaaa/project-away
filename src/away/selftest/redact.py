@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 TOKEN_RES = (
-    re.compile(r"\bpar?_[A-Za-z0-9_-]{8,}"),  # Agent Link access / refresh tokens
+    re.compile(r"\b(?:paway|par?)_[A-Za-z0-9_-]{8,}"),  # Agent Link access / refresh / persistent tokens
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+)?"),  # JWT / tunnel tokens
     re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|hf)_[A-Za-z0-9_]{16,}"),

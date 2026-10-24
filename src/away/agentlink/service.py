@@ -11,6 +11,7 @@ stores), or change ``allow_shell`` / the agents' own permissions.
 from __future__ import annotations
 
 import contextlib
+import re
 import threading
 import time
 from collections import deque
@@ -148,6 +149,8 @@ class Service:
 
             inbox = Inbox()
         self.inbox = inbox  # v0.1.22 "Talk to your agent"
+        if hasattr(inbox, "live_ids") and hasattr(registry, "known"):
+            inbox.live_ids = lambda: [a.id for a in registry.known()]
         # v0.1.21: the monitor layout (away.control.monitors Monitor objects), for get_screen's monitor/region; None:
         # the system's (one display the size of the screenshot when it cannot be read)
         self.monitors = monitors
@@ -408,7 +411,11 @@ class Service:
             }
         if not wait:
             return started
-        st.wait(180.0)
+        if not st.wait(180.0):  # still running: never hand back the previous run's report as this one's result
+            return {
+                "state": "running",
+                "note": "the self-test is still running; read the newest report in a minute (selftest_latest)",
+            }
         rep = st.latest()
         out: dict[str, Any] = {"state": "done", "report": rep}
         if joined_existing and rep is not None:
@@ -493,7 +500,7 @@ class Service:
         p = safepaths.resolve(self.data_dir, rel)
         if p.stat().st_size > max_bytes:
             raise ValueError("that file is too large to download")
-        if p.suffix.lower() in (".log", ".txt"):  # v0.1.24: raw logs leave the PC with secrets hidden
+        if p.suffix.lower() in (".log", ".txt") or re.search(r"\.(log|txt)\.\d+$", p.name.lower()):  # rotated too
             from away.agentlink.bundle import redact_text
 
             return redact_text(p.read_bytes().decode("utf-8", "replace")).encode("utf-8")

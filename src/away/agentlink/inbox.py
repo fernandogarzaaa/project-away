@@ -63,13 +63,17 @@ class Message:
             out["replied"] = any(r.get("agent_id") == agent_id for r in self.replies)
         return out
 
-    def is_for(self, agent_id: str, name: str = "") -> bool:
+    def is_for(self, agent_id: str, name: str = "", live_ids: Iterable[str] = ()) -> bool:
         """Addressed to this agent: by id, or (v0.1.23) by name, so an agent that paired again under the same
-        name finds what was said while it was away."""
+        name finds what was said while it was away. Not by name when a recipient id still belongs to a known
+        agent: a local and a remote agent may share a name (their name is whatever the client says it is)."""
         if agent_id in self.to:
             return True
         n = str(name or "").strip().lower()
-        return bool(n) and any(str(x).strip().lower() == n for x in self.to_names)
+        if not n or not any(str(x).strip().lower() == n for x in self.to_names):
+            return False
+        live = set(live_ids)
+        return not any(x in live for x in self.to)
 
 
 def _attr(a: Any, name: str, default: Any = "") -> Any:
@@ -154,6 +158,9 @@ class Inbox:
         self._lock = threading.Lock()
         self.path = Path(path) if path is not None else None
         self.max_age_s = float(max_age_s)
+        # the ids of agents that still exist (set by the service from its registry): a message for one of them is
+        # never handed to a different agent that merely has the same name
+        self.live_ids: Callable[[], Iterable[str]] = lambda: ()
         self._load()
 
     # ------------------------------------------------------------ disk (v0.1.23)
@@ -239,16 +246,18 @@ class Inbox:
             run()
 
     def for_agent(self, agent_id: str, unread_only: bool = False, name: str = "") -> list[Message]:
+        live = set(self.live_ids()) if name else set()
         with self._lock:
-            ms = [m for m in self.messages if m.is_for(agent_id, name)]
+            ms = [m for m in self.messages if m.is_for(agent_id, name, live)]
         if unread_only:
             ms = [m for m in ms if agent_id not in m.read_by]
         return list(reversed(ms))
 
     def get(self, agent_id: str, msg_id: str, name: str = "") -> Message:
+        live = set(self.live_ids()) if name else set()
         with self._lock:
             for m in self.messages:
-                if m.id == str(msg_id) and m.is_for(agent_id, name):
+                if m.id == str(msg_id) and m.is_for(agent_id, name, live):
                     return m
         raise KeyError(f"no message {msg_id!r} in your inbox (inbox action=list shows them)")
 

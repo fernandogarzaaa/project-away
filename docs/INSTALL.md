@@ -10,7 +10,8 @@ Project Away is free and local-first. Pick **one** of the install methods below.
 | `pipx install "project-away[all,train]"` | anyone with Python 3.10–3.12, Intel Macs, Parakeet users | wheel install verified in a clean venv (Linux) |
 
 The native installers appear on the GitHub **Releases** page after a version tag is pushed
-(`git tag v0.1.0 && git push origin v0.1.0`); the release is created as a **draft** so you can check it first.
+(`git tag v0.1.0 && git push origin v0.1.0`); the release is published as soon as every installer job passes (a tag with a `-`, such as `v0.2.0-rc1`, is
+marked as a pre-release), so `away update` can see it.
 
 ## One click: what you get
 

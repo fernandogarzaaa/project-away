@@ -214,7 +214,9 @@ def test_model_bench_agent_link_domain(tmp_path, monkeypatch):
         assert done.text == "Models: light preset (2026-10)"
         (inv,) = done.inverse
         assert inv.op == "restore"
-        al.apply_ops(cfg, [inv])
+        with pytest.raises(al.ChangeError, match="not a change an agent can make"):
+            al.apply_ops(cfg, [inv])  # inverse ops are undo-only
+        al.apply_ops(cfg, [inv], internal=True)
         assert cfg.models_next.presets == "classic"
         rows = model_bench.agent_rows(cfg, tmp_path)
         assert {r["key"] for r in rows[1:]} == {VAD, MOON}
