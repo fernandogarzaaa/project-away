@@ -106,15 +106,42 @@ def menu_safe(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     import logging
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-        @functools.wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
+        def guarded(*args: Any) -> Any:
             try:
-                return fn(*args, **kwargs)
+                return fn(*args)
             except Exception as exc:
                 logging.getLogger("away.tray").warning("tray menu %r failed (ignored): %s", name, exc)
                 return None
 
-        return wrapper
+        # pystray decides how to call a menu action from ``action.__code__.co_argcount`` (minus one for a bound
+        # method) and rejects anything that is not 0, 1 or 2 arguments. A bare ``*args`` wrapper reports 0, so
+        # the tray refused its own menu at start-up (ValueError) and plain functions were called with no
+        # arguments. The wrapper therefore keeps the wrapped function's argument count.
+        n = fn.__code__.co_argcount
+        wrapper: Callable[..., Any]
+        if n == 3:
+
+            def wrapper(a: Any, b: Any, c: Any) -> Any:
+                return guarded(a, b, c)
+
+        elif n == 2:
+
+            def wrapper(a: Any, b: Any) -> Any:
+                return guarded(a, b)
+
+        elif n == 1:
+
+            def wrapper(a: Any) -> Any:
+                return guarded(a)
+
+        elif n == 0:
+
+            def wrapper() -> Any:
+                return guarded()
+
+        else:
+            raise TypeError(f"menu_safe: {fn!r} takes {n} arguments; a pystray menu action takes 0 to 2")
+        return functools.wraps(fn)(wrapper)
 
     return deco
 
