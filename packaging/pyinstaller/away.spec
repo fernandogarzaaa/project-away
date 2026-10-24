@@ -150,13 +150,21 @@ if sys.platform.startswith("linux"):
 if STRICT and missing:
     raise SystemExit(f"[away.spec] AWAY_SPEC_STRICT=1 and these bundled features are missing: {missing}")
 
+# macOS: PyAV ("av", pulled in by faster-whisper, which only uses it to decode audio files) and OpenCV each carry
+# their own FFmpeg including libavdevice, and both define the Objective-C classes AVFFrameReceiver / AVFAudioReceiver;
+# macOS warns this "may cause spurious casting failures and mysterious crashes". Deleting a libavdevice is not
+# possible (every PyAV module and cv2.abi3.so is linked against its own), so PyAV is left out and rthook_stub_av.py
+# installs an empty "av" so faster-whisper still imports. Windows and Linux are unchanged. release.yml checks that
+# exactly one libavdevice is left.
+_mac = sys.platform == "darwin"
+
 a = Analysis(  # noqa: F821
     [str(HERE / "away_entry.py")],
     pathex=[str(ROOT / "src")],
     binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
-    runtime_hooks=[str(HERE / "rthook_portaudio.py")],
+    runtime_hooks=[str(HERE / "rthook_portaudio.py"), *([str(HERE / "rthook_stub_av.py")] if _mac else [])],
     # nemo: Parakeet is not bundled. torchvision/torchaudio/triton/tensorflow: unused and huge.
     excludes=[
         "nemo",
@@ -172,6 +180,7 @@ a = Analysis(  # noqa: F821
         # phonemizer (GPL-3.0) are an opt-in runtime download (Settings > Voice & input > Voice > Download);
         # piper-tts / piper_phonemize (GPL) are not used at all (Piper voices run directly on onnxruntime).
         *NON_PERMISSIVE,
+        *(["av"] if _mac else []),  # see the macOS note above
     ],
     noarchive=False,
 )
