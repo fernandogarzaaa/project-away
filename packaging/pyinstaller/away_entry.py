@@ -30,7 +30,8 @@ def main() -> int:
     if frozen.needs_setup():
         # show the download progress (Windows: a console window; elsewhere: notification + log/terminal)
         where = frozen.ensure_streams(["setup"])
-        frozen.first_launch(cli_main)
+        # macOS/Linux: the download runs with a progress window (its own process); Windows: in the console window
+        frozen.first_launch(cli_main, window=None if sys.platform == "win32" else frozen.setup_window_process)
         if where == "console":
             frozen.detach_console()
     else:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 
 from away.voice.dictation import DictationResult, DictationSession
-from test_voice import FakeASR, ListSink, RuleCleaner, make_session, utterance
+from test_voice import FakeASR, ListSink, RuleCleaner, feed_chunks, make_session, utterance
 
 
 def test_cancel_discards_without_transcribing() -> None:
@@ -574,3 +574,28 @@ def test_hotkey_listener_hold_release_stops_via_thread(monkeypatch) -> None:
     # Releasing again while not recording must not stop again.
     listener.on_release(keyboard.Key.space)
     assert session.stop_calls == 1
+
+
+def test_stops_at_the_same_time_transcribe_the_recording_once() -> None:
+    """v0.1.32: stop() checked ``recording`` outside its lock, so a hotkey release racing a toggle could run the
+    shared VAD and Whisper a second time on empty audio."""
+    import threading
+
+    for _ in range(20):
+        s, asr, _sink, _bus = make_session(["hello there"])
+        assert s.start() is True
+        feed_chunks(s, utterance())
+        barrier = threading.Barrier(8)
+        results: list[str] = []
+
+        def stop(sess: Any = s, bar: threading.Barrier = barrier, out: list[str] = results) -> None:
+            bar.wait()
+            out.append(sess.stop().status)
+
+        threads = [threading.Thread(target=stop) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(asr.calls) == 1
+        assert sorted(results).count("empty") == 7 and len(results) == 8

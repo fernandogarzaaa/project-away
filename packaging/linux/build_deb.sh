@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the PyInstaller onedir as a .deb (installs to /opt/project-away, adds `away` + menu entry).
 set -euo pipefail
-VERSION="${1:-0.1.31}"
+VERSION="${1:-0.1.32}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="$ROOT/dist/ProjectAway"
 case "$(uname -m)" in x86_64) DEBARCH=amd64 ;; aarch64) DEBARCH=arm64 ;; *) DEBARCH="$(uname -m)" ;; esac

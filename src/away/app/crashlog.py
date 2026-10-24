@@ -43,7 +43,7 @@ HANDLED_CODES = {
     "0x40010006": "debug output",
 }
 # v0.1.23: helper processes the app starts (labelled so a real restart stands out in crash.log)
-HELPER_COMMANDS = ("agent-ui", "settings", "first-run", "mcp", "voice", "cameras", "selftest", "update")
+HELPER_COMMANDS = ("agent-ui", "settings", "first-run", "mcp", "voice", "cameras", "selftest", "update", "setup-window")
 SEEN_FILE = "crash-seen.json"  # how far into crash.log the last start had read
 MAX_BYTES = 1_000_000  # crash.log is moved to crash.log.1 beyond this
 CRASHED_MESSAGE = "the app crashed last time; details in crash.log"

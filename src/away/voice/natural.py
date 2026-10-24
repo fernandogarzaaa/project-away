@@ -265,9 +265,30 @@ def _path(d: Path, a: Asset) -> Path:
     return d / ("wheels" if a.name.endswith(".whl") else "") / a.name
 
 
+def _stamp(p: Path) -> Path:
+    return p.with_name(p.name + ".sha256")
+
+
 def _have(d: Path, a: Asset) -> bool:
+    """The file is there and is the pinned one: its size, and its SHA-256 (hashed once, then remembered in a
+    ``.sha256`` file next to it). Before v0.1.32 only the size was compared, so a damaged or replaced file of the
+    same size counted as installed."""
+    p = _path(d, a)
     try:
-        return _path(d, a).stat().st_size == a.size
+        if p.stat().st_size != a.size:
+            return False
+        stamp = _stamp(p)
+        fresh = stamp.is_file() and stamp.stat().st_mtime >= p.stat().st_mtime  # a newer file is hashed again
+        if fresh and stamp.read_text(encoding="utf-8").strip() == a.sha256:
+            return True
+        h = hashlib.sha256()
+        with p.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest() != a.sha256:
+            return False
+        stamp.write_text(a.sha256, encoding="utf-8")
+        return True
     except OSError:
         return False
 
@@ -300,6 +321,8 @@ def _fetch(a: Asset, dest: Path, opener: Callable[..., Any], progress: Callable[
         part.unlink(missing_ok=True)
         raise VoiceDownloadError(f"{a.name} did not match its pinned checksum; nothing was installed")
     part.replace(dest)
+    with contextlib.suppress(OSError):
+        _stamp(dest).write_text(a.sha256, encoding="utf-8")  # verified just now: _have need not hash it again
 
 
 def _safe(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:

@@ -359,6 +359,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: packaging/release-install-notes.md
+          sparse-checkout-cone-mode: false
+      - name: How-to-install notes for the release page (the file names carry this version)
+        run: sed "s/<version>/${GITHUB_REF_NAME#v}/g" packaging/release-install-notes.md > install-notes.md
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: out
@@ -380,4 +386,7 @@ jobs:
           # runs after python-dist, linux, windows and macos all passed (needs:), including the installer smoke tests.
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}  # v1.2.0-rc.1 -> pre-release (beta channel only)
+          # how to install, under whatever notes the release already has (a release made on github.com keeps them)
+          body_path: install-notes.md
+          append_body: true
           files: out/*

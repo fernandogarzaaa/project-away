@@ -496,6 +496,9 @@ class TrayMenuCallbacks:
         self.icon: Any = None
         self.gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
         self.gate_hint = {"shown": False}
+        # v0.1.32: pystray's macOS notifications run osascript, credited to Script Editor (a click opens it); there
+        # the app's own message window is used instead (see notify)
+        self.icon_notifications = sys.platform != "darwin"
 
     # -- icon / menu plumbing -------------------------------------------------
     def _set_icon(self, icon: Any) -> None:
@@ -508,12 +511,15 @@ class TrayMenuCallbacks:
     def notify(self, title: str, message: str) -> None:
         if self.guard.stopping:
             return
+        from away.app.frozen import notify as desktop_notify
+
+        if not self.icon_notifications:  # macOS: Project Away's own message window (frozen.notify)
+            desktop_notify(title, message)
+            return
         try:
             with self.guard._lock:
                 self.icon.notify(message, title)
         except Exception:
-            from away.app.frozen import notify as desktop_notify
-
             desktop_notify(title, message)
 
     def safe_update_menu(self, icon: Any = None) -> None:
@@ -630,6 +636,19 @@ class TrayMenuCallbacks:
     @menu_safe("reset cursor size")
     def on_reset_cursor(self, _icon: Any, _item: Any) -> None:
         self.app.reset_cursor_size()
+
+    @menu_safe("mac permissions")
+    def on_mac_permissions(self, _icon: Any, _item: Any) -> None:
+        from away.app import macperms
+
+        state = {"accessibility": macperms.accessibility(), "input_monitoring": macperms.input_monitoring()}
+        if all(v is True for v in state.values()):
+            self.notify(
+                "Project Away", "Pointer and keyboard control are allowed (Accessibility and Input Monitoring)."
+            )
+            return
+        missing = [k for k, v in state.items() if v is False]
+        macperms.open_settings(missing[0] if missing else "accessibility")
 
     @menu_safe("check my PC")
     def on_check_pc(self, _icon: Any, _item: Any) -> None:
@@ -852,6 +871,9 @@ def build_tray_menu(
             "Reset cursor size to normal", callbacks.on_reset_cursor
         ),
         pystray.MenuItem("Check my PC", callbacks.on_check_pc),  # v0.1.24
+        pystray.MenuItem(  # v0.1.32: the macOS permissions without which control silently does nothing
+            "Allow pointer and keyboard control...", callbacks.on_mac_permissions, visible=sys.platform == "darwin"
+        ),
         pystray.MenuItem("Run self-test", callbacks.on_run_selftest),  # v0.1.24
         pystray.MenuItem("Settings...", callbacks.on_settings),
         pystray.MenuItem("Edit config file", callbacks.on_edit_yaml),
@@ -860,6 +882,21 @@ def build_tray_menu(
         ),
         pystray.MenuItem("Quit", callbacks.on_quit),
     )
+
+
+def ask_mac_permissions(callbacks: Any) -> Any:
+    """v0.1.32 (macOS): without Accessibility and Input Monitoring the pointer, clicks, typing and hotkeys silently
+    do nothing. Check both once the icon exists; macOS asks for a missing one itself and one message says what to
+    allow. On a thread: the icon never waits for it."""
+    import threading
+
+    from away.app import macperms
+
+    t = threading.Thread(
+        target=lambda: macperms.check_and_ask(callbacks.notify), name="away-mac-permissions", daemon=True
+    )
+    t.start()
+    return t
 
 
 def acquire_single_instance() -> bool:
@@ -1006,6 +1043,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     if crash_note:
         ctl.crash_note = f"{crash_note} ({crashlog.crash_log_path()})"
         callbacks.notify("Project Away", ctl.crash_note)
+    if sys.platform == "darwin":
+        ask_mac_permissions(callbacks)
 
     updates.start()  # reports the last install; first check right away, then every 24 h (unless updates.check: false)
     icon.run()

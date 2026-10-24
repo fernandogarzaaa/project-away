@@ -82,9 +82,9 @@ class DictationSession:
         self._publish("dictation.enabled", {"enabled": enabled})
 
     def start(self) -> bool:
-        if not self.enabled or self.recording:
-            return False
-        with self._lock:
+        with self._lock:  # check and set together: two starts at once must not both reset the recording
+            if not self.enabled or self.recording:
+                return False
             self._chunks = []
             self.recording = True
             self._t_start = self.clock()
@@ -97,14 +97,15 @@ class DictationSession:
                 self._chunks.append(np.asarray(chunk, dtype=np.float32).reshape(-1))
 
     def stop(self) -> DictationResult:
-        if not self.recording:
-            return DictationResult("disabled" if not self.enabled else "empty")
-        with self._lock:
+        with self._lock:  # check and take together: a second stop at the same time gets "empty", not a second run
+            if not self.recording:
+                return DictationResult("disabled" if not self.enabled else "empty")
             self.recording = False
             audio = np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
             self._chunks = []
+            t_start = self._t_start
         t_end = self.clock()
-        result = self._process(audio, self._t_start, t_end)
+        result = self._process(audio, t_start, t_end)
         self._publish("dictation.result", {"status": result.status, "text": result.text})
         return result
 

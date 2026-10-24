@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
@@ -251,12 +252,47 @@ def detach_console() -> None:  # pragma: no cover - Windows only
         ctypes.windll.kernel32.FreeConsole()  # type: ignore[attr-defined]
 
 
+def mac_message(
+    title: str,
+    message: str,
+    folder: Path | None = None,
+    spawn: Callable[..., Any] | None = None,
+    clock: Callable[[], float] = time.time,
+) -> bool:
+    """macOS: show ``message`` in Project Away's own small window (``away agent-ui toast``, top right, closes by
+    itself or on a click) instead of a system notification. Notifications sent with ``osascript`` (the only kind an
+    unsigned app can send) are credited to Script Editor, and clicking one opens Script Editor. False when the
+    window could not be started."""
+    import json
+    import tempfile
+    import uuid
+
+    from away.agentlink.prompts import window_process_options
+
+    d = Path(folder) if folder is not None else Path(tempfile.gettempdir()) / "project-away-messages"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        for old in d.glob("message-*.json"):  # the window does not delete its file; keep the folder small
+            with contextlib.suppress(OSError):
+                if clock() - old.stat().st_mtime > 3600:
+                    old.unlink()
+        spec = d / f"message-{uuid.uuid4().hex[:8]}.json"
+        spec.write_text(json.dumps({"title": title, "text": message, "level": "info", "seconds": 8}), encoding="utf-8")
+        (spawn or subprocess.Popen)(away_command(["agent-ui", "toast", str(spec)]), **window_process_options())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def notify(title: str, message: str, platform: str | None = None) -> bool:  # pragma: no cover - desktop only
     """Best-effort desktop notification (no extra dependencies). Always also prints."""
     print(f"{title}: {message}", flush=True)
     plat = platform or sys.platform
     try:
         if plat == "darwin":
+            if mac_message(title, message):
+                return True
+            # the window could not start: a system notification (credited to Script Editor) beats nothing
             script = f"display notification {_osa(message)} with title {_osa(title)}"
             subprocess.run(["osascript", "-e", script], timeout=5, check=False)
             return True
@@ -272,29 +308,55 @@ def _osa(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def setup_download_mb(cfg: cfgmod.AppConfig, missing: list[str] | None = None) -> float:
+    """How much the first-launch setup downloads (MB): the missing MediaPipe models and Whisper model."""
+    missing = missing_models(cfg) if missing is None else missing
+    size = float(sum(mf.size_mb for mf in models.MEDIAPIPE_MODELS if mf.name in missing))
+    asr = _asr_model(cfg)
+    if f"whisper-{asr}" in missing:
+        size += models.ASR_SIZES_MB.get(asr, 0)
+    return size
+
+
+def setup_window_process(argv: Sequence[str], run: Callable[..., Any] = subprocess.run) -> int | None:
+    """Run ``setup`` with its progress window (:mod:`away.app.setup_window`) in its own process and wait for it.
+    Its exit code, or None when that process could not be started (then the caller sets up without a window)."""
+    from away.agentlink.prompts import window_process_options
+
+    try:
+        return int(run(away_command(["setup-window", *argv]), **window_process_options()).returncode)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def first_launch(
     cli_main: Callable[[list[str]], int],
     cfg: cfgmod.AppConfig | None = None,
     notifier: Callable[[str, str], object] = notify,
+    window: Callable[[list[str]], int | None] | None = None,
 ) -> int | None:
-    """Run ``setup --yes --skip-probe`` when models are missing. Returns its exit code, or None if not needed."""
+    """Run ``setup --yes --skip-probe`` when models are missing. Returns its exit code, or None if not needed.
+
+    ``window`` (macOS, Linux): runs the setup with a progress window instead (:func:`setup_window_process`); when it
+    cannot start, the setup runs here with a notification at the start and the end, as before."""
     if cfg is None:
         cfg, _ = cfgmod.load()
     missing = missing_models(cfg)
     if not missing and paths.config_file().exists():
         return None
-    size = sum(mf.size_mb for mf in models.MEDIAPIPE_MODELS if mf.name in missing)
-    asr = _asr_model(cfg)
-    if f"whisper-{asr}" in missing:
-        size += models.ASR_SIZES_MB.get(asr, 0)
-    notifier(
-        "Project Away: first-time setup",
-        f"Downloading hand-tracking and speech models (~{size / 1000:.1f} GB). The app starts when done.",
-    )
+    size = setup_download_mb(cfg, missing)
     # an explicit model is passed on; "auto" stays auto (setup offers the GPU pack first, then picks the model)
     argv = ["setup", "--yes", "--skip-probe"]
     if cfg.voice.asr_model != "auto":
         argv += ["--asr-model", cfg.voice.asr_model]
+    if window is not None:
+        rc = window(argv)
+        if rc is not None:
+            return rc
+    notifier(
+        "Project Away: first-time setup",
+        f"Downloading hand-tracking and speech models (~{size / 1000:.1f} GB). The app starts when done.",
+    )
     rc = cli_main(argv)
     notifier(
         "Project Away",

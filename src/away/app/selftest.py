@@ -131,6 +131,26 @@ def _pystray() -> str:
     return "pystray + Pillow ok"
 
 
+def _tray_menu() -> str:
+    """The real tray menu, built with the real pystray. v0.1.29 and v0.1.30 shipped a menu pystray refuses (a
+    callback wrapper with the wrong argument count), so the app crashed at start-up on every OS while the
+    import-only ``pystray`` check above still passed."""
+    from unittest.mock import MagicMock
+
+    import pystray
+
+    from away.app import tray
+    from away.liveagent.integrate import menu_items
+
+    app = MagicMock()
+    ctl = tray.TrayController(app)
+    cb = tray.TrayMenuCallbacks(ctl, app, MagicMock(), tray.TrayGuard())
+    menu = tray.build_tray_menu(pystray, ctl, app, cb, MagicMock(), menu_items, lambda _tab: None)
+    n = len(list(menu.items))
+    assert n > 10, f"only {n} menu items"
+    return f"{n} menu items accepted by pystray"
+
+
 def _pyperclip() -> str:
     import pyperclip  # noqa: F401
 
@@ -224,6 +244,7 @@ CHECKS: tuple[Check, ...] = (
     Check("pynput", "mouse + keyboard control", _pynput, needs_display=True),
     Check("monitors", "multi-monitor cursor (monitor list)", _monitors),
     Check("pystray", "tray icon", _pystray, needs_display=True),
+    Check("tray-menu", "tray menu builds (the app's start-up)", _tray_menu, needs_display=True),
     Check("pyperclip", "paste dictation", _pyperclip),
     Check("speech", "speaking to you (text-to-speech)", _speech),
 )

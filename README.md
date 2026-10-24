@@ -690,8 +690,11 @@ NVIDIA-oriented; use `pipx install "project-away[all,parakeet]"`). Installers ar
 
 - **Windows:** run the `setup.exe`. It's unsigned, so choose *More info → Run anyway*, then **Install**. Models,
   start-at-sign-in, a desktop shortcut and launching the tray app are all on by default.
-- **macOS:** open the `.dmg`, drag to Applications, then right-click → Open. The first launch downloads the
-  models with a notification. Allow Camera, Microphone, Accessibility and Input Monitoring.
+- **macOS:** open the `.dmg` and drag Project Away onto Applications. The app is not signed by Apple, so open
+  Terminal once and run `xattr -dr com.apple.quarantine "/Applications/Project Away.app"` (or use *Open Anyway*
+  in System Settings > Privacy & Security). The first launch shows a setup window while it downloads the models,
+  then the app lives in the menu bar. Allow Camera, Microphone, Accessibility and Input Monitoring when asked.
+  Step by step: [docs/INSTALL.md, Option C](docs/INSTALL.md#option-c--macos-disk-image-apple-silicon).
 - **Linux:** run the AppImage or install the `.deb`; the first launch downloads the models. Mouse and keyboard
   control needs X11; Wayland is untested.
 
@@ -2155,6 +2158,28 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | GPU tracking (v0.1.24) | The numpy MediaPipe pipeline (anchors, NMS, letterbox, crop / projection), the ONNX hand and face landmarkers with fake sessions, compute selection and fallbacks, pinned downloads tested; the real models downloaded and run on ONNX Runtime **CPU** (sandbox numbers in *GPU tracking*). A Windows CI job (allowed to fail) installs `onnxruntime-directml` and runs `tests/test_v0124_gpu.py` with the real models; on GitHub's runners the DirectML runtime loads but finds no DirectX 12 device (first CI run: "No devices detected"), ONNX Runtime quietly falls back to the processor, and the test checks that the app notices and falls back to MediaPipe with a note. **Untested on a real graphics card**: speed, and tracking quality versus MediaPipe on live video |
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
+
+## What's new in 0.1.32
+
+A smoother first run, mostly on a Mac.
+
+* **A setup window on first launch (macOS, Linux).** The first start downloads the models (~1.6 GB). It
+  used to do that with no window and no menu-bar icon, so the app looked dead; now a window shows what is
+  downloading with a progress bar, and says where to find the icon when it is done.
+* **No more Script Editor on a Mac.** Notifications sent the way an unsigned Mac app can send them are
+  credited to Script Editor, and clicking one opened Script Editor. Project Away now shows its messages in
+  its own small window.
+* **Permissions explained (macOS).** Without Accessibility and Input Monitoring, macOS silently ignores the
+  pointer, clicks, typing and hotkeys. The app now checks both at start-up, lets macOS ask for a missing one,
+  says what to allow, and the menu has *Allow pointer and keyboard control...* to open the right page.
+* **Install steps on every release page.** Each release now ends with how to install on Windows, Mac and
+  Linux, including the one Terminal line an unsigned Mac app needs.
+* **The release build tries the real menu.** The self-test the release workflow runs inside each finished
+  app now builds the menu-bar / tray menu, so a crash like 0.1.29's fails the release instead of reaching you.
+* **Smaller fixes.** Two dictation stops at the same moment no longer run Whisper twice, and a downloaded voice
+  file is checked by its SHA-256, not only its size.
+* **Still untested on a real Mac:** the setup window, the message window and the permission prompts (the
+  Mac build is CI-tested; the windows need a desktop).
 
 ## What's new in 0.1.31
 

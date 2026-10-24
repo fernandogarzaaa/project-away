@@ -158,14 +158,22 @@ and the other `away` commands work from a terminal and open their own console wi
 
 ## Option C — macOS disk image (Apple Silicon)
 
-1. Download `ProjectAway-<version>-macos-arm64.dmg`, open it, drag **Project Away** to **Applications**.
-2. Gatekeeper blocks unsigned apps on first open. **Right-click (or Control-click) the app → Open → Open.**
-   On macOS 15+, if there is no Open button: *System Settings → Privacy & Security* → scroll down →
-   **Open Anyway** next to "Project Away was blocked". If macOS says the app "is damaged", the download was
-   quarantined: run `xattr -dr com.apple.quarantine "/Applications/Project Away.app"` once.
-3. **First launch** downloads the models automatically (~1.6 GB). A notification says when it starts
-   and when it is done; the menu-bar icon appears afterwards. The log is in
-   `~/Library/Application Support/ProjectAway/logs/away.log`.
+1. Download `ProjectAway-<version>-macos-arm64.dmg` and double-click it. In the window that opens, drag
+   **Project Away** onto the **Applications** folder next to it, then close the window.
+2. **Let macOS open it (once).** The Mac app is not signed by Apple (that needs a paid Apple developer
+   account), so macOS refuses to open it the first time. The reliable way past that: open **Terminal**
+   (⌘ + Space, type `Terminal`, Return), paste this line and press Return:
+
+   ```
+   xattr -dr com.apple.quarantine "/Applications/Project Away.app"
+   ```
+
+   Nothing is printed; that is normal. Without Terminal: try to open the app, then *System Settings →
+   Privacy & Security*, scroll down and click **Open Anyway** next to the Project Away message. (The old
+   right-click → Open trick no longer works on recent macOS versions.)
+3. **First launch** shows a *first-time setup* window with a progress bar while it downloads the models
+   (~1.6 GB, once). When it closes, Project Away runs in the **menu bar** at the top right of the screen; it
+   has no window and no Dock icon. The log is in `~/Library/Application Support/ProjectAway/logs/away.log`.
 4. Grant permissions when prompted, or later in *System Settings → Privacy & Security*:
    - **Camera** — hand and face tracking
    - **Microphone** — dictation

@@ -37,6 +37,7 @@ HELPER_WORDS = (
     "update-install",
     " settings",
     " check",
+    "setup-window",
 )
 RELAYS = (
     ("Cloudflare", "region1.v2.argotunnel.com", 7844, "The standard link may not start; try the backup link."),

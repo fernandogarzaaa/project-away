@@ -579,6 +579,7 @@ def _callbacks() -> tuple[Any, _FakeCtl, Any, _FakeUpdates, _FakeGuard, _FakeIco
     updates = _FakeUpdates()
     guard = _FakeGuard()
     cb = tray.TrayMenuCallbacks(ctl, app, updates, guard)
+    cb.icon_notifications = True  # these tests drive pystray's notify path on every OS (macOS uses its own window)
     icon = _FakeIcon()
     cb.icon = icon
     return cb, ctl, app, updates, guard, icon
