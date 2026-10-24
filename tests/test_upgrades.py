@@ -318,6 +318,9 @@ def test_settings_model_new_switches(tmp_path):
         ("forty two, forty three", "42, 43"),
         ("one million two hundred thousand", "1200000"),
         ("Twelve Monkeys", "12 Monkeys"),
+        ("back in twenty twenty four", "back in 2024"),
+        ("nineteen ninety nine", "1999"),
+        ("twenty, twenty four", "20, 24"),
     ],
 )
 def test_words_to_digits(spoken, digits):

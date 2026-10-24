@@ -503,7 +503,14 @@ class Speaker:
                 try:
                     text = self._q.get(timeout=max(1.0, float(self.idle_s)))
                 except queue.Empty:
-                    break  # idle: let the thread (and its COM object) go; the next message starts a new one
+                    # idle: let the thread (and its COM object) go; the next message starts a new one. Decided under
+                    # the lock say() queues under, so a message queued meanwhile is never left with no thread
+                    with self._lock:
+                        if not self._q.empty():
+                            continue
+                        if self._thread is threading.current_thread():
+                            self._thread = None
+                    break
                 if text is None:
                     break
                 # Switching/deleting a custom profile must take effect on the next queued message rather than
@@ -560,7 +567,8 @@ class Speaker:
             if eng is not None:
                 with contextlib.suppress(Exception):
                     eng.close()
-            self._idle.set()
+            if self._q.empty():  # a message queued while closing is still waiting (its new thread speaks it)
+                self._idle.set()
 
 
 def selftest_check(platform: str | None = None) -> str:

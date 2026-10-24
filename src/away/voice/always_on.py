@@ -115,6 +115,7 @@ class StreamingEndpointer:
         self._speech_frames = 0
         self._utt_start = 0
         self._frames_seen = 0
+        self._max_hits = 0  # utterances in a row that ended at max_frames rather than in a pause
         self.noise: float | None = None
 
     @property
@@ -169,8 +170,22 @@ class StreamingEndpointer:
         end_frames = self._end_frames_now()
         if self._silence >= end_frames or len(self._utt) >= self.max_frames:
             self.last_end_wait_s = self._silence * self.frame / self.sr
+            if self._silence < end_frames:
+                self._max_hits += 1
+                if self._max_hits >= 2:  # nobody talks 2 x max_utterance_s without a single pause: background
+                    self._relearn_noise()
+            else:
+                self._max_hits = 0
             return self._close(idx + 1)
         return None
+
+    def _relearn_noise(self) -> None:
+        """Utterances keep hitting ``max_frames`` without a pause: the background got louder than the threshold
+        (a fan, music), and the floor only adapts on non-speech frames. Take the utterance's quiet end (its 20th
+        percentile frame level: speech has gaps, steady noise does not) as the new floor, never lower."""
+        levels = [float(np.sqrt(np.mean(f.astype(np.float64) ** 2))) for f in self._utt]
+        if levels:
+            self.noise = max(self.noise or 0.0, float(np.percentile(levels, 20)))
 
     def _close(self, end_idx: int) -> Utterance | None:
         utt, speech = self._utt, self._speech_frames

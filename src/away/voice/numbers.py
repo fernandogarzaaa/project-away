@@ -85,6 +85,31 @@ def _value(words: list[str]) -> int:
     return total + current
 
 
+def _year_tail(
+    toks: list[str], words: list[tuple[int, str]], j: int, last_tok: int
+) -> tuple[list[str], int, int] | None:
+    """After "nineteen"/"twenty": the year's last two digits (a teen, or tens with an optional unit), as
+    ``(words, next word index, last token)``; None when the next words are not one."""
+
+    def joined(n: int, prev_tok: int) -> list[str] | None:
+        if n >= len(words) or any(not toks[m].isspace() for m in range(prev_tok + 1, words[n][0])):
+            return None
+        return words[n][1].split("-")
+
+    first = joined(j, last_tok)
+    if not first or not all(p in NUMBER_WORDS for p in first):
+        return None
+    if len(first) == 1 and _kind(first[0]) == "teen":
+        return first, j + 1, words[j][0]
+    if first[0] not in TENS or len(first) > 2 or (len(first) == 2 and _kind(first[1]) != "unit"):
+        return None
+    if len(first) == 1:
+        nxt = joined(j + 1, words[j][0])
+        if nxt is not None and len(nxt) == 1 and nxt[0] in UNITS and _kind(nxt[0]) == "unit" and nxt[0] != "zero":
+            return [first[0], nxt[0]], j + 2, words[j + 1][0]
+    return first, j + 1, words[j][0]
+
+
 def words_to_digits(text: str, min_value: int = 10) -> str:
     toks = _TOKEN.findall(text)
     words = []  # (token index, lowercase word) for word tokens
@@ -132,6 +157,11 @@ def words_to_digits(text: str, min_value: int = 10) -> str:
         if not run:
             k += 1
             continue
+        if run in (["nineteen"], ["twenty"]) and j < len(words):
+            year = _year_tail(toks, words, j, last_tok)
+            if year is not None:  # "twenty twenty four" -> 2024, "nineteen ninety nine" -> 1999
+                tail, j, last_tok = year
+                run = [*run, "hundred", *tail]
         value = _value(run)
         end_tok = last_tok
         decimal = ""

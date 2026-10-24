@@ -169,7 +169,7 @@ def get_profile(profile_id: str, data_dir: Path | None = None) -> VoiceProfile:
             created_at=str(raw["created_at"]),
             duration_s=float(raw["duration_s"]),
         )
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, KeyError, TypeError, AttributeError, json.JSONDecodeError) as exc:  # AttributeError: not a dict
         raise ValueError("voice profile could not be read") from exc
 
 

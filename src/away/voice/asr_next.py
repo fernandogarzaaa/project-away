@@ -379,6 +379,7 @@ class NemotronASR:
         self._q: queue.Queue[Any] = queue.Queue(maxsize=200)
         self._stream: RealtimeStream | None = None
         self._pushed = 0
+        self._handoff = threading.Lock()  # a committed stream goes to its waiter or, if it gave up, gets closed
         self.final_wait_s = 3.0
         self._worker = threading.Thread(target=self._pump, daemon=True)
         self._worker.start()
@@ -389,11 +390,17 @@ class NemotronASR:
             if item is None:
                 return
             try:
-                if isinstance(item, tuple):  # ("commit", holder): finish the live stream, hand back its stream
+                if isinstance(item, tuple):  # ("commit", holder, gave_up): finish the live stream, hand it back
                     st, self._stream = self._stream, None
                     if st is not None and not st.closed:
                         st.commit()
-                        item[1].append(st)
+                        holder, gave_up = item[1], item[2]
+                        with self._handoff:
+                            late = gave_up.is_set()
+                            if not late:
+                                holder.append(st)
+                        if late:  # the waiter already returned: nobody else will close it
+                            st.close()
                     continue
                 if isinstance(item, str):  # "reset"
                     if self._stream is not None:
@@ -426,18 +433,21 @@ class NemotronASR:
         if self._pushed < 0.8 * n or n <= 0:
             return ""
         holder: list[RealtimeStream] = []
+        gave_up = threading.Event()
         try:
-            self._q.put(("commit", holder), timeout=0.5)
+            self._q.put(("commit", holder, gave_up), timeout=0.5)
         except queue.Full:
             return ""
         end = time.monotonic() + self.final_wait_s
         while not holder and time.monotonic() < end:
             time.sleep(0.01)
-        if not holder or not holder[0].done.wait(max(0.0, end - time.monotonic())):
-            return ""
-        st = holder[0]
-        st.close()
-        return " ".join(st.finals).strip()
+        done = bool(holder) and holder[0].done.wait(max(0.0, end - time.monotonic()))
+        with self._handoff:
+            gave_up.set()
+            st = holder[0] if holder else None
+        if st is not None:
+            st.close()  # on every path: a slow final must not leave its socket and server session open
+        return " ".join(st.finals).strip() if st is not None and done else ""
 
     def transcribe(self, audio: NDArray[np.float32], prompt: str | None = None) -> str:
         n = len(np.asarray(audio).reshape(-1))
