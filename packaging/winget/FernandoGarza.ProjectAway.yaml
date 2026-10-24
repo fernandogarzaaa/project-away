@@ -1,4 +1,4 @@
-# winget version manifest (optional; see docs/SIGNING-AND-STORE.md, "winget"). Replace "{{VERSION}}" first.
+# winget version manifest (optional; see README.md, "Code signing policy"). Replace "{{VERSION}}" first.
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
 PackageIdentifier: FernandoGarza.ProjectAway
 PackageVersion: "{{VERSION}}"

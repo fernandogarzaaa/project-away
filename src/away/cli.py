@@ -462,13 +462,16 @@ def cmd_bindings(args: argparse.Namespace) -> int:
     if not args.trigger:
         return _fail("usage: away bindings import FILE [--replace]")
     try:
-        incoming, raw = load_bindings_file(args.trigger)
+        incoming, raw = load_bindings_file(args.trigger, allow_shell=b.allow_shell)
         cfg.bindings = incoming if args.replace else merge_bindings(b, incoming, raw)
     except BindingsError as exc:
         return _fail(exc)
     except (OSError, yaml.YAMLError) as exc:
         return _fail(f"cannot read {args.trigger}: {exc}")
-    cfgmod.save(cfg, path)
+    try:
+        cfgmod.save(cfg, path)
+    except ValueError as exc:  # e.g. an unknown per-app tuning key, checked on save
+        return _fail(exc)
     print(f"imported bindings from {args.trigger} ({'replaced' if args.replace else 'merged'})")
     return 0
 
@@ -584,7 +587,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
         elif attr:
             setattr(v, attr, val)
         cfgmod.save(cfg, path)  # validates
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:  # OverflowError: int(float("inf"))
         return _fail(exc)
     shown = "off" if args.action == "wake-word" and not v.wake_word_enabled else val
     print(f"voice {args.action}: {shown}")
@@ -818,6 +821,8 @@ def cmd_cameras_edit(args: argparse.Namespace) -> int:
         keep = [c for c in cams if str(c.device) != str(args.device)]
         if len(keep) == len(cams):
             return _fail(f"no configured camera {args.device!r}")
+        if len(keep) > 1 and not any(c.role == "primary" for c in keep):
+            keep[0].role = "primary"  # the primary was removed: promote the first remaining camera
         cfg.hands.cameras = keep if len(keep) > 1 else []  # one camera left: back to single-camera mode
         if len(keep) == 1:
             h.camera_index, h.camera_hint = keep[0].device, keep[0].index_hint

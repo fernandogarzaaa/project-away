@@ -126,6 +126,60 @@ def test_hand_lost_ends_drag_and_keeps_pause():
     assert sm.update(1.1, None) == []  # only reported once
 
 
+def test_pause_during_a_pinch_does_not_click_on_resume():
+    sm = GestureStateMachine(GestureConfig(drag_hold=5.0))
+    run(sm, [pose("pinch_open"), pose("pinch")])
+    assert sm.pinched and not sm.dragging
+    sm.paused = True
+    ev = sm.update(1.0, pose("pinch_open"))
+    assert ev == [] and not sm.pinched  # no drag was running: nothing to end
+    sm.paused = False
+    ev, _ = run(sm, [pose("pinch_open")], t0=2.0)
+    assert "click" not in kinds(ev) and "drag_end" not in kinds(ev)
+
+
+def test_pause_during_a_drag_ends_it_once():
+    sm = GestureStateMachine(GestureConfig(drag_hold=0.0))
+    run(sm, [pose("pinch_open"), pose("pinch"), pose("pinch")])
+    assert sm.dragging
+    sm.paused = True
+    ev = sm.update(1.0, pose("pinch"))
+    assert [e.kind for e in ev] == ["drag_end"] and ev[0].data == {"reason": "paused"}
+    assert not sm.dragging and not sm.pinched
+    assert sm.update(1.1, pose("pinch")) == []  # reported once
+    sm.paused = False
+    ev, _ = run(sm, [pose("pinch_open")], t0=2.0)
+    assert "drag_end" not in kinds(ev) and "click" not in kinds(ev)
+
+
+def test_pause_forgets_the_two_finger_scroll_anchor():
+    sm = GestureStateMachine()
+    run(sm, [pose("two", center=(0.5, 0.5))])
+    assert sm._scroll_prev_y is not None
+    sm.paused = True
+    sm.update(1.0, pose("two", center=(0.5, 0.5)))
+    assert sm._scroll_prev_y is None
+    sm.paused = False
+    ev, _ = run(sm, [pose("two", center=(0.5, 0.2))], t0=2.0)
+    assert "scroll" not in kinds(ev)  # a fresh anchor: no jump scroll from before the pause
+
+
+def test_palm_scroll_suppress_ends_a_drag_and_clears_state():
+    sm = GestureStateMachine(GestureConfig(drag_hold=0.0))
+    run(sm, [pose("pinch_open"), pose("pinch"), pose("pinch")])
+    assert sm.dragging
+    sm._wrist_hist.append((0.0, 0.5, 0.5))
+    sm._scroll_prev_y, sm._palm_t0, sm._clutch_latched = 0.4, 0.1, True
+    ev = sm.update(1.0, pose("pinch"), suppress=True)
+    assert [e.kind for e in ev] == ["drag_end"] and ev[0].data == {"reason": "palm_scroll"}
+    assert not sm.dragging and not sm.pinched and sm.hand_present
+    assert sm._scroll_prev_y is None and sm._palm_t0 is None and sm._clutch_latched is False
+    assert not sm._wrist_hist
+    assert sm.update(1.1, pose("pinch"), suppress=True) == []  # nothing running: no event
+    ev, _ = run(sm, [pose("pinch_open")], t0=2.0)
+    assert "click" not in kinds(ev)
+
+
 def test_double_click_survives_brief_hand_loss():
     sm = GestureStateMachine()
     sm.update(0.0, pose("pinch_open"))

@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -389,7 +390,11 @@ def install(
             log.warning("%s (%s): %s", note, path, first_crash_line(text) or "see the file")
         with contextlib.suppress(OSError):
             if path.stat().st_size > MAX_BYTES:
-                os.replace(path, path.with_name(CRASH_FILE + ".1"))
+                # copy, then truncate (not rename): another running Away process (the tray, when this is Settings)
+                # keeps appending to its open handle, which a rename would point at crash.log.1 on Linux/macOS
+                shutil.copyfile(path, path.with_name(CRASH_FILE + ".1"))
+                with path.open("r+", encoding="utf-8") as fh:
+                    fh.truncate(0)
         f = path.open("a", encoding="utf-8", buffering=1)
         parent = ""
         with contextlib.suppress(Exception):

@@ -104,19 +104,21 @@ class ChangeManager:
     def preview(self, ops: list[Op]) -> dict[str, Any]:
         """What ``ops`` would do, without saving anything (raises :class:`ChangeError` when invalid)."""
         cfg = self._load_cfg()
-        done = apply_ops(cfg, ops, self.presets)
+        done = apply_ops(cfg, ops, self.presets, dry_run=True)
         return {
             "changes": [a.text for a in done],
             "low_risk": bool(done) and all(a.low_risk for a in done),
             "before_after": [{"key": a.op.key, "before": a.before, "after": a.after} for a in done],
         }
 
-    def apply(self, ops: list[Op], who: str, agent_id: str = "", why: str = "") -> dict[str, Any]:
+    def apply(
+        self, ops: list[Op], who: str, agent_id: str = "", why: str = "", *, internal: bool = False
+    ) -> dict[str, Any]:
         if not ops:
             raise ChangeError("nothing to change")
         with self._lock:
             cfg = self._load_cfg()
-            done: list[Applied] = apply_ops(cfg, ops, self.presets)
+            done: list[Applied] = apply_ops(cfg, ops, self.presets, internal=internal)
             batch = uuid.uuid4().hex[:8]
             snap = self._snapshot(batch)
             cfgmod.save(cfg, self.config_path())
@@ -163,7 +165,7 @@ class ChangeManager:
             ops.extend(Op.from_dict(o) for o in e.inverse)
         if not ops:
             raise ChangeError("nothing to undo")
-        res = self.apply(ops, who=who, why="undo: " + "; ".join(e.text for e in entries)[:400])
+        res = self.apply(ops, who=who, why="undo: " + "; ".join(e.text for e in entries)[:400], internal=True)
         with self._lock:
             for e in entries:
                 e.undone = True

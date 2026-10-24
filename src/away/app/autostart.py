@@ -50,6 +50,16 @@ def plist(cmd: list[str]) -> str:
     )
 
 
+def windowless(cmd: list[str]) -> list[str]:
+    """A pip/pipx install's ``python.exe -m away tray`` opens a console window at login (closing it quits the app):
+    use the ``pythonw.exe`` next to it when there is one."""
+    if cmd and Path(cmd[0]).name.lower() == "python.exe":
+        w = Path(cmd[0]).with_name("pythonw.exe")
+        if w.exists():
+            return [str(w), *cmd[1:]]
+    return cmd
+
+
 def enable(platform: str | None = None, home: Path | None = None, cmd: list[str] | None = None) -> str:
     plat = platform or sys.platform
     home = home or Path.home()
@@ -58,7 +68,7 @@ def enable(platform: str | None = None, home: Path | None = None, cmd: list[str]
         import winreg  # type: ignore[import-not-found,unused-ignore]
 
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            winreg.SetValueEx(k, "ProjectAway", 0, winreg.REG_SZ, " ".join(f'"{c}"' for c in cmd))
+            winreg.SetValueEx(k, "ProjectAway", 0, winreg.REG_SZ, " ".join(f'"{c}"' for c in windowless(cmd)))
         return "HKCU\\" + RUN_KEY + "\\ProjectAway"
     path = mac_plist(home) if plat == "darwin" else linux_desktop_file(home)
     path.parent.mkdir(parents=True, exist_ok=True)

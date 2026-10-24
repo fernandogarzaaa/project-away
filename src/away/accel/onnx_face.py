@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from away.accel import mp_pipeline as mp
-from away.accel.onnx_hands import session
+from away.accel.onnx_hands import SAME_HAND_IOU, _overlap, session
 
 DET_SIZE = 128
 MESH_SIZE = 256
@@ -42,6 +42,9 @@ BLENDSHAPE_NAMES = (
 )  # fmt: skip
 
 
+DETECT_EVERY = 10  # frames between searches for another face while at least one is tracked
+
+
 class OnnxFaceLandmarker:
     def __init__(
         self,
@@ -63,6 +66,7 @@ class OnnxFaceLandmarker:
         self.min_detection = float(min_detection)
         self.anchors = mp.ssd_anchors(DET_SIZE, (8, 16, 16, 16))
         self.tracked: list[mp.Rect] = []
+        self._frames = 0  # look for new faces every DETECT_EVERY frames while fewer than max_faces are tracked
         self.det_runs = 0
 
     def _detect(self, rgb: np.ndarray) -> list[mp.Rect]:
@@ -95,13 +99,22 @@ class OnnxFaceLandmarker:
     def detect(self, rgb: np.ndarray) -> list[tuple[np.ndarray, dict[str, float]]]:
         """Every face: (478, 3) normalized mesh points and the blendshape scores."""
         h, w = rgb.shape[:2]
-        rois = list(self.tracked) or self._detect(rgb)
-        out, nxt = [], []
+        rois = list(self.tracked)
+        self._frames += 1
+        if not rois or (len(rois) < self.max_faces and self._frames % DETECT_EVERY == 0):
+            for r in self._detect(rgb):  # someone new in view (the tracked faces alone never find them)
+                if len(rois) < self.max_faces and all(_overlap(r, t, w, h) < SAME_HAND_IOU for t in rois):
+                    rois.append(r)
+        out: list[tuple[np.ndarray, dict[str, float]]] = []
+        nxt: list[mp.Rect] = []
         for r in rois[: self.max_faces]:
             lm = self._mesh(rgb, r)
             if lm is None:
                 continue
-            nxt.append(mp.face_rect_from_landmarks(lm, w, h))
+            nr = mp.face_rect_from_landmarks(lm, w, h)
+            if any(_overlap(nr, t, w, h) > SAME_HAND_IOU for t in nxt):
+                continue  # two regions found the same face
+            nxt.append(nr)
             out.append((lm, self.blendshapes(lm, w, h)))
         self.tracked = nxt
         return out

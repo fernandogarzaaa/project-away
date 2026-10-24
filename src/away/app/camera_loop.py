@@ -140,7 +140,8 @@ class CameraLoop:
             if close is not None:  # releases the capture (the generator's finally)
                 with contextlib.suppress(Exception):
                     close()
-        return True
+        # a camera that opens but delivers no frame must not be reopened in a tight loop: wait retry_s first
+        return n > 0 or self.stop.is_set() or self._requested()
 
     def _hand_over(self) -> None:
         assert self.share is not None

@@ -257,6 +257,14 @@ def test_desktop_entry_quotes_spaces():
     assert 'Exec="/a b/away" tray' in autostart.desktop_entry(["/a b/away", "tray"])
 
 
+def test_windows_autostart_uses_pythonw(tmp_path):
+    (tmp_path / "python.exe").write_bytes(b"")
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    cmd = [str(tmp_path / "python.exe"), "-m", "away", "tray"]
+    assert autostart.windowless(cmd) == [str(tmp_path / "pythonw.exe"), "-m", "away", "tray"]
+    assert autostart.windowless(["C:/x/ProjectAway.exe", "tray"]) == ["C:/x/ProjectAway.exe", "tray"]
+
+
 def test_launch_command(monkeypatch):
     import sys
 
@@ -280,6 +288,21 @@ def test_uninstall(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "pipx uninstall project-away" in out
     assert "no Project Away user data found" in out
+
+
+def test_uninstall_keep_config_when_config_and_data_share_a_folder(tmp_path, monkeypatch):
+    # macOS: config_dir() == data_dir(); --keep-config must not delete config.yaml with the data
+    shared = tmp_path / "ProjectAway"
+    monkeypatch.setenv("AWAY_DATA_DIR", str(shared))
+    monkeypatch.setenv("AWAY_CONFIG_DIR", str(shared))
+    (shared / "models").mkdir(parents=True)
+    (shared / "models" / "m.bin").write_bytes(b"x")
+    (shared / "config.yaml").write_text("config_version: 4\n")
+    (shared / "config.yaml.bak").write_text("config_version: 4\n")
+    uninstall.run(yes=True, keep_config=True)
+    assert sorted(p.name for p in shared.iterdir()) == ["config.yaml", "config.yaml.bak"]
+    uninstall.run(yes=True)
+    assert not shared.exists()
 
 
 def test_uninstall_abort(monkeypatch):

@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from away.agentlink import ui_helper
 from away.agentlink.control import GRACE_S, ComputerControl, ControlHooks
 from away.agentlink.prompts import NullUI, SubprocessUI
@@ -146,6 +148,8 @@ def test_banner_continue_click_is_not_a_takeover_but_real_input_still_pauses() -
 # ------------------------------------------------------- ui_helper routes paused specs to _control
 def test_main_routes_paused_control_specs(tmp_path: Path, monkeypatch: Any) -> None:
     # main() builds a tk.Tk before _control: fake it (no display on CI), like the window code is faked for toasts.
+    pytest.importorskip("tkinter")
+
     class FakeRoot:
         def withdraw(self) -> None:
             pass

@@ -26,7 +26,18 @@ from pathlib import Path
 from typing import Any
 
 APP_NAMES = ("projectaway", "project away", "away.exe", "away-tray")
-HELPER_WORDS = ("agent-ui", "selftest", " mcp", "cameras ", "ui_helper", "--helper", "update-install")
+# command lines of Away's own short-lived helpers and windows (Settings, Check my PC): not "extra copies"
+HELPER_WORDS = (
+    "agent-ui",
+    "selftest",
+    " mcp",
+    "cameras ",
+    "ui_helper",
+    "--helper",
+    "update-install",
+    " settings",
+    " check",
+)
 RELAYS = (
     ("Cloudflare", "region1.v2.argotunnel.com", 7844, "The standard link may not start; try the backup link."),
     ("localhost.run", "localhost.run", 22, "The backup link (localhost.run) may not start; try Pinggy."),

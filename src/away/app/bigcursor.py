@@ -163,8 +163,8 @@ class BigCursor:
         return self.marker.with_name(USER_SIZE_NAME)
 
     def _remember_user_size(self, size: int) -> None:
-        if size in our_sizes() and size != BASE_SIZE:
-            return
+        # only called with a size seen while Away has not enlarged the cursor: 48 or 64 px are ordinary steps of
+        # the Windows pointer-size slider too, so they are recorded like any other size
         with contextlib.suppress(OSError):
             self.user_size_file.write_text(json.dumps({"size": int(size)}), "utf-8")
 
@@ -195,7 +195,9 @@ class BigCursor:
                 self._clear_marker()
             return False
         original = int(data["original"])
-        if original in our_sizes():  # v0.1.23: a marker overwritten by a second copy of the app held our own size
+        if original in our_sizes() and original != self.user_size():
+            # v0.1.23: a marker overwritten by a second copy of the app held our own size as the "original"
+            # (unless that size is the user's own: 48/64/96 px are also steps of the Windows slider)
             original = self.user_size()
         ok = self.backend.set(original)
         self._clear_marker()
@@ -242,12 +244,16 @@ class BigCursor:
             return False
         # v0.1.23: the original is never one of our own sizes. A marker left by another run (or another copy of
         # the app) already holds the real original: keep it. A current size that is one of ours means a big
-        # cursor was left behind: the original is the last size known to be the user's (32 px when unknown).
+        # cursor was left behind: the original is the last size known to be the user's. With no size known yet the
+        # current one is the user's (48 and 64 px are also ordinary steps of the Windows pointer-size slider).
         marked = self.read_marker()
-        if marked is not None and int(marked["original"]) not in our_sizes() - {BASE_SIZE}:
+        user = self.user_size()
+        if marked is not None and (
+            int(marked["original"]) not in our_sizes() - {BASE_SIZE} or marked["original"] == user
+        ):
             original = int(marked["original"])
-        elif current in our_sizes() and current != BASE_SIZE:
-            original = self.user_size()
+        elif current in our_sizes() and current != BASE_SIZE and current != user and self.user_size_file.exists():
+            original = user  # a size of ours that is not the user's last known one: a big cursor left behind
         else:
             original = current
             self._remember_user_size(current)

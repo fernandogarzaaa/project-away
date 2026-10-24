@@ -177,7 +177,7 @@ class Vocabulary:
 
     def apply(self, text: str) -> str:
         for pat, rep in self.replacements:
-            text = pat.sub(rep, text)
+            text = pat.sub(rep.replace("\\", "\\\\"), text)  # literal: "C:\\Users" is not a regex template
         return text
 
     def terms(self) -> list[str]:

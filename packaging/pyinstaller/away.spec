@@ -219,7 +219,7 @@ print(f"[away.spec] dropped {before - len(a.binaries) - len(a.datas)} GPL voice 
 
 def _windows_metadata():
     """Windows exe version resource + icon. The version resource (product name "Project Away", product version =
-    the release version) is what SignPath's metadata restrictions check before signing (docs/SIGNING-AND-STORE.md);
+    the release version) is what SignPath's metadata restrictions check before signing (README.md, "Code signing policy");
     the icon is the tray icon's glyph. Neither exists on macOS/Linux builds."""
     if sys.platform != "win32":
         return None, None

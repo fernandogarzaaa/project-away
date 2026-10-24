@@ -455,9 +455,9 @@ class OpenCodeServer:
         last = ""
         while self.clock() < deadline:
             if self.proc is not None and self.proc.poll() is not None:
-                raise EngineError(
-                    f"opencode stopped while starting (exit code {self.proc.returncode}); see {self.log_path}"
-                )
+                code = self.proc.returncode
+                self.stop()
+                raise EngineError(f"opencode stopped while starting (exit code {code}); see {self.log_path}")
             try:
                 sid = self.client.post_json(f"{self.url}/session", {"title": "away-ready"}, self._auth(), 5)
                 if isinstance(sid, dict) and sid.get("id"):
@@ -467,6 +467,7 @@ class OpenCodeServer:
             except HttpError as exc:
                 last = str(exc)
                 if exc.status == 401:
+                    self.stop()  # else the refused server stays up and ensure() never restarts it
                     raise EngineError("opencode refused Away's password") from None
             time.sleep(0.3)
         self.stop()

@@ -214,6 +214,11 @@ class GestureStateMachine:
             self._clutch_latched = False
 
         if self.paused:
+            # a pinch held when the pause came must not click (or end a stale drag) on the first frame after it
+            if self.dragging:
+                events.append(GestureEvent("drag_end", t, {"reason": "paused"}))
+            self.pinched = self.dragging = False
+            self._scroll_prev_y = None
             self._wrist_hist.clear()
             return events + self.stop_autoscroll(t, "paused")
 

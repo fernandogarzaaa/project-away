@@ -127,7 +127,7 @@ def ratio_rotation(csi: Cx) -> tuple[float, float]:
 def window_features(csi: Cx | None, rssi: F | None, fs: float) -> dict[str, float]:
     """Features for one window. Works with RSSI only (csi=None)."""
     feats: dict[str, float] = {}
-    if csi is not None:
+    if csi is not None and len(np.asarray(csi)) >= 2:  # one packet has no motion (and empty diffs crash)
         h = np.asarray(csi)
         if h.ndim == 2:
             h = h[:, None, :]

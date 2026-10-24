@@ -648,9 +648,15 @@ class AuthMiddleware:
                 method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh")
             )
             m = CODE_PATH.match(path)
+            wants_mcp = bool(m) and (method in ("POST", "DELETE") or "text/event-stream" in headers.get("accept", ""))
+            pairing = (method == "POST" and path in ("/v1/pair", "/v1/pair/local", "/v1/token/refresh")) or wants_mcp
+            if pairing and not persistent and was_locked:
+                # these routes check a PIN or a code, never the bearer token: a junk Authorization header must not
+                # lift the lockout on them (it would turn PIN guessing into a token-bucket-limited brute force)
+                await reply(429, "too many failed attempts; wait a minute")
+                return
             agent: Agent | None = None
             if m:
-                wants_mcp = method in ("POST", "DELETE") or "text/event-stream" in headers.get("accept", "")
                 if not wants_mcp:
                     public = True  # the landing page; it reveals nothing about the code's state
                 else:
@@ -832,7 +838,9 @@ def _client_info(body: bytes) -> tuple[str | None, dict[str, Any]]:
     items = data if isinstance(data, list) else [data]
     for it in items:
         if isinstance(it, dict) and it.get("method") == "initialize":
-            info = (it.get("params") or {}).get("clientInfo") or {}
+            params = it.get("params")
+            info = params.get("clientInfo") if isinstance(params, dict) else None
+            info = info if isinstance(info, dict) else {}  # untrusted, before pairing: never let a shape crash it
             return str(info.get("name") or "AI agent"), {"name": info.get("name"), "version": info.get("version")}
     return None, {}
 

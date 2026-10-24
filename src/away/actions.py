@@ -68,6 +68,16 @@ def _default_shell(cmd: str) -> None:  # pragma: no cover - starts a process
     subprocess.Popen(cmd, shell=True, start_new_session=True)
 
 
+def split_command(cmd: str, *, nt: bool | None = None) -> list[str]:
+    """``launch:`` argv. On Windows the non-POSIX split keeps quotes in the token (``"C:\\Program Files\\x.exe"``),
+    which Popen would then escape again: drop one pair of surrounding quotes per token."""
+    nt = os.name == "nt" if nt is None else nt
+    argv = shlex.split(cmd, posix=not nt)
+    if nt:
+        argv = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] == '"' else t for t in argv]
+    return argv
+
+
 class ActionExecutor:
     """Runs one :class:`Action`. Launch/shell/URL openers are injectable for tests."""
 
@@ -140,7 +150,7 @@ class ActionExecutor:
             if a.arg.lower().startswith(URL_PREFIXES):
                 self.url_opener(a.arg)
             else:
-                self.launcher(shlex.split(a.arg, posix=os.name != "nt"))
+                self.launcher(split_command(a.arg))
         elif a.kind == "shell":
             if not self.allow_shell:
                 self.log.append(f"refused {a}: bindings.allow_shell is false")

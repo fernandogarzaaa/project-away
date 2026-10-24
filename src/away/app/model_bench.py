@@ -480,6 +480,8 @@ def register_agent_link(data_dir: Path | None = None) -> None:
 
     def apply(cfg: Any, op: Any) -> Any:
         if op.op == "run":
+            if al.is_dry_run():
+                return al.Applied(op, None, None, [], "Start Test my PC", True)
             started = start_background(cfg, data_dir)
             text = (
                 "Test my PC started; read model_bench for the results" if started else "Test my PC is already running"

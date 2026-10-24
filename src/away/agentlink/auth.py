@@ -136,6 +136,9 @@ class Agent:
     # where the agent looks up a moved address (rendezvous): a random topic and the key that signs announcements
     rdv_id: str = ""
     rdv_key: str = ""
+    # when the short access token itself ends (0 = at ``expires``, files written before this field). A session kept
+    # alive by a link or a persistent token moves ``expires`` but must not bring an expired access token back.
+    token_expires: float = 0.0
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -346,7 +349,7 @@ class AgentRegistry:
                 old.kind = kind
                 old.scopes = perms.to_list(perms.normalize(list(scopes)))
                 old.token_hash = digest(token)
-                old.expires = now + float(ttl_s)
+                old.expires = old.token_expires = now + float(ttl_s)
                 old.last_seen = now
                 old.link_hash = digest(link_code) if link_code else ""
                 old.client = dict(client or {})
@@ -365,6 +368,7 @@ class AgentRegistry:
             token_hash=digest(token),
             created=now,
             expires=now + float(ttl_s),
+            token_expires=now + float(ttl_s),
             last_seen=now,
             link_hash=digest(link_code) if link_code else "",
             client=dict(client or {}),
@@ -386,7 +390,7 @@ class AgentRegistry:
             for a in self.agents.values():
                 if same(a.token_hash, h) and found is None:  # no early exit: compare every hash
                     found = a
-            if found is None or not found.active(now):
+            if found is None or not found.active(now) or now >= (found.token_expires or found.expires):
                 return None
             found.last_seen = now
         return found
@@ -499,7 +503,7 @@ class AgentRegistry:
             fresh = REFRESH_PREFIX + secrets.token_urlsafe(32)
             ttl = access_ttl_s(found) if callable(access_ttl_s) else access_ttl_s
             found.token_hash = digest(access)
-            found.expires = now + float(ttl)
+            found.expires = found.token_expires = now + float(ttl)
             found.last_seen = now
             if not old:  # the token just used stays valid briefly, in case this reply never arrives
                 found.prev_refresh_hash, found.prev_refresh_until = found.refresh_hash, now + REFRESH_GRACE_S

@@ -144,8 +144,8 @@ class TrayController:
 
     def settings_path(self) -> str:
         p = paths.config_file()
-        if not p.exists():
-            cfgmod.save(self.app.cfg, p)
+        if not p.exists():  # the defaults (the live config has this camera's calibration layered in)
+            cfgmod.save(cfgmod.AppConfig(), p)
         return str(p)
 
     # mic / listening ------------------------------------------------------

@@ -37,6 +37,18 @@ FIX_LABELS = {
 }
 
 
+def _release_all(key_up: Callable[[str], Any], held: list[str]) -> None:
+    """Release every held key, last first, even if one release fails (then re-raise the first error)."""
+    err: BaseException | None = None
+    for k in reversed(held):
+        try:
+            key_up(k)
+        except Exception as exc:
+            err = err or exc
+    if err is not None:
+        raise err
+
+
 @dataclass
 class PlayResult:
     ok: bool
@@ -168,8 +180,7 @@ class MacroPlayer:
                     b.key_down(m)
                 b.click(s.button, s.count)
             finally:
-                for m in reversed(held):
-                    b.key_up(m)
+                _release_all(b.key_up, held)
         elif s.type == "scroll":
             b.move(x, y)
             b.scroll(s.dx, s.dy)
@@ -188,14 +199,13 @@ class MacroPlayer:
                 held.append(k)
                 self.backend.key_down(k)
         finally:
-            for k in reversed(held):
-                self.backend.key_up(k)
+            _release_all(self.backend.key_up, held)
 
     def _drag(self, s: Step, x: int, y: int, factor: float) -> None:
         b = self.backend
         b.move(x, y)
-        b.press(s.button)
         try:
+            b.press(s.button)
             per = (s.duration / factor / max(1, len(s.path))) if factor else 0.0
             for dx, dy in s.path:
                 if per and self._sleep(self.abort, min(per, 0.25)):

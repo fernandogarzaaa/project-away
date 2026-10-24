@@ -27,6 +27,8 @@ Never reachable through here: ``bindings.allow_shell``, ``agent_link.*`` (the ag
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
 import json
 import re
@@ -139,6 +141,9 @@ class Applied:
 
 @dataclass
 class Domain:
+    """One kind of change. ``apply(cfg, op)`` changes ``cfg`` in place; when :func:`is_dry_run` is true (a preview,
+    before the person said Yes) it must validate and describe the change without touching any file."""
+
     name: str
     title: str
     list: Callable[[Any], list[dict[str, Any]]]
@@ -612,17 +617,20 @@ def make_presets_domain(store: PresetStore) -> Domain:
             existed = op.key in store.names()
             old = store.load(op.key) if existed else None
             vals = {k: float(v) for k, (_lo, _hi, v) in ranges(cfg).items() if not isinstance(v, bool)}
-            store.save(op.key, vals)
+            if not is_dry_run():
+                store.save(op.key, vals)
             inv = [Op("presets", "restore_file", op.key, old)] if existed else [Op("presets", "delete", op.key)]
             return Applied(op, None, op.key, inv, f"Saved your current settings as preset '{op.key}'")
         if op.op == "restore_file":
-            if op.value is None:
+            if is_dry_run():
+                pass
+            elif op.value is None:
                 store.delete(op.key)
             else:
                 store.save(op.key, dict(op.value))
             return Applied(op, None, op.key, [], f"Restored preset file '{op.key}'")
         if op.op == "delete":
-            old = store.delete(op.key)
+            old = (store.load(op.key) if op.key in store.names() else None) if is_dry_run() else store.delete(op.key)
             if old is None:
                 raise ChangeError(f"no saved preset named {op.key!r}")
             return Applied(op, op.key, None, [Op("presets", "restore_file", op.key, old)], f"Deleted preset '{op.key}'")
@@ -765,13 +773,45 @@ def domains(store: PresetStore | None = None) -> dict[str, Domain]:
     return out
 
 
-def apply_ops(cfg: Any, ops: list[Op], store: PresetStore | None = None) -> list[Applied]:
-    """Apply ``ops`` to ``cfg`` in place (all or nothing: raises before anything is kept if one fails)."""
+# inverse operations: only ever produced by the change history's undo, never accepted from an agent (they write
+# recorded values back without the checks the public operations make)
+INTERNAL_OPS = frozenset({"restore", "restore_file"})
+_DRY_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar("away_agentlink_dry_run", default=False)
+
+
+def is_dry_run() -> bool:
+    """True while :func:`apply_ops` runs for a preview: domains must not write files or start anything."""
+    return _DRY_RUN.get()
+
+
+@contextlib.contextmanager
+def _dry_run(on: bool) -> Any:
+    tok = _DRY_RUN.set(on)
+    try:
+        yield
+    finally:
+        _DRY_RUN.reset(tok)
+
+
+def apply_ops(
+    cfg: Any, ops: list[Op], store: PresetStore | None = None, *, internal: bool = False, dry_run: bool = False
+) -> list[Applied]:
+    """Apply ``ops`` to ``cfg`` in place (all or nothing: raises before anything is kept if one fails).
+
+    ``internal``: the ops come from undo (inverse operations are allowed). ``dry_run``: a preview, no side effects.
+    """
+    with _dry_run(dry_run):
+        return _apply_ops(cfg, ops, store, internal)
+
+
+def _apply_ops(cfg: Any, ops: list[Op], store: PresetStore | None, internal: bool) -> list[Applied]:
     doms = domains(store)
     work = copy.deepcopy(cfg)
     done: list[Applied] = []
     for op in ops:
         _forbid(op.key)
+        if op.op in INTERNAL_OPS and not internal:
+            raise ChangeError(f"{op.op!r} is not a change an agent can make")
         d = doms.get(op.domain)
         if d is None:
             raise ChangeError(f"unknown kind of change {op.domain!r}; use {', '.join(doms)}")

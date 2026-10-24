@@ -17,6 +17,26 @@ def targets(keep_config: bool = False) -> list[Path]:
     return out
 
 
+def config_files() -> list[Path]:
+    d = paths.config_dir()
+    return [d / "config.yaml", d / "config.yaml.bak"]
+
+
+def _remove(p: Path, keep: list[Path]) -> None:
+    """Delete ``p``, except the files in ``keep`` inside it (macOS keeps config and data in one folder)."""
+    inside = [k for k in keep if k == p or p in k.parents]
+    if not inside:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+        return
+    if p in inside:
+        return
+    for child in p.iterdir():
+        _remove(child, keep)
+
+
 def program_removal_hint(platform: str | None = None) -> str:
     plat = platform or sys.platform
     lines = [
@@ -47,8 +67,9 @@ def run(yes: bool = False, keep_config: bool = False, dry_run: bool = False) -> 
             return []
     removed = []
     if not dry_run:
+        keep = config_files() if keep_config else []
         for p in victims:
-            shutil.rmtree(p, ignore_errors=True)
+            _remove(p, keep)
             removed.append(p)
         if autostart.disable():
             print("  removed start-at-login entry")
