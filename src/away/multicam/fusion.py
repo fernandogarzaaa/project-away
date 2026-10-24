@@ -158,27 +158,31 @@ class PushDetector:
 
 
 class _Align:
-    """Running map from a secondary view's normalised coords into the primary's: scale about the wrist + shift."""
+    """Running map from a secondary view's normalised coords into the primary's: one similarity for every point
+    (per-axis scale, then shift), so the wrist moves at the primary camera's speed too once only the secondary
+    sees the hand. Per axis because the two cameras' frames may have different aspect ratios."""
 
     def __init__(self, rate: float = 0.2) -> None:
         self.rate = rate
         self.offset: Array | None = None
-        self.scale = 1.0
+        self.scale: Array = np.ones(2)
 
     def learn(self, prim: Array, sec: Array, size_p: tuple[int, int], size_s: tuple[int, int]) -> None:
         sp, ss = palm_px(prim, size_p), palm_px(sec, size_s)
-        scale = (sp / size_p[0]) / (ss / size_s[0]) if ss > 1e-6 else 1.0
-        off = prim[WRIST, :2] - sec[WRIST, :2]
-        if self.offset is None:
-            self.offset, self.scale = off, scale
+        if ss > 1e-6:
+            scale = np.array([(sp / size_p[0]) / (ss / size_s[0]), (sp / size_p[1]) / (ss / size_s[1])])
         else:
-            self.offset = (1 - self.rate) * self.offset + self.rate * off
+            scale = np.ones(2)
+        if self.offset is None:
+            self.scale = scale
+        else:
             self.scale = (1 - self.rate) * self.scale + self.rate * scale
+        off = prim[WRIST, :2] - self.scale * sec[WRIST, :2]
+        self.offset = off if self.offset is None else (1 - self.rate) * self.offset + self.rate * off
 
     def apply(self, sec: Array) -> Array:
         out = sec.copy()
-        w = sec[WRIST, :2]
-        out[:, :2] = (sec[:, :2] - w) * self.scale + w + (self.offset if self.offset is not None else 0.0)
+        out[:, :2] = sec[:, :2] * self.scale + (self.offset if self.offset is not None else 0.0)
         return out
 
 

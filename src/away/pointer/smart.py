@@ -235,6 +235,10 @@ class SmartPointer:
         self.magnet.reset()
         if getattr(mouse, "stabilizer", None) is not None:
             mouse.stabilizer.reset()
-        mouse.backend.move(*pos)
+        jump = getattr(mouse, "jump_to", None)
+        if callable(jump):
+            jump(*pos)  # tells the output glide, so it does not pull the cursor back towards the old hand target
+        else:
+            mouse.backend.move(*pos)
         mouse.backend.click(2 if action == "double_click" else 1)
         self._say(f"{ACTION_WORDS.get(action, 'Clicked')} {label}.")

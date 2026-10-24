@@ -451,6 +451,9 @@ class Pipeline:
             g = self.gestures
             self.mouse.observe_pinch(t, ratio, self.cfg.hands.gestures.pinch_on, g.pinched, g.dragging)
         self.last_ratio = ratio
+        if self.temporal is not None and landmarks is None and self.temporal.buf:
+            self.temporal.reset()  # hand lost: the next window must not join frames from before the gap
+            self.fusion._probs.clear()
         if self.temporal is not None and landmarks is not None:
             probs = self.temporal.push(landmarks, handedness)
             self.fusion.update_model(probs)
@@ -561,6 +564,8 @@ class Pipeline:
             self.gate.primary = ids[0]
             self.bus.publish("face.enrolled", {"face_id": ids[0], "reacquired": True}, t)
         scores = {fid: self.speaking.update(fid, bs) for fid, bs in zip(ids, blendshapes)}
+        for gone in [fid for fid in self.speaking._hist if fid not in self.faces.tracks]:
+            self.speaking.forget(gone)  # tracker ids are never reused: drop the histories of faces it let go
         active = self.asd.update(scores, self.mic_energy)
         user_score = (
             scores.get(self.gate.primary) if self.gate.primary in scores else max(scores.values(), default=None)

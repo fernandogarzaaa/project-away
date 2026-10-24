@@ -52,7 +52,9 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 def camera_key(cfg: Any) -> str:
     """The camera a calibration belongs to: the primary camera's name / index / path, as text."""
     h = cfg.hands
-    dev = h.cameras[0].device if getattr(h, "cameras", None) else h.camera_index
+    cams = getattr(h, "cameras", None) or []
+    prim = next((c for c in cams if getattr(c, "role", "") == "primary"), cams[0] if cams else None)
+    dev = prim.device if prim is not None else h.camera_index
     return str(dev)
 
 
