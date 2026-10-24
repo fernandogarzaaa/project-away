@@ -188,10 +188,12 @@ def test_frozen_entry_runs_setup_then_tray(monkeypatch):
     calls = []
     monkeypatch.setattr("away.cli.main", lambda argv: calls.append(argv) or 0)
     monkeypatch.setattr(frozen, "notify", lambda t, m, platform=None: True)
-    monkeypatch.setattr(frozen, "first_launch", lambda cli: calls.append("first_launch"))
+    monkeypatch.setattr(frozen, "first_launch", lambda cli, window=None: calls.append(("first_launch", window)))
     monkeypatch.setattr(sys, "argv", ["ProjectAway"])
     assert entry.main() == 0
-    assert calls == ["first_launch", ["tray"]]
+    # v0.1.32: macOS/Linux download with a progress window; Windows keeps its console window
+    window = None if sys.platform == "win32" else frozen.setup_window_process
+    assert calls == [("first_launch", window), ["tray"]]
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["ProjectAway", "doctor"])
     entry.main()

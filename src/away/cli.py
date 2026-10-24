@@ -1697,9 +1697,20 @@ def build_parser() -> argparse.ArgumentParser:
     from away.agentlink.cli import add_parsers  # Agent Link (v0.1.20): agent, mcp, replay, diagnose
 
     add_parsers(sub)
-    hidden = ("agent-ui", "link", "remote")
+    # v0.1.32: the frozen app's first-launch setup with a progress window (``setup-window setup --yes ...``)
+    sw = sub.add_parser("setup-window")  # no help: hidden, like agent-ui
+    sw.add_argument("setup_args", nargs=argparse.REMAINDER)
+    sw.set_defaults(fn=cmd_setup_window)
+    hidden = ("agent-ui", "link", "remote", "setup-window")
     sub.metavar = "{" + ",".join(c for c in sub.choices if c not in hidden) + "}"
     return p
+
+
+def cmd_setup_window(args: argparse.Namespace) -> int:
+    from away.app.setup_window import main as setup_window_main
+
+    setup_args = list(args.setup_args) or ["setup", "--yes", "--skip-probe"]
+    return setup_window_main(setup_args, cli_main=main)
 
 
 def cmd_cursor(args: argparse.Namespace) -> int:
