@@ -496,6 +496,9 @@ class TrayMenuCallbacks:
         self.icon: Any = None
         self.gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
         self.gate_hint = {"shown": False}
+        # v0.1.32: pystray's macOS notifications run osascript, credited to Script Editor (a click opens it); there
+        # the app's own message window is used instead (see notify)
+        self.icon_notifications = sys.platform != "darwin"
 
     # -- icon / menu plumbing -------------------------------------------------
     def _set_icon(self, icon: Any) -> None:
@@ -510,9 +513,7 @@ class TrayMenuCallbacks:
             return
         from away.app.frozen import notify as desktop_notify
 
-        if sys.platform == "darwin":
-            # pystray's macOS notifications run osascript: credited to Script Editor, which a click then opens.
-            # desktop_notify shows Project Away's own message window there instead.
+        if not self.icon_notifications:  # macOS: Project Away's own message window (frozen.notify)
             desktop_notify(title, message)
             return
         try:

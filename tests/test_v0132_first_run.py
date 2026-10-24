@@ -90,11 +90,15 @@ def test_the_tray_does_not_use_pystray_notifications_on_macos(monkeypatch: pytes
     app = MagicMock()
     cb = tray.TrayMenuCallbacks(tray.TrayController(app), app, MagicMock(), tray.TrayGuard())
     cb.icon = MagicMock()
+    assert cb.icon_notifications is False
     cb.notify("Project Away", "hello")
     assert shown == [("Project Away", "hello")] and not cb.icon.notify.called  # pystray's runs osascript
     monkeypatch.setattr(tray.sys, "platform", "win32")
-    cb.notify("Project Away", "hi")
-    cb.icon.notify.assert_called_once_with("hi", "Project Away")
+    other = tray.TrayMenuCallbacks(tray.TrayController(app), app, MagicMock(), tray.TrayGuard())
+    other.icon = MagicMock()
+    assert other.icon_notifications is True
+    other.notify("Project Away", "hi")
+    other.icon.notify.assert_called_once_with("hi", "Project Away")
 
 
 # --------------------------------------------------------------------------------------- setup progress window
