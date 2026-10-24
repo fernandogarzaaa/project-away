@@ -2156,6 +2156,40 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.30
+
+* **A repo-wide bug audit, fixed.** About 70 confirmed bugs across Agent
+  Link, the config loader, the app, voice and tracking, each with a
+  regression test (`tests/test_v0130_audit_fixes.py`).
+* **Agent Link holes closed.** Agents can no longer send the undo-only
+  "restore" operations (they wrote any setting, shell commands included,
+  past every check). Previews are true dry runs: nothing is saved,
+  deleted or started before you say Yes. A junk `Authorization` header no
+  longer lifts the PIN lockout, an expired one-hour access token no
+  longer comes back to life when a link keeps the session going, rotated
+  logs are redacted, and inbox messages never reach a different agent
+  that only shares a name.
+* **Importing a bindings file never turns shell commands on.** That stays
+  your own switch.
+* **Config mistakes give a clear error, not a crash.** An empty section,
+  a number in quotes or a bad `hands.cursor.active_region` now say what
+  is wrong.
+* **Your settings file stays yours.** The app no longer saves its live
+  config (with the camera calibration and per-app tuning mixed in) over
+  config.yaml. `away uninstall --keep-config` keeps config.yaml on macOS.
+  A changed gestures on/off hotkey applies without a restart.
+* **Smoother tracking.** With two cameras the cursor keeps its speed when
+  only the second camera sees your hand; GPU face tracking notices a
+  second person; a pinch held when you pause no longer clicks on resume;
+  `click <name>` no longer flicks back.
+* **Voice.** A fan or music no longer produces endless 15-second
+  utterances; a message queued while the voice goes idle is spoken;
+  vocabulary replacements with backslashes (`C:\Users\...`) work;
+  "twenty twenty four" becomes 2024 with numbers as digits; your own
+  48/64 px pointer is no longer shrunk by the big cursor.
+* **Release workflow.** A manual run no longer publishes to PyPI or breaks
+  the Linux packages with a branch name as the version.
+
 ## What's new in 0.1.29
 
 * **A full security audit, fixed and merged.** Every finding from the
