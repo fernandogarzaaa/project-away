@@ -532,7 +532,7 @@ def _panel(tmp_path, ready=lambda m: False, **kw):
 
 
 def test_panel_presets_show_vram_and_what_to_download(tmp_path):
-    p, _, _ = _panel(tmp_path)
+    p, _, _ = _panel(tmp_path, platform="win32")  # v0.1.35: a Mac shows unified memory (test_v0135_mac_accel)
     rows = {r["mode"]: r for r in p.presets()}
     assert rows["light"]["vram"] == "about 0.7 GB of graphics memory"
     assert rows["balanced"]["vram"] == "about 2.7 GB of graphics memory"

@@ -62,6 +62,13 @@ def _os(platform: str | None = None) -> str:
     return "linux" if plat.startswith("linux") else plat
 
 
+def applies(platform: str | None = None) -> bool:
+    """v0.1.35: whether the NVIDIA GPU pack means anything on this OS. Never on macOS: Macs have no NVIDIA / CUDA
+    (Apple Silicon's GPU and Neural Engine are used through Core ML instead, :mod:`away.accel.compute`), so the
+    offer, the tray item and its notification are hidden there."""
+    return _os(platform) != "darwin"
+
+
 def platform_tag(platform: str | None = None, arch: str | None = None) -> str | None:
     """The wheel tag for this machine, or ``None`` where CTranslate2 has no CUDA build."""
     import platform as _p
