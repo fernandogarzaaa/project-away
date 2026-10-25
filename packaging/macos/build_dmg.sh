@@ -7,6 +7,15 @@ VERSION="${1:-0.1.34}"
 ARCH="$(uname -m)"
 APP="dist/ProjectAway.app"
 [ -d "$APP" ] || { echo "missing $APP (run pyinstaller packaging/pyinstaller/away.spec first)"; exit 1; }
+# v0.1.35: the native Settings app (away.spec copies it; this covers an app built by an older spec)
+HELPER="Project Away Settings.app"
+if [ ! -d "$APP/Contents/Helpers/$HELPER" ] && [ -d "macos/SettingsApp/build/$HELPER" ]; then
+  mkdir -p "$APP/Contents/Helpers"
+  cp -R "macos/SettingsApp/build/$HELPER" "$APP/Contents/Helpers/"
+fi
+[ -d "$APP/Contents/Helpers/$HELPER" ] && echo "native Settings: $APP/Contents/Helpers/$HELPER" \
+  || echo "warning: no native Settings app in $APP (macOS Settings will be the Tk window)"
+# signed after the helper is in place, so --deep signs it with the same identity
 if [ -n "${MAC_SIGN_IDENTITY:-}" ]; then
   codesign --force --deep --sign "$MAC_SIGN_IDENTITY" ${MAC_SIGN_KEYCHAIN:+--keychain "$MAC_SIGN_KEYCHAIN"} "$APP"
   codesign --verify --deep --strict "$APP"

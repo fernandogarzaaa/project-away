@@ -861,7 +861,19 @@ def comfort_menu_items(pystray: Any, ctl: TrayController, notify: Any) -> list[A
     ]
 
 
+def _open_native_settings(tab: str | None = None) -> bool:
+    """v0.1.35 macOS: the native Settings app straight from the tray process (no extra `away settings` start-up);
+    False when Tk should open (see away.app.settings_native)."""
+    if sys.platform != "darwin":
+        return False
+    from away.app import settings_native
+
+    return settings_native.launch(tab)
+
+
 def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a GUI process
+    if _open_native_settings():
+        return
     try:
         subprocess.Popen(ctl.settings_command())
     except Exception:
@@ -869,6 +881,8 @@ def open_settings(ctl: TrayController) -> None:  # pragma: no cover - launches a
 
 
 def _open_settings_tab(ctl: TrayController, tab: str) -> None:  # pragma: no cover - launches a GUI process
+    if _open_native_settings(tab):
+        return
     try:
         subprocess.Popen([*ctl.settings_command(), "--tab", tab])
     except Exception:

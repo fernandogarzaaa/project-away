@@ -1330,11 +1330,25 @@ def cmd_cleanup_engine(args: argparse.Namespace) -> int:
 def cmd_settings(args: argparse.Namespace) -> int:
     from away.app import settings_gui
 
+    # v0.1.35 macOS: the native SwiftUI Settings app when it ships inside the bundle (Tk for its unported tabs,
+    # for --teach-gesture, with --tk, and on Windows / Linux)
+    if not getattr(args, "tk", False) and not getattr(args, "teach_gesture", False):
+        from away.app import settings_native
+
+        if settings_native.launch(getattr(args, "tab", None), args.config):
+            return 0
     return settings_gui.main(
         config_path=Path(args.config) if args.config else None,
         tab=getattr(args, "tab", None),
         teach_gesture=bool(getattr(args, "teach_gesture", False)),
     )
+
+
+def cmd_settings_bridge(args: argparse.Namespace) -> int:
+    """v0.1.35: JSON in/out for the native macOS Settings app (see away.app.settings_bridge)."""
+    from away.app import settings_bridge
+
+    return settings_bridge.main(args.action, args.json, args.config)
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
@@ -1641,7 +1655,14 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--config")
     st.add_argument("--tab", help='open on this tab (part of its title, e.g. "studio", "shortcuts")')
     st.add_argument("--teach-gesture", action="store_true", help="open Gesture Studio's 'teach a gesture' guide")
+    st.add_argument("--tk", action="store_true", help="macOS: the classic (Tk) window, not the native one")
     st.set_defaults(fn=cmd_settings)
+    # v0.1.35: hidden; the native macOS Settings app reads and saves the config through it
+    sb = sub.add_parser("settings-bridge")
+    sb.add_argument("action", choices=["get", "set", "status", "serve"])
+    sb.add_argument("--json", help='set: the changes, e.g. \'{"voice.mode": "toggle"}\'')
+    sb.add_argument("--config")
+    sb.set_defaults(fn=cmd_settings_bridge)
 
     from away.control.macro_cli import add_parser as add_shortcut_parser
 
@@ -1701,7 +1722,7 @@ def build_parser() -> argparse.ArgumentParser:
     sw = sub.add_parser("setup-window")  # no help: hidden, like agent-ui
     sw.add_argument("setup_args", nargs=argparse.REMAINDER)
     sw.set_defaults(fn=cmd_setup_window)
-    hidden = ("agent-ui", "link", "remote", "setup-window")
+    hidden = ("agent-ui", "link", "remote", "setup-window", "settings-bridge")
     sub.metavar = "{" + ",".join(c for c in sub.choices if c not in hidden) + "}"
     return p
 

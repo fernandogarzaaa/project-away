@@ -10,6 +10,7 @@ def isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.delenv("AWAY_CONFIG", raising=False)
     monkeypatch.delenv("AWAY_LLM_BASE_URL", raising=False)
     monkeypatch.setenv("AWAY_NO_CRASHLOG", "1")  # cli.main must not replace pytest's fault handler / excepthooks
+    monkeypatch.setenv("AWAY_NATIVE_SETTINGS", "0")  # v0.1.35: `away settings` on a Mac never opens the real native app
     yield
 
 

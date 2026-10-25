@@ -333,7 +333,10 @@ jobs:
             dist/*-windows-x64.msix
 
   macos:
-    runs-on: macos-14  # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`
+    # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`. v0.1.35: macos-26 (was macos-14, now
+    # deprecated) for Xcode 26: the native Settings app's Liquid Glass needs the macOS 26 SDK (an older Xcode would
+    # build it with plain materials only)
+    runs-on: macos-26
     env:
       AWAY_DATA_DIR: ${{ github.workspace }}/smoke/data
       AWAY_CONFIG_DIR: ${{ github.workspace }}/smoke/config
@@ -352,8 +355,19 @@ jobs:
           pip install torch --index-url "$TORCH_CPU_INDEX"
           pip install ".[all,train]" pyinstaller
           python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: Native Settings app (SwiftUI; away.spec puts it in Contents/Helpers)
+        run: |
+          xcodebuild -version
+          PYTHON=python bash packaging/macos/build_settings_app.sh "$AWAY_REL_VERSION"
       - name: PyInstaller (strict)
         run: AWAY_VERSION="$AWAY_REL_VERSION" pyinstaller packaging/pyinstaller/away.spec --noconfirm
+      - name: Native Settings app is in the bundle and its bridge answers
+        run: |
+          set -e
+          test -x "dist/ProjectAway.app/Contents/Helpers/Project Away Settings.app/Contents/MacOS/ProjectAwaySettings"
+          mkdir -p "$AWAY_CONFIG_DIR"
+          dist/ProjectAway.app/Contents/MacOS/ProjectAway settings-bridge get > bridge.json
+          python -c "import json; d = json.load(open('bridge.json')); assert d['ok'] and d['document']['sections'], d"
       - name: Exactly one libavdevice (PyAV is left out of the macOS bundle, see away.spec)
         # two copies define the same Objective-C classes and macOS warns of "mysterious crashes"
         run: |
