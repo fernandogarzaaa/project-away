@@ -6,7 +6,7 @@
 # Xcode 26+; an older Xcode builds the same app with standard materials).
 #   bash packaging/macos/build_settings_app.sh [VERSION]
 set -euo pipefail
-VERSION="${1:-${AWAY_VERSION:-0.1.34}}"
+VERSION="${1:-${AWAY_VERSION:-0.1.35}}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PKG="$ROOT/macos/SettingsApp"
 OUT="$PKG/build/Project Away Settings.app"

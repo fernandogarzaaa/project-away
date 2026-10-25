@@ -3,7 +3,7 @@
 # MAC_SIGN_IDENTITY set (v0.1.35): signed with that fixed certificate (see import_signing_cert.sh) so macOS keeps
 # the app's permissions across updates; unset: ad-hoc, as before (a local build).
 set -euo pipefail
-VERSION="${1:-0.1.34}"
+VERSION="${1:-0.1.35}"
 ARCH="$(uname -m)"
 APP="dist/ProjectAway.app"
 [ -d "$APP" ] || { echo "missing $APP (run pyinstaller packaging/pyinstaller/away.spec first)"; exit 1; }
