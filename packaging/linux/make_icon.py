@@ -1,11 +1,16 @@
-"""Write the app icon PNG (same glyph as the tray icon). Usage: make_icon.py OUT.png"""
+"""Write the 256 px app icon PNG. Usage: make_icon.py OUT.png
+
+v0.1.35: the same hand icon as the Mac and Windows apps (scripts/build_msix.py _icon_master, from
+packaging/icon/ProjectAway-1024.png); before, the tray's green disc."""
 
 import sys
+from pathlib import Path
 
 try:
-    from away.app.tray import make_icon_image
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
+    from build_msix import _icon_master
 
-    make_icon_image(False, 256).save(sys.argv[1])
+    _icon_master(256).save(sys.argv[1])
 except Exception:  # Pillow missing: write a 1x1 PNG so packaging still succeeds
     import base64
 

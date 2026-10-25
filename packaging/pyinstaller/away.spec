@@ -286,7 +286,7 @@ def _windows_metadata():
     icon = None
     try:
         sys.path.insert(0, str(ROOT / "scripts"))
-        from build_msix import _icon_master  # the same drawing as the MSIX tiles
+        from build_msix import _icon_master  # v0.1.35: the hand icon, as on macOS and the MSIX tiles
 
         icon = os.path.join(tempfile.mkdtemp(prefix="away-icon-"), "ProjectAway.ico")
         _icon_master(256).save(icon, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
