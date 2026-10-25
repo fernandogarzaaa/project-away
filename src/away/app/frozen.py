@@ -179,6 +179,20 @@ def _win_console() -> TextIO | None:  # pragma: no cover - Windows only
         return None
 
 
+def _discarded(stream: Any, platform: str) -> bool:
+    """True when ``stream`` is missing, or (macOS/Linux) open on /dev/null: an app opened from Finder or the Dock
+    gets /dev/null, not None, so before v0.1.35 every error the Mac app printed was thrown away."""
+    if stream is None:
+        return True
+    if platform == "win32":
+        return False
+    try:
+        st, null = os.fstat(stream.fileno()), os.stat(os.devnull)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        return False
+    return (st.st_dev, st.st_ino) == (null.st_dev, null.st_ino)
+
+
 def ensure_streams(
     argv: Sequence[str],
     platform: str | None = None,
@@ -190,7 +204,8 @@ def ensure_streams(
     plat = platform or sys.platform
     if sys.stdin is None:
         sys.stdin = io.StringIO("")  # input() -> EOFError -> default answer, never a hang or crash
-    if sys.stdout is not None and sys.stderr is not None:
+    no_out, no_err = _discarded(sys.stdout, plat), _discarded(sys.stderr, plat)
+    if not no_out and not no_err:
         if plat == "win32" and is_frozen() and wants_console(argv):
             disable_quick_edit(platform=plat)  # frozen exe run from cmd/PowerShell: a click must not pause setup
         return "tty"
@@ -204,9 +219,9 @@ def ensure_streams(
         path.parent.mkdir(parents=True, exist_ok=True)
         out = open(path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
         where = str(path)
-    if sys.stdout is None:
+    if no_out:
         sys.stdout = out
-    if sys.stderr is None:
+    if no_err:
         sys.stderr = out
     return where
 

@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -90,6 +91,22 @@ def test_ensure_streams_log_file(monkeypatch, tmp_path):
         input()
     sys.stdout.flush()
     assert "hello" in log.read_text() and "progress" in log.read_text()
+
+
+def test_ensure_streams_devnull_goes_to_the_log_on_a_mac(monkeypatch, tmp_path):
+    # v0.1.35: an app opened from Finder gets /dev/null, not None; its errors were lost and away.log never appeared
+    log = tmp_path / "logs" / "a.log"
+    null = open(os.devnull, "w")
+    try:
+        monkeypatch.setattr(sys, "stdout", null)
+        monkeypatch.setattr(sys, "stderr", null)
+        where = frozen.ensure_streams(["settings"], platform="darwin", env={"AWAY_LOG_FILE": str(log)})
+        assert where == str(log)
+        sys.stderr.write("Exception in Tkinter callback\n")
+        sys.stderr.flush()
+        assert "Tkinter callback" in log.read_text()
+    finally:
+        null.close()
 
 
 def test_ensure_streams_windows_console(monkeypatch, tmp_path):
