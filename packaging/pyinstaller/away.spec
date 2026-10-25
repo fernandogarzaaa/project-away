@@ -59,6 +59,27 @@ optional("faster_whisper")  # ships the Silero VAD ONNX in faster_whisper/assets
 # detects it via importlib.metadata, so the dist-info must ship too.
 optional("hf_xet", libs=True, subs=True, meta=True)
 optional("ctranslate2", libs=True)
+_mlx_whisper = sys.platform == "darwin" and importlib.util.find_spec("mlx_whisper") is not None
+if sys.platform == "darwin":
+    # v0.1.35: Whisper on the Apple Silicon GPU (away.voice.asr_mlx imports it lazily, so PyInstaller never sees
+    # it). mlx_whisper/assets holds the tokenizers + mel filters. "mlx" is a namespace package (no __init__.py)
+    # whose core extension loads mlx/lib/libmlx.dylib, and libmlx loads the Metal kernels from mlx.metallib NEXT TO
+    # ITSELF: both must land in mlx/lib, or MLX fails on first use (asr_mlx then falls back to the CPU and says so).
+    optional("mlx_whisper", subs=True, hidden_mods=["mlx_whisper.transcribe", "mlx_whisper.audio", "tiktoken"])
+    _mlx_core = importlib.util.find_spec("mlx.core") if _mlx_whisper else None
+    if _mlx_core is not None and _mlx_core.origin:
+        _mlx_dir = Path(_mlx_core.origin).parent
+        hidden += ["mlx.core", *collect_submodules("mlx", filter=lambda n: not n.startswith("mlx._distributed"))]
+        for _lib in sorted((_mlx_dir / "lib").glob("*.dylib")):
+            binaries.append((str(_lib), "mlx/lib"))
+        _metallib = _mlx_dir / "lib" / "mlx.metallib"
+        if _metallib.exists():
+            datas.append((str(_metallib), "mlx/lib"))
+        else:
+            print("[away.spec] mlx.metallib not found: MLX would fail on the GPU")
+            missing.append("mlx.metallib")
+    elif _mlx_whisper:
+        missing.append("mlx")
 optional("onnxruntime", libs=True)
 optional("onnx")
 optional("torch")  # hooks-contrib's torch hook collects the libs; CPU wheel only (see release.yml)
@@ -186,6 +207,9 @@ a = Analysis(  # noqa: F821
         # piper-tts / piper_phonemize (GPL) are not used at all (Piper voices run directly on onnxruntime).
         *NON_PERMISSIVE,
         *(["av"] if _mac else []),  # see the macOS note above
+        # v0.1.35: mlx_whisper imports numba only for word timestamps (never used); away.voice.asr_mlx stands in a
+        # no-op numba.jit, saving numba + llvmlite (~150 MB)
+        *(["numba", "llvmlite"] if _mac else []),
     ],
     noarchive=False,
 )

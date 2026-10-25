@@ -1105,7 +1105,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
             self.talk.sound = Earcon(lambda: bool(getattr(self.cfg.voice, "listen_sound", True)), ECHO.active)
 
     def _start_voice(self) -> None:
-        from away.app.performance import asr_plan
+        from away.app.performance import asr_backend, asr_plan
         from away.voice.always_on import AmbientSession, ASRQueue, StreamingEndpointer, VoiceController
         from away.voice.asr import make_asr
         from away.voice.cleanup import RuleCleaner, Vocabulary
@@ -1147,7 +1147,7 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
 
         def build_whisper() -> Any:
             return make_asr(
-                v.asr_backend,
+                asr_backend(self.cfg),  # v0.1.35: auto = the Apple GPU (MLX) on Apple Silicon
                 model,
                 prof.device,
                 prof.compute_type,
@@ -1171,12 +1171,20 @@ class AwayApp:  # pragma: no cover - device threads; exercised manually on real 
         if hasattr(asr, "push"):  # a streaming backend (Moonshine / Nemotron) was chosen
             self.asr_model = str(getattr(asr, "name", self.asr_model))
             self.asr_device = str(getattr(asr, "device", self.asr_device))
+        elif getattr(asr, "device", None) == "metal":  # v0.1.35: Whisper on the Apple GPU (MLX)
+            self.asr_device = "metal"
         self.bus.publish(
             "voice.asr_ready",
             {
                 "model": self.asr_model,
                 "device": self.asr_device,
-                "compute_type": prof.compute_type if self.asr_device == prof.device else "int8",
+                "compute_type": (
+                    str(getattr(asr, "compute_type", "") or "float16")
+                    if self.asr_device == "metal"
+                    else prof.compute_type
+                    if self.asr_device == prof.device
+                    else "int8"
+                ),
             },
         )
         face_gate = self.cfg.face.enabled and self.cfg.face.gate_dictation

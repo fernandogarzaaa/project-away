@@ -115,10 +115,16 @@ def run(
         auto_model = getattr(prof, "asr_model", None) or "small"
         model = asr_model or (cfg.voice.asr_model if cfg.voice.asr_model != "auto" else auto_model)
         size = models.ASR_SIZES_MB.get(model, 0)
+        # v0.1.35: on Apple Silicon with mlx-whisper, the MLX weights (Whisper on the Apple GPU) instead
+        from away.app.frozen import asr_engine
+
+        engine = "mlx-whisper" if asr_engine(cfg, model) == "mlx-whisper" else "faster-whisper"
+        if engine == "mlx-whisper":
+            size = models.MLX_MODELS[model].size_mb
         hint = "" if model in ("small", "base", "tiny") else " 'small' is ~485 MB for slower PCs or connections."
         if ask(f"  Download Whisper '{model}' (~{size} MB)?{hint}", True, assume):
             try:
-                models.download_asr(model, mdir, out, connections=max(1, connections))
+                models.download_asr(model, mdir, out, connections=max(1, connections), engine=engine)
                 if asr_model:  # an explicit choice is remembered; otherwise the config stays "auto"
                     cfg.voice.asr_model = model
                 rep.models["asr"] = "ok"

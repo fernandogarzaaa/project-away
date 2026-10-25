@@ -405,8 +405,8 @@ def parse_sp_displays(text: str) -> tuple[str, int | None]:
 
 def apple_gpu(cpu_name: str, ram_mb: int | None, run: Runner = run_cmd) -> GPU:
     """The Apple Silicon GPU: its chip, GPU cores and the unified memory it shares with the CPU. Used by hand / face
-    / eye tracking through Core ML (:mod:`away.accel.compute`, kept only where it measures faster than the CPU);
-    speech recognition (Whisper / CTranslate2) has no Metal backend and stays on the CPU."""
+    / eye tracking through Core ML (:mod:`away.accel.compute`, kept only where it measures faster than the CPU)
+    and by speech recognition through MLX (:mod:`away.voice.asr_mlx`) when mlx-whisper is installed."""
     chip, cores = "", None
     with contextlib.suppress(Exception):
         chip, cores = parse_sp_displays(run(SP_DISPLAYS_CMD, TIMEOUT_S) or "")

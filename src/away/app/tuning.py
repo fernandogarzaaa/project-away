@@ -99,11 +99,16 @@ class Profile:
     gpu_capable: bool = False  # an NVIDIA GPU that CUDA 12 can use is present
     gpu_pack: str = "not-needed"  # not-needed | recommended | installed | unavailable
     reasons: list[str] = field(default_factory=list)
+    # v0.1.35: mlx-whisper = Whisper on the Apple GPU (MLX, float16); device/compute_type above are then the
+    # faster-whisper CPU fallback
+    asr_backend: str = "faster-whisper"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def summary(self) -> str:
+        if self.asr_backend == "mlx-whisper":
+            return f"{self.asr_model} on the Apple GPU (MLX, float16)"
         return f"{self.asr_model} on {self.device.upper()} ({self.compute_type}), beam {self.beam_size}"
 
 
@@ -126,11 +131,20 @@ def model_fits_vram(model: str, compute_type: str, vram_mb: int | None) -> bool:
     return need <= vram_mb
 
 
-def gpu_usable(hw: Hardware, gpu: GPU | None, ct2_cuda: bool | None = None) -> tuple[bool, str]:
-    """Can the bundled CTranslate2 run Whisper on this GPU at all (ignoring whether cuBLAS is present)?"""
+def gpu_usable(
+    hw: Hardware, gpu: GPU | None, ct2_cuda: bool | None = None, apple_gpu: bool = False
+) -> tuple[bool, str]:
+    """Can the bundled CTranslate2 run Whisper on this GPU at all (ignoring whether cuBLAS is present)?
+
+    v0.1.35 ``apple_gpu``: Whisper runs on the Apple GPU through MLX instead (still no CUDA: False)."""
     if gpu is None:
+        if hw.apple_silicon and apple_gpu:
+            return False, "Apple Silicon: Whisper runs on the Apple GPU (MLX, Metal); CPU (int8) only as a fallback"
         if hw.apple_silicon:
-            return False, "Apple Silicon: CTranslate2 has no Metal backend, Whisper runs on the CPU (int8)"
+            return False, (
+                "Apple Silicon: CTranslate2 has no Metal backend, Whisper runs on the CPU (int8); "
+                "install mlx-whisper (the [mlx] extra) to run it on the Apple GPU"
+            )
         if hw.os == "darwin":
             return False, "macOS: no CUDA, Whisper runs on the CPU"
         return False, "no NVIDIA GPU detected"
@@ -194,12 +208,15 @@ def choose_profile(
     cuda_runtime: bool = False,
     ct2_cuda: bool | None = None,
     pack_installed: bool = False,
+    apple_gpu: bool = False,
 ) -> Profile:
     """Pick the settings for ``hw``.
 
     ``cuda_runtime``: cuBLAS 12 can be loaded (GPU pack installed, pip ``nvidia-cublas-cu12``, or a CUDA
     toolkit on PATH). ``ct2_cuda``: the installed CTranslate2 has CUDA (``None`` = unknown, assume yes on
     Windows/Linux x86-64). ``pack_installed``: the GPU pack is in the data dir (for the status line).
+    ``apple_gpu`` (v0.1.35): speech recognition will run on the Apple GPU through MLX
+    (:func:`away.voice.asr_mlx.resolve_backend`); the CPU settings stay as its fallback.
     """
     ov = ov or Overrides()
     p = Profile(reasons=[])
@@ -209,7 +226,7 @@ def choose_profile(
     r.append(f"CPU: {hw.cores} cores ({hw.cores_logical or '?'} threads), {ram} -> {tier}")
 
     gpu = hw.nvidia
-    usable, why = gpu_usable(hw, gpu, ct2_cuda)
+    usable, why = gpu_usable(hw, gpu, ct2_cuda, apple_gpu=apple_gpu)
     p.gpu_capable = usable
     p.gpu = gpu.name if gpu else None
     if usable:
@@ -259,10 +276,15 @@ def choose_profile(
         p.device, p.tier, p.compute_type = "cpu", tier, "int8"
         p.asr_model, p.beam_size = CPU_ASR[tier]
         p.cpu_threads = max(1, min(hw.cores - 1, 8)) if hw.cores > 1 else 1
-        r.append(
-            f"CPU speech: {p.asr_model} int8, beam {p.beam_size}, "
-            f"{p.cpu_threads} thread{'s' if p.cpu_threads != 1 else ''}"
-        )
+        threads = f"{p.cpu_threads} thread{'s' if p.cpu_threads != 1 else ''}"
+        if apple_gpu and hw.apple_silicon:
+            p.asr_backend = "mlx-whisper"
+            r.append(
+                f"Apple GPU speech: {p.asr_model} (MLX, float16); "
+                f"CPU fallback: {p.asr_model} int8, beam {p.beam_size}, {threads}"
+            )
+        else:
+            r.append(f"CPU speech: {p.asr_model} int8, beam {p.beam_size}, {threads}")
 
     if not _fits_disk(p.asr_model, hw):
         smaller = next((m for m in DOWNSIZE[DOWNSIZE.index(p.asr_model) + 1 :] if _fits_disk(m, hw)), "tiny")
@@ -270,7 +292,7 @@ def choose_profile(
         p.asr_model = smaller
 
     w, h, fps, he, fe = CAMERA[tier]
-    if p.device == "cpu" and tier == "cpu-mid" and hw.cores < 6:
+    if p.device == "cpu" and p.asr_backend != "mlx-whisper" and tier == "cpu-mid" and hw.cores < 6:
         fe = 3  # Whisper competes with MediaPipe for the same few cores
     p.camera_width, p.camera_height, p.camera_fps, p.hands_every, p.face_every = w, h, fps, he, fe
     face = "every frame" if fe == 1 else f"1 in {fe} frames"

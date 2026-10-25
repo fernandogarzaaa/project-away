@@ -523,7 +523,7 @@ def test_setup_wizard_passes_connections(monkeypatch: pytest.MonkeyPatch, tmp_pa
     from away.app import setup_wizard
 
     got: list[int] = []
-    monkeypatch.setattr(models, "download_asr", lambda m, d, out, connections: got.append(connections))
+    monkeypatch.setattr(models, "download_asr", lambda m, d, out, connections, **k: got.append(connections))
     setup_wizard.run(
         yes=True,
         asr_model="tiny",

@@ -255,7 +255,7 @@ def test_apple_silicon_reports_chip_gpu_cores_and_unified_memory() -> None:
     p = tuning.choose_profile(hw)
     line = next(ln for ln in performance.describe(hw, p) if ln.startswith("GPU:"))
     assert "24 GB unified memory (shared with the CPU)" in line and "VRAM" not in line
-    assert "Core ML" in line and "speech runs on the CPU" in line
+    assert "Core ML" in line and ("speech too (MLX)" in line or "speech runs on the CPU" in line)
 
 
 def test_apple_silicon_without_system_profiler_still_names_the_chip() -> None:

@@ -16,7 +16,35 @@ def current_profile(cfg: Any, hw: hardware.Hardware | None = None, cuda_runtime:
         usable, _ = tuning.gpu_usable(hw, hw.nvidia)
         wants = ov.mode != "cpu" and ov.device != "cpu"
         cuda_runtime = bool(usable and wants and gpupack.cublas_available())
-    return tuning.choose_profile(hw, ov, cuda_runtime=cuda_runtime, pack_installed=gpupack.installed())
+    return tuning.choose_profile(
+        hw, ov, cuda_runtime=cuda_runtime, pack_installed=gpupack.installed(), apple_gpu=apple_gpu(cfg, hw)
+    )
+
+
+def asr_backend(cfg: Any) -> str:
+    """``voice.asr_backend`` as :func:`away.voice.asr.make_asr` should get it (v0.1.35): ``auto`` with
+    ``performance.mode: cpu`` or ``voice.device: cpu`` set explicitly means faster-whisper on the CPU, not MLX."""
+    backend = str(cfg.voice.asr_backend or "auto")
+    if backend == "auto" and (cfg.performance.mode == "cpu" or cfg.voice.device == "cpu"):
+        return "faster-whisper"
+    return backend
+
+
+def apple_gpu(cfg: Any, hw: hardware.Hardware | None = None) -> bool:
+    """Speech recognition will run on the Apple GPU (MLX): Apple Silicon, mlx-whisper installed, and
+    ``voice.asr_backend`` auto or mlx-whisper (v0.1.35)."""
+    from away.voice import asr_mlx
+
+    try:
+        if hw is not None and not hw.apple_silicon:
+            return False
+        return (
+            asr_mlx.resolve_backend(asr_backend(cfg)) == asr_mlx.MLX_BACKEND
+            and asr_mlx.apple_silicon()
+            and asr_mlx.mlx_installed()
+        )
+    except Exception:
+        return False
 
 
 def effective_asr_model(cfg: Any, profile: tuning.Profile | None = None) -> str:
@@ -111,7 +139,10 @@ def describe(hw: hardware.Hardware, p: tuning.Profile) -> list[str]:
         if g.unified_memory_mb:  # v0.1.35: Apple Silicon (shared with the CPU, not VRAM)
             bits.append(f"{g.unified_memory_mb / 1024:.0f} GB unified memory (shared with the CPU)")
         if g.vendor == "apple":
-            bits.append("Metal / Core ML: hand, face and eye tracking can use it; speech runs on the CPU")
+            from away.voice.asr_mlx import mlx_installed
+
+            speech = "speech too (MLX)" if mlx_installed() else "speech runs on the CPU (no mlx-whisper)"
+            bits.append(f"Metal / Core ML: hand, face and eye tracking can use it; {speech}")
         if g.compute_capability:
             bits.append(f"compute {g.cc_str}")
         if g.driver_version:
@@ -121,7 +152,11 @@ def describe(hw: hardware.Hardware, p: tuning.Profile) -> list[str]:
         lines.append("GPU:   " + ", ".join(bits) + (f"  [{g.source}]" if g.source else ""))
     lines.append("")
     lines.append(f"Profile ({p.tier}): {p.summary()}")
-    lines.append(f"  device={p.device} compute_type={p.compute_type} model={p.asr_model}")
+    if p.asr_backend == "mlx-whisper":  # v0.1.35
+        lines.append(f"  engine=mlx-whisper (Apple GPU, float16) model={p.asr_model}")
+        lines.append(f"  CPU fallback: device={p.device} compute_type={p.compute_type}")
+    else:
+        lines.append(f"  device={p.device} compute_type={p.compute_type} model={p.asr_model}")
     lines.append(f"  cpu_threads={p.cpu_threads} beam_size={p.beam_size}")
     lines.append(
         f"  camera={p.camera_width}x{p.camera_height}@{p.camera_fps} "
