@@ -792,10 +792,10 @@ def test_gate_hint_fires_less_often() -> None:
 def test_version_is_0_1_13() -> None:
     from away import __version__
 
-    assert __version__ == "0.1.33"
+    assert __version__ == "0.1.34"
     root = Path(__file__).parents[1]
-    assert 'version = "0.1.33"' in (root / "pyproject.toml").read_text()
-    assert '#define AppVersion "0.1.33"' in (root / "packaging" / "windows" / "away.iss").read_text()
+    assert 'version = "0.1.34"' in (root / "pyproject.toml").read_text()
+    assert '#define AppVersion "0.1.34"' in (root / "packaging" / "windows" / "away.iss").read_text()
     assert os.path.exists(root / "src" / "away" / "__init__.py")
 
 
