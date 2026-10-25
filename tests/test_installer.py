@@ -345,8 +345,9 @@ def _load_check_script():
     return mod
 
 
-def test_check_selftest_script(tmp_path, capsys):
+def test_check_selftest_script(tmp_path, capsys, monkeypatch):
     chk = _load_check_script()
+    monkeypatch.setattr(chk, "apple_silicon", lambda: False)  # the faster-whisper model (Windows, Linux, Intel Mac)
     good = {"frozen": True, "checks": {"torch": {"ok": True, "feature": "train", "detail": "2.x"}}}
     skip = {"frozen": True, "checks": {"pystray": {"ok": None, "feature": "tray", "detail": "skipped"}}}
     bad = {"frozen": False, "checks": {"tkinter": {"ok": False, "feature": "settings", "detail": "ImportError"}}}
@@ -368,3 +369,23 @@ def test_check_selftest_script(tmp_path, capsys):
     big.write_bytes(b"x" * 3 * 1024 * 1024)
     assert chk.main(["--max-size-mb", "2", str(big)]) == 1
     assert chk.main(["--max-size-mb", "5", str(big)]) == 0
+
+
+def test_check_selftest_wants_the_mlx_weights_on_apple_silicon(tmp_path):
+    # v0.1.35: setup on an M-series Mac fetches Whisper for the Apple GPU (MLX), not faster-whisper's model.bin
+    chk = _load_check_script()
+    mdir = tmp_path / "models"
+    mdir.mkdir()
+    for m in chk.MEDIAPIPE:
+        (mdir / m).write_bytes(b"x")
+    (mdir / "whisper-tiny").mkdir()
+    (mdir / "whisper-tiny" / "model.bin").write_bytes(b"x")
+    assert any("whisper-mlx-tiny" in e for e in chk.check_models(str(mdir), "tiny", mlx=True))
+    mlx = mdir / "whisper-mlx-tiny"
+    mlx.mkdir()
+    (mlx / "config.json").write_text("{}")
+    assert chk.check_models(str(mdir), "tiny", mlx=True) != []  # weights still missing
+    (mlx / "weights.npz").write_bytes(b"x")
+    assert chk.check_models(str(mdir), "tiny", mlx=True) == []
+    assert chk.apple_silicon("darwin", "arm64") and not chk.apple_silicon("darwin", "x86_64")
+    assert not chk.apple_silicon("linux", "aarch64")
