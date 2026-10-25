@@ -361,7 +361,10 @@ def test_signing_happens_before_packaging_and_before_the_release_upload():
 def test_sha256sums_cover_only_the_published_signed_files():
     yml = _release()
     publish = yml.split("\n  publish:")[1]
-    assert "needs: [python-dist, linux, windows, macos]" in publish
+    assert "needs: [plan, python-dist, linux, windows, macos]" in publish
+    # v0.1.35: every platform job passed, or a [macos-only] tag and the Mac job passed
+    assert "needs.macos.result == 'success'" in publish and "needs.plan.outputs.macos_only == 'true'" in publish
+    assert "needs.windows.result == 'success'" in publish and "needs.linux.result == 'success'" in publish
     assert 'pattern: "{python-dist,linux-installers,windows-installer,macos-dmg}"' in publish  # no signpath-unsigned-*
     assert publish.index("pattern:") < publish.index("sha256sum") < publish.index("softprops/action-gh-release")
     names = re.findall(r"name: (signpath-unsigned-[a-z]+)", yml)

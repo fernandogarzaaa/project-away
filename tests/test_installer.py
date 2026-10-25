@@ -301,7 +301,10 @@ def test_release_workflow_smoke_and_strict():
     # published (not a draft) so the in-app updater sees it, but only after every platform job passed
     assert "draft: false" in yml and "draft: true" not in yml
     publish = yml.split("\n  publish:")[1]
-    assert "needs: [python-dist, linux, windows, macos]" in publish
+    assert "needs: [plan, python-dist, linux, windows, macos]" in publish
+    # v0.1.35: every platform job passed, or a [macos-only] tag and the Mac job passed
+    assert "needs.macos.result == 'success'" in publish and "needs.plan.outputs.macos_only == 'true'" in publish
+    assert "needs.windows.result == 'success'" in publish and "needs.linux.result == 'success'" in publish
     assert "sha256sum" in publish and "SHA256SUMS.txt" in publish
     assert publish.index("SHA256SUMS.txt") < publish.index("softprops/action-gh-release")
     # PyPI via trusted publishing: OIDC only, in its own job so it can't block the installers
