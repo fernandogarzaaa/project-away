@@ -297,3 +297,21 @@ if sys.platform == "darwin":
             "NSAppleEventsUsageDescription": "Project Away reads the name of the active app to tune dictation.",
         },
     )
+
+    # v0.1.35: the native SwiftUI Settings app (packaging/macos/build_settings_app.sh builds it first) goes to
+    # Contents/Helpers/, where away.app.settings_native looks for it; without it `away settings` opens the Tk window.
+    import shutil
+
+    _settings_src = Path(
+        os.environ.get("AWAY_SETTINGS_APP") or ROOT / "macos" / "SettingsApp" / "build" / "Project Away Settings.app"
+    )
+    _helpers = Path(DISTPATH) / f"{APP}.app" / "Contents" / "Helpers"  # noqa: F821  (injected by PyInstaller)
+    if _settings_src.is_dir():
+        _helpers.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(_helpers / _settings_src.name, ignore_errors=True)
+        shutil.copytree(_settings_src, _helpers / _settings_src.name, symlinks=True)
+        print(f"[away.spec] native Settings app -> {_helpers / _settings_src.name}")
+    elif STRICT:
+        raise SystemExit(f"[away.spec] AWAY_SPEC_STRICT=1 and the native Settings app is missing: {_settings_src}")
+    else:
+        print(f"[away.spec] no native Settings app at {_settings_src}; macOS Settings stays the Tk window")
