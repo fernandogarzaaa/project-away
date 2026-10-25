@@ -80,7 +80,7 @@ def test_a_bus_event_on_a_worker_never_touches_the_mac_status_item(
     monkeypatch: pytest.MonkeyPatch, main_queue: FakeMainQueue
 ) -> None:
     monkeypatch.setattr(tray.sys, "platform", "darwin")
-    monkeypatch.setattr(tray, "make_icon_image", lambda *a, **k: "img")
+    monkeypatch.setattr(tray, "tray_icon_image", lambda *a, **k: "img")
     cb, icon = _callbacks()
     _on_worker(lambda: cb.sync_icon(icon))  # what "voice.state" and friends do
     _on_worker(cb.safe_update_menu)  # the update manager's on_change

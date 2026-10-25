@@ -76,6 +76,87 @@ def make_icon_image(paused: bool = False, size: int = 64, state: str | None = No
     return img
 
 
+def tray_icon_image(paused: bool = False, state: str | None = None, platform: str | None = None) -> Any:
+    """v0.1.35: the image the tray shows. macOS: the monochrome template hand (:func:`away.app.icon_art.template_icon`;
+    the state is its shape, and macOS tints it for a light or dark menu bar), drawn large so the status item can
+    scale it to the screen's pixels. Windows and Linux: the coloured disc (:func:`make_icon_image`), as before."""
+    st = state or ("paused" if paused else "active")
+    if (platform or sys.platform) == "darwin":
+        try:
+            from away.app.icon_art import template_icon
+
+            return template_icon(st, MAC_ICON_PX)
+        except Exception:  # an old Pillow without some drawing call: the coloured icon beats none
+            pass
+    return make_icon_image(paused, state=st)
+
+
+#: v0.1.35: the template image's size in pixels; the status item scales it to the menu bar (22-24 pt at 2x or 3x)
+MAC_ICON_PX = 96
+
+
+def mac_template_icon_class(base: type) -> type:
+    """v0.1.35 (macOS): pystray's Mac ``Icon`` with a native status item image. pystray turns the PIL image into a
+    plain NSImage exactly the menu bar's thickness in *pixels* (blurry on a Retina screen) and never marks it as a
+    template, so a coloured or black icon ignores the light/dark menu bar and the highlighted (menu open) state.
+    Here the image is scaled to the bar's thickness times the screens' backing scale, its point size set to the bar's
+    thickness, and ``setTemplate_(True)`` lets macOS tint it like every native menu bar icon.
+
+    pystray calls ``_assert_image`` from ``_show`` / ``_update_icon``, i.e. whenever ``icon.icon`` or
+    ``icon.visible`` is set, and every such call in this module goes through :func:`on_main_thread` (v0.1.34), so
+    the AppKit calls below run on the main thread. Anything but pystray's Mac backend (a test fake, another backend
+    chosen with PYSTRAY_BACKEND) is returned unchanged."""
+    if not isinstance(base, type) or not callable(getattr(base, "_assert_image", None)):
+        return base
+
+    class TemplateIcon(base):  # type: ignore[misc,valid-type]
+        def run(self, setup: Any = None) -> None:
+            # pystray's default setup shows the icon from its setup *thread*, and showing it builds the status item's
+            # image (AppKit): that goes to the main thread like every other icon change
+            def show(icon: Any) -> None:
+                on_main_thread(lambda: setattr(icon, "visible", True))
+
+            super().run(setup if setup is not None else show)
+
+        def _assert_image(self) -> None:
+            try:
+                self._assert_template_image()
+            except Exception as exc:  # never lose the icon over this: pystray's own (untinted) image instead
+                import logging
+
+                logging.getLogger("away.tray").info("template menu bar icon failed (plain icon used): %s", exc)
+                super()._assert_image()
+
+        def _assert_template_image(self) -> None:
+            import io
+
+            import AppKit
+            import Foundation
+            from PIL import Image
+
+            pt = int(self._status_bar.thickness())
+            current: Any = getattr(self, "_icon_image", None)
+            if current is not None and tuple(current.size()) == (pt, pt):
+                return
+            # at least 2x: the bar may sit on a Retina screen even when the main screen is not (or one is plugged in
+            # later); AppKit scales the bigger bitmap down on a 1x screen
+            scales = [float(sc.backingScaleFactor()) for sc in (AppKit.NSScreen.screens() or [])]
+            px = pt * max(2, round(max(scales, default=2.0)))
+            source: Any = self._icon
+            if source.size != (px, px):
+                source = source.resize((px, px), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            source.save(buf, "png")
+            image = AppKit.NSImage.alloc().initWithData_(Foundation.NSData(buf.getvalue()))
+            image.setSize_((pt, pt))  # points: the extra pixels are the Retina detail
+            image.setTemplate_(True)
+            self._icon_image = image
+            self._status_item.button().setImage_(image)
+
+    TemplateIcon.__name__ = TemplateIcon.__qualname__ = "TemplateIcon"
+    return TemplateIcon
+
+
 def agent_popup_lines(host: Any, now: float | None = None) -> list[str]:
     """One plain-words line per agent for the tray popup: "Claude — can see your screen · used your computer
     2 min ago". Tk-free and pure so it is unit-testable; :meth:`TrayController.show_agent_popup` shows it."""
@@ -497,12 +578,13 @@ class TrayMenuCallbacks:
         self.gpu_offer = {"text": ctl.gpu_pack_offer(), "installing": False}
         self.gate_hint = {"shown": False}
         # v0.1.32: pystray's macOS notifications run osascript, credited to Script Editor (a click opens it); there
-        # the app's own message window is used instead (see notify)
+        # frozen.notify is used instead (v0.1.35: a real UserNotifications notification, or the app's own message
+        # window when the system will not show one)
         self.icon_notifications = sys.platform != "darwin"
 
     # -- icon / menu plumbing -------------------------------------------------
     def _set_icon(self, icon: Any) -> None:
-        icon.icon = make_icon_image(self.ctl.paused, state=self.ctl.icon_state())
+        icon.icon = tray_icon_image(self.ctl.paused, state=self.ctl.icon_state())
         icon.title = self.ctl.tooltip()
 
     def refresh(self, icon: Any) -> None:
@@ -517,7 +599,7 @@ class TrayMenuCallbacks:
             return
         from away.app.frozen import notify as desktop_notify
 
-        if not self.icon_notifications:  # macOS: Project Away's own message window (frozen.notify)
+        if not self.icon_notifications:  # macOS: a system notification, else Project Away's window (frozen.notify)
             desktop_notify(title, message)
             return
         try:
@@ -1003,7 +1085,9 @@ def setup_tray_runtime(app: Any, ctl: TrayController, cfg: Any, pystray: Any) ->
         live_menu_items,
         lambda tab: _open_settings_tab(ctl, tab),
     )
-    icon = pystray.Icon("project-away", make_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
+    # v0.1.35: on a Mac a template image (tinted by macOS for a light/dark menu bar), elsewhere the coloured icon
+    icon_cls = mac_template_icon_class(pystray.Icon) if sys.platform == "darwin" else pystray.Icon
+    icon = icon_cls("project-away", tray_icon_image(ctl.paused, state=ctl.icon_state()), ctl.tooltip(), menu)
     callbacks.icon = icon
     app.tray_icon = icon  # v0.1.24: Check my PC reads whether it shows and its tooltip
     subscribe_tray_bus(app, ctl, callbacks, icon)
