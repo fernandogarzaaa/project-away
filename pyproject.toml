@@ -51,6 +51,9 @@ pointer = ["comtypes>=1.2; sys_platform == 'win32'"]
 # Silero VAD comes from the ONNX model bundled in faster-whisper (no torch needed)
 # pycaw (Windows only, v0.1.22): which other apps are playing sound, so a video in the background is not typed
 voice = ["faster-whisper>=1.1", "sounddevice>=0.4.6", "pycaw>=20240210; sys_platform == 'win32'"]
+# v0.1.35: Whisper on the Apple Silicon GPU (MLX, Metal); voice.asr_backend: auto picks it on M-series Macs.
+# Apple Silicon only (nothing is installed anywhere else). mlx-whisper also pulls in torch, numba and tiktoken.
+mlx = ["mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 control = ["pynput>=1.7.6", "pyperclip>=1.8"]
 tray = ["pystray>=0.19", "Pillow>=10"]
 # v0.1.20 Agent Link: connect AI agents (MCP over stdio + Streamable HTTP, REST), QR pairing, UI Automation
@@ -79,6 +82,8 @@ qwen = ["qwen-tts>=0.1.1"]
 all = [
   "mediapipe>=0.10.14", "opencv-python>=4.8", "onnxruntime>=1.17",
   "faster-whisper>=1.1", "sounddevice>=0.4.6", "pycaw>=20240210; sys_platform == 'win32'",
+  # the [mlx] extra (Apple Silicon only; the macOS app bundles it, v0.1.35)
+  "mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "pynput>=1.7.6", "pyperclip>=1.8",
   "pystray>=0.19", "Pillow>=10",
   # v0.1.20: pure-Python packages the downloadable Smart cleanup engine (llama-cpp-python) imports; bundled in

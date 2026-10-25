@@ -947,7 +947,7 @@ def test_prefer_migrates_to_roles_mode():
         C.from_dict({"hands": {"prefer": "both"}})
     c, _ = C.from_dict({"hands": {"prefer": "right", "roles": {"mode": "left"}}})
     assert c.hands.roles.mode == "left"  # an explicit roles.mode wins
-    assert "prefer" not in C.to_dict(c)["hands"] and C.to_dict(c)["config_version"] == C.CONFIG_VERSION == 4
+    assert "prefer" not in C.to_dict(c)["hands"] and C.to_dict(c)["config_version"] == C.CONFIG_VERSION == 5
 
 
 def test_migration_does_not_touch_the_callers_dict():

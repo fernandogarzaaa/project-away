@@ -217,12 +217,27 @@ def missing_models(cfg: cfgmod.AppConfig | None = None, models_dir: Path | None 
         cfg, _ = cfgmod.load()
     mdir = models_dir or (Path(cfg.models_dir) if cfg.models_dir else paths.models_dir())
     missing = [mf.name for mf in models.MEDIAPIPE_MODELS if not (mdir / mf.name).exists()]
-    if cfg.voice.enabled and cfg.voice.asr_backend == "faster-whisper":
+    if cfg.voice.enabled:
         model = _asr_model(cfg)
-        wdir = mdir / f"whisper-{model}"
-        if not (wdir / "model.bin").exists():
+        engine = asr_engine(cfg, model)
+        if engine == "mlx-whisper":  # v0.1.35: Apple Silicon: the MLX weights (Whisper on the Apple GPU)
+            if not models.mlx_ready(models.mlx_dir(mdir, model), model):
+                missing.append(f"whisper-mlx-{model}")
+        elif engine == "faster-whisper" and not (mdir / f"whisper-{model}" / "model.bin").exists():
             missing.append(f"whisper-{model}")
     return missing
+
+
+def asr_engine(cfg: cfgmod.AppConfig, model: str | None = None) -> str:
+    """The speech engine whose weights setup fetches: ``mlx-whisper`` | ``faster-whisper`` | ``parakeet`` (v0.1.35,
+    :func:`away.voice.asr_mlx.setup_backend`)."""
+    from away.app.performance import asr_backend
+    from away.voice.asr_mlx import setup_backend
+
+    try:
+        return setup_backend(asr_backend(cfg), model or _asr_model(cfg))
+    except Exception:
+        return "faster-whisper" if cfg.voice.asr_backend != "parakeet" else "parakeet"
 
 
 def _asr_model(cfg: cfgmod.AppConfig) -> str:
@@ -315,6 +330,8 @@ def setup_download_mb(cfg: cfgmod.AppConfig, missing: list[str] | None = None) -
     asr = _asr_model(cfg)
     if f"whisper-{asr}" in missing:
         size += models.ASR_SIZES_MB.get(asr, 0)
+    if f"whisper-mlx-{asr}" in missing and asr in models.MLX_MODELS:
+        size += models.MLX_MODELS[asr].size_mb
     return size
 
 

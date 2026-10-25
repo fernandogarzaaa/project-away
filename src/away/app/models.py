@@ -233,8 +233,12 @@ def download_asr(
     slow: Callable[[str, Path, Callable[[str], object]], Path] | None = None,
     attempts: int = FAST_ATTEMPTS,
     sleep: Callable[[float], None] | None = None,
+    engine: str = "faster-whisper",
 ) -> Path:
     """Download Whisper ``model`` into ``dest_dir/whisper-<model>``.
+
+    v0.1.35: ``engine="mlx-whisper"`` fetches the MLX weights into ``dest_dir/whisper-mlx-<model>`` instead
+    (:func:`download_mlx`; Apple Silicon, see :func:`away.app.frozen.asr_engine`).
 
     Primary path: parallel, resumable, checksum-verified ranged download (``away.app.fastdl``). A failed run
     keeps its ``.part`` + sidecar, waits, and resumes (up to ``attempts`` runs); only then does it fall back to
@@ -244,6 +248,8 @@ def download_asr(
 
     from away.app import fastdl
 
+    if engine == "mlx-whisper":
+        return download_mlx(model, dest_dir, progress, connections, write, fast)
     out = dest_dir / f"whisper-{model}"
     size_mb = ASR_SIZES_MB.get(model, 0)
     write = write or _stdout_writer()
@@ -274,6 +280,121 @@ def download_asr(
     path = Path((slow or _hub_download)(model, out, write))
     cleanup_fastdl_temp(out)
     return path
+
+
+@dataclass(frozen=True)
+class MLXModel:
+    """v0.1.35: Whisper weights in MLX format (Apple Silicon GPU, :mod:`away.voice.asr_mlx`), pinned to one commit
+    of the mlx-community repo and to the sha256 of the weights file (checked against the Hub listing before the
+    download and again on the downloaded bytes by :mod:`away.app.fastdl`)."""
+
+    repo: str
+    revision: str
+    weights: str  # weights.npz | weights.safetensors
+    sha256: str
+    size_mb: int
+
+
+MLX_MODELS = {
+    "tiny": MLXModel(
+        "mlx-community/whisper-tiny-mlx",
+        "6caf9c55601caafbe6508a8b0d216bdf4783c4e8",
+        "weights.npz",
+        "0e03a5993d6eea43b07ee2dcc772b0e4cef5bb227257dacc24bf289387d49186",
+        75,
+    ),
+    "base": MLXModel(
+        "mlx-community/whisper-base-mlx",
+        "1e3e249fb8d01c655324bd6841b1deadffd6d04c",
+        "weights.npz",
+        "2f57d5f3ef473054c638961f90716f4ee415e8108de81313eccb2c5fd62eff0b",
+        144,
+    ),
+    "small": MLXModel(
+        "mlx-community/whisper-small-mlx",
+        "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
+        "weights.npz",
+        "55b6674c9b339702d486e2b1573839a66f8ec8f821ed2886993ef717a86b09f5",
+        481,
+    ),
+    "medium": MLXModel(
+        "mlx-community/whisper-medium-mlx",
+        "7fc08c4eac4c316526498f147dfdee6f6303f975",
+        "weights.npz",
+        "10b597c2bcb1bcc38b2d3d24cd4f0885f461a7cd70e8444d6ad5a763ece549ea",
+        1525,
+    ),
+    "large-v3": MLXModel(
+        "mlx-community/whisper-large-v3-mlx",
+        "49e6aa286ad60c14352c404340ded53710378a11",
+        "weights.npz",
+        "05ff791ce3630fae47e7c51004e9666204d786246ec07cac6110af768099b40d",
+        3084,
+    ),
+    "large-v3-turbo": MLXModel(
+        "mlx-community/whisper-large-v3-turbo",
+        "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+        "weights.safetensors",
+        "951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a6",
+        1614,
+    ),
+    "distil-large-v3": MLXModel(
+        "mlx-community/distil-whisper-large-v3",
+        "e1c3c155644be59f8b477c0186719442f7e3fbb0",
+        "weights.npz",
+        "dacfaf0b80d75c8b217a77a1e1da49d935a17a7581618f4811bd1e94aa7a92d5",
+        1509,
+    ),
+}
+
+
+def mlx_dir(models_dir: Path, model: str) -> Path:
+    """Where ``away setup`` puts the MLX weights of ``model`` (next to the faster-whisper ``whisper-<model>``)."""
+    return Path(models_dir) / f"whisper-mlx-{model}"
+
+
+def mlx_ready(path: Path, model: str | None = None) -> bool:
+    """``config.json`` and the weights file are on disk (the files mlx_whisper's ``load_model`` reads)."""
+    path = Path(path)
+    spec = MLX_MODELS.get(model or "")
+    names = (spec.weights,) if spec else ("weights.safetensors", "weights.npz")
+    return (path / "config.json").is_file() and any((path / n).is_file() for n in names)
+
+
+def download_mlx(
+    model: str,
+    dest_dir: Path,
+    progress: Callable[[str], None] = print,
+    connections: int = 8,
+    write: Callable[[str], object] | None = None,
+    fast: Callable[..., Path] | None = None,
+) -> Path:
+    """v0.1.35: download the pinned MLX Whisper weights of ``model`` into ``dest_dir/whisper-mlx-<model>`` with the
+    same parallel, resumable, checksum-verified downloader as the faster-whisper models. Raises ``KeyError`` for a
+    model with no MLX build (the app then uses faster-whisper on the CPU)."""
+    from away.app import fastdl
+
+    spec = MLX_MODELS[model]
+    out = mlx_dir(dest_dir, model)
+    if mlx_ready(out, model):
+        progress(f"  ASR '{model}' (Apple GPU, MLX): already present")
+        return out
+    write = write or _stdout_writer()
+    progress(f"  ASR '{model}' (Apple GPU, MLX): downloading ~{spec.size_mb} MB from Hugging Face ...")
+    return Path(
+        (fast or fastdl.download_model)(
+            model,
+            out,
+            write,
+            connections=connections,
+            on_slow=slow_hint(model, progress),
+            repo=spec.repo,
+            revision=spec.revision,
+            patterns=("config.json", spec.weights),
+            required=(spec.weights,),
+            expect={spec.weights: spec.sha256},
+        )
+    )
 
 
 def model_path(models_dir: Path, name: str) -> Path | None:

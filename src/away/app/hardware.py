@@ -563,7 +563,13 @@ def detect(
     hw.gpus = nvidia + others
     if os_name == "darwin" and arch in ("arm64", "aarch64"):
         name = hw.cpu_name or "Apple Silicon"
-        hw.gpus.append(GPU("apple", f"{name} GPU (Metal; not used by Whisper/CTranslate2)", source="platform"))
+        hw.gpus.append(
+            GPU(
+                "apple",
+                f"{name} GPU (Metal; Whisper runs on it through MLX when mlx-whisper is installed)",
+                source="platform",
+            )
+        )
     return hw
 
 

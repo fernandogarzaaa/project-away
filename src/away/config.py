@@ -301,7 +301,8 @@ class VoiceConfig:
     min_utterance_ms: int = 250
     max_utterance_s: float = 15.0
     commands_enabled: bool = True  # an utterance that exactly matches a bound phrase runs it instead of typing
-    asr_backend: str = "faster-whisper"  # faster-whisper | parakeet
+    # v0.1.35: auto = Whisper on the Apple GPU (mlx-whisper) on Apple Silicon Macs, faster-whisper everywhere else
+    asr_backend: str = "auto"  # auto | faster-whisper | mlx-whisper | parakeet
     asr_model: str = "auto"  # auto = picked from your hardware (`away hardware`); or large-v3-turbo, small, base...
     device: str = "auto"  # auto | cuda | cpu (explicit wins over performance.mode)
     compute_type: str = "auto"  # auto | float16 | int8_float16 | int8 | float32
@@ -662,7 +663,9 @@ def validate_agent_link(a: AgentLinkConfig) -> None:
         raise ValueError("agent_link.github_repo must be owner/name")
 
 
-CONFIG_VERSION = 4  # 1 (implicit) = written by v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9..v0.1.13; 4 = v0.1.14
+# v0.1.35 (same tuple as away.voice.asr_mlx.ASR_BACKENDS; config stays import-light)
+ASR_BACKENDS = ("auto", "faster-whisper", "mlx-whisper", "parakeet")
+CONFIG_VERSION = 5  # 1 (implicit) = v0.1.5 or older; 2 = v0.1.6..v0.1.8; 3 = v0.1.9..v0.1.13; 4 = v0.1.14; 5 = v0.1.35
 
 
 @dataclass
@@ -745,6 +748,14 @@ def migrate(data: dict[str, Any]) -> list[str]:
         if isinstance(voice, dict) and str(voice.get("use either hand", "")).strip().lower() == "hands:any":
             voice["use either hand"] = "hands:auto"
             notes.append("bindings voice 'use either hand': hands:any -> hands:auto")
+    if ver < 5:
+        # v0.1.35: voice.asr_backend: faster-whisper was the only default up to v0.1.34 and every save wrote it, so
+        # it pinned a Mac to CPU Whisper. It becomes auto (mlx-whisper on Apple Silicon, faster-whisper elsewhere);
+        # a faster-whisper chosen from v0.1.35 on is saved with config_version 5 and kept.
+        voice = data.get("voice")
+        if isinstance(voice, dict) and voice.get("asr_backend") == "faster-whisper":
+            voice["asr_backend"] = "auto"
+            notes.append("voice.asr_backend: faster-whisper (old default written by setup) -> auto")
     data["config_version"] = CONFIG_VERSION
     return notes
 
@@ -853,8 +864,8 @@ def validate(cfg: AppConfig) -> None:
         raise ValueError(f"voice.output must be paste|type, got {cfg.voice.output!r}")
     if cfg.voice.ptt_mode not in ("toggle", "hold"):
         raise ValueError(f"voice.ptt_mode must be toggle|hold, got {cfg.voice.ptt_mode!r}")
-    if cfg.voice.asr_backend not in ("faster-whisper", "parakeet"):
-        raise ValueError(f"voice.asr_backend must be faster-whisper|parakeet, got {cfg.voice.asr_backend!r}")
+    if cfg.voice.asr_backend not in ASR_BACKENDS:
+        raise ValueError(f"voice.asr_backend must be {'|'.join(ASR_BACKENDS)}, got {cfg.voice.asr_backend!r}")
     perf = cfg.performance
     if perf.mode not in PERFORMANCE_MODES:
         raise ValueError(f"performance.mode must be {'|'.join(PERFORMANCE_MODES)}, got {perf.mode!r}")
