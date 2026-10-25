@@ -202,14 +202,22 @@ def _friendly(exc: BaseException) -> str:
     return f"update check failed: {exc}"
 
 
-def fetch_release(channel: str = "stable", fetch: Fetch | None = None, timeout: float = TIMEOUT_S) -> Release | None:
+def fetch_release(
+    channel: str = "stable",
+    fetch: Fetch | None = None,
+    timeout: float = TIMEOUT_S,
+    wanted: Callable[[Release], bool] | None = None,
+) -> Release | None:
     """Newest published release for the channel (drafts never; pre-releases only on ``beta``).
+
+    ``wanted`` (v0.1.35) skips releases it rejects, e.g. a macOS-only release for a Windows install; the release
+    list is read then instead of GitHub's single "latest" release.
 
     Raises :class:`UpdateError` with a friendly message on network/HTTP/JSON problems.
     """
     get = fetch or _default_fetch
     try:
-        if channel == "beta":
+        if channel == "beta" or wanted is not None:
             data = json.loads(get(API_RELEASES, timeout).decode("utf-8"))
             if not isinstance(data, list):
                 raise ValueError("expected a list")
@@ -224,6 +232,8 @@ def fetch_release(channel: str = "stable", fetch: Fetch | None = None, timeout: 
         raise UpdateError(_friendly(exc)) from exc
     allow_pre = channel == "beta"
     ok = [r for r in items if not r.draft and (allow_pre or not (r.prerelease or is_prerelease_version(r.version)))]
+    if wanted is not None:
+        ok = [r for r in ok if wanted(r)]
     if not ok:
         return None
     return max(ok, key=lambda r: parse_version(r.version) or ())
@@ -357,6 +367,10 @@ def check(
         return res
     try:
         rel = fetch_release(channel, fetch, timeout)
+        # v0.1.35: macOS-only releases exist; when the newest one has no installer for this copy, take the newest
+        # that has (pip installs have no installer and take any release)
+        if rel is not None and asset_suffix(tgt) is not None and select_asset(rel, tgt) is None:
+            rel = fetch_release(channel, fetch, timeout, wanted=lambda r: select_asset(r, tgt) is not None) or rel
     except UpdateError as exc:
         res.error = str(exc)
         return res

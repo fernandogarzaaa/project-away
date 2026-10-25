@@ -889,7 +889,9 @@ class SettingsModel:
         hw = hw or hardware.cached()
         prof = performance.current_profile(self.cfg, hw)
         frozen = is_frozen()
-        if prof.gpu_pack == "installed":
+        if not gpupack.applies(hw.os or None):  # v0.1.35: macOS (the pack is NVIDIA CUDA only; its buttons are hidden)
+            pack = "Mac: the NVIDIA GPU pack does not apply; tracking can use the Apple GPU / Neural Engine (Core ML)"
+        elif prof.gpu_pack == "installed":
             pack = "GPU pack installed"
         elif prof.gpu_pack == "recommended":
             pack = "GPU pack not installed: download it to use the GPU" if frozen else gpupack.pip_instructions()
@@ -906,6 +908,7 @@ class SettingsModel:
             "pack_status": pack,
             "can_install": bool(frozen and prof.gpu_pack == "recommended" and gpupack.platform_tag() is not None),
             "can_remove": gpupack.installed(),
+            "pack_applies": gpupack.applies(hw.os or None),
         }
 
     @staticmethod
@@ -3034,6 +3037,9 @@ class SettingsWindow:  # pragma: no cover - widgets; smoke-tested under Xvfb onl
         self.pack_var.set(info["pack_status"])
         self.pack_btn.configure(state="normal" if info["can_install"] else "disabled")
         self.pack_rm.configure(state="normal" if info["can_remove"] else "disabled")
+        if not info.get("pack_applies", True):  # v0.1.35: no NVIDIA GPU pack buttons on a Mac
+            self.pack_btn.pack_forget()
+            self.pack_rm.pack_forget()
 
     def _perf_install(self) -> None:
         self.pack_btn.configure(state="disabled")

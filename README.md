@@ -2159,6 +2159,26 @@ and wake-word engines and NeMo-Speech.cpp as pinned files, each checked against 
 | Keep this agent connected: persistent agent tokens (v0.1.24) | Issuing on "Keep this agent connected" (REST pairing over a real local HTTP server), reconnecting with the token after a real host restart with no prompt (REST and MCP Streamable HTTP with the official client), the 24 h sliding session, revoke dropping a live event stream and ending the agent's MCP session at once, rotation with a one-hour grace on an injectable clock (and an old-token stream ending with its grace), hash-only storage, shown once, per-address backoff (429), the 30 / 90 days / never choices, Settings rows and the CLI tested; the Agent tokens section is smoke-tested under Xvfb. **Untested on real hardware**: a real agent (for example Cookie) keeping a token across a real reboot of the user's PC, through a real Cloudflare link, and the Settings section on Windows |
 | A link that survives restarts (v0.1.24) | Refresh tokens (rotation, grace, expiry, revoke), keep-link restart, rendezvous signing / verification and publishing with a fake relay, the move notices, named-tunnel settings and the client's follow-and-refresh tested. **Untested live**: a real Cloudflare quick or named tunnel, real ntfy.sh, a real agent reconnecting after a real reboot |
 
+## What's new in 0.1.35
+
+The Mac release: Project Away now feels like a Mac app and uses the Mac's own hardware.
+
+- **Dictation on the Apple GPU.** On Apple Silicon, Whisper runs through MLX: about 7x faster than before on an M5
+  (an 8 s phrase in 0.25 s instead of 1.9 s). It falls back to the CPU by itself if the GPU path fails.
+- **Tracking on the Neural Engine.** Hand-landmark and eye tracking use Core ML where it measures faster (about 6x and
+  20x on an M5); the other models stay on the CPU.
+- **A native Settings window** (SwiftUI, Liquid Glass on macOS 26+): sidebar, search, a Permissions page, one window
+  at a time. Tabs not ported yet open the classic window through "More settings".
+- **Permissions that survive updates.** Mac builds are signed with one fixed certificate instead of ad hoc, so macOS
+  no longer drops Accessibility and Input Monitoring on every update. Coming from 0.1.34 you allow them once more;
+  the app clears the old build's leftover entries itself.
+- **A new app icon**, a menu bar icon that follows light and dark mode, and native macOS notifications.
+- **Errors are kept.** An app opened from Finder gets /dev/null for its output, so every Mac error was lost; they now
+  go to away.log.
+- **Mac-native hardware text**: unified memory instead of VRAM, and no NVIDIA GPU pack offer.
+- The new icon on Windows and Linux too, and macOS-only releases (Windows and Linux skip a release without their
+  installer).
+
 ## What's new in 0.1.34
 
 A Mac fix. On macOS 27, Project Away could quit by itself a few seconds after it started, with nothing in

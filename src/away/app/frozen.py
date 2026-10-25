@@ -179,6 +179,20 @@ def _win_console() -> TextIO | None:  # pragma: no cover - Windows only
         return None
 
 
+def _discarded(stream: Any, platform: str) -> bool:
+    """True when ``stream`` is missing, or (macOS/Linux) open on /dev/null: an app opened from Finder or the Dock
+    gets /dev/null, not None, so before v0.1.35 every error the Mac app printed was thrown away."""
+    if stream is None:
+        return True
+    if platform == "win32":
+        return False
+    try:
+        st, null = os.fstat(stream.fileno()), os.stat(os.devnull)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        return False
+    return (st.st_dev, st.st_ino) == (null.st_dev, null.st_ino)
+
+
 def ensure_streams(
     argv: Sequence[str],
     platform: str | None = None,
@@ -190,7 +204,8 @@ def ensure_streams(
     plat = platform or sys.platform
     if sys.stdin is None:
         sys.stdin = io.StringIO("")  # input() -> EOFError -> default answer, never a hang or crash
-    if sys.stdout is not None and sys.stderr is not None:
+    no_out, no_err = _discarded(sys.stdout, plat), _discarded(sys.stderr, plat)
+    if not no_out and not no_err:
         if plat == "win32" and is_frozen() and wants_console(argv):
             disable_quick_edit(platform=plat)  # frozen exe run from cmd/PowerShell: a click must not pause setup
         return "tty"
@@ -204,9 +219,9 @@ def ensure_streams(
         path.parent.mkdir(parents=True, exist_ok=True)
         out = open(path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
         where = str(path)
-    if sys.stdout is None:
+    if no_out:
         sys.stdout = out
-    if sys.stderr is None:
+    if no_err:
         sys.stderr = out
     return where
 
@@ -217,12 +232,27 @@ def missing_models(cfg: cfgmod.AppConfig | None = None, models_dir: Path | None 
         cfg, _ = cfgmod.load()
     mdir = models_dir or (Path(cfg.models_dir) if cfg.models_dir else paths.models_dir())
     missing = [mf.name for mf in models.MEDIAPIPE_MODELS if not (mdir / mf.name).exists()]
-    if cfg.voice.enabled and cfg.voice.asr_backend == "faster-whisper":
+    if cfg.voice.enabled:
         model = _asr_model(cfg)
-        wdir = mdir / f"whisper-{model}"
-        if not (wdir / "model.bin").exists():
+        engine = asr_engine(cfg, model)
+        if engine == "mlx-whisper":  # v0.1.35: Apple Silicon: the MLX weights (Whisper on the Apple GPU)
+            if not models.mlx_ready(models.mlx_dir(mdir, model), model):
+                missing.append(f"whisper-mlx-{model}")
+        elif engine == "faster-whisper" and not (mdir / f"whisper-{model}" / "model.bin").exists():
             missing.append(f"whisper-{model}")
     return missing
+
+
+def asr_engine(cfg: cfgmod.AppConfig, model: str | None = None) -> str:
+    """The speech engine whose weights setup fetches: ``mlx-whisper`` | ``faster-whisper`` | ``parakeet`` (v0.1.35,
+    :func:`away.voice.asr_mlx.setup_backend`)."""
+    from away.app.performance import asr_backend
+    from away.voice.asr_mlx import setup_backend
+
+    try:
+        return setup_backend(asr_backend(cfg), model or _asr_model(cfg))
+    except Exception:
+        return "faster-whisper" if cfg.voice.asr_backend != "parakeet" else "parakeet"
 
 
 def _asr_model(cfg: cfgmod.AppConfig) -> str:
@@ -290,18 +320,33 @@ def notify(title: str, message: str, platform: str | None = None) -> bool:  # pr
     plat = platform or sys.platform
     try:
         if plat == "darwin":
-            if mac_message(title, message):
+            # v0.1.35: a real macOS notification (Project Away's name and icon, Notification Center, Focus) when the
+            # app bundle may post one; Project Away's own window when it may not (a source checkout, permission
+            # denied, the framework missing), also when the user's "no" arrives after the message was queued
+            from away.app import macnotify
+
+            if macnotify.notify(title, message, fallback=mac_window_notify):
                 return True
-            # the window could not start: a system notification (credited to Script Editor) beats nothing
-            script = f"display notification {_osa(message)} with title {_osa(title)}"
-            subprocess.run(["osascript", "-e", script], timeout=5, check=False)
-            return True
+            return mac_window_notify(title, message)
         if plat.startswith("linux") and shutil.which("notify-send"):
             subprocess.run(["notify-send", "-a", "Project Away", title, message], timeout=5, check=False)
             return True
     except (OSError, subprocess.SubprocessError):
         return False
     return False
+
+
+def mac_window_notify(title: str, message: str) -> bool:  # pragma: no cover - desktop only
+    """macOS without system notifications: Project Away's own message window (:func:`mac_message`)."""
+    try:
+        if mac_message(title, message):
+            return True
+        # the window could not start: a system notification (credited to Script Editor) beats nothing
+        script = f"display notification {_osa(message)} with title {_osa(title)}"
+        subprocess.run(["osascript", "-e", script], timeout=5, check=False)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _osa(s: str) -> str:
@@ -315,6 +360,8 @@ def setup_download_mb(cfg: cfgmod.AppConfig, missing: list[str] | None = None) -
     asr = _asr_model(cfg)
     if f"whisper-{asr}" in missing:
         size += models.ASR_SIZES_MB.get(asr, 0)
+    if f"whisper-mlx-{asr}" in missing and asr in models.MLX_MODELS:
+        size += models.MLX_MODELS[asr].size_mb
     return size
 
 

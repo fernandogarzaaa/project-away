@@ -170,6 +170,34 @@ def _winrt_camera() -> str:
     return "pywinrt MediaCapture ok"
 
 
+def _mlx() -> str:
+    """v0.1.35 (Apple Silicon): Whisper on the Apple GPU. mlx-whisper and MLX import, the Metal kernels (mlx.metallib)
+    are bundled, and the native library runs an op on the CPU stream. The GPU op is reported, not required: CI's
+    virtual Macs may have no usable Metal device (the app then falls back to faster-whisper on the CPU)."""
+    from away.voice import asr_mlx
+
+    if not asr_mlx.apple_silicon():
+        return "n/a (Apple Silicon only)"
+    asr_mlx.ensure_numba()  # as the app does before the import: the bundle leaves numba out (away.spec)
+    asr_mlx.quiet_tqdm()
+    import mlx.core as mx
+    import mlx_whisper  # noqa: F401  # imports its decoding / audio modules, as the app does
+
+    lib = Path(mx.__file__).resolve().parent / "lib"
+    metallib = [p.name for p in lib.glob("*.metallib")] if lib.is_dir() else []
+    assert metallib, f"mlx.metallib missing in {lib} (the Apple GPU path cannot run)"
+    cpu = mx.add(mx.array([1, 2]), 1, stream=mx.cpu)
+    mx.eval(cpu)
+    assert cpu.tolist() == [2, 3], f"MLX CPU op gave {cpu.tolist()}"
+    try:
+        gpu = mx.add(mx.array([1, 2]), 1, stream=mx.gpu)
+        mx.eval(gpu)
+        where = "GPU op ok" if gpu.tolist() == [2, 3] else f"GPU op gave {gpu.tolist()}"
+    except Exception as exc:  # no Metal device here (a VM): reported only
+        where = f"GPU op not available here ({type(exc).__name__})"
+    return f"mlx {getattr(mx, '__version__', '?')}, {metallib[0]}, {where}"
+
+
 def _away_data() -> str:
     from away.hands.runtime import bundled_model
 
@@ -235,6 +263,7 @@ CHECKS: tuple[Check, ...] = (
     Check("opencv", "camera capture", _opencv),
     Check("winrt-camera", "WinRT camera backend (Windows)", _winrt_camera),
     Check("faster-whisper", "dictation (Whisper + Silero VAD)", _faster_whisper),
+    Check("mlx", "dictation on the Apple GPU (MLX)", _mlx),
     Check("cleanup-runtime", "Smart cleanup engine dependencies", _cleanup_runtime),
     Check("hf-xet", "fast Whisper download fallback (Xet)", _hf_xet),
     Check("sounddevice", "microphone (PortAudio)", _sounddevice),

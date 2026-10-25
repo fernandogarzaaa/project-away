@@ -170,13 +170,16 @@ def list_files(
     revision: str = "main",
     base: str | None = None,
     patterns: Sequence[str] = ALLOW_PATTERNS,
+    required: Sequence[str] = ("model.bin",),
 ) -> list[RemoteFile]:
+    """The repo's files matching ``patterns``. ``required``: at least one of these must be listed (v0.1.35: the
+    MLX Whisper repos ship ``weights.npz`` or ``weights.safetensors`` instead of ``model.bin``)."""
     url = f"{base or endpoint()}/api/models/{repo}/tree/{urllib.parse.quote(revision, safe='')}"
     with opener(_request(url), TIMEOUT_S) as r:
         entries = json.loads(r.read().decode("utf-8"))
     files = select_files(entries, patterns)
-    if not any(f.path == "model.bin" for f in files):
-        raise RuntimeError(f"{repo}: no model.bin in the repo listing")
+    if required and not any(f.path in required for f in files):
+        raise RuntimeError(f"{repo}: no {' or '.join(required)} in the repo listing")
     return files
 
 
@@ -688,12 +691,24 @@ def download_model(
     interval: float = 0.5,
     warmup: float = 1.0,
     on_slow: Callable[[float, float | None], object] | None = None,
+    repo: str | None = None,
+    patterns: Sequence[str] = ALLOW_PATTERNS,
+    required: Sequence[str] = ("model.bin",),
+    expect: dict[str, str] | None = None,
 ) -> Path:
     """Download the faster-whisper files of ``model`` into ``out_dir``; returns ``out_dir``.
 
-    ``on_slow(rate_bytes_per_s, eta_s)`` is called once if the connection turns out to be very slow."""
-    repo = repo_for(model)
-    files = _retry(lambda: list_files(repo, opener, revision, base), retries, backoff, sleep)
+    ``on_slow(rate_bytes_per_s, eta_s)`` is called once if the connection turns out to be very slow.
+
+    v0.1.35: ``repo`` / ``patterns`` / ``required`` fetch another layout the same way (the MLX Whisper weights for
+    Apple Silicon, :data:`away.app.models.MLX_MODELS`, pinned to a commit with ``revision``). ``expect`` maps a
+    file name to the sha256 it must have; the Hub listing is checked against it before anything is downloaded."""
+    repo = repo or repo_for(model)
+    files = _retry(lambda: list_files(repo, opener, revision, base, patterns, required), retries, backoff, sleep)
+    for rf in files:
+        want = (expect or {}).get(rf.path)
+        if want and rf.sha256 != want:
+            raise ChecksumError(f"{repo}@{revision[:12]}: {rf.path} is not the pinned file (sha256 {rf.sha256})")
     out_dir.mkdir(parents=True, exist_ok=True)
     todo = [f for f in files if not matches(out_dir / f.path, f)]
     total = sum(f.size for f in files)

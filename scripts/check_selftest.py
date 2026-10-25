@@ -32,12 +32,28 @@ def check_reports(files: list[str], allow_skip: bool = False) -> list[str]:
     return errors
 
 
-def check_models(models_dir: str, asr: str | None) -> list[str]:
+def apple_silicon(platform: str | None = None, machine: str | None = None) -> bool:
+    import platform as _p
+
+    return (platform or sys.platform) == "darwin" and (machine or _p.machine()).lower() in ("arm64", "aarch64")
+
+
+def check_models(models_dir: str, asr: str | None, mlx: bool | None = None) -> list[str]:
+    """v0.1.35: on Apple Silicon setup fetches the MLX weights (Whisper on the Apple GPU), not faster-whisper's."""
     d = Path(models_dir)
     want = [d / m for m in MEDIAPIPE]
-    if asr:
+    errors = []
+    if asr and (apple_silicon() if mlx is None else mlx):
+        m = d / f"whisper-mlx-{asr}"
+        want.append(m / "config.json")
+        weights = [m / n for n in ("weights.safetensors", "weights.npz") if (m / n).exists()]
+        if weights:
+            want.append(weights[0])
+        else:
+            errors.append(f"missing model: {m}/weights.(safetensors|npz)")
+    elif asr:
         want.append(d / f"whisper-{asr}" / "model.bin")
-    errors = [f"missing model: {p}" for p in want if not p.exists()]
+    errors += [f"missing model: {p}" for p in want if not p.exists()]
     for p in want:
         if p.exists():
             print(f"  ok  {p} ({p.stat().st_size / 1e6:.1f} MB)")

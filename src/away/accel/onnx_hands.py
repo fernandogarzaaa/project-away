@@ -1,5 +1,6 @@
 """Hand tracking with the MediaPipe hand models as ONNX (v0.1.24): the same models as ``hand_landmarker.task``
-(Google, Apache-2.0), run by ONNX Runtime on the graphics card (DirectML / CUDA) or the processor.
+(Google, Apache-2.0), run by ONNX Runtime on the graphics card (DirectML / CUDA; v0.1.35: Core ML on macOS) or the
+processor.
 
 :class:`OnnxHandLandmarker` behaves like MediaPipe's ``HandLandmarker`` in VIDEO mode as far as
 :class:`away.hands.tracker.HandTracker` is concerned: ``detect_for_video(rgb, ms)`` returns an object with
@@ -44,12 +45,12 @@ class HandResult:
     handedness: list[list[Category]] = field(default_factory=list)
 
 
-def session(path: Path | str, providers: list[str]) -> Any:
-    import onnxruntime as ort
+def session(path: Path | str, providers: list[str], data_dir: Path | None = None) -> Any:
+    """v0.1.35: through :func:`away.accel.compute.measured_session`, so Core ML (macOS) gets its options and is kept
+    per model only when it runs faster than the processor; CUDA / DirectML / CPU open exactly as before."""
+    from away.accel import compute
 
-    opts = ort.SessionOptions()
-    opts.log_severity_level = 3
-    return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
+    return compute.measured_session(path, providers, data_dir)
 
 
 class OnnxHandLandmarker:
@@ -61,10 +62,13 @@ class OnnxHandLandmarker:
         providers: list[str] | None = None,
         min_detection: float = DETECTION_MIN,
         min_presence: float = PRESENCE_MIN,
+        data_dir: Path | None = None,
     ) -> None:
         prov = providers or ["CPUExecutionProvider"]
-        self.palm = session(palm_model, prov) if isinstance(palm_model, (str, Path)) else palm_model
-        self.lmk = session(landmark_model, prov) if isinstance(landmark_model, (str, Path)) else landmark_model
+        self.palm = session(palm_model, prov, data_dir) if isinstance(palm_model, (str, Path)) else palm_model
+        self.lmk = (
+            session(landmark_model, prov, data_dir) if isinstance(landmark_model, (str, Path)) else landmark_model
+        )
         self.num_hands = max(1, int(num_hands))
         self.min_detection = float(min_detection)
         self.min_presence = float(min_presence)

@@ -960,7 +960,7 @@ def test_version_parsing_orders_0_1_10_after_0_1_9() -> None:
     assert U.is_newer("0.1.10", "0.1.9") and not U.is_newer("0.1.9", "0.1.10")
     assert U.parse_version("v0.1.10") > U.parse_version("0.1.9") > U.parse_version("0.1.8")  # type: ignore[operator]
     assert max(["0.1.8", "0.1.10", "0.1.9"], key=lambda v: U.parse_version(v) or ()) == "0.1.10"
-    assert __version__ == "0.1.34"
+    assert __version__ == "0.1.35"
 
 
 def test_batch_helper_with_the_users_real_paths() -> None:
@@ -1275,3 +1275,16 @@ def test_tray_update_menu_shows_run_installer_only_after_a_failure(tmp_path: Pat
     shown = {i.label(): i.action for i in items if i.visible()}
     assert shown == {"Run update installer": "run", "Check for updates": "chk"}
     assert m.failed_installer == setup
+
+
+def test_a_macos_only_release_is_skipped_by_other_installs_but_offered_on_a_mac() -> None:
+    # v0.1.35: macOS fixes can ship alone; a Windows copy must keep seeing the newest release with its installer
+    mac_only = {**_release_json("v9.9.0"), "assets": [_asset_json("ProjectAway-9.9.0-macos-arm64.dmg")]}
+    payloads = {U.API_LATEST: mac_only, U.API_RELEASES: [mac_only, _release_json()]}
+    calls: list[str] = []
+    win = U.check("0.1.2", target=U.InstallTarget("windows"), fetch=_fetcher(payloads, calls))
+    assert win.latest == V and win.asset is not None and win.asset.name == NAMES["windows"]
+    assert calls == [U.API_LATEST, U.API_RELEASES]
+    mac = U.check("0.1.2", target=U.InstallTarget("macos", Path("/x"), "arm64"), fetch=_fetcher(payloads))
+    assert mac.latest == "9.9.0" and mac.asset is not None and mac.asset.name.endswith("-macos-arm64.dmg")
+    assert U.check(V, target=U.InstallTarget("windows"), fetch=_fetcher(payloads)).update_available is False

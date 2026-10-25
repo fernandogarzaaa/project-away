@@ -338,7 +338,7 @@ def test_the_permissions_check_runs_in_the_background(monkeypatch: pytest.Monkey
     from away.app import macperms
 
     got: list[Any] = []
-    monkeypatch.setattr(macperms, "check_and_ask", lambda notify: got.append(notify))
+    monkeypatch.setattr(macperms, "check_and_ask", lambda notify, data_dir=None: got.append(notify))
     cb = SimpleNamespace(notify=lambda t, m: None)
     t = tray.ask_mac_permissions(cb)
     t.join(5)

@@ -12,7 +12,9 @@ github.com/yakhyo/gaze-estimation ("MobileGaze", MIT code; an L2CS-Net style 90-
 research-only**, so they are opt-in downloads and never bundled.
 
 :class:`GazeNet` is rate-limited (``max_hz``) and runs onnxruntime on CUDA when it is available, else on the
-CPU. The session is injected, so the tests use a fake one.
+CPU. v0.1.35: on macOS it also tries Core ML (Neural Engine / GPU) and keeps it only when it measures faster than the
+CPU (an Apple M5: L2CS ResNet-18 1.1 ms on Core ML vs 17 ms on the CPU). The session is injected, so the tests use a
+fake one.
 """
 
 from __future__ import annotations
@@ -84,8 +86,11 @@ def preprocess(rgb: np.ndarray, box: tuple[float, float, float], size: int = INP
     return np.ascontiguousarray(crop.transpose(2, 0, 1)[None, ...], dtype=np.float32)
 
 
-def providers(available: list[str] | None = None) -> list[str]:
-    """CUDA first when onnxruntime offers it (the GPU build), then the CPU."""
+def providers(available: list[str] | None = None, platform: str | None = None) -> list[str]:
+    """CUDA first when onnxruntime offers it (the GPU build), then DirectML, then (v0.1.35, macOS only) Core ML,
+    then the CPU; the same list as hand tracking (:func:`away.accel.compute.gpu_providers`)."""
+    from away.accel.compute import gpu_providers
+
     if available is None:
         try:
             import onnxruntime as ort
@@ -93,20 +98,20 @@ def providers(available: list[str] | None = None) -> list[str]:
             available = list(ort.get_available_providers())
         except Exception:  # pragma: no cover - onnxruntime missing
             available = []
-    out = [p for p in ("CUDAExecutionProvider", "DmlExecutionProvider") if p in available]
+    out = [p for p in gpu_providers(platform) if p in available]
     return [*out, "CPUExecutionProvider"]
 
 
-def gpu_available(available: list[str] | None = None) -> bool:
-    return len(providers(available)) > 1
+def gpu_available(available: list[str] | None = None, platform: str | None = None) -> bool:
+    return len(providers(available, platform)) > 1
 
 
 def default_session(path: Path) -> Any:  # pragma: no cover - needs onnxruntime + the model file
-    import onnxruntime as ort
+    from away.accel import compute
 
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 2  # keep CPU use bounded next to MediaPipe and Whisper
-    return ort.InferenceSession(str(path), sess_options=opts, providers=providers())
+    # 2 threads keep CPU use bounded next to MediaPipe and Whisper; v0.1.35: Core ML is kept only when it measures
+    # faster than this CPU session (CUDA / DirectML open as before)
+    return compute.measured_session(path, providers(), threads=2)
 
 
 class GazeNet:

@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -90,6 +91,22 @@ def test_ensure_streams_log_file(monkeypatch, tmp_path):
         input()
     sys.stdout.flush()
     assert "hello" in log.read_text() and "progress" in log.read_text()
+
+
+def test_ensure_streams_devnull_goes_to_the_log_on_a_mac(monkeypatch, tmp_path):
+    # v0.1.35: an app opened from Finder gets /dev/null, not None; its errors were lost and away.log never appeared
+    log = tmp_path / "logs" / "a.log"
+    null = open(os.devnull, "w")
+    try:
+        monkeypatch.setattr(sys, "stdout", null)
+        monkeypatch.setattr(sys, "stderr", null)
+        where = frozen.ensure_streams(["settings"], platform="darwin", env={"AWAY_LOG_FILE": str(log)})
+        assert where == str(log)
+        sys.stderr.write("Exception in Tkinter callback\n")
+        sys.stderr.flush()
+        assert "Tkinter callback" in log.read_text()
+    finally:
+        null.close()
 
 
 def test_ensure_streams_windows_console(monkeypatch, tmp_path):
@@ -284,7 +301,10 @@ def test_release_workflow_smoke_and_strict():
     # published (not a draft) so the in-app updater sees it, but only after every platform job passed
     assert "draft: false" in yml and "draft: true" not in yml
     publish = yml.split("\n  publish:")[1]
-    assert "needs: [python-dist, linux, windows, macos]" in publish
+    assert "needs: [plan, python-dist, linux, windows, macos]" in publish
+    # v0.1.35: every platform job passed, or a [macos-only] tag and the Mac job passed
+    assert "needs.macos.result == 'success'" in publish and "needs.plan.outputs.macos_only == 'true'" in publish
+    assert "needs.windows.result == 'success'" in publish and "needs.linux.result == 'success'" in publish
     assert "sha256sum" in publish and "SHA256SUMS.txt" in publish
     assert publish.index("SHA256SUMS.txt") < publish.index("softprops/action-gh-release")
     # PyPI via trusted publishing: OIDC only, in its own job so it can't block the installers
@@ -325,8 +345,9 @@ def _load_check_script():
     return mod
 
 
-def test_check_selftest_script(tmp_path, capsys):
+def test_check_selftest_script(tmp_path, capsys, monkeypatch):
     chk = _load_check_script()
+    monkeypatch.setattr(chk, "apple_silicon", lambda: False)  # the faster-whisper model (Windows, Linux, Intel Mac)
     good = {"frozen": True, "checks": {"torch": {"ok": True, "feature": "train", "detail": "2.x"}}}
     skip = {"frozen": True, "checks": {"pystray": {"ok": None, "feature": "tray", "detail": "skipped"}}}
     bad = {"frozen": False, "checks": {"tkinter": {"ok": False, "feature": "settings", "detail": "ImportError"}}}
@@ -348,3 +369,23 @@ def test_check_selftest_script(tmp_path, capsys):
     big.write_bytes(b"x" * 3 * 1024 * 1024)
     assert chk.main(["--max-size-mb", "2", str(big)]) == 1
     assert chk.main(["--max-size-mb", "5", str(big)]) == 0
+
+
+def test_check_selftest_wants_the_mlx_weights_on_apple_silicon(tmp_path):
+    # v0.1.35: setup on an M-series Mac fetches Whisper for the Apple GPU (MLX), not faster-whisper's model.bin
+    chk = _load_check_script()
+    mdir = tmp_path / "models"
+    mdir.mkdir()
+    for m in chk.MEDIAPIPE:
+        (mdir / m).write_bytes(b"x")
+    (mdir / "whisper-tiny").mkdir()
+    (mdir / "whisper-tiny" / "model.bin").write_bytes(b"x")
+    assert any("whisper-mlx-tiny" in e for e in chk.check_models(str(mdir), "tiny", mlx=True))
+    mlx = mdir / "whisper-mlx-tiny"
+    mlx.mkdir()
+    (mlx / "config.json").write_text("{}")
+    assert chk.check_models(str(mdir), "tiny", mlx=True) != []  # weights still missing
+    (mlx / "weights.npz").write_bytes(b"x")
+    assert chk.check_models(str(mdir), "tiny", mlx=True) == []
+    assert chk.apple_silicon("darwin", "arm64") and not chk.apple_silicon("darwin", "x86_64")
+    assert not chk.apple_silicon("linux", "aarch64")

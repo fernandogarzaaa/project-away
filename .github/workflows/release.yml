@@ -10,6 +10,11 @@ name: Release
 # PortAudio, MediaPipe/Whisper/Silero assets. AWAY_SPEC_STRICT=1 fails the PyInstaller build if a
 # package is missing, and `selftest` (a hidden command) fails the job if a feature does not load
 # inside the frozen app. Parakeet/NeMo is intentionally not bundled (docs/INSTALL.md).
+#
+# macOS-only release (v0.1.35): put [macos-only] in an annotated tag's message, e.g.
+#   git tag -a v0.1.35 -m "[macos-only] Mac fixes" && git push origin v0.1.35
+# Only the Mac app is built and published (no Windows/Linux installers, no PyPI upload). Windows and Linux copies
+# skip a release without their installer (updater.check), so they are not offered it.
 
 on:
   push:
@@ -25,7 +30,26 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      macos_only: ${{ steps.p.outputs.macos_only }}
+    steps:
+      - id: p
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          msg=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
+            if [[ "$obj" == tag\ * ]]; then msg=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${obj#tag }" --jq .message); fi
+          fi
+          if [[ "$msg" == *"[macos-only]"* ]]; then v=true; else v=false; fi
+          echo "macos_only=$v" | tee -a "$GITHUB_OUTPUT"
+
   python-dist:
+    needs: plan
+    if: needs.plan.outputs.macos_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -56,6 +80,8 @@ jobs:
           skip-existing: true  # re-running a tag never fails on an already-uploaded version
 
   linux:
+    needs: plan
+    if: needs.plan.outputs.macos_only != 'true'
     runs-on: ubuntu-22.04  # older glibc => the bundle runs on more distros
     env:
       AWAY_DATA_DIR: ${{ github.workspace }}/smoke/data
@@ -111,6 +137,8 @@ jobs:
             dist/*.deb
 
   windows:
+    needs: plan
+    if: needs.plan.outputs.macos_only != 'true'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -305,7 +333,10 @@ jobs:
             dist/*-windows-x64.msix
 
   macos:
-    runs-on: macos-14  # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`
+    # Apple Silicon; Intel Macs: use `pipx install "project-away[all,train]"`. v0.1.35: macos-26 (was macos-14, now
+    # deprecated) for Xcode 26: the native Settings app's Liquid Glass needs the macOS 26 SDK (an older Xcode would
+    # build it with plain materials only)
+    runs-on: macos-26
     env:
       AWAY_DATA_DIR: ${{ github.workspace }}/smoke/data
       AWAY_CONFIG_DIR: ${{ github.workspace }}/smoke/config
@@ -324,8 +355,19 @@ jobs:
           pip install torch --index-url "$TORCH_CPU_INDEX"
           pip install ".[all,train]" pyinstaller
           python -c "import torch; assert not torch.backends.cuda.is_built(), 'CUDA torch slipped in'; print(torch.__version__)"
+      - name: Native Settings app (SwiftUI; away.spec puts it in Contents/Helpers)
+        run: |
+          xcodebuild -version
+          PYTHON=python bash packaging/macos/build_settings_app.sh "$AWAY_REL_VERSION"
       - name: PyInstaller (strict)
         run: AWAY_VERSION="$AWAY_REL_VERSION" pyinstaller packaging/pyinstaller/away.spec --noconfirm
+      - name: Native Settings app is in the bundle and its bridge answers
+        run: |
+          set -e
+          test -x "dist/ProjectAway.app/Contents/Helpers/Project Away Settings.app/Contents/MacOS/ProjectAwaySettings"
+          mkdir -p "$AWAY_CONFIG_DIR"
+          dist/ProjectAway.app/Contents/MacOS/ProjectAway settings-bridge get > bridge.json
+          python -c "import json; d = json.load(open('bridge.json')); assert d['ok'] and d['document']['sections'], d"
       - name: Exactly one libavdevice (PyAV is left out of the macOS bundle, see away.spec)
         # two copies define the same Objective-C classes and macOS warns of "mysterious crashes"
         run: |
@@ -346,6 +388,20 @@ jobs:
           python scripts/check_selftest.py selftest.json
           $APP setup --yes --skip-probe --asr-model tiny < /dev/null; show
           python scripts/check_selftest.py --models "$AWAY_DATA_DIR/models" --asr tiny
+      - name: Signing certificate (v0.1.35; a fixed identity keeps macOS permissions across updates)
+        env:
+          MAC_SIGN_P12: ${{ secrets.MAC_SIGN_P12 }}
+          MAC_SIGN_P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$MAC_SIGN_P12" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "::error::MAC_SIGN_P12 secret missing"; exit 1; fi
+            echo "::warning::no MAC_SIGN_P12 secret: ad-hoc signature"; exit 0
+          fi
+          echo "$MAC_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          kc=$(bash packaging/macos/import_signing_cert.sh "$RUNNER_TEMP/signing.p12" "$MAC_SIGN_P12_PASSWORD" "$RUNNER_TEMP/away-signing.keychain-db")
+          rm -f "$RUNNER_TEMP/signing.p12"
+          echo "MAC_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          echo "MAC_SIGN_IDENTITY=Project Away Self-Signed" >> "$GITHUB_ENV"
       - run: bash packaging/macos/build_dmg.sh "$AWAY_REL_VERSION"
       - name: Release asset size limit (GitHub allows 2 GB per file)
         run: python scripts/check_selftest.py --max-size-mb 1900 dist/*.dmg
@@ -355,8 +411,12 @@ jobs:
           path: dist/*.dmg
 
   publish:
-    needs: [python-dist, linux, windows, macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [plan, python-dist, linux, windows, macos]
+    # every build passed, or a macOS-only release and its Mac build passed (the skipped jobs then count as fine)
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/v') && needs.macos.result == 'success' &&
+      (needs.plan.outputs.macos_only == 'true' ||
+       (needs.python-dist.result == 'success' && needs.linux.result == 'success' && needs.windows.result == 'success'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -364,7 +424,11 @@ jobs:
           sparse-checkout: packaging/release-install-notes.md
           sparse-checkout-cone-mode: false
       - name: How-to-install notes for the release page (the file names carry this version)
-        run: sed "s/<version>/${GITHUB_REF_NAME#v}/g" packaging/release-install-notes.md > install-notes.md
+        run: |
+          sed "s/<version>/${GITHUB_REF_NAME#v}/g" packaging/release-install-notes.md > install-notes.md
+          if [ "${{ needs.plan.outputs.macos_only }}" = "true" ]; then
+            printf '\n**macOS only.** Windows and Linux stay on the previous release.\n' >> install-notes.md
+          fi
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: out

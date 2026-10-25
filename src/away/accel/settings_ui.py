@@ -5,15 +5,28 @@ it really uses right now in plain words, a Download button for the graphics-card
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from typing import Any
 
 LABELS = {"auto": "Automatic (recommended)", "gpu": "Graphics card", "cpu": "Processor"}
+MAC_GPU_LABEL = "Apple GPU / Neural Engine"  # v0.1.35: Core ML on macOS
+
+
+def labels(platform: str | None = None) -> dict[str, str]:
+    """The choices as shown on this OS (v0.1.35: macOS names the Apple GPU / Neural Engine; others unchanged)."""
+    plat = platform or sys.platform
+    return {**LABELS, "gpu": MAC_GPU_LABEL} if plat == "darwin" else dict(LABELS)
 
 
 def status_line(st: dict[str, Any]) -> str:
     """One plain sentence for the current state (tests read it too)."""
     using = st.get("using") or "processor"
+    if using == "graphics card" and "Core ML" in str(st.get("provider") or ""):
+        # v0.1.35: Core ML is kept per model only where it measured faster; the reason names which ones
+        return (
+            f"Tracking uses the Apple Neural Engine / GPU (Core ML): {st.get('reason') or 'faster than the processor'}."
+        )
     if using == "graphics card":
         return f"Tracking runs on your graphics card ({st.get('provider') or 'GPU'})."
     if st.get("provider") and not st.get("models_ready"):
@@ -25,6 +38,8 @@ def status_line(st: dict[str, Any]) -> str:
 
 
 def label_to_value(label: str) -> str:
+    if label == MAC_GPU_LABEL:
+        return "gpu"
     return next((k for k, v in LABELS.items() if v == label), "auto")
 
 
@@ -40,8 +55,9 @@ def build(win: Any, parent: Any) -> None:  # pragma: no cover - Tk widgets; smok
     row = ttk.Frame(box)
     row.pack(fill="x", pady=2)
     ttk.Label(row, text="Runs on:").pack(side="left")
-    var = tk.StringVar(value=LABELS.get(str(win.m.cfg.hands.compute), LABELS["auto"]))
-    cb = ttk.Combobox(row, textvariable=var, values=list(LABELS.values()), state="readonly", width=24)
+    shown = labels()
+    var = tk.StringVar(value=shown.get(str(win.m.cfg.hands.compute), shown["auto"]))
+    cb = ttk.Combobox(row, textvariable=var, values=list(shown.values()), state="readonly", width=24)
     cb.pack(side="left", padx=6)
     line = tk.StringVar()
     ttk.Label(box, textvariable=line, wraplength=640).pack(anchor="w", pady=2)

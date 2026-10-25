@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -10,6 +11,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from away.voice.hallucination import join_segments
+
+log = logging.getLogger(__name__)
 
 WHISPER_MODELS = ("large-v3-turbo", "large-v3", "medium", "small", "base", "tiny", "distil-large-v3")
 
@@ -189,6 +192,7 @@ def make_asr(
     cpu_model: str | None = None,
     cpu_download_root: str | None = None,
     cpu_beam_size: int | None = None,
+    mlx_factory: Callable[..., ASRBackend] | None = None,
 ) -> ASRBackend:
     """Build the ASR backend. On ``device="cuda"`` the GPU libraries are activated first; if CUDA cannot
     load or run (no cuBLAS, old driver, out of VRAM) it falls back to the CPU (int8) and calls
@@ -196,7 +200,13 @@ def make_asr(
 
     ``cpu_model``: the model to use on that CPU fallback (the hardware profile's CPU pick). A GPU-sized
     model such as large-v3-turbo cannot keep up on most CPUs, so falling back to it would just drop
-    speech. A CUDA error that only shows up later, on a real transcription, switches the same way."""
+    speech. A CUDA error that only shows up later, on a real transcription, switches the same way.
+
+    v0.1.35: ``backend`` ``auto`` (the default) is ``mlx-whisper`` on an Apple Silicon Mac with mlx-whisper
+    installed (Whisper on the Apple GPU, :mod:`away.voice.asr_mlx`), else faster-whisper. MLX failing to import, to
+    load the model or later during a transcription falls back to faster-whisper on the CPU the same way, with a log
+    line and ``on_fallback(reason)``. ``mlx_factory(model, language, download_root, beam_size)`` replaces the MLX
+    backend in tests."""
     if backend == "parakeet":
         try:
             import nemo.collections.asr  # noqa: F401
@@ -211,6 +221,35 @@ def make_asr(
         beam = cpu_beam_size if cpu_beam_size else beam_size
         return build(m, "cpu", "int8", language, root, hotwords, cpu_threads, beam)
 
+    if backend in ("auto", "", "mlx-whisper") and device != "cuda":
+        from away.voice import asr_mlx
+
+        if asr_mlx.resolve_backend(backend, installed=None if mlx_factory is None else True) == "mlx-whisper":
+            try:
+                if mlx_factory is not None:
+                    mlx = mlx_factory(model, language, download_root, beam_size)
+                elif not asr_mlx.apple_silicon():
+                    raise ImportError("MLX runs only on Apple Silicon Macs")
+                else:
+                    path = asr_mlx.model_path(model, download_root)
+                    mlx = asr_mlx.MLXWhisperASR(path, language, beam_size)
+                log.info("[voice.asr] Whisper '%s' on the Apple GPU (MLX)", model)
+                return FallbackASR(
+                    mlx,
+                    build_cpu,
+                    on_fallback,
+                    cpu_model or model,
+                    gpu_device="metal",
+                    is_gpu_error=lambda exc: True,  # any MLX error: the CPU engine is a different library
+                    reason=asr_mlx.failure_reason,
+                )
+            except Exception as exc:  # then faster-whisper below, exactly as before v0.1.35
+                reason = asr_mlx.failure_reason(exc)
+                log.warning("[voice.asr] %s", reason)
+                if on_fallback is not None:
+                    on_fallback(reason)
+        elif backend == "auto" and asr_mlx.apple_silicon():
+            log.info("[voice.asr] mlx-whisper is not installed: Whisper runs on the CPU (faster-whisper)")
     if device == "cuda":
         from away.app import gpupack
 
@@ -236,7 +275,11 @@ def is_cuda_error(exc: BaseException) -> bool:
 
 
 class FallbackASR:
-    """A GPU backend that switches itself to the CPU (once) when CUDA fails during a transcription."""
+    """A GPU backend that switches itself to the CPU (once) when CUDA fails during a transcription.
+
+    v0.1.35: also wraps the Apple GPU (MLX) backend: ``gpu_device`` names the GPU side ("metal"),
+    ``is_gpu_error`` decides which errors switch (every error for MLX) and ``reason`` words the message.
+    ``language`` reaches whichever backend is in use (``away.app.runner.set_asr_language``)."""
 
     def __init__(
         self,
@@ -244,6 +287,9 @@ class FallbackASR:
         build_cpu: Callable[[], ASRBackend],
         on_fallback: Callable[[str], object] | None = None,
         cpu_model: str = "",
+        gpu_device: str = "cuda",
+        is_gpu_error: Callable[[BaseException], bool] | None = None,
+        reason: Callable[[BaseException, str | None], str] | None = None,
     ) -> None:
         self.gpu = gpu
         self.build_cpu = build_cpu
@@ -251,10 +297,29 @@ class FallbackASR:
         self.cpu_model = cpu_model
         self.cpu: ASRBackend | None = None
         self.name = getattr(gpu, "name", "faster-whisper")
+        self.gpu_device = gpu_device
+        self.is_gpu_error = is_gpu_error or is_cuda_error
+        self.reason = reason or cuda_failure_reason
 
     @property
     def device(self) -> str:
-        return "cpu" if self.cpu is not None else "cuda"
+        return "cpu" if self.cpu is not None else self.gpu_device
+
+    @property
+    def compute_type(self) -> str:
+        backend = self.cpu if self.cpu is not None else self.gpu
+        return str(getattr(backend, "compute_type", "") or "")
+
+    @property
+    def language(self) -> str | None:
+        backend = self.cpu if self.cpu is not None else self.gpu
+        return getattr(backend, "language", None)
+
+    @language.setter
+    def language(self, value: str | None) -> None:
+        for backend in (self.gpu, self.cpu):
+            if backend is not None and hasattr(backend, "language"):
+                backend.language = value  # type: ignore[attr-defined]
 
     @property
     def last_confidence(self) -> float | None:
@@ -268,11 +333,14 @@ class FallbackASR:
         try:
             return self.gpu.transcribe(audio, prompt)
         except Exception as exc:
-            if not is_cuda_error(exc):
+            if not self.is_gpu_error(exc):
                 raise
+            language = self.language
             self.cpu = self.build_cpu()
+            if hasattr(self.cpu, "language"):
+                self.cpu.language = language  # type: ignore[attr-defined]  # a language picked since start-up
             if self.on_fallback is not None:
-                self.on_fallback(cuda_failure_reason(exc, self.cpu_model or None))
+                self.on_fallback(self.reason(exc, self.cpu_model or None))
             return self.cpu.transcribe(audio, prompt)
 
 

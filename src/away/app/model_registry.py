@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 import time
 import urllib.request
 from collections.abc import Callable
@@ -69,6 +70,55 @@ SET_PREFIXES = ("hands.", "face.", "gaze.", "voice.", "speech.")
 NEXT_SET_PREFIXES = (*SET_PREFIXES, "models_next.")
 # fields a models_next entry may add to a model that already exists (its settings and title stay as they are)
 INFO_FIELDS = ("notes", "version", "released", "sha256_note")
+# v0.1.35: where a model runs, in this OS's words. A Mac has no NVIDIA card: its "GPU" models run on the Apple GPU /
+# Neural Engine (Core ML) when that is faster, and their memory comes out of the unified memory shared with the CPU.
+RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "GPU", "either": "CPU or GPU"}
+MAC_RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "Apple GPU / Neural Engine", "either": "CPU or Apple GPU / Neural Engine"}
+# only the tracking models run through Core ML; a "gpu" speech / voice model needs CUDA and runs on a Mac's CPU
+COREML_SLOTS = frozenset({"hands", "face", "gaze"})
+MAC_CUDA_RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "NVIDIA GPU (CPU on a Mac)", "either": "CPU"}
+# unified memory a Mac keeps for macOS, the camera / MediaPipe / Whisper and your own apps before the models' share:
+# a quarter of it, at least 4 GB (an 8 GB Mac can spare ~4 GB, a 24 GB one ~18 GB)
+UNIFIED_HEADROOM_MIN_MB = 4096
+UNIFIED_HEADROOM_SHARE = 0.25
+VRAM_HEADROOM_MB = 1024  # the same headroom the benchmark keeps on a graphics card (model_bench)
+
+
+def is_mac(platform: str | None = None) -> bool:
+    return (platform or sys.platform) == "darwin"
+
+
+def runs_on_title(runs_on: str, platform: str | None = None, slot: str | None = None) -> str:
+    """``cpu|gpu|either`` in plain words; v0.1.35: on macOS "Apple GPU / Neural Engine" for the tracking slots
+    (Core ML), and the CPU for the others (``slot`` None: a tracking model)."""
+    if not is_mac(platform):
+        titles = RUNS_ON_TITLES
+    else:
+        titles = MAC_RUNS_ON_TITLES if slot is None or slot in COREML_SLOTS else MAC_CUDA_RUNS_ON_TITLES
+    return titles.get(runs_on, runs_on)
+
+
+def memory_budget(hw: Any = None, platform: str | None = None) -> dict[str, Any]:
+    """How much memory the models' GPU share may use here: ``{"kind": "unified"|"vram", "total_mb", "budget_mb"}``
+    (``None`` when unknown). v0.1.35: on macOS it is the unified memory (``hw.memsize``) minus
+    :data:`UNIFIED_HEADROOM_SHARE` of it (at least :data:`UNIFIED_HEADROOM_MIN_MB`), not VRAM; elsewhere the NVIDIA
+    card's VRAM minus :data:`VRAM_HEADROOM_MB`."""
+    if is_mac(platform):
+        total = getattr(hw, "ram_mb", None) if hw is not None else None
+        if not total:
+            return {"kind": "unified", "total_mb": None, "budget_mb": None}
+        keep = max(UNIFIED_HEADROOM_MIN_MB, int(total * UNIFIED_HEADROOM_SHARE))
+        return {"kind": "unified", "total_mb": int(total), "budget_mb": max(0, int(total) - keep)}
+    gpu = getattr(hw, "nvidia", None) if hw is not None else None
+    total = getattr(gpu, "vram_mb", None) if gpu is not None else None
+    budget = max(0, int(total) - VRAM_HEADROOM_MB) if total else None
+    return {"kind": "vram", "total_mb": int(total) if total else None, "budget_mb": budget}
+
+
+def memory_fits(need_mb: int, hw: Any = None, platform: str | None = None) -> bool | None:
+    """Does ``need_mb`` of model memory fit :func:`memory_budget`? ``None`` when the memory is unknown."""
+    b = memory_budget(hw, platform)
+    return None if b["budget_mb"] is None else int(need_mb) <= int(b["budget_mb"])
 
 
 @dataclass
@@ -116,7 +166,7 @@ class Model:
             "description": self.description,
             "license": self.license,
             "permissive": self.is_permissive,
-            "runs_on": {"cpu": "CPU", "gpu": "GPU", "either": "CPU or GPU"}.get(self.runs_on, self.runs_on),
+            "runs_on": runs_on_title(self.runs_on, slot=self.slot),  # v0.1.35: in the Mac's words on macOS
             "size_mb": round(self.size / 1e6) if self.size else 0,
             "cost": dict(self.cost),
             "source": self.source,
@@ -365,8 +415,14 @@ class Registry:
         return rows
 
     def preset_vram_mb(self, mode: str) -> int:
-        """Estimated graphics memory of a 2026-10 preset (sum of its models' estimates)."""
+        """Estimated graphics memory of a 2026-10 preset (sum of its models' estimates; on a Mac the same estimate is
+        taken out of the unified memory, see :meth:`preset_fits`)."""
         return sum(int(r["vram_mb"]) for r in self.preset_plan(mode))
+
+    def preset_fits(self, mode: str, hw: Any = None, platform: str | None = None) -> bool | None:
+        """v0.1.35: whether a preset's GPU memory fits this machine (:func:`memory_fits`: unified memory with
+        headroom on macOS, VRAM elsewhere); ``None`` when the memory is unknown."""
+        return memory_fits(self.preset_vram_mb(mode), hw, platform)
 
     def apply_next_preset(self, cfg: Any, mode: str, ready: Callable[[Model], bool] | None = None) -> dict[str, Any]:
         before: dict[str, Any] = {}

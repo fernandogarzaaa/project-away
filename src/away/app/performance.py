@@ -16,7 +16,35 @@ def current_profile(cfg: Any, hw: hardware.Hardware | None = None, cuda_runtime:
         usable, _ = tuning.gpu_usable(hw, hw.nvidia)
         wants = ov.mode != "cpu" and ov.device != "cpu"
         cuda_runtime = bool(usable and wants and gpupack.cublas_available())
-    return tuning.choose_profile(hw, ov, cuda_runtime=cuda_runtime, pack_installed=gpupack.installed())
+    return tuning.choose_profile(
+        hw, ov, cuda_runtime=cuda_runtime, pack_installed=gpupack.installed(), apple_gpu=apple_gpu(cfg, hw)
+    )
+
+
+def asr_backend(cfg: Any) -> str:
+    """``voice.asr_backend`` as :func:`away.voice.asr.make_asr` should get it (v0.1.35): ``auto`` with
+    ``performance.mode: cpu`` or ``voice.device: cpu`` set explicitly means faster-whisper on the CPU, not MLX."""
+    backend = str(cfg.voice.asr_backend or "auto")
+    if backend == "auto" and (cfg.performance.mode == "cpu" or cfg.voice.device == "cpu"):
+        return "faster-whisper"
+    return backend
+
+
+def apple_gpu(cfg: Any, hw: hardware.Hardware | None = None) -> bool:
+    """Speech recognition will run on the Apple GPU (MLX): Apple Silicon, mlx-whisper installed, and
+    ``voice.asr_backend`` auto or mlx-whisper (v0.1.35)."""
+    from away.voice import asr_mlx
+
+    try:
+        if hw is not None and not hw.apple_silicon:
+            return False
+        return (
+            asr_mlx.resolve_backend(asr_backend(cfg)) == asr_mlx.MLX_BACKEND
+            and asr_mlx.apple_silicon()
+            and asr_mlx.mlx_installed()
+        )
+    except Exception:
+        return False
 
 
 def effective_asr_model(cfg: Any, profile: tuning.Profile | None = None) -> str:
@@ -73,12 +101,17 @@ def asr_plan(cfg: Any, profile: tuning.Profile, cpu: tuning.Profile | None = Non
     return cpu_model, cpu_model, note
 
 
-def gpu_pack_offer(cfg: Any, profile: tuning.Profile | None = None, frozen: bool | None = None) -> str | None:
+def gpu_pack_offer(
+    cfg: Any, profile: tuning.Profile | None = None, frozen: bool | None = None, platform: str | None = None
+) -> str | None:
     """Why to offer the GPU pack now, or ``None``: an NVIDIA GPU that can run CUDA 12, mode auto/gpu, the
     pack is not installed and cuBLAS cannot be loaded otherwise. Only frozen apps download it (pip installs
-    get the ``pip install`` line)."""
+    get the ``pip install`` line). v0.1.35: never on macOS (the pack is NVIDIA CUDA only), so the tray item and the
+    one-time notification, which both read this, stay hidden there."""
     from away.app.frozen import is_frozen
 
+    if not gpupack.applies(platform or hardware.cached().os or None):
+        return None
     p = profile or current_profile(cfg)
     if cfg.performance.mode == "cpu" or cfg.voice.device == "cpu":
         return None
@@ -103,6 +136,13 @@ def describe(hw: hardware.Hardware, p: tuning.Profile) -> list[str]:
         bits = [g.name]
         if g.vram_mb:
             bits.append(f"{g.vram_mb / 1024:.1f} GB VRAM")
+        if g.unified_memory_mb:  # v0.1.35: Apple Silicon (shared with the CPU, not VRAM)
+            bits.append(f"{g.unified_memory_mb / 1024:.0f} GB unified memory (shared with the CPU)")
+        if g.vendor == "apple":
+            from away.voice.asr_mlx import mlx_installed
+
+            speech = "speech too (MLX)" if mlx_installed() else "speech runs on the CPU (no mlx-whisper)"
+            bits.append(f"Metal / Core ML: hand, face and eye tracking can use it; {speech}")
         if g.compute_capability:
             bits.append(f"compute {g.cc_str}")
         if g.driver_version:
@@ -112,7 +152,11 @@ def describe(hw: hardware.Hardware, p: tuning.Profile) -> list[str]:
         lines.append("GPU:   " + ", ".join(bits) + (f"  [{g.source}]" if g.source else ""))
     lines.append("")
     lines.append(f"Profile ({p.tier}): {p.summary()}")
-    lines.append(f"  device={p.device} compute_type={p.compute_type} model={p.asr_model}")
+    if p.asr_backend == "mlx-whisper":  # v0.1.35
+        lines.append(f"  engine=mlx-whisper (Apple GPU, float16) model={p.asr_model}")
+        lines.append(f"  CPU fallback: device={p.device} compute_type={p.compute_type}")
+    else:
+        lines.append(f"  device={p.device} compute_type={p.compute_type} model={p.asr_model}")
     lines.append(f"  cpu_threads={p.cpu_threads} beam_size={p.beam_size}")
     lines.append(
         f"  camera={p.camera_width}x{p.camera_height}@{p.camera_fps} "
