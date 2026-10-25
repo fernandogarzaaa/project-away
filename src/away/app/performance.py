@@ -73,12 +73,17 @@ def asr_plan(cfg: Any, profile: tuning.Profile, cpu: tuning.Profile | None = Non
     return cpu_model, cpu_model, note
 
 
-def gpu_pack_offer(cfg: Any, profile: tuning.Profile | None = None, frozen: bool | None = None) -> str | None:
+def gpu_pack_offer(
+    cfg: Any, profile: tuning.Profile | None = None, frozen: bool | None = None, platform: str | None = None
+) -> str | None:
     """Why to offer the GPU pack now, or ``None``: an NVIDIA GPU that can run CUDA 12, mode auto/gpu, the
     pack is not installed and cuBLAS cannot be loaded otherwise. Only frozen apps download it (pip installs
-    get the ``pip install`` line)."""
+    get the ``pip install`` line). v0.1.35: never on macOS (the pack is NVIDIA CUDA only), so the tray item and the
+    one-time notification, which both read this, stay hidden there."""
     from away.app.frozen import is_frozen
 
+    if not gpupack.applies(platform or hardware.cached().os or None):
+        return None
     p = profile or current_profile(cfg)
     if cfg.performance.mode == "cpu" or cfg.voice.device == "cpu":
         return None
@@ -103,6 +108,10 @@ def describe(hw: hardware.Hardware, p: tuning.Profile) -> list[str]:
         bits = [g.name]
         if g.vram_mb:
             bits.append(f"{g.vram_mb / 1024:.1f} GB VRAM")
+        if g.unified_memory_mb:  # v0.1.35: Apple Silicon (shared with the CPU, not VRAM)
+            bits.append(f"{g.unified_memory_mb / 1024:.0f} GB unified memory (shared with the CPU)")
+        if g.vendor == "apple":
+            bits.append("Metal / Core ML: hand, face and eye tracking can use it; speech runs on the CPU")
         if g.compute_capability:
             bits.append(f"compute {g.cc_str}")
         if g.driver_version:

@@ -8,7 +8,8 @@ What it finds:
 * OS / architecture,
 * GPUs: NVIDIA through NVML (``nvml.dll`` / ``libnvidia-ml.so.1`` via ``ctypes``, no subprocess), then
   ``nvidia-smi``; any vendor through ``Get-CimInstance Win32_VideoController`` / ``wmic`` on Windows or
-  ``lspci`` on Linux (name only); Apple Silicon from ``platform`` + ``sysctl``.
+  ``lspci`` on Linux (name only); Apple Silicon from ``platform`` + ``sysctl`` (v0.1.35: its unified memory from
+  ``hw.memsize`` and the GPU core count from ``system_profiler SPDisplaysDataType``).
 
 :func:`detect` takes injectable probes so the tests can feed recorded outputs (RTX 2060, GTX 1050,
 Apple M1, an old driver, ``nvidia-smi`` missing or hanging...) without the real tools.
@@ -43,12 +44,15 @@ Runner = Callable[[Sequence[str], float], "str | None"]
 class GPU:
     vendor: str  # nvidia | amd | intel | apple | other
     name: str
-    vram_mb: int | None = None  # total memory (MiB); unified memory on Apple Silicon is not counted here
+    vram_mb: int | None = None  # total memory (MiB); unified memory on Apple Silicon is in unified_memory_mb
     vram_free_mb: int | None = None
     compute_capability: tuple[int, int] | None = None  # NVIDIA only, e.g. (7, 5)
     driver_version: str | None = None
     cuda_driver_version: str | None = None  # highest CUDA the driver supports, e.g. "12.4"
     source: str = ""  # nvml | nvidia-smi | cim | wmic | lspci | platform
+    # v0.1.35: Apple Silicon has no VRAM: the GPU and the Neural Engine share the machine's memory (hw.memsize)
+    unified_memory_mb: int | None = None
+    gpu_cores: int | None = None  # Apple Silicon: "Total Number of Cores" from system_profiler
 
     @property
     def cc_str(self) -> str:
@@ -77,6 +81,11 @@ class Hardware:
     @property
     def apple_silicon(self) -> bool:
         return self.os == "darwin" and self.arch in ("arm64", "aarch64")
+
+    @property
+    def unified_memory_mb(self) -> int | None:
+        """v0.1.35: the memory the Apple Silicon GPU / Neural Engine share with the CPU (None elsewhere)."""
+        return self.ram_mb if self.apple_silicon else None
 
     @property
     def cores(self) -> int:
@@ -382,6 +391,29 @@ def generic_gpus(os_name: str, run: Runner = run_cmd) -> list[GPU]:
     return []
 
 
+# ---------------------------------------------------------------- Apple Silicon (v0.1.35)
+SP_DISPLAYS_CMD = ["system_profiler", "-detailLevel", "mini", "SPDisplaysDataType"]  # ~0.2 s
+
+
+def parse_sp_displays(text: str) -> tuple[str, int | None]:
+    """``(chip, GPU cores)`` from ``system_profiler SPDisplaysDataType`` ("Chipset Model: Apple M5", "Total Number
+    of Cores: 10"); ``("", None)`` when they are missing (Intel Macs list a Radeon / Intel GPU with no core count)."""
+    chip = re.search(r"Chipset Model:\s*(.+)", text or "")
+    cores = re.search(r"Total Number of Cores:\s*(\d+)", text or "")
+    return (chip.group(1).strip() if chip else ""), (int(cores.group(1)) if cores else None)
+
+
+def apple_gpu(cpu_name: str, ram_mb: int | None, run: Runner = run_cmd) -> GPU:
+    """The Apple Silicon GPU: its chip, GPU cores and the unified memory it shares with the CPU. Used by hand / face
+    / eye tracking through Core ML (:mod:`away.accel.compute`, kept only where it measures faster than the CPU);
+    speech recognition (Whisper / CTranslate2) has no Metal backend and stays on the CPU."""
+    chip, cores = "", None
+    with contextlib.suppress(Exception):
+        chip, cores = parse_sp_displays(run(SP_DISPLAYS_CMD, TIMEOUT_S) or "")
+    name = f"{chip or cpu_name or 'Apple Silicon'} GPU" + (f" ({cores}-core)" if cores else "")
+    return GPU("apple", name, unified_memory_mb=ram_mb, gpu_cores=cores, source="platform")
+
+
 # ---------------------------------------------------------------- CPU / RAM / disk
 def parse_cpuinfo(text: str) -> tuple[str, int | None, int | None]:
     """(model name, physical cores, logical cores) from ``/proc/cpuinfo``."""
@@ -562,8 +594,7 @@ def detect(
         others = [g for g in others if g.vendor != "nvidia"]
     hw.gpus = nvidia + others
     if os_name == "darwin" and arch in ("arm64", "aarch64"):
-        name = hw.cpu_name or "Apple Silicon"
-        hw.gpus.append(GPU("apple", f"{name} GPU (Metal; not used by Whisper/CTranslate2)", source="platform"))
+        hw.gpus.append(apple_gpu(hw.cpu_name, hw.ram_mb, run))
     return hw
 
 

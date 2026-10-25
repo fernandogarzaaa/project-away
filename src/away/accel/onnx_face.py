@@ -1,5 +1,6 @@
 """Face tracking with the MediaPipe face models as ONNX (v0.1.24): the detector, the 478-point face mesh and the
-blendshape model from ``face_landmarker.task`` (Google, Apache-2.0), run by ONNX Runtime on the graphics card.
+blendshape model from ``face_landmarker.task`` (Google, Apache-2.0), run by ONNX Runtime on the graphics card
+(v0.1.35: or Core ML on macOS, per model where it measures faster than the processor).
 
 :class:`OnnxFaceLandmarker` has the same ``process(rgb, t) -> list[FaceObs]`` as
 :class:`away.face.landmarker.FaceLandmarker`, so the face gate, head pose and gaze features work unchanged. The
@@ -54,11 +55,12 @@ class OnnxFaceLandmarker:
         max_faces: int = 1,
         providers: list[str] | None = None,
         min_detection: float = 0.5,
+        data_dir: Path | None = None,
     ) -> None:
         prov = providers or ["CPUExecutionProvider"]
 
-        def load(m: Any) -> Any:
-            return session(m, prov) if isinstance(m, (str, Path)) else m
+        def load(m: Any) -> Any:  # v0.1.35: Core ML is kept per model only when it measures faster (session())
+            return session(m, prov, data_dir) if isinstance(m, (str, Path)) else m
 
         self.det, self.mesh = load(detector), load(mesh)
         self.bs = load(blendshapes) if blendshapes is not None else None

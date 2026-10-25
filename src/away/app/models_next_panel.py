@@ -6,7 +6,8 @@ What the user sees, top to bottom:
    newer ones run well here.");
 2. **Test my PC** - one click: downloads nothing, measures what is downloaded, then says which preset fits and offers
    **Use it** (undoable; anything that later fails or runs slower switches back by itself);
-3. **Light / Balanced / Best** - each shows its estimated graphics memory and what still needs downloading; one click
+3. **Light / Balanced / Best** - each shows its estimated graphics memory (v0.1.35: on a Mac, the shared unified
+   memory and whether it fits) and what still needs downloading; one click
    downloads what is missing (licence notes shown first) and switches;
 4. **Advanced** (closed by default) - every new model per job, with Download / Use / Try it (Try it switches back
    automatically when it is slower), plus "Go back to the standard models".
@@ -21,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from away.app.model_registry import MODE_TITLES, MODES, SLOT_TITLES, Registry
+from away.app.model_registry import MODE_TITLES, MODES, SLOT_TITLES, Registry, is_mac, memory_budget
 
 LICENSE_NOTES = {
     "OpenMDW-1.1": "OpenMDW-1.1 (permissive; its licence text is kept with the model)",
@@ -62,6 +63,8 @@ class NextModelsPanel:
         ready: Callable[[Any], bool] | None = None,
         downloader: Callable[..., Any] | None = None,
         bench: Callable[..., Any] | None = None,
+        platform: str | None = None,
+        hw: Any = None,
     ) -> None:
         self.cfg = cfg
         self.save = save or (lambda: None)
@@ -71,6 +74,8 @@ class NextModelsPanel:
         self._download = downloader
         self._bench = bench
         self.undo: dict[str, Any] | None = None
+        self.platform = platform  # v0.1.35: None = this OS (tests pass "darwin" / "win32")
+        self._hw = hw
 
     # ----------------------------------------------------------------- reads
     def is_ready(self, m: Any) -> bool:
@@ -89,6 +94,30 @@ class NextModelsPanel:
             return f"Using {using}. Press Test my PC to see if the newer ones run well on this computer."
         return f"Using {using}. {model_bench.summary(rep)}"
 
+    def hardware(self) -> Any:
+        if self._hw is None:
+            from away.app import hardware
+
+            self._hw = hardware.cached()
+        return self._hw
+
+    def memory_text(self, mb: int) -> str:
+        """A preset's memory in this machine's terms. Windows / Linux: graphics memory (unchanged). v0.1.35 macOS:
+        the unified memory the GPU / Neural Engine share with the CPU, and whether it fits with headroom left."""
+        gb = mb / 1000
+        if not is_mac(self.platform):
+            return "no graphics card needed" if gb < 0.05 else f"about {gb:.1f} GB of graphics memory"
+        if gb < 0.05:
+            return "no extra shared memory needed"
+        text = f"about {gb:.1f} GB of shared (unified) memory"
+        b = memory_budget(self.hardware(), self.platform)
+        if b["budget_mb"] is None:
+            return text
+        total = f"{b['total_mb'] / 1024:.0f} GB"
+        if mb <= b["budget_mb"]:
+            return f"{text}; fits this Mac's {total}"
+        return f"{text}; too much for this Mac's {total} (about {b['budget_mb'] / 1000:.1f} GB can be spared)"
+
     def presets(self) -> list[dict[str, Any]]:
         out = []
         for mode in MODES:
@@ -97,12 +126,12 @@ class NextModelsPanel:
             except ValueError:
                 continue
             missing = [r for r in plan if not r["ready"] and r["model"]]
-            gb = sum(int(r["vram_mb"]) for r in plan) / 1000
+            mb = sum(int(r["vram_mb"]) for r in plan)
             out.append(
                 {
                     "mode": mode,
                     "title": MODE_TITLES[mode],
-                    "vram": "no graphics card needed" if gb < 0.05 else f"about {gb:.1f} GB of graphics memory",
+                    "vram": self.memory_text(mb),
                     "missing": [r["title"] for r in missing],
                     "download_mb": sum(int(r.get("size_mb") or 0) for r in missing),
                     "experimental": [r["title"] for r in plan if r.get("experimental")],
