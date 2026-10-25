@@ -377,3 +377,30 @@ def test_a_voice_file_of_the_right_size_but_wrong_content_is_not_installed(tmp_p
     assert N._have(tmp_path, a) is True
     assert N._stamp(p).read_text(encoding="utf-8") == a.sha256  # hashed once, then remembered
     assert N._have(tmp_path, a) is True
+
+
+def test_warm_up_touches_the_hiservices_names_on_macos_only() -> None:
+    """v0.1.33: PyObjC fills HIServices in lazily, not thread-safely; pynput's two listener threads raced on it
+    (KeyError: 'AXIsProcessTrusted'). The main thread resolves the names first."""
+    from away.app import macperms
+
+    seen: list[str] = []
+
+    class Spy:
+        def __getattr__(self, name: str) -> Any:
+            seen.append(name)
+            return object()
+
+    assert macperms.warm_up(platform="win32", hiservices=Spy()) is False and seen == []
+    assert macperms.warm_up(platform="darwin", hiservices=Spy()) is True
+    assert seen == ["AXIsProcessTrusted", "AXIsProcessTrustedWithOptions", "kAXTrustedCheckOptionPrompt"]
+
+
+def test_warm_up_never_raises() -> None:
+    from away.app import macperms
+
+    class Broken:
+        def __getattr__(self, name: str) -> Any:
+            raise KeyError(name)
+
+    assert macperms.warm_up(platform="darwin", hiservices=Broken()) is False

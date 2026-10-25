@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-away"
-version = "0.1.32"
+version = "0.1.33"
 description = "The bridge between you and your AI agents, controlled by your hands, face and voice: hands-free PC control, dictation, Agent Link (MCP) and more. Local-first."
 readme = "README.md"
 requires-python = ">=3.10"

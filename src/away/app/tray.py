@@ -1018,6 +1018,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a de
     from away.app import crashlog
 
     crash_note = crashlog.install("tray")  # crash.log (v0.1.16); None unless the last run crashed
+    if sys.platform == "darwin":
+        from away.app import macperms
+
+        macperms.warm_up()  # before any listener thread: PyObjC's lazy HIServices is not thread-safe
     if not acquire_single_instance():  # v0.1.23: already running: show its Settings instead of a second app
         open_running_settings()
         return 0

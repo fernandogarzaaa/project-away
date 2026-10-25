@@ -56,6 +56,24 @@ def _iokit() -> Any:
     return lib
 
 
+def warm_up(platform: str | None = None, hiservices: Any = None) -> bool:
+    """Resolve the HIServices names on the calling thread, before any other thread needs them.
+
+    PyObjC fills a framework module in lazily on its first attribute access, and that is not thread-safe: pynput's
+    keyboard and mouse listeners (and the permission check) each ask for ``AXIsProcessTrusted`` at the same moment
+    on start-up, and the loser dies with ``KeyError: 'AXIsProcessTrusted'`` (a dead hotkey or click listener).
+    Touching the names once from the main thread makes every later access a plain lookup."""
+    if (platform or sys.platform) != "darwin":
+        return False
+    try:
+        hs = hiservices if hiservices is not None else _hiservices()
+        for name in ("AXIsProcessTrusted", "AXIsProcessTrustedWithOptions", "kAXTrustedCheckOptionPrompt"):
+            getattr(hs, name)
+        return True
+    except Exception:
+        return False
+
+
 def accessibility(ask: bool = False, platform: str | None = None, hiservices: Any = None) -> bool | None:
     """Whether macOS lets this app control the pointer and keyboard. ``ask``: when not, macOS shows its own
     request (and lists the app in System Settings, switched off). None: unknown (not macOS, or no API)."""
