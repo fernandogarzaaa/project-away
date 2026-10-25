@@ -305,18 +305,33 @@ def notify(title: str, message: str, platform: str | None = None) -> bool:  # pr
     plat = platform or sys.platform
     try:
         if plat == "darwin":
-            if mac_message(title, message):
+            # v0.1.35: a real macOS notification (Project Away's name and icon, Notification Center, Focus) when the
+            # app bundle may post one; Project Away's own window when it may not (a source checkout, permission
+            # denied, the framework missing), also when the user's "no" arrives after the message was queued
+            from away.app import macnotify
+
+            if macnotify.notify(title, message, fallback=mac_window_notify):
                 return True
-            # the window could not start: a system notification (credited to Script Editor) beats nothing
-            script = f"display notification {_osa(message)} with title {_osa(title)}"
-            subprocess.run(["osascript", "-e", script], timeout=5, check=False)
-            return True
+            return mac_window_notify(title, message)
         if plat.startswith("linux") and shutil.which("notify-send"):
             subprocess.run(["notify-send", "-a", "Project Away", title, message], timeout=5, check=False)
             return True
     except (OSError, subprocess.SubprocessError):
         return False
     return False
+
+
+def mac_window_notify(title: str, message: str) -> bool:  # pragma: no cover - desktop only
+    """macOS without system notifications: Project Away's own message window (:func:`mac_message`)."""
+    try:
+        if mac_message(title, message):
+            return True
+        # the window could not start: a system notification (credited to Script Editor) beats nothing
+        script = f"display notification {_osa(message)} with title {_osa(title)}"
+        subprocess.run(["osascript", "-e", script], timeout=5, check=False)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _osa(s: str) -> str:

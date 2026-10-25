@@ -1170,7 +1170,7 @@ def test_setup_tray_runtime_wires_everything(monkeypatch: pytest.MonkeyPatch) ->
     menu_calls: list[Any] = []
     monkeypatch.setattr(tray, "build_tray_menu", lambda *a: menu_calls.append(a) or "MENU")
     image_calls: list[Any] = []
-    monkeypatch.setattr(tray, "make_icon_image", lambda *a, **k: image_calls.append((a, k)) or "IMAGE")
+    monkeypatch.setattr(tray, "tray_icon_image", lambda *a, **k: image_calls.append((a, k)) or "IMAGE")
 
     icon_created: list[Any] = []
 
@@ -1423,7 +1423,7 @@ class _MainStage:
             ),
         )
         monkeypatch.setattr(tray, "build_tray_menu", lambda *a: "MENU")
-        monkeypatch.setattr(tray, "make_icon_image", lambda *a, **k: "IMAGE")
+        monkeypatch.setattr(tray, "tray_icon_image", lambda *a, **k: "IMAGE")
         self.once_calls: list[str] = []
         self.once_value = False
         _patch_submodule(
