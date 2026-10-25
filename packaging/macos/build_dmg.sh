@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build an UNSIGNED Project Away .dmg from the PyInstaller .app (macOS only; free, no Apple Developer ID).
 set -euo pipefail
-VERSION="${1:-0.1.33}"
+VERSION="${1:-0.1.34}"
 ARCH="$(uname -m)"
 APP="dist/ProjectAway.app"
 [ -d "$APP" ] || { echo "missing $APP (run pyinstaller packaging/pyinstaller/away.spec first)"; exit 1; }

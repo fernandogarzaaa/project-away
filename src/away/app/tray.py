@@ -506,7 +506,11 @@ class TrayMenuCallbacks:
         icon.title = self.ctl.tooltip()
 
     def refresh(self, icon: Any) -> None:
-        self.guard.call(self._set_icon, icon)
+        self._on_icon(self._set_icon, icon)
+
+    def _on_icon(self, fn: Any, *args: Any) -> None:
+        # v0.1.34: the change runs on the main thread on a Mac (see on_main_thread); the guard is checked when it runs
+        on_main_thread(lambda: self.guard.call(fn, *args))
 
     def notify(self, title: str, message: str) -> None:
         if self.guard.stopping:
@@ -526,7 +530,7 @@ class TrayMenuCallbacks:
         # some pystray backends cannot rebuild the menu from another thread; the next open does
         ic = icon if icon is not None else self.icon
         if ic is not None:
-            self.guard.call(ic.update_menu)
+            self._on_icon(ic.update_menu)
 
     def quit_for_update(self) -> None:
         # Runs on the update worker thread. pystray's icon.stop() only posts a message to the tray
@@ -566,7 +570,7 @@ class TrayMenuCallbacks:
     def on_quit(self, icon: Any, _item: Any) -> None:
         self.updates.stop()
         self.ctl.quit()
-        self.guard.stop(icon)
+        on_main_thread(lambda: self.guard.stop(icon))  # an update quits from a worker thread; hiding is AppKit too
 
     @menu_safe("install update")
     def on_update(self, _icon: Any, _item: Any) -> None:
@@ -669,7 +673,22 @@ class TrayMenuCallbacks:
             return
         self.ctl.paused = bool(self.app.pipeline.paused)
         self.refresh(icon)
-        self.guard.call(icon.update_menu)
+        self._on_icon(icon.update_menu)
+
+
+def on_main_thread(fn: Callable[[], Any], platform: str | None = None) -> None:
+    """v0.1.34 (macOS): AppKit may only be touched from the main thread, and macOS 27 kills the app when it is not
+    (SIGTRAP in -[NSStatusItem setMenu:], eight crash reports from 0.1.32 and 0.1.33). pystray's Mac backend changes
+    the status item on whichever thread sets ``icon.icon`` / ``icon.title`` or calls ``update_menu``, and the bus
+    handlers that do so run on worker threads. On a Mac, off the main thread, ``fn`` is queued to the main run loop
+    (pystray's NSApplication runs it); everywhere else it runs now, as before."""
+    plat = platform or sys.platform
+    if plat != "darwin" or threading.current_thread() is threading.main_thread():
+        fn()
+        return
+    from Foundation import NSOperationQueue
+
+    NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
 
 
 def com_apartment(platform: str | None = None, ole32: Any = None) -> str:
