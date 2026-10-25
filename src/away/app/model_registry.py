@@ -74,6 +74,9 @@ INFO_FIELDS = ("notes", "version", "released", "sha256_note")
 # Neural Engine (Core ML) when that is faster, and their memory comes out of the unified memory shared with the CPU.
 RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "GPU", "either": "CPU or GPU"}
 MAC_RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "Apple GPU / Neural Engine", "either": "CPU or Apple GPU / Neural Engine"}
+# only the tracking models run through Core ML; a "gpu" speech / voice model needs CUDA and runs on a Mac's CPU
+COREML_SLOTS = frozenset({"hands", "face", "gaze"})
+MAC_CUDA_RUNS_ON_TITLES = {"cpu": "CPU", "gpu": "NVIDIA GPU (CPU on a Mac)", "either": "CPU"}
 # unified memory a Mac keeps for macOS, the camera / MediaPipe / Whisper and your own apps before the models' share:
 # a quarter of it, at least 4 GB (an 8 GB Mac can spare ~4 GB, a 24 GB one ~18 GB)
 UNIFIED_HEADROOM_MIN_MB = 4096
@@ -85,9 +88,13 @@ def is_mac(platform: str | None = None) -> bool:
     return (platform or sys.platform) == "darwin"
 
 
-def runs_on_title(runs_on: str, platform: str | None = None) -> str:
-    """``cpu|gpu|either`` in plain words; v0.1.35: "Apple GPU / Neural Engine" on macOS."""
-    titles = MAC_RUNS_ON_TITLES if is_mac(platform) else RUNS_ON_TITLES
+def runs_on_title(runs_on: str, platform: str | None = None, slot: str | None = None) -> str:
+    """``cpu|gpu|either`` in plain words; v0.1.35: on macOS "Apple GPU / Neural Engine" for the tracking slots
+    (Core ML), and the CPU for the others (``slot`` None: a tracking model)."""
+    if not is_mac(platform):
+        titles = RUNS_ON_TITLES
+    else:
+        titles = MAC_RUNS_ON_TITLES if slot is None or slot in COREML_SLOTS else MAC_CUDA_RUNS_ON_TITLES
     return titles.get(runs_on, runs_on)
 
 
@@ -159,7 +166,7 @@ class Model:
             "description": self.description,
             "license": self.license,
             "permissive": self.is_permissive,
-            "runs_on": runs_on_title(self.runs_on),  # v0.1.35: "Apple GPU / Neural Engine" on macOS
+            "runs_on": runs_on_title(self.runs_on, slot=self.slot),  # v0.1.35: in the Mac's words on macOS
             "size_mb": round(self.size / 1e6) if self.size else 0,
             "cost": dict(self.cost),
             "source": self.source,

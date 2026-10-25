@@ -283,6 +283,11 @@ def test_runs_on_reads_apple_gpu_on_a_mac_and_gpu_elsewhere() -> None:
     assert R.runs_on_title("either", "darwin") == "CPU or Apple GPU / Neural Engine"
     assert R.runs_on_title("cpu", "darwin") == "CPU"
     assert (R.runs_on_title("gpu", "win32"), R.runs_on_title("either", "linux")) == ("GPU", "CPU or GPU")
+    # a CUDA speech model must not claim the Apple GPU: only tracking goes through Core ML
+    assert R.runs_on_title("gpu", "darwin", slot="stt") == "NVIDIA GPU (CPU on a Mac)"
+    assert R.runs_on_title("either", "darwin", slot="voice") == "CPU"
+    assert R.runs_on_title("gpu", "darwin", slot="gaze") == "Apple GPU / Neural Engine"
+    assert R.runs_on_title("gpu", "win32", slot="stt") == "GPU"
 
 
 @pytest.mark.parametrize(
