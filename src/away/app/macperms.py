@@ -21,6 +21,7 @@ import contextlib
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 IOKIT = "/System/Library/Frameworks/IOKit.framework/IOKit"
@@ -103,6 +104,73 @@ def input_monitoring(ask: bool = False, platform: str | None = None, iokit: Any 
         return None
 
 
+BUNDLE_ID = "com.fernandogarzaaa.projectaway"
+TCC_SERVICES = ("Accessibility", "ListenEvent")  # tccutil's names for Accessibility and Input Monitoring
+IDENTITY_FILE = "macperms-identity.json"
+
+
+def app_bundle(executable: str | None = None) -> Path | None:
+    """The ``.app`` this process runs from (``.../Project Away.app/Contents/MacOS/ProjectAway``), or None."""
+    exe = Path(executable or sys.executable).resolve()
+    app = exe.parent.parent.parent
+    return app if exe.parent.name == "MacOS" and app.suffix == ".app" else None
+
+
+def signing_identity(app: Path, run: Callable[..., Any] = subprocess.run) -> str | None:
+    """The designated requirement macOS ties the app's permissions to (``codesign -d -r-``), or None."""
+    try:
+        r = run(["codesign", "-d", "-r-", str(app)], capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = f"{r.stdout or ''}{r.stderr or ''}"
+    line = next((ln for ln in out.splitlines() if ln.startswith("designated =>")), "")
+    if not line:
+        return None
+    return line.split("=>", 1)[1].strip() or None
+
+
+def clear_stale(
+    data_dir: Path,
+    platform: str | None = None,
+    hiservices: Any = None,
+    executable: str | None = None,
+    run: Callable[..., Any] = subprocess.run,
+) -> bool:
+    """v0.1.35: drop Accessibility / Input Monitoring entries left by a build signed differently. True when cleared.
+
+    macOS ties a permission to the app's signing identity. Before v0.1.35 every release was ad-hoc signed, so each
+    one was a new app: System Settings kept showing Project Away switched on, but the switch belonged to the old
+    build and the new one was asked again and again, however often it was toggled. When this build is not trusted
+    and its identity differs from the one recorded on the last start, its entries are reset once, so the prompt
+    that follows adds a fresh entry for this build. Never twice for one identity: a permission you turn off stays off.
+    """
+    import json
+
+    if (platform or sys.platform) != "darwin" or accessibility(False, platform, hiservices) is not False:
+        return False
+    app = app_bundle(executable)
+    ident = signing_identity(app, run) if app is not None else None
+    if not ident:
+        return False
+    marker = Path(data_dir) / IDENTITY_FILE
+    try:
+        seen = json.loads(marker.read_text(encoding="utf-8")).get("identity")
+    except (OSError, ValueError, AttributeError):
+        seen = None
+    if seen == ident:
+        return False
+    for service in TCC_SERVICES:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            run(["tccutil", "reset", service, BUNDLE_ID], capture_output=True, timeout=15, check=False)
+    with contextlib.suppress(OSError):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"identity": ident}), encoding="utf-8")
+    import logging
+
+    logging.getLogger("away.macperms").info("permissions: cleared entries of a differently signed build (%s)", ident)
+    return True
+
+
 def missing_names(state: dict[str, bool | None]) -> list[str]:
     names = {"accessibility": "Accessibility", "input_monitoring": "Input Monitoring"}
     return [names[k] for k in ("accessibility", "input_monitoring") if state.get(k) is False]
@@ -113,8 +181,13 @@ def check_and_ask(
     platform: str | None = None,
     hiservices: Any = None,
     iokit: Any = None,
+    data_dir: Path | None = None,
 ) -> dict[str, bool | None]:
-    """Start-up (macOS): check both permissions, let macOS ask for missing ones, and say once what to allow."""
+    """Start-up (macOS): check both permissions, let macOS ask for missing ones, and say once what to allow.
+    ``data_dir`` (v0.1.35): first clear entries a differently signed build left behind (:func:`clear_stale`)."""
+    if data_dir is not None:
+        with contextlib.suppress(Exception):
+            clear_stale(data_dir, platform, hiservices)
     state = {
         "accessibility": accessibility(True, platform, hiservices),
         "input_monitoring": input_monitoring(True, platform, iokit),

@@ -320,3 +320,62 @@ def test_app_icon_assets_are_committed_and_wired_into_the_mac_bundle() -> None:
     assert "ProjectAway.icns" in spec and "UserNotifications" in spec
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "pyobjc-framework-UserNotifications" in pyproject
+
+
+# ------------------------------------------------------------------ stale permission entries (v0.1.35)
+class _HS:
+    kAXTrustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
+
+    def __init__(self, trusted: bool) -> None:
+        self.trusted = trusted
+
+    def AXIsProcessTrusted(self) -> bool:
+        return self.trusted
+
+
+def _runner(identity: str, calls: list[list[str]]):
+    from types import SimpleNamespace
+
+    def run(cmd, **_kw):
+        calls.append(list(cmd))
+        if cmd[0] == "codesign":
+            return SimpleNamespace(stdout="", stderr=f"Executable=/x\ndesignated => {identity}\n")
+        return SimpleNamespace(stdout="", stderr="")
+
+    return run
+
+
+EXE = "/Applications/Project Away.app/Contents/MacOS/ProjectAway"
+
+
+def test_a_differently_signed_build_clears_its_stale_permissions_once(tmp_path) -> None:
+    # an ad-hoc 0.1.34 left "on" switches that belong to the old build; the signed build was asked forever
+    from away.app import macperms
+
+    calls: list[list[str]] = []
+    run = _runner('identifier "com.fernandogarzaaa.projectaway" and certificate root = H"23a8"', calls)
+    assert macperms.clear_stale(tmp_path, "darwin", _HS(False), EXE, run) is True
+    resets = [c for c in calls if c[0] == "tccutil"]
+    assert resets == [
+        ["tccutil", "reset", "Accessibility", "com.fernandogarzaaa.projectaway"],
+        ["tccutil", "reset", "ListenEvent", "com.fernandogarzaaa.projectaway"],
+    ]
+    calls.clear()
+    # same identity again (you turned it off on purpose, or have not allowed it yet): never reset twice
+    assert macperms.clear_stale(tmp_path, "darwin", _HS(False), EXE, run) is False
+    assert not [c for c in calls if c[0] == "tccutil"]
+    # a new certificate later: once more
+    run2 = _runner('identifier "com.fernandogarzaaa.projectaway" and certificate root = H"ffff"', calls)
+    assert macperms.clear_stale(tmp_path, "darwin", _HS(False), EXE, run2) is True
+
+
+def test_stale_permissions_are_left_alone_when_trusted_off_a_mac_or_outside_the_app(tmp_path) -> None:
+    from away.app import macperms
+
+    calls: list[list[str]] = []
+    run = _runner('cdhash H"abc"', calls)
+    assert macperms.clear_stale(tmp_path, "darwin", _HS(True), EXE, run) is False  # already works
+    assert macperms.clear_stale(tmp_path, "win32", _HS(False), EXE, run) is False
+    assert macperms.clear_stale(tmp_path, "darwin", _HS(False), "/usr/bin/python3", run) is False  # not a .app
+    assert calls == []
+    assert macperms.app_bundle(EXE).name == "Project Away.app"

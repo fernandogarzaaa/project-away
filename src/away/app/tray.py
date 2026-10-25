@@ -1008,7 +1008,9 @@ def ask_mac_permissions(callbacks: Any) -> Any:
     from away.app import macperms
 
     t = threading.Thread(
-        target=lambda: macperms.check_and_ask(callbacks.notify), name="away-mac-permissions", daemon=True
+        target=lambda: macperms.check_and_ask(callbacks.notify, data_dir=paths.data_dir()),
+        name="away-mac-permissions",
+        daemon=True,
     )
     t.start()
     return t
